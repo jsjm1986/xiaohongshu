@@ -82,9 +82,13 @@ export function KnowledgePage() {
 
   const remove = async (file: KnowledgeFile) => {
     if (!window.confirm(`确定删除「${file.name}」吗？历史内容仍会保留当时的知识快照。`)) return;
-    await api.knowledge.remove(file.id).catch(() => undefined);
-    setFiles((current) => current.filter((item) => item.id !== file.id));
-    toast.push('文件已删除');
+    try {
+      await api.knowledge.remove(file.id);
+      setFiles((current) => current.filter((item) => item.id !== file.id));
+      toast.push('文件已删除');
+    } catch (error) {
+      toast.push(error instanceof Error ? error.message : '删除失败', 'error');
+    }
   };
 
   const openPreview = async (file: KnowledgeFile) => {
