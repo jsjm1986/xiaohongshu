@@ -287,6 +287,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const [refreshing, setRefreshing] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [approving, setApproving] = useState(false);
+  const [approvingModuleId, setApprovingModuleId] = useState("");
   const [preparing, setPreparing] = useState(false);
   const [poolOpen, setPoolOpen] = useState(false);
   const [poolTab, setPoolTab] = useState<PoolTab>("gaps");
@@ -574,6 +575,19 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     if (selectedOpportunityId === item.id) setSelectedOpportunityId("");
   };
 
+  const approveBlueprintModule = async (module: ProjectBlueprintModule) => {
+    setApprovingModuleId(module.id);
+    try {
+      const saved = await api.blueprintModules.approve(projectId, module.id);
+      setBlueprintModules((current) => current.map((item) => item.id === saved.id ? saved : item));
+      toast.push(`已确认「${blueprintModuleMeta[module.moduleKey].label}」`, "success");
+    } catch (error) {
+      toast.push(error instanceof Error ? error.message : "确认模块失败", "error");
+    } finally {
+      setApprovingModuleId("");
+    }
+  };
+
   const openBlueprintEditor = (module: ProjectBlueprintModule) => {
     setEditingBlueprintModule(module);
     setEditingBlueprintJson(JSON.stringify(module.data, null, 2));
@@ -727,7 +741,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
             <p>{meta.description}</p>
             <small><strong>{blueprintModuleSummary(module)}</strong><br />这里的内容会作为项目参数进入生成；静态提示词不会替你补行业角色和场景。</small>
             {blueprintModuleHighlights(module).length > 0 && <div className="blueprint-highlights">{blueprintModuleHighlights(module).map((group, index) => <div key={index} className="blueprint-highlights__group"><strong>{group.label}</strong><ul>{group.items.map((item, itemIndex) => <li key={itemIndex}>{item}</li>)}</ul></div>)}</div>}
-            <footer>{module.status !== "approved" && <button type="button" onClick={() => void api.blueprintModules.approve(projectId, module.id).then((saved) => setBlueprintModules((current) => current.map((item) => item.id === saved.id ? saved : item)))}>确认模块</button>}<button type="button" onClick={() => openBlueprintEditor(module)}><Pencil size={13} /> 编辑</button></footer>
+            <footer>{module.status !== "approved" && <button type="button" disabled={approvingModuleId === module.id} onClick={() => void approveBlueprintModule(module)}>{approvingModuleId === module.id ? "确认中…" : "确认模块"}</button>}<button type="button" onClick={() => openBlueprintEditor(module)}><Pencil size={13} /> 编辑</button></footer>
           </article>; })}
         </div> : intelligence?.id ? <div className="blueprint-missing"><TriangleAlert size={16} /><span>当前分析没有完整项目创作模型，必须重新分析后才能正式生成。</span></div> : null}
       </div>
