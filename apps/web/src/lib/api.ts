@@ -1134,11 +1134,15 @@ export const api = {
       request<void>(`/api/projects/${projectId}/presets/${id}`, {
         method: "DELETE",
       }),
-    copy: async (projectId: string, id: string) =>
+    copy: async (
+      projectId: string,
+      id: string,
+      body?: { name?: string; description?: string },
+    ) =>
       normalizePreset(
         await request<JsonRecord>(
           `/api/projects/${projectId}/presets/${id}/copy`,
-          { method: "POST", body: JSON.stringify({}) },
+          { method: "POST", body: JSON.stringify(body ?? {}) },
         ),
       ),
     setDefault: async (projectId: string, id: string) =>

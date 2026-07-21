@@ -377,9 +377,12 @@ export function GeneratorPage() {
 
   const copyPreset = async (preset: ContentPreset) => {
     if (!projectId) return;
+    const input = window.prompt("复制预设的名称", `${preset.name} · 副本`);
+    if (input === null) return;
+    const copyName = input.trim() || `${preset.name} · 副本`;
     let copied: ContentPreset;
     try {
-      copied = await api.presets.copy(projectId, preset.id);
+      copied = await api.presets.copy(projectId, preset.id, { name: copyName });
     } catch (copyError) {
       if (copyError instanceof ApiError && copyError.status !== 404 && copyError.status < 500) {
         toast.push(copyError.message || "没有复制预设的权限", "error");
@@ -387,7 +390,7 @@ export function GeneratorPage() {
       }
       try {
         copied = await api.presets.create(projectId, {
-          name: `${preset.name} · 副本`,
+          name: copyName,
           description: preset.description,
           values: preset.values,
           isDefault: false,
@@ -401,7 +404,7 @@ export function GeneratorPage() {
           ...preset,
           id: `local-${Date.now()}`,
           projectId,
-          name: `${preset.name} · 副本`,
+          name: copyName,
           source: "project",
           isDefault: false,
         };
