@@ -1,0 +1,27 @@
+{
+  "name": "content-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "基于项目知识库与可版本化公式的小红书完整内容生成 Agent",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @content-agent/agent-core && npm run build -w @content-agent/web && npm run build -w @content-agent/api",
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev -w @content-agent/api\" \"npm run dev -w @content-agent/web\"",
+    "start": "npm run start -w @content-agent/api",
+    "test": "npm run test -w @content-agent/agent-core && npm run test -w @content-agent/web && npm run test -w @content-agent/api",
+    "typecheck": "npm run typecheck -w @content-agent/agent-core && npm run typecheck -w @content-agent/web && npm run typecheck -w @content-agent/api",
+    "import:legacy": "tsx scripts/import-legacy.ts",
+    "analyze:style": "tsx scripts/analyze-style-corpus.ts"
+  },
+  "engines": {
+    "node": ">=24.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

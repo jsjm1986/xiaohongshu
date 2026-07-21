@@ -1,0 +1,139 @@
+{
+  "schemaVersion": "2.0",
+  "id": "xhs-reference-corpus-descriptive-v1",
+  "name": "小红书对标样本描述性画像",
+  "source": "70篇对标内容_AI提炼版.jsonl",
+  "evidenceStatus": "descriptive_sample",
+  "sampleSize": 70,
+  "caveat": "这些统计只描述当前样本，不代表质量因果关系、平台推荐规律或最优取值。",
+  "distributions": {
+    "titleChars": {
+      "min": 1,
+      "p10": 1,
+      "p25": 5,
+      "median": 8.5,
+      "p75": 13,
+      "p90": 15.1,
+      "max": 22
+    },
+    "bodyCharsWithoutHashtags": {
+      "min": 0,
+      "p10": 14.9,
+      "p25": 36,
+      "median": 77,
+      "p75": 143,
+      "p90": 191.7,
+      "max": 267
+    },
+    "commentTotalCharsWithoutRolePrefix": {
+      "min": 3,
+      "p10": 31.4,
+      "p25": 61.5,
+      "median": 109.5,
+      "p75": 160.3,
+      "p90": 251.5,
+      "max": 486
+    },
+    "commentLineCharsWithoutRolePrefix": {
+      "min": 1,
+      "p10": 4,
+      "p25": 6,
+      "median": 10,
+      "p75": 15,
+      "p90": 26,
+      "max": 95
+    },
+    "bodyParagraphs": {
+      "min": 0,
+      "p10": 1,
+      "p25": 1,
+      "median": 2,
+      "p75": 4,
+      "p90": 6,
+      "max": 14
+    },
+    "commentLines": {
+      "min": 1,
+      "p10": 3,
+      "p25": 6,
+      "median": 10,
+      "p75": 14,
+      "p90": 16.1,
+      "max": 20
+    },
+    "imageCount": {
+      "min": 1,
+      "p10": 1,
+      "p25": 1,
+      "median": 1,
+      "p75": 3,
+      "p90": 5,
+      "max": 5
+    }
+  },
+  "counts": {
+    "bodyAtMost100Chars": 43,
+    "bodyAtMost150Chars": 53,
+    "bodyAtLeast300Chars": 0
+  },
+  "informationPlacement": {
+    "price": {
+      "body": 3,
+      "comment": 20,
+      "commentOnly": 18
+    },
+    "pain": {
+      "body": 4,
+      "comment": 11,
+      "commentOnly": 10
+    },
+    "appointment": {
+      "body": 2,
+      "comment": 7,
+      "commentOnly": 7
+    },
+    "service": {
+      "body": 0,
+      "comment": 0,
+      "commentOnly": 0
+    },
+    "recovery": {
+      "body": 16,
+      "comment": 19,
+      "commentOnly": 12
+    },
+    "method": {
+      "body": 5,
+      "comment": 16,
+      "commentOnly": 16
+    },
+    "doctor": {
+      "body": 1,
+      "comment": 11,
+      "commentOnly": 11
+    },
+    "risk": {
+      "body": 1,
+      "comment": 2,
+      "commentOnly": 2
+    }
+  },
+  "imageTypes": {
+    "真人自拍": 80,
+    "文字封面/求助卡": 20,
+    "环境/路线照片": 18,
+    "生活出片照": 16,
+    "面诊/专业过程图": 8,
+    "过程拼图/对比图": 5,
+    "辅助素材": 5,
+    "对镜自拍": 4,
+    "恢复/护理记录": 4,
+    "生活身份照片": 3,
+    "文字封面/截图": 2
+  },
+  "measurementNotes": [
+    "正文长度已移除 #标签[话题]# 与普通 #标签。",
+    "评论总长和单行长度已移除“评1：”“博主回：”等转录前缀。",
+    "图片类型来自样本人工提炼字段，只作描述性计数。"
+  ]
+}

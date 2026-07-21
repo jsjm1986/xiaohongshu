@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.vite/
+.env
+data/
+coverage/
+.tmp-test/
+**/.tmp-test/
+*.log
+.DS_Store
+.tmp-*.json
+.tmp-*/

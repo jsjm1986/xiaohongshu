@@ -1,0 +1,27 @@
+{
+  "name": "@content-agent/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "test": "node --import tsx --test test/presets.test.ts test/formula-ui.test.ts test/reader-state.test.ts test/generation-fallback.test.ts test/research-governance.test.ts",
+    "typecheck": "tsc --noEmit --pretty false"
+  },
+  "dependencies": {
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-router-dom": "latest"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "tsx": "^4.20.6",
+    "typescript": "latest",
+    "vite": "latest"
+  }
+}

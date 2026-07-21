@@ -1,0 +1,10 @@
+services:
+  content-agent:
+    build: .
+    ports:
+      - "8780:8780"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

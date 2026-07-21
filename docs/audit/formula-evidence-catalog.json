@@ -1,0 +1,1806 @@
+{
+  "schemaVersion": "1.0",
+  "catalogVersion": "2026-07-21.r14-f10-runtime-contract",
+  "reviewedAt": "2026-07-21",
+  "runtimeUse": "audit/evidence metadata only; production executes only separately reviewed runtime contracts and handlers",
+  "defaultFormulaVersion": {
+    "version": "1.6.0",
+    "digest": "de79bd209322254b75184971d35c4d4f36700d587ed6e22a656c047d11c3753e",
+    "fingerprintRule": "sha256(canonicalJson({id,equation,expression,variables,calculatorContract,diagnosticContract,type,title,plainLanguage,purpose,evidenceStatus,directGenerationInstruction,directPromptExecutionScope}))"
+  },
+  "evidencePolicy": {
+    "classes": [
+      "project_definition",
+      "internal_descriptive_observation",
+      "scientific_conceptual_support",
+      "scientific_empirical_support",
+      "scientific_boundary_or_conflict",
+      "official_platform_disclosure",
+      "unvalidated_hypothesis",
+      "unknown"
+    ],
+    "rules": [
+      "Architecture formulas may be justified by project requirements and code evidence; they do not need a paper pretending to validate a local data structure.",
+      "A paper supports only the construct, population, task and outcome it actually studied.",
+      "Platform disclosures support only the disclosed mechanism; absent weights, ranking rules or causal effects remain unknown.",
+      "Internal samples describe this collected set only; without denominators or controls they are not platform or outcome laws.",
+      "Evidence and handlers are inherited only when the canonical semantic fingerprint matches; changing the AST, variables, prompt-facing explanation or evidence status requires review."
+    ]
+  },
+  "sources": [
+    {
+      "id": "SCI-INFO-01",
+      "kind": "primary_theory",
+      "citation": "Pirolli & Card (1999), Information Foraging",
+      "url": "https://doi.org/10.1037/0033-295X.106.4.643",
+      "supports": "Information seeking can be modeled as a tradeoff among information value, cues and acquisition cost.",
+      "doesNotSupport": "The share of Xiaohongshu search users, guaranteed comment opening, conversion effects, or project-specific weights."
+    },
+    {
+      "id": "SCI-CURIOSITY-01",
+      "kind": "review_theory",
+      "citation": "Loewenstein (1994), The Psychology of Curiosity",
+      "url": "https://doi.org/10.1037/0033-2909.116.1.75",
+      "supports": "A perceived information gap can create curiosity and information-seeking motivation.",
+      "doesNotSupport": "Deliberate withholding, lower vigilance, comment conversion, or a monotonic benefit from larger gaps."
+    },
+    {
+      "id": "SCI-LOAD-01",
+      "kind": "primary_theory",
+      "citation": "Sweller (1988), Cognitive Load During Problem Solving",
+      "url": "https://doi.org/10.1207/s15516709cog1202_4",
+      "supports": "Problem solving uses limited processing capacity, so cognitive cost is a legitimate design concern.",
+      "doesNotSupport": "Shorter is always better, character count equals cognitive cost, or a longer click path reduces rationality."
+    },
+    {
+      "id": "SCI-MULTIMEDIA-01",
+      "kind": "review_program",
+      "citation": "Mayer (2003), The Promise of Multimedia Learning",
+      "url": "https://doi.org/10.1016/S0959-4752(02)00016-6",
+      "supports": "Well-designed words and pictures can jointly support mental representation in learning tasks.",
+      "doesNotSupport": "Any image improves marketing, exposure or conversion, or that imageBrief is equivalent to a final image."
+    },
+    {
+      "id": "SCI-MULTIMEDIA-02",
+      "kind": "meta_analysis",
+      "citation": "Ginns (2006), Integrating Information: A Meta-analysis of Spatial and Temporal Contiguity Effects",
+      "url": "https://doi.org/10.1016/j.learninstruc.2006.10.001",
+      "supports": "Integration and proximity of related verbal and visual information matter in instructional tasks.",
+      "doesNotSupport": "A Xiaohongshu ranking or business outcome effect, or the current image-title-body validator."
+    },
+    {
+      "id": "SCI-CAUSAL-01",
+      "kind": "primary_method",
+      "citation": "Rubin (1974), Estimating Causal Effects of Treatments in Randomized and Nonrandomized Studies",
+      "url": "https://doi.org/10.1037/h0037350",
+      "supports": "Causal channel effects require comparable treatments/counterfactual design rather than post-hoc differences.",
+      "doesNotSupport": "That current three structurally different drafts identify the causal effect of body versus comments."
+    },
+    {
+      "id": "SCI-FIDELITY-01",
+      "kind": "critical_review_framework",
+      "citation": "Carroll et al. (2007), A Conceptual Framework for Implementation Fidelity",
+      "url": "https://doi.org/10.1186/1748-5908-2-40",
+      "supports": "Designed intervention and delivered intervention should be measured separately.",
+      "doesNotSupport": "Any Xiaohongshu visibility rate or the claim that a deployment plan was actually deployed."
+    },
+    {
+      "id": "SCI-SEARCH-01",
+      "kind": "primary_taxonomy",
+      "citation": "Broder (2002), A Taxonomy of Web Search",
+      "url": "https://doi.org/10.1145/792550.792552",
+      "supports": "Search goals are heterogeneous rather than one fixed intent.",
+      "doesNotSupport": "Search entry equals one fixed decision stage or a known population distribution."
+    },
+    {
+      "id": "SCI-SEARCH-02",
+      "kind": "primary_taxonomy",
+      "citation": "Rose & Levinson (2004), Understanding User Goals in Web Search",
+      "url": "https://doi.org/10.1145/988672.988675",
+      "supports": "User search goals have multiple categories and sub-goals.",
+      "doesNotSupport": "Current F12/F41 state constants or Xiaohongshu-specific stage proportions."
+    },
+    {
+      "id": "SCI-SELECTIVE-01",
+      "kind": "meta_analysis",
+      "citation": "Hart et al. (2009), Feeling Validated Versus Being Correct",
+      "url": "https://doi.org/10.1037/a0015701",
+      "supports": "Information selection may serve both accuracy and existing-attitude maintenance, with moderators.",
+      "doesNotSupport": "All active searchers are rational, all are easier to persuade, or one fixed state direction."
+    },
+    {
+      "id": "SCI-MOTIVATION-01",
+      "kind": "review_theory",
+      "citation": "Kunda (1990), The Case for Motivated Reasoning",
+      "url": "https://doi.org/10.1037/0033-2909.108.3.480",
+      "supports": "Accuracy and directional motivations can shape reasoning.",
+      "doesNotSupport": "Identifying an individual's motive from a click or assigning current stateSeed numbers."
+    },
+    {
+      "id": "SCI-CLOSURE-01",
+      "kind": "review_theory",
+      "citation": "Kruglanski & Webster (1996), Motivated Closing of the Mind",
+      "url": "https://doi.org/10.1037/0033-295X.103.2.263",
+      "supports": "Need for closure can be a stable difference or situational state, with urgency and permanence tendencies.",
+      "doesNotSupport": "That every long-path reader has low vigilance or a fixed closureNeed of 0.55/0.80."
+    },
+    {
+      "id": "SCI-DEPTH-01",
+      "kind": "primary_empirical",
+      "citation": "Rozenblit & Keil (2002), The Misunderstood Limits of Folk Science",
+      "url": "https://doi.org/10.1207/S15516709COG2605_1",
+      "supports": "People can overestimate explanatory understanding, and explanation attempts can expose limits.",
+      "doesNotSupport": "The current FalseClosure equation, its weights, or a platform effect."
+    },
+    {
+      "id": "SCI-FALSE-INSIGHT-01",
+      "kind": "primary_empirical",
+      "citation": "Danek & Wiley (2017), What About False Insights?",
+      "url": "https://doi.org/10.3389/fpsyg.2016.02077",
+      "supports": "Incorrect solutions can be accompanied by insight/Aha phenomenology, motivating a false-insight guard.",
+      "doesNotSupport": "Current keyword thresholds, medical-content correctness, or conversion predictions."
+    },
+    {
+      "id": "SCI-TRUTH-01",
+      "kind": "meta_analysis",
+      "citation": "Dechêne et al. (2010), The Truth About the Truth",
+      "url": "https://doi.org/10.1177/1088868309352251",
+      "supports": "Repetition and processing fluency can affect subjective truth judgments.",
+      "doesNotSupport": "That current copy necessarily creates false closure or any project-specific penalty weight."
+    },
+    {
+      "id": "SCI-GENERATION-01",
+      "kind": "primary_empirical",
+      "citation": "Slamecka & Graf (1978), The Generation Effect",
+      "url": "https://doi.org/10.1037/0278-7393.4.6.592",
+      "supports": "Generating target words improved memory over reading them in specific experimental tasks.",
+      "doesNotSupport": "Higher trust, correctness, persuasion, platform engagement or conversion from simulated comment inference."
+    },
+    {
+      "id": "SCI-GENERATION-02",
+      "kind": "boundary_replication",
+      "citation": "Slamecka & Katsaiti (1987), The Generation Effect as an Artifact of Selective Displaced Rehearsal",
+      "url": "https://doi.org/10.1016/0749-596X(87)90104-5",
+      "supports": "Some generation-effect findings depend on task and design, providing a boundary condition.",
+      "doesNotSupport": "That generation effects never occur, or that the current comment design is validated."
+    },
+    {
+      "id": "SCI-SELFEXPLAIN-01",
+      "kind": "meta_analysis",
+      "citation": "Bisra et al. (2018), Inducing Self-Explanation: A Meta-Analysis",
+      "url": "https://doi.org/10.1007/s10648-018-9434-x",
+      "supports": "Self-explanation prompts can improve learning/performance in studied educational tasks.",
+      "doesNotSupport": "Marketing persuasion, all prompt forms, medical decision accuracy, or Xiaohongshu outcomes."
+    },
+    {
+      "id": "SCI-SELFARG-01",
+      "kind": "primary_empirical",
+      "citation": "Xu & Wegener (2024), Self-Generated Arguments and Perceived Difficulty",
+      "url": "https://doi.org/10.1177/19485506221146612",
+      "supports": "Perceived generation difficulty moderates the persuasive advantage of self-generated arguments; high difficulty can reduce it.",
+      "doesNotSupport": "Direct transfer to Xiaohongshu, medical content or the current one-step discovery template."
+    },
+    {
+      "id": "SCI-CURIOSITY-02",
+      "kind": "primary_empirical",
+      "citation": "Kang et al. (2009), The Wick in the Candle of Learning",
+      "url": "https://doi.org/10.1111/j.1467-9280.2009.02402.x",
+      "supports": "Curiosity was associated with information seeking and memory in trivia-learning tasks.",
+      "doesNotSupport": "Recommendation, consultation or purchase effects from comment cues."
+    },
+    {
+      "id": "SCI-DISFLUENCY-01",
+      "kind": "primary_empirical",
+      "citation": "Alter et al. (2007), Overcoming Intuition",
+      "url": "https://doi.org/10.1037/0096-3445.136.4.569",
+      "supports": "The original experiments reported that metacognitive difficulty could trigger more analytic processing.",
+      "doesNotSupport": "A general rule that making content harder improves reasoning."
+    },
+    {
+      "id": "SCI-DISFLUENCY-02",
+      "kind": "multi_study_boundary",
+      "citation": "Meyer et al. (2015), Disfluent Fonts Don't Help People Solve Math Problems",
+      "url": "https://doi.org/10.1037/xge0000049",
+      "supports": "Across multiple replications, disfluent fonts did not improve math problem solving, limiting a simple disfluency rule.",
+      "doesNotSupport": "That all effort is harmful; it specifically rejects an unqualified benefit claim."
+    },
+    {
+      "id": "SCI-INVOLVEMENT-01",
+      "kind": "primary_empirical",
+      "citation": "Petty, Cacioppo & Schumann (1983), Central and Peripheral Routes to Advertising Effectiveness",
+      "url": "https://doi.org/10.1086/208954",
+      "supports": "In the study, argument quality mattered more under high involvement, while endorser cues mattered more under low involvement.",
+      "doesNotSupport": "That active clicking lowers vigilance or that every high-intent user follows one persuasion route."
+    },
+    {
+      "id": "SCI-REGRET-01",
+      "kind": "primary_theory",
+      "citation": "Bell (1982), Regret in Decision Making Under Uncertainty",
+      "url": "https://doi.org/10.1287/opre.30.5.961",
+      "supports": "Regret can be modeled as a consequence of comparing realized and alternative outcomes in decision theory.",
+      "doesNotSupport": "Equating F15's normative excess expected loss with experienced psychological regret."
+    },
+    {
+      "id": "SCI-REGRET-02",
+      "kind": "primary_theory",
+      "citation": "Loomes & Sugden (1982), Regret Theory",
+      "url": "https://doi.org/10.2307/2232669",
+      "supports": "Anticipated regret can affect choices under uncertainty.",
+      "doesNotSupport": "Project-specific loss values or automatic before/after regret inference from a draft."
+    },
+    {
+      "id": "SCI-VOI-01",
+      "kind": "method_review",
+      "citation": "Claxton et al. (2001), Bayesian Value-of-Information Analysis",
+      "url": "https://doi.org/10.1017/S0266462301104058",
+      "supports": "Expected value of information distinguishes current decisions from the potential value of further evidence.",
+      "doesNotSupport": "How much one post reduces loss, or commensurability of F17/F18 terms without measurement."
+    },
+    {
+      "id": "SCI-CLICK-01",
+      "kind": "primary_method",
+      "citation": "Joachims et al. (2005), Accurately Interpreting Clickthrough Data as Implicit Feedback",
+      "url": "https://doi.org/10.1145/1076034.1076063",
+      "supports": "Clicks can contain preference information but are affected by presentation/position bias.",
+      "doesNotSupport": "Treating clicks as absolute relevance, value, understanding or qualified action."
+    },
+    {
+      "id": "SCI-CLICK-02",
+      "kind": "primary_model",
+      "citation": "Craswell et al. (2008), An Experimental Comparison of Click Position-Bias Models",
+      "url": "https://doi.org/10.1145/1341531.1341545",
+      "supports": "Sequential/cascade examination is a useful class of retrieval path models and makes denominators explicit.",
+      "doesNotSupport": "F21 variable values or Xiaohongshu-specific path probabilities."
+    },
+    {
+      "id": "SCI-REVIEWS-01",
+      "kind": "meta_analysis",
+      "citation": "Hong et al. (2017), Online Review Helpfulness: A Meta-Analytic Review",
+      "url": "https://doi.org/10.1016/j.dss.2017.06.007",
+      "supports": "Characteristics of real online reviews relate to helpfulness, with heterogeneity and inconsistent effects across factors.",
+      "doesNotSupport": "More comments are always better or simulated FAQ equals independent real review evidence."
+    },
+    {
+      "id": "SCI-REVIEWS-02",
+      "kind": "meta_analysis",
+      "citation": "Qiu & Zhang (2024), Online Reviews and Purchase Intention: A Meta-Analysis",
+      "url": "https://doi.org/10.1016/j.dim.2023.100058",
+      "supports": "Associations between real online reviews and purchase intention are moderated by content, product and cultural factors.",
+      "doesNotSupport": "Causal effects of author-built FAQ, Xiaohongshu medical conversion, or fabricated social proof."
+    },
+    {
+      "id": "SCI-ROBUST-01",
+      "kind": "primary_method",
+      "citation": "Ben-Tal & Nemirovski (1998), Robust Convex Optimization",
+      "url": "https://doi.org/10.1287/moor.23.4.769",
+      "supports": "Robust optimization requires a defined uncertainty set and optimization problem.",
+      "doesNotSupport": "Calling structural diversity minus overlap a max-min robust selection."
+    },
+    {
+      "id": "SCI-ROBUST-02",
+      "kind": "primary_method",
+      "citation": "Bertsimas & Sim (2004), The Price of Robustness",
+      "url": "https://doi.org/10.1287/opre.1030.0065",
+      "supports": "Robustness has a conservatism/performance tradeoff and can require an uncertainty budget.",
+      "doesNotSupport": "That the worst-case rule is universally preferable or current parameter weights are calibrated."
+    },
+    {
+      "id": "SCI-DIVERSITY-01",
+      "kind": "primary_method",
+      "citation": "Carbonell & Goldstein (1998), The Use of MMR, Diversity-Based Reranking for Reordering Documents and Producing Summaries",
+      "url": "https://doi.org/10.1145/290941.291025",
+      "supports": "Relevance and non-redundancy can be balanced explicitly in selection/reranking.",
+      "doesNotSupport": "Current structure-distance weights, semantic originality, or marketing outcome."
+    },
+    {
+      "id": "SCI-DIVERSITY-02",
+      "kind": "primary_method",
+      "citation": "Agrawal et al. (2009), Diversifying Search Results",
+      "url": "https://doi.org/10.1145/1498759.1498766",
+      "supports": "Covering multiple query intents and marginal utility can matter in diversified retrieval.",
+      "doesNotSupport": "F28 demand/coverage values or that market noncoverage is automatically a valuable opportunity."
+    },
+    {
+      "id": "SCI-EXPERIMENT-01",
+      "kind": "primary_method_survey",
+      "citation": "Kohavi et al. (2009), Controlled Experiments on the Web: Survey and Practical Guide",
+      "url": "https://doi.org/10.1145/1557019.1557132",
+      "supports": "Online causal learning requires controlled assignment, metrics, guardrails and analysis discipline.",
+      "doesNotSupport": "That current natural draft comparisons or historical scores are randomized experiments."
+    },
+    {
+      "id": "SCI-DEPENDENCE-01",
+      "kind": "primary_method",
+      "citation": "Clemen (1987), Combining Overlapping Information",
+      "url": "https://doi.org/10.1287/mnsc.33.3.373",
+      "supports": "Overlapping/shared information creates dependence that should be considered when combining sources.",
+      "doesNotSupport": "A particular F34 dependence discount, source-role ontology or medical evidence hierarchy."
+    },
+    {
+      "id": "XHS-ALGO-01",
+      "kind": "official_platform_disclosure",
+      "citation": "小红书个性化推荐算法公示",
+      "url": "https://beian.cac.gov.cn/api/static/fileUpload/principalOrithm/additional/user_c015445c-80ac-45f7-94d7-3871e961b1fe_d4425f3b-7f35-45af-b8d4-badd4424d6d5.pdf",
+      "verifiedAt": "2026-07-14",
+      "supports": "Recommendation uses note content and user interaction data, with deduplication, dispersion and interest-discovery interventions.",
+      "doesNotSupport": "Public ranking weights, a tag formula, guaranteed traffic, or any project proxy score."
+    },
+    {
+      "id": "XHS-ROUTE-01",
+      "kind": "official_platform_documentation",
+      "citation": "小红书 Deeplink 文档",
+      "url": "https://pages.xiaohongshu.com/activity/deeplink",
+      "supports": "Distinct note, comment, search result, topic and tag routes exist, with source/mode metadata.",
+      "doesNotSupport": "How ranking works within a route or the population/state distribution arriving through it."
+    },
+    {
+      "id": "XHS-HOTSPOT-01",
+      "kind": "official_platform_rules",
+      "citation": "小红书热点榜单规则说明",
+      "url": "https://fe.xiaohongshu.com/ditto/vincent/c45978d1a53d4dec963167ebd6f1802e?fullscreen=true&naviHidden=yes",
+      "verifiedAt": "2026-07-14",
+      "supports": "That specific hotspot-list product describes search, spread, interaction and click-rate inputs and minute updates.",
+      "doesNotSupport": "The current hot-discussion product, ordinary-note ranking weights, or guaranteed benefit from adding a tag."
+    },
+    {
+      "id": "XHS-HOTDISCUSS-01",
+      "kind": "official_platform_rules",
+      "citation": "小红书热议榜单规则说明",
+      "url": "https://fe.xiaohongshu.com/ditto/vincent/b9ca419956094c3aafaa7c2354aff1c8?fullscreen=true&naviHidden=yes&source=wowcard",
+      "verifiedAt": "2026-07-14",
+      "supports": "Hot-discussion topics consider publication/consumption, are personalized to 12 topics, and update hourly.",
+      "doesNotSupport": "The older hotspot formula, ordinary-note reach, or causal gains from trend-jacking."
+    },
+    {
+      "id": "DATA-REFERENCE-70",
+      "kind": "internal_descriptive_observation",
+      "citation": "70篇对标内容_AI提炼版；reference_copy_70_descriptive_v1",
+      "path": "../70篇对标内容_AI提炼版.jsonl",
+      "supports": "Within the collected 70 items, descriptive title/body/comment length distributions and observable format patterns.",
+      "doesNotSupport": "Quality thresholds, recommendation rules, causal performance, population representativeness, or optimal comment count."
+    },
+    {
+      "id": "DATA-HUMAN-50",
+      "kind": "internal_unvalidated_evaluation_artifact",
+      "citation": "Legacy 50-row summary containing a human score field",
+      "path": "../_score_all_result.json",
+      "supports": "That a legacy local evaluation artifact with 50 scored rows exists and can be audited for future offline use.",
+      "doesNotSupport": "Current-agent validity, blinded reliability, platform performance or formula calibration until provenance, scale and leakage are reviewed."
+    }
+  ],
+  "formulaEvidence": [
+    {
+      "formulaId": "F01",
+      "equation": "Ucopy = Render(WIinst, ψ) = H ⊕ N ⊕ Cref",
+      "equationFingerprint": "ca28e062e13272c3c1165dae9b458c928b7e6aa1a2a516217faf04a8b7dbd83d",
+      "currentStatus": "active",
+      "auditVerdict": "implemented_local_contract",
+      "evidenceClass": "project_definition",
+      "sourceIds": [],
+      "actualExecution": "输出合同与写作提示会装配同一个 H＋N＋Cref 完整内容包。",
+      "boundary": "只在本地内容包定义上完整执行，不代表触达或效果公式成立。",
+      "proposedStatus": "active",
+      "reviewIds": [
+        "R07",
+        "R01"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "ca28e062e13272c3c1165dae9b458c928b7e6aa1a2a516217faf04a8b7dbd83d",
+      "executionClass": "direct-executable",
+      "implementedStages": [
+        "generation"
+      ],
+      "declaredStages": [
+        "generation"
+      ],
+      "controlMode": "partially-gated",
+      "directGenerationInstruction": true
+    },
+    {
+      "formulaId": "F02",
+      "equation": "Uplan=(Ucopy,aC); Ureal,t=(Uplan,ξt,Cuser,t)",
+      "equationFingerprint": "94e11cf23709e38eee36998f41c02f691d44398f47bfef7995a2ccaacfd17062",
+      "currentStatus": "partial",
+      "auditVerdict": "partial_direct_execution",
+      "evidenceClass": "project_definition",
+      "sourceIds": [
+        "SCI-FIDELITY-01"
+      ],
+      "actualExecution": "草稿、编排计划与部署计划分别保存快照。",
+      "boundary": "系统没有执行平台部署，也没有观测平台扰动、真实用户评论或 Ureal。",
+      "proposedStatus": "partial",
+      "reviewIds": [
+        "R07",
+        "R22"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "94e11cf23709e38eee36998f41c02f691d44398f47bfef7995a2ccaacfd17062",
+      "executionClass": "direct-executable",
+      "implementedStages": [
+        "planning"
+      ],
+      "declaredStages": [
+        "planning"
+      ],
+      "controlMode": "always-on",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F03",
+      "equation": "Cref ≠ aC ≠ Cuser,t",
+      "equationFingerprint": "62ff59d7b9dc262aa23b92b6c0dddd4cf15f3fbe9a058b18f85e1757d44041e7",
+      "currentStatus": "active",
+      "auditVerdict": "implemented_local_contract",
+      "evidenceClass": "project_definition",
+      "sourceIds": [],
+      "actualExecution": "参考问答、部署说明和真实评论使用不同身份；模拟内容会标注并校验。",
+      "boundary": "校验器只证明本地产物的身份字段，不证明平台实际如何展示或审核线程。",
+      "proposedStatus": "active",
+      "reviewIds": [
+        "R07",
+        "R19"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "62ff59d7b9dc262aa23b92b6c0dddd4cf15f3fbe9a058b18f85e1757d44041e7",
+      "executionClass": "direct-executable",
+      "implementedStages": [
+        "generation",
+        "validation"
+      ],
+      "declaredStages": [
+        "generation",
+        "validation"
+      ],
+      "controlMode": "partially-gated",
+      "directGenerationInstruction": true
+    },
+    {
+      "formulaId": "F04",
+      "equation": "WI=(G,Ans,E,Φ,Priority,Boundary)",
+      "equationFingerprint": "39f5ec7d9d483e76551255f953c7e03ebe82f2f4f80184347081f14b51c639ec",
+      "currentStatus": "active",
+      "auditVerdict": "implemented_local_contract",
+      "evidenceClass": "project_definition_with_conceptual_support",
+      "sourceIds": [
+        "SCI-INFO-01",
+        "SCI-CURIOSITY-01"
+      ],
+      "actualExecution": "同一张缺口卡把问题、答案/框架、证据、优先级、边界和计划位置传入写作。",
+      "boundary": "它是完整执行的生产数据模型；重要性仍是项目判断，不是人群分布真值。",
+      "proposedStatus": "active",
+      "reviewIds": [
+        "R07",
+        "R01",
+        "R03",
+        "R05"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "39f5ec7d9d483e76551255f953c7e03ebe82f2f4f80184347081f14b51c639ec",
+      "executionClass": "direct-executable",
+      "implementedStages": [
+        "planning",
+        "generation"
+      ],
+      "declaredStages": [
+        "planning",
+        "generation"
+      ],
+      "controlMode": "partially-gated",
+      "directGenerationInstruction": true
+    },
+    {
+      "formulaId": "F05",
+      "equation": "WX=(Channel,Form,Voice,Sequence,Thread)",
+      "equationFingerprint": "a9f627064037b10a3bed6b2f8d6ee65d0a0c3cfce1d3a3ae4f16774355733e3c",
+      "currentStatus": "partial",
+      "auditVerdict": "partial_direct_execution",
+      "evidenceClass": "project_definition_with_conceptual_support",
+      "sourceIds": [
+        "SCI-INFO-01",
+        "SCI-LOAD-01"
+      ],
+      "actualExecution": "表达策略会落成通道、形式、口吻、顺序和线程选择，并把选中计划交给写作。",
+      "boundary": "可配置表达窗与采样策略尚未成为一个完全受公式开关控制的单一真源，也没有哪种表达已被证明效果更好。",
+      "proposedStatus": "partial",
+      "reviewIds": [
+        "R07",
+        "R01",
+        "R05",
+        "R18"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "a9f627064037b10a3bed6b2f8d6ee65d0a0c3cfce1d3a3ae4f16774355733e3c",
+      "executionClass": "direct-executable",
+      "implementedStages": [
+        "planning",
+        "generation"
+      ],
+      "declaredStages": [
+        "planning",
+        "generation"
+      ],
+      "controlMode": "partially-gated",
+      "directGenerationInstruction": true
+    },
+    {
+      "formulaId": "F06",
+      "equation": "WIinst={xi}⊆Feasible(KBt)",
+      "equationFingerprint": "2ad863015625030f5436881b058221d4cd83d296e73fd705e62db9fd1f20b9f8",
+      "currentStatus": "active",
+      "auditVerdict": "implemented_local_contract",
+      "evidenceClass": "normative_project_constraint",
+      "sourceIds": [
+        "SCI-DEPENDENCE-01"
+      ],
+      "actualExecution": "缺口规划保留获批原文片段；可发布声明受这些片段约束，无支持内容保持 unknown，最终包会重新校验。",
+      "boundary": "可行域只覆盖已加载并获批的项目证据；系统不能证明资料之外的外部完整性或真值。",
+      "proposedStatus": "active",
+      "reviewIds": [
+        "R07",
+        "R02",
+        "R14"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "2ad863015625030f5436881b058221d4cd83d296e73fd705e62db9fd1f20b9f8",
+      "executionClass": "direct-executable",
+      "implementedStages": [
+        "planning",
+        "generation",
+        "validation"
+      ],
+      "declaredStages": [
+        "planning",
+        "generation",
+        "validation"
+      ],
+      "controlMode": "partially-gated",
+      "directGenerationInstruction": true
+    },
+    {
+      "formulaId": "F07",
+      "equation": "N=(Img,Ttitle,B)",
+      "equationFingerprint": "884c42948bf4c2d8bb98453c9105110ad528323d4560d91a953ed13b041a489d",
+      "currentStatus": "partial",
+      "auditVerdict": "partial_direct_execution",
+      "evidenceClass": "project_definition_with_learning_task_support",
+      "sourceIds": [
+        "SCI-MULTIMEDIA-01",
+        "SCI-MULTIMEDIA-02"
+      ],
+      "actualExecution": "获批图片观察会与标题、正文一起形成图片计划和图片简报。",
+      "boundary": "当前内容包通常只有简报，不是已渲染的最终图片，也没有图题文语义一致性的实测分数。",
+      "proposedStatus": "partial",
+      "reviewIds": [
+        "R07",
+        "R10"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "884c42948bf4c2d8bb98453c9105110ad528323d4560d91a953ed13b041a489d",
+      "executionClass": "direct-executable",
+      "implementedStages": [
+        "planning",
+        "generation"
+      ],
+      "declaredStages": [
+        "planning",
+        "generation"
+      ],
+      "controlMode": "partially-gated",
+      "directGenerationInstruction": true
+    },
+    {
+      "formulaId": "F08",
+      "equation": "Vmcompare=E[q(Um←x)-q(U-x)]",
+      "equationFingerprint": "776697ea21f78a22ecc6eef6c126173daf0691ced30879697d8f87127334cf8e",
+      "currentStatus": "protocol-only",
+      "auditVerdict": "protocol_only",
+      "evidenceClass": "unexecuted_causal_hypothesis",
+      "sourceIds": [
+        "SCI-CAUSAL-01",
+        "SCI-EXPERIMENT-01"
+      ],
+      "actualExecution": "当前没有执行跨通道位置的反事实实验。",
+      "boundary": "现有通道分配和重复检查不能估计因果边际价值。",
+      "proposedStatus": "protocol-only",
+      "reviewIds": [
+        "R07",
+        "R21"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "776697ea21f78a22ecc6eef6c126173daf0691ced30879697d8f87127334cf8e",
+      "executionClass": "protocol",
+      "implementedStages": [],
+      "declaredStages": [
+        "planning",
+        "diagnostic",
+        "evaluation"
+      ],
+      "controlMode": "not-running",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F09",
+      "equation": "Gres=Gdecision\\Resolve(H⊕N)",
+      "equationFingerprint": "3a243918ef38b3165ba1f2fecc7bd58b3cb1e3686fb3905dd4479abd5ee80821",
+      "currentStatus": "partial",
+      "auditVerdict": "partial_direct_execution",
+      "evidenceClass": "project_definition_with_conceptual_support",
+      "sourceIds": [
+        "SCI-INFO-01"
+      ],
+      "actualExecution": "计划会分配残余缺口；最终校验会重新检查答案、边界、证据和位置是否真实可见。",
+      "boundary": "系统只审计已选缺口集，不会发现阅读后的全部潜在残余缺口，也不会根据真实读者观测重新规划。",
+      "proposedStatus": "partial",
+      "reviewIds": [
+        "R07",
+        "R01",
+        "R03"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "3a243918ef38b3165ba1f2fecc7bd58b3cb1e3686fb3905dd4479abd5ee80821",
+      "executionClass": "direct-executable",
+      "implementedStages": [
+        "planning",
+        "generation",
+        "validation"
+      ],
+      "declaredStages": [
+        "planning",
+        "generation",
+        "validation"
+      ],
+      "controlMode": "partially-gated",
+      "directGenerationInstruction": true
+    },
+    {
+      "formulaId": "F10",
+      "equation": "Cref=Rollout(ρC|Role×Scene×Register×Topology×Gap)",
+      "equationFingerprint": "2dee6ad04f88f34b03ad68abe2ed081452f1f06d54d7ef6ad733b22b582b1b2d",
+      "currentStatus": "partial",
+      "auditVerdict": "partial_direct_execution",
+      "evidenceClass": "project_definition_with_unvalidated_interaction_hypothesis",
+      "sourceIds": [
+        "SCI-INFO-01",
+        "SCI-SELFEXPLAIN-01",
+        "SCI-SELFARG-01"
+      ],
+      "actualExecution": "系统会按角色、场景、语域、关系拓扑和待补缺口生成条件化根问题、可追责回复、追问及同线程发现计划，并做结构校验。",
+      "boundary": "角色、场景、语域、拓扑和缺口只是受控生成条件；尚未实现完整的逐轮状态转移，也没有校准后的信息增量测量。",
+      "proposedStatus": "partial",
+      "reviewIds": [
+        "R07",
+        "R16",
+        "R17"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "2dee6ad04f88f34b03ad68abe2ed081452f1f06d54d7ef6ad733b22b582b1b2d",
+      "executionClass": "direct-executable",
+      "implementedStages": [
+        "planning",
+        "generation",
+        "validation"
+      ],
+      "declaredStages": [
+        "planning",
+        "generation",
+        "validation"
+      ],
+      "controlMode": "partially-gated",
+      "directGenerationInstruction": true
+    },
+    {
+      "formulaId": "F11",
+      "equation": "Cref — Deploy(aC,t) → Crefvis(t)",
+      "equationFingerprint": "5ab02a49aacbcb21ff612328d54c4b091d31020ecee2318ae56acf31b5145275",
+      "currentStatus": "protocol-only",
+      "auditVerdict": "protocol_only",
+      "evidenceClass": "unexecuted_delivery_protocol",
+      "sourceIds": [
+        "SCI-FIDELITY-01"
+      ],
+      "actualExecution": "系统会写部署计划，但不会实际发布或观测评论可见性。",
+      "boundary": "计划不能证明置顶、折叠、排序、审核或特定时点的实际可见状态。",
+      "proposedStatus": "protocol-only",
+      "reviewIds": [
+        "R07",
+        "R22"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "5ab02a49aacbcb21ff612328d54c4b091d31020ecee2318ae56acf31b5145275",
+      "executionClass": "protocol",
+      "implementedStages": [],
+      "declaredStages": [
+        "planning",
+        "evaluation"
+      ],
+      "controlMode": "not-running",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F12",
+      "equation": "Sscenario=Hypothesize(entry,stage;preContactKnown?,history?)",
+      "equationFingerprint": "8b85ccd75156828eca8bbff373284f8403c0f9a29e13c6fd4ea73ea7056fa74b",
+      "currentStatus": "partial",
+      "auditVerdict": "partial_hypothesis",
+      "evidenceClass": "unvalidated_latent_state_hypothesis",
+      "sourceIds": [
+        "SCI-SEARCH-01",
+        "SCI-SEARCH-02",
+        "SCI-SELECTIVE-01",
+        "XHS-ROUTE-01"
+      ],
+      "actualExecution": "系统只按用户选择的入口与阶段建立一组可修正写作情景；preContactKnown 仅接收用户明确提供的内容，history 未提供时保持 unknown。",
+      "boundary": "这不是抽样、分类或估计得到的人群分布，也不能从一次点击推断个人动机。",
+      "proposedStatus": "partial",
+      "reviewIds": [
+        "R07",
+        "R08"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "8b85ccd75156828eca8bbff373284f8403c0f9a29e13c6fd4ea73ea7056fa74b",
+      "executionClass": "hypothesis",
+      "implementedStages": [
+        "planning"
+      ],
+      "declaredStages": [
+        "planning"
+      ],
+      "controlMode": "partially-gated",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F13",
+      "equation": "ŝscenario=(stage,hypothesizedGaps,preContactKnown?,readerConstraints?,history?)",
+      "equationFingerprint": "2ef99f01acf1de1ed454bb00044e58a70719e61cf1ef1ea084e0ce1fd47237b5",
+      "currentStatus": "partial",
+      "auditVerdict": "partial_hypothesis",
+      "evidenceClass": "unvalidated_latent_state_hypothesis",
+      "sourceIds": [
+        "SCI-MOTIVATION-01",
+        "SCI-CLOSURE-01",
+        "SCI-INVOLVEMENT-01",
+        "SCI-SELECTIVE-01"
+      ],
+      "actualExecution": "系统把审慎、信息疲劳与收束需要表示为 low/medium/high 写作假设，并附未标定区间、形成依据和 calibrated=false。",
+      "boundary": "等级仅按所选阶段启发式形成；不是心理测量、个人诊断、人群比例，也没有实现阅读前后状态转移。",
+      "proposedStatus": "partial",
+      "reviewIds": [
+        "R07",
+        "R08"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "2ef99f01acf1de1ed454bb00044e58a70719e61cf1ef1ea084e0ce1fd47237b5",
+      "executionClass": "hypothesis",
+      "implementedStages": [
+        "planning"
+      ],
+      "declaredStages": [
+        "planning"
+      ],
+      "controlMode": "partially-gated",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F14",
+      "equation": "FalseClosure=Σ wj max(0,Gobj-Ĝ)",
+      "equationFingerprint": "d898f79d4dc0998b5c28f2dc110c447e9ca59d7a875f404eb562d1dfa3326083",
+      "currentStatus": "partial",
+      "auditVerdict": "partial_diagnostic_proxy",
+      "evidenceClass": "unvalidated_risk_proxy",
+      "sourceIds": [
+        "SCI-DEPTH-01",
+        "SCI-FALSE-INSIGHT-01",
+        "SCI-TRUTH-01"
+      ],
+      "actualExecution": "系统把 unknown 冒充事实和过度确定表达作为假闭合风险进行检查。",
+      "boundary": "系统没有测量客观缺口、感知缺口和确信度，因此不会数值计算展示的公式。",
+      "proposedStatus": "partial",
+      "reviewIds": [
+        "R07",
+        "R16",
+        "R28"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "d898f79d4dc0998b5c28f2dc110c447e9ca59d7a875f404eb562d1dfa3326083",
+      "executionClass": "diagnostic-proxy",
+      "implementedStages": [
+        "validation"
+      ],
+      "declaredStages": [
+        "validation"
+      ],
+      "controlMode": "partially-gated",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F15",
+      "equation": "LT★=当前决策期望损失-可行最小损失",
+      "equationFingerprint": "07a50cf15942daa678a9d629f8d4836ed5df3e4b1be40b653229fabc593984db",
+      "currentStatus": "protocol-only",
+      "auditVerdict": "protocol_only",
+      "evidenceClass": "normative_unexecuted_protocol",
+      "sourceIds": [
+        "SCI-REGRET-01",
+        "SCI-REGRET-02",
+        "SCI-VOI-01"
+      ],
+      "actualExecution": "当前没有采集决策损失终点或遗憾观测。",
+      "boundary": "它是规范性评价协议，不会给生成文案打分。",
+      "proposedStatus": "protocol-only",
+      "reviewIds": [
+        "R07",
+        "R23"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "07a50cf15942daa678a9d629f8d4836ed5df3e4b1be40b653229fabc593984db",
+      "executionClass": "protocol",
+      "implementedStages": [],
+      "declaredStages": [
+        "evaluation"
+      ],
+      "controlMode": "not-running",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F16",
+      "equation": "ΔLT★=LT★(before)-LT★(after)",
+      "equationFingerprint": "8e44531247abc03a3670e81c5d7828078c9dc9755784aa5213e822521c3c34e0",
+      "currentStatus": "protocol-only",
+      "auditVerdict": "protocol_only",
+      "evidenceClass": "normative_unexecuted_protocol",
+      "sourceIds": [
+        "SCI-REGRET-01",
+        "SCI-REGRET-02",
+        "SCI-VOI-01"
+      ],
+      "actualExecution": "当前没有执行可比的阅读前后决策损失测量。",
+      "boundary": "仅凭生成文本不能识别读者遗憾是否变化。",
+      "proposedStatus": "protocol-only",
+      "reviewIds": [
+        "R07",
+        "R23"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "8e44531247abc03a3670e81c5d7828078c9dc9755784aa5213e822521c3c34e0",
+      "executionClass": "protocol",
+      "implementedStages": [],
+      "declaredStages": [
+        "evaluation"
+      ],
+      "controlMode": "not-running",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F17",
+      "equation": "V*=regretBefore-regretAfter-cognitiveCost",
+      "equationFingerprint": "1d727fd246d7852bf158e7223ef4eaccdde4b4c0769e5fcd7fe78076166235e5",
+      "currentStatus": "conditional",
+      "auditVerdict": "conditional_calculator",
+      "evidenceClass": "normative_scenario_calculator",
+      "sourceIds": [
+        "SCI-VOI-01",
+        "SCI-LOAD-01"
+      ],
+      "actualExecution": "仅当用户提供三个数值及各自非空、完全一致的可比较单位时，安全 AST 才计算 regretBefore－regretAfter－cognitiveCost。",
+      "boundary": "输入不足或单位不一致时结果保持 unknown 并报告校验错误；该手工情景值不会被规划、选稿或写作消费。",
+      "proposedStatus": "conditional",
+      "reviewIds": [
+        "R07",
+        "R09",
+        "R23"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "1d727fd246d7852bf158e7223ef4eaccdde4b4c0769e5fcd7fe78076166235e5",
+      "executionClass": "derived-calculator",
+      "implementedStages": [
+        "calculation"
+      ],
+      "declaredStages": [
+        "calculation",
+        "evaluation"
+      ],
+      "controlMode": "fully-gated",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F18",
+      "equation": "V̂N=ΔL̂-CogCost-AdRisk-λΔFalseClosure",
+      "equationFingerprint": "68ab3930924d3e6128c5aeeebd7277ea946f891b4bbb520fe15caecfb6a5e29c",
+      "currentStatus": "protocol-only",
+      "auditVerdict": "not_implemented",
+      "evidenceClass": "unvalidated_proxy_protocol",
+      "sourceIds": [
+        "SCI-LOAD-01",
+        "SCI-FALSE-INSIGHT-01",
+        "SCI-VOI-01"
+      ],
+      "actualExecution": "系统有相邻诊断设置，但不会计算展示的代理公式。",
+      "boundary": "决策损失变化、认知成本、广告风险和假闭合目前没有共同量纲。",
+      "proposedStatus": "protocol-only",
+      "reviewIds": [
+        "R07",
+        "R23",
+        "R28"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "68ab3930924d3e6128c5aeeebd7277ea946f891b4bbb520fe15caecfb6a5e29c",
+      "executionClass": "not-implemented",
+      "implementedStages": [],
+      "declaredStages": [
+        "diagnostic",
+        "evaluation"
+      ],
+      "controlMode": "not-running",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F19",
+      "equation": "EntryDraft=Plan(ImagePlan,ImageBrief,Ttitle,Tags,Excerpt|r); PreviewObserved=Observe(FinalImg,Ttitle,VisibleTags,Excerpt|EntrySnapshot,r)",
+      "equationFingerprint": "a20f3374555b7db250b2c4aabd0e56e8e7520d1c253785a1afb63bc87f74638d",
+      "currentStatus": "partial",
+      "auditVerdict": "partial_direct_execution",
+      "evidenceClass": "project_definition",
+      "sourceIds": [
+        "XHS-ROUTE-01",
+        "XHS-ALGO-01"
+      ],
+      "actualExecution": "系统联合生成 ImagePlan、ImageBrief、标题、标签和正文入口草稿，并用 planToCopyAlignment 检查制作计划与可见文案的承接；productionArtifacts 分别记录最终图片和入口截图是否存在。",
+      "boundary": "当前最终图片资产与真实入口截图均为 absent，finalAssetAlignment/entrySnapshotAlignment 为 not_evaluated；因此只完成 EntryDraft，绝不声称 PreviewObserved 已执行或预测打开效果。",
+      "proposedStatus": "partial",
+      "reviewIds": [
+        "R07",
+        "R10"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "a20f3374555b7db250b2c4aabd0e56e8e7520d1c253785a1afb63bc87f74638d",
+      "executionClass": "direct-executable",
+      "implementedStages": [
+        "planning",
+        "generation",
+        "validation"
+      ],
+      "declaredStages": [
+        "planning",
+        "generation",
+        "validation"
+      ],
+      "controlMode": "partially-gated",
+      "directGenerationInstruction": true
+    },
+    {
+      "formulaId": "F20",
+      "equation": "Q̂gen=RouteFit̂·[V̂N+P̂open·Q̂C]",
+      "equationFingerprint": "feebdc68c6888a59500bb468dbf9a29e0a548d1e5479b11a202358e404e80683",
+      "currentStatus": "protocol-only",
+      "auditVerdict": "protocol_only",
+      "evidenceClass": "unvalidated_proxy_protocol",
+      "sourceIds": [
+        "SCI-VOI-01",
+        "SCI-CLICK-01",
+        "SCI-CLICK-02"
+      ],
+      "actualExecution": "当前不会计算 RouteFit、打开概率或评论质量表达式。",
+      "boundary": "相关参数只是写作指引，不能被报告成这条离线质量公式。",
+      "proposedStatus": "protocol-only",
+      "reviewIds": [
+        "R07",
+        "R24"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "feebdc68c6888a59500bb468dbf9a29e0a548d1e5479b11a202358e404e80683",
+      "executionClass": "protocol",
+      "implementedStages": [],
+      "declaredStages": [
+        "diagnostic",
+        "evaluation"
+      ],
+      "controlMode": "not-running",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F21",
+      "equation": "Ppath=pExposure·pNoticeGivenExposure·pEnterGivenNotice·pConsumeGivenEnter",
+      "equationFingerprint": "4aae8ac2005bf3d9632e593697c6ee0478ec8a1321eb5b245e5ceaa7f70962fb",
+      "currentStatus": "conditional",
+      "auditVerdict": "conditional_calculator",
+      "evidenceClass": "architecture_scenario_calculator",
+      "sourceIds": [
+        "SCI-CLICK-01",
+        "SCI-CLICK-02"
+      ],
+      "actualExecution": "仅当用户提供 pExposure、pNoticeGivenExposure、pEnterGivenNotice、pConsumeGivenEnter 且四者都位于 [0,1] 时，安全 AST 才计算顺序路径概率。",
+      "boundary": "输入不足或越界时结果保持 unknown 并报告校验错误；该手工情景值不会用于生成、规划或选稿。",
+      "proposedStatus": "conditional",
+      "reviewIds": [
+        "R07",
+        "R09",
+        "R24"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "4aae8ac2005bf3d9632e593697c6ee0478ec8a1321eb5b245e5ceaa7f70962fb",
+      "executionClass": "derived-calculator",
+      "implementedStages": [
+        "calculation"
+      ],
+      "declaredStages": [
+        "calculation",
+        "evaluation"
+      ],
+      "controlMode": "fully-gated",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F22",
+      "equation": "V̂Cread=Needs·Pfind·InformationValue-Costopen-Clutter",
+      "equationFingerprint": "62cad763d177375f2c9b779160f9b42768b02e2c76847f0febc827f9951c4cb1",
+      "currentStatus": "partial",
+      "auditVerdict": "partial_hypothesis",
+      "evidenceClass": "unvalidated_hypothesis_with_conceptual_support",
+      "sourceIds": [
+        "SCI-INFO-01",
+        "SCI-REVIEWS-01"
+      ],
+      "actualExecution": "评论计划会优先安排可找到的残余缺口、新增答案、边界并控制杂乱。",
+      "boundary": "Needs、Pfind、信息价值、打开成本与杂乱成本都没有被观测或合并计算。",
+      "proposedStatus": "partial",
+      "reviewIds": [
+        "R07",
+        "R17",
+        "R24"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "62cad763d177375f2c9b779160f9b42768b02e2c76847f0febc827f9951c4cb1",
+      "executionClass": "hypothesis",
+      "implementedStages": [
+        "planning"
+      ],
+      "declaredStages": [
+        "planning",
+        "evaluation"
+      ],
+      "controlMode": "partially-gated",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F23",
+      "equation": "Vafter=V̂N+Popen·[V̂Cread+ΔV̂Creal+Pparticipate·V̂Cinteract]",
+      "equationFingerprint": "3c0a528ef15b9eacc98189faad177640937c9bbb3819ba363323aa61fbeb7f7f",
+      "currentStatus": "protocol-only",
+      "auditVerdict": "protocol_only",
+      "evidenceClass": "unvalidated_outcome_protocol",
+      "sourceIds": [
+        "SCI-REVIEWS-01",
+        "SCI-REVIEWS-02",
+        "SCI-CLICK-01"
+      ],
+      "actualExecution": "当前没有真实评论增量、参与或互动价值观测。",
+      "boundary": "参考问答不能替代公式里的真实评论。",
+      "proposedStatus": "protocol-only",
+      "reviewIds": [
+        "R07",
+        "R24"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "3c0a528ef15b9eacc98189faad177640937c9bbb3819ba363323aa61fbeb7f7f",
+      "executionClass": "protocol",
+      "implementedStages": [],
+      "declaredStages": [
+        "evaluation"
+      ],
+      "controlMode": "not-running",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F24",
+      "equation": "Ir=Es∼π⁻r,t[qr(Uplan|s,ξ)]",
+      "equationFingerprint": "9931e42bbabf59a5c06d1ce808a9d79505d89a7c627c81e16ea9f0a17a38922f",
+      "currentStatus": "protocol-only",
+      "auditVerdict": "protocol_only",
+      "evidenceClass": "unexecuted_population_protocol",
+      "sourceIds": [
+        "SCI-SEARCH-01",
+        "SCI-SEARCH-02",
+        "SCI-SELECTIVE-01"
+      ],
+      "actualExecution": "当前不会对接触内容前的人群分布求期望。",
+      "boundary": "单个启发式状态种子不是人群分布。",
+      "proposedStatus": "protocol-only",
+      "reviewIds": [
+        "R07",
+        "R08",
+        "R24"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "9931e42bbabf59a5c06d1ce808a9d79505d89a7c627c81e16ea9f0a17a38922f",
+      "executionClass": "protocol",
+      "implementedStages": [],
+      "declaredStages": [
+        "planning",
+        "evaluation"
+      ],
+      "controlMode": "not-running",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F25",
+      "equation": "Uplan∈Ω(KBt)",
+      "equationFingerprint": "984179deca6cc80bc64c579d99ce704bda138a974340ae4cec5f615c53739e7b",
+      "currentStatus": "active",
+      "auditVerdict": "implemented_local_contract",
+      "evidenceClass": "normative_project_constraint",
+      "sourceIds": [],
+      "actualExecution": "获批证据、禁止声明、未知边界、来源身份和最终有效性会作为本地硬门槛。",
+      "boundary": "只对本地配置的 Ω 完整执行；不代表已覆盖所有最新平台、法律或外部约束。",
+      "proposedStatus": "active",
+      "reviewIds": [
+        "R07",
+        "R02",
+        "R05"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "984179deca6cc80bc64c579d99ce704bda138a974340ae4cec5f615c53739e7b",
+      "executionClass": "direct-executable",
+      "implementedStages": [
+        "generation",
+        "validation"
+      ],
+      "declaredStages": [
+        "generation",
+        "validation"
+      ],
+      "controlMode": "partially-gated",
+      "directGenerationInstruction": true
+    },
+    {
+      "formulaId": "F26",
+      "equation": "X=WI×Ψ(WX)×AC",
+      "equationFingerprint": "776d473b9a0429d5969e0056d15ae44556267cc45a5112802ea3b69f90cff5a8",
+      "currentStatus": "partial",
+      "auditVerdict": "partial_direct_execution",
+      "evidenceClass": "project_definition",
+      "sourceIds": [
+        "SCI-DIVERSITY-01",
+        "SCI-DIVERSITY-02"
+      ],
+      "actualExecution": "规划器会在缺口卡、表达策略、通道和部署选择组成的有界联合空间中采样。",
+      "boundary": "这是受控采样，不是对 WI×Ψ(WX)×AC 的穷尽枚举。",
+      "proposedStatus": "partial",
+      "reviewIds": [
+        "R07",
+        "R17"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "776d473b9a0429d5969e0056d15ae44556267cc45a5112802ea3b69f90cff5a8",
+      "executionClass": "direct-executable",
+      "implementedStages": [
+        "planning"
+      ],
+      "declaredStages": [
+        "planning"
+      ],
+      "controlMode": "partially-gated",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F27",
+      "equation": "x*=arg maxx minϑ Ĵr(x;ϑ)",
+      "equationFingerprint": "507f8f3cdc36726978fe00ac6bc8ed08e12642d5097a691ca7e43345499a3bd9",
+      "currentStatus": "protocol-only",
+      "auditVerdict": "protocol_only",
+      "evidenceClass": "unexecuted_optimization_protocol",
+      "sourceIds": [
+        "SCI-ROBUST-01",
+        "SCI-ROBUST-02"
+      ],
+      "actualExecution": "当前不会计算不确定集合或最坏情景目标。",
+      "boundary": "结构距离与近期重合惩罚不是 max-min 鲁棒优化。",
+      "proposedStatus": "protocol-only",
+      "reviewIds": [
+        "R07",
+        "R25"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "507f8f3cdc36726978fe00ac6bc8ed08e12642d5097a691ca7e43345499a3bd9",
+      "executionClass": "protocol",
+      "implementedStages": [],
+      "declaredStages": [
+        "planning",
+        "evaluation",
+        "validation"
+      ],
+      "controlMode": "not-running",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F28",
+      "equation": "Opportunity=Proofable·Demand·Importance·(1-Coverage)·Leverage/(e+CogCost)",
+      "equationFingerprint": "ab86042126e193a207af499f70333ad3cdd089ab0ed1b6ed16d757dd0e9ee57c",
+      "currentStatus": "protocol-only",
+      "auditVerdict": "not_implemented",
+      "evidenceClass": "unvalidated_proxy",
+      "sourceIds": [
+        "SCI-INFO-01",
+        "SCI-DIVERSITY-01",
+        "SCI-DIVERSITY-02"
+      ],
+      "actualExecution": "当前不会计算展示的乘法机会公式。候选排序由独立的 OpportunityRankHeuristicV1 执行，并随结果保存分项、输入来源、unknown 与复核状态。",
+      "boundary": "OpportunityRankHeuristicV1 使用固定且未标定的内部权重，不含 F28 所需的真实需求和竞品覆盖观测，也不是因果效果预测；它不能继承 F28 的公式身份。",
+      "proposedStatus": "protocol-only",
+      "reviewIds": [
+        "R07",
+        "R04",
+        "R11"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "ab86042126e193a207af499f70333ad3cdd089ab0ed1b6ed16d757dd0e9ee57c",
+      "executionClass": "not-implemented",
+      "implementedStages": [],
+      "declaredStages": [
+        "planning",
+        "diagnostic",
+        "evaluation"
+      ],
+      "controlMode": "not-running",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F29",
+      "equation": "Advantage=Eq[max portfolio Iq-max competitor Iq]",
+      "equationFingerprint": "7d30abc72ca529bb5d329bb83d8964f703c775ad590bf0bd3d71fbf4f1014e92",
+      "currentStatus": "protocol-only",
+      "auditVerdict": "protocol_only",
+      "evidenceClass": "unexecuted_competition_protocol",
+      "sourceIds": [
+        "SCI-DIVERSITY-01",
+        "SCI-DIVERSITY-02"
+      ],
+      "actualExecution": "当前没有观测可比较的项目与竞品内容组合。",
+      "boundary": "新颖度指引不是测量得到的相对竞争前沿。",
+      "proposedStatus": "protocol-only",
+      "reviewIds": [
+        "R07",
+        "R26"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "7d30abc72ca529bb5d329bb83d8964f703c775ad590bf0bd3d71fbf4f1014e92",
+      "executionClass": "protocol",
+      "implementedStages": [],
+      "declaredStages": [
+        "evaluation"
+      ],
+      "controlMode": "not-running",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F30",
+      "title": "热点匹配手工情景",
+      "equation": "TrendFit=Relevance·BridgeClarity·Timeliness",
+      "equationFingerprint": "13f7a3cd5e8b645ec69cfec64eb17c10e9953c1030b180c2da3f8af5b004fb45",
+      "currentStatus": "conditional",
+      "auditVerdict": "conditional_manual_scenario_calculator",
+      "evidenceClass": "unvalidated_manual_proxy_with_official_and_causal_boundaries",
+      "sourceIds": [
+        "XHS-HOTSPOT-01",
+        "XHS-HOTDISCUSS-01",
+        "XHS-ALGO-01",
+        "SCI-CAUSAL-01",
+        "SCI-EXPERIMENT-01"
+      ],
+      "actualExecution": "仅当用户显式声明来源类型，trendSourceRef 通过绝对 http/https URL 或 id:/title:/source: 具体引用格式校验，sourceObservedAt 通过带秒和时区的 RFC3339 格式与取值校验，并手工提供 relevance、bridgeClarity、timeliness 三个 [0,1] 情景值时，服务端安全 AST 才计算 TrendFit。",
+      "boundary": "系统只校验用户声明的来源引用与时间格式，不联网确认页面存在、官方归属、榜单或热议身份及观察真实性。输出是未标定情景值，不进入生成、规划、选稿或校验，也不预测触达；标签和热点词不保证曝光、推荐、点击或合格触达。",
+      "calculatorContract": {
+        "mode": "manual_scenario",
+        "outputMetric": "TrendFit",
+        "outputSemantics": "unvalidated_scenario_index",
+        "outputRange": [
+          0,
+          1
+        ],
+        "consumedBy": {
+          "generation": false,
+          "planning": false,
+          "selection": false,
+          "validation": false
+        },
+        "prohibitedUses": [
+          "generation",
+          "planning",
+          "selection",
+          "validation"
+        ],
+        "excludedResearchOutputs": [
+          {
+            "metric": "qualifiedIncrementalReach",
+            "protocolId": "qualified_incremental_reach_protocol",
+            "status": "not_executed",
+            "outputProduced": false,
+            "notProducedByCalculator": true,
+            "reason": "TrendFit has no exposure counterfactual, qualified-audience outcome, or deduplicated incremental-reach observation.",
+            "requiredObservations": [
+              "预先定义的合格触达结果与合格受众口径",
+              "同一口径下无热点桥接基线、热点桥接处理及可解释反事实",
+              "可比入口、投放位置、平台条件、曝光机会与预先约定的归因时间窗",
+              "去重后的增量触达结果，以及风险、过期和混杂处理；不能用标签数量或榜单身份代替"
+            ]
+          }
+        ],
+        "boundaries": [
+          "xiaohongshu_hotspot_rank 只表示用户声明在 sourceObservedAt 观察到一个具体小红书热点榜条目；系统只校验声明格式，不联网核验榜单身份、观察时间、持续热度或触达增量。",
+          "xiaohongshu_hot_discussion 只表示用户声明了一个具体小红书热议对象；系统不联网核验其存在性，也不得把该声明冒充热点榜条目。",
+          "other_explicit_source 必须由用户声明具体来源对象；系统不联网核验来源存在性，且不得把它改写成小红书热点榜或热议来源。",
+          "relevance、bridgeClarity、timeliness 都是用户手工情景输入，未校准且不是平台观测值。",
+          "标签与热点词只能表达内容关联，不能保证曝光、推荐、进入或合格触达。"
+        ]
+      },
+      "proposedStatus": "conditional",
+      "reviewIds": [
+        "R07",
+        "R04",
+        "R12"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "13f7a3cd5e8b645ec69cfec64eb17c10e9953c1030b180c2da3f8af5b004fb45",
+      "executionClass": "derived-calculator",
+      "implementedStages": [
+        "calculation"
+      ],
+      "declaredStages": [
+        "calculation"
+      ],
+      "controlMode": "fully-gated",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F31",
+      "equation": "TrendOpportunity=qualifiedReach·value-RiskCost-ExpiryCost",
+      "equationFingerprint": "bebcbc92a7513784995f7ec011fa3875eaf8cd05b4ae12306153b4a941f90fb6",
+      "currentStatus": "protocol-only",
+      "auditVerdict": "protocol_only",
+      "evidenceClass": "unexecuted_platform_outcome_protocol",
+      "sourceIds": [
+        "XHS-HOTSPOT-01",
+        "XHS-HOTDISCUSS-01",
+        "XHS-ALGO-01",
+        "SCI-CAUSAL-01",
+        "SCI-EXPERIMENT-01"
+      ],
+      "actualExecution": "当前没有观测合格触达、共同价值单位、风险成本或过期成本。",
+      "boundary": "标签与热点设置不是这条净机会公式。",
+      "proposedStatus": "protocol-only",
+      "reviewIds": [
+        "R07",
+        "R12",
+        "R26"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "bebcbc92a7513784995f7ec011fa3875eaf8cd05b4ae12306153b4a941f90fb6",
+      "executionClass": "protocol",
+      "implementedStages": [],
+      "declaredStages": [
+        "planning",
+        "evaluation",
+        "validation"
+      ],
+      "controlMode": "not-running",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F32",
+      "equation": "BodyReview=OrderForReview({componentᵢ}); missing sourceᵢ ⇒ statusᵢ=unknown",
+      "equationFingerprint": "b1e3d133995e6773ff0d89cd389bc384a881d857b4e290dfdbe29711a807c0a9",
+      "currentStatus": "partial",
+      "auditVerdict": "partial_diagnostic_proxy",
+      "evidenceClass": "unvalidated_component_proxy",
+      "sourceIds": [
+        "DATA-REFERENCE-70",
+        "SCI-LOAD-01"
+      ],
+      "actualExecution": "系统会按 emphasis 降序输出十个正文分项；同值按合同固定顺序展示，并保留并列人工复核优先级。",
+      "boundary": "emphasis 只控制展示与人工检查优先级，不改变阈值、分项状态或结论；当前分项没有校准观测，value=null/status=unknown，不生成总分，也不进入生成、规划、选稿或校验。",
+      "proposedStatus": "partial",
+      "reviewIds": [
+        "R07",
+        "R13",
+        "R20",
+        "R28"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "b1e3d133995e6773ff0d89cd389bc384a881d857b4e290dfdbe29711a807c0a9",
+      "executionClass": "diagnostic-proxy",
+      "implementedStages": [
+        "diagnostic"
+      ],
+      "declaredStages": [
+        "diagnostic"
+      ],
+      "controlMode": "fully-gated",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F33",
+      "equation": "CommentReview=OrderForReview({componentᵢ}); missing sourceᵢ ⇒ statusᵢ=unknown",
+      "equationFingerprint": "06b84308f3fd72c8c066ab819b70524a01f56ab922ad2d76d1578e85822fe6f4",
+      "currentStatus": "partial",
+      "auditVerdict": "partial_diagnostic_proxy",
+      "evidenceClass": "unvalidated_component_proxy",
+      "sourceIds": [
+        "DATA-REFERENCE-70",
+        "SCI-REVIEWS-01",
+        "SCI-REVIEWS-02"
+      ],
+      "actualExecution": "系统会按 emphasis 降序输出十个评论分项；同值按合同固定顺序展示，并保留并列人工复核优先级。",
+      "boundary": "emphasis 只控制展示与人工检查优先级，不改变阈值、分项状态或结论；当前分项没有校准观测，value=null/status=unknown。独立硬校验器不属于 F33 分项，线程数和规则通过数也不是质量分。",
+      "proposedStatus": "partial",
+      "reviewIds": [
+        "R07",
+        "R13",
+        "R17",
+        "R20",
+        "R28"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "06b84308f3fd72c8c066ab819b70524a01f56ab922ad2d76d1578e85822fe6f4",
+      "executionClass": "diagnostic-proxy",
+      "implementedStages": [
+        "diagnostic"
+      ],
+      "declaredStages": [
+        "diagnostic"
+      ],
+      "controlMode": "fully-gated",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F34",
+      "equation": "Eeff=AggregateBySource({eraw},SourceRole,SourceDependence)",
+      "equationFingerprint": "306f86ea65a490e9faf0081b450a9a6745079f4afc3080e7e164b611d233d77a",
+      "currentStatus": "partial",
+      "auditVerdict": "not_implemented",
+      "evidenceClass": "project_architecture_not_implemented",
+      "sourceIds": [
+        "SCI-DEPENDENCE-01"
+      ],
+      "actualExecution": "系统已具备声明级来源片段、来源角色和获批证据引用这些前置数据。",
+      "boundary": "展示的 AggregateBySource、独立来源聚类与依赖建模尚未实现；现有引用校验归属 F06/F25。",
+      "proposedStatus": "partial",
+      "reviewIds": [
+        "R07",
+        "R02",
+        "R14"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "306f86ea65a490e9faf0081b450a9a6745079f4afc3080e7e164b611d233d77a",
+      "executionClass": "not-implemented",
+      "implementedStages": [],
+      "declaredStages": [
+        "diagnostic",
+        "validation",
+        "knowledge-update"
+      ],
+      "controlMode": "not-running",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F35",
+      "equation": "ExpectedQualifiedActions=Σ AudienceMass·Ppath·Pqualified",
+      "equationFingerprint": "be437cbf1c781bad0b206a0398f9c4eded8a92d106578ee5de0215f53fa62650",
+      "currentStatus": "protocol-only",
+      "auditVerdict": "protocol_only",
+      "evidenceClass": "unexecuted_business_outcome_protocol",
+      "sourceIds": [
+        "SCI-CLICK-01",
+        "SCI-CLICK-02"
+      ],
+      "actualExecution": "当前没有观测受众规模、完整路径概率或合格行动结果。",
+      "boundary": "业务行动和用户决策价值仍是两个分开的未测结果。",
+      "proposedStatus": "protocol-only",
+      "reviewIds": [
+        "R07",
+        "R26"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "be437cbf1c781bad0b206a0398f9c4eded8a92d106578ee5de0215f53fa62650",
+      "executionClass": "protocol",
+      "implementedStages": [],
+      "declaredStages": [
+        "evaluation"
+      ],
+      "controlMode": "not-running",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F36",
+      "equation": "KBt+1=Update(KBt,Observations)",
+      "equationFingerprint": "43698c2c0b7df983e38aef32bd78d8b081e2977195b9a760fcbfca0a49d4e9e5",
+      "currentStatus": "partial",
+      "auditVerdict": "partial_direct_execution",
+      "evidenceClass": "project_definition",
+      "sourceIds": [
+        "SCI-FIDELITY-01"
+      ],
+      "actualExecution": "项目智能与资源可以先版本化、审批，再供后续任务使用。",
+      "boundary": "生成文本和未经复核的现实结果不会自动升级为事实。",
+      "proposedStatus": "partial",
+      "reviewIds": [
+        "R07",
+        "R15"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "43698c2c0b7df983e38aef32bd78d8b081e2977195b9a760fcbfca0a49d4e9e5",
+      "executionClass": "direct-executable",
+      "implementedStages": [
+        "knowledge-update"
+      ],
+      "declaredStages": [
+        "knowledge-update"
+      ],
+      "controlMode": "always-on",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F37",
+      "equation": "GapSpecificity(high/low) × AnswerLocation(body/comment FAQ)",
+      "equationFingerprint": "0f6627b8dbe0e2bd233e81f1b59f67dbad1ef3b2a5b95ea3f533a39587c5f3a3",
+      "currentStatus": "protocol-only",
+      "auditVerdict": "protocol_only",
+      "evidenceClass": "unexecuted_experiment_protocol",
+      "sourceIds": [
+        "SCI-CAUSAL-01",
+        "SCI-EXPERIMENT-01"
+      ],
+      "actualExecution": "当前没有执行随机 2×2 实验器或分析计划。",
+      "boundary": "这条公式是实验设计，不是当前已有验证证据。",
+      "proposedStatus": "protocol-only",
+      "reviewIds": [
+        "R07",
+        "R27"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "0f6627b8dbe0e2bd233e81f1b59f67dbad1ef3b2a5b95ea3f533a39587c5f3a3",
+      "executionClass": "protocol",
+      "implementedStages": [],
+      "declaredStages": [
+        "validation",
+        "knowledge-update"
+      ],
+      "controlMode": "not-running",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F38",
+      "equation": "IndustrySpace=Enumerate(DomainNoun,DomainPrior,KBt,Constraints)",
+      "equationFingerprint": "ae4a51409501f80cbfaa0f1f0cd2b47a48b10f8f829f318db2898466f61f2793",
+      "currentStatus": "partial",
+      "auditVerdict": "partial_direct_execution",
+      "evidenceClass": "model_assisted_project_architecture",
+      "sourceIds": [],
+      "actualExecution": "多模态分析模型会结合行业先验与获批项目证据枚举行业缺口、策略和机会。",
+      "boundary": "这是模型辅助且必须复核的过程，不是穷尽结果，也不是对整个行业空间的确定性证明。",
+      "proposedStatus": "partial",
+      "reviewIds": [
+        "R07",
+        "R04",
+        "R20"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "ae4a51409501f80cbfaa0f1f0cd2b47a48b10f8f829f318db2898466f61f2793",
+      "executionClass": "direct-executable",
+      "implementedStages": [
+        "planning"
+      ],
+      "declaredStages": [
+        "planning"
+      ],
+      "controlMode": "always-on",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F39",
+      "equation": "Ofeasible={o∈O:Proofable(o)∧Relevant(o)∧Ω(o)}",
+      "equationFingerprint": "a3f0040b7661a8badd449d0255da03112ad471ec4c9b7e5f5aef9bc8e2d13ffb",
+      "currentStatus": "partial",
+      "auditVerdict": "partial_direct_execution",
+      "evidenceClass": "normative_project_constraint_partially_implemented",
+      "sourceIds": [],
+      "actualExecution": "unknown 指标会被阻断；获批相关性、证据、可证性、风险和依赖版本共同约束可选机会。",
+      "boundary": "配置门槛只是有界的本地可行性检查，不是全部可能 Ω 约束的完整实现。",
+      "proposedStatus": "partial",
+      "reviewIds": [
+        "R07",
+        "R02",
+        "R04",
+        "R05"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "a3f0040b7661a8badd449d0255da03112ad471ec4c9b7e5f5aef9bc8e2d13ffb",
+      "executionClass": "direct-executable",
+      "implementedStages": [
+        "planning",
+        "validation"
+      ],
+      "declaredStages": [
+        "planning",
+        "validation"
+      ],
+      "controlMode": "always-on",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F40",
+      "equation": "OrchDraft=Plan(H,ImagePlan,ImageBrief,T,B,Cref,DeploymentPlan|o,s,KBt); OrchRealized requires FinalImg∧DeploymentObserved",
+      "equationFingerprint": "d7cf70158f0c1496cfa86d9fcf131f21217aebbb72700837403dd0b7a62b5f30",
+      "currentStatus": "partial",
+      "auditVerdict": "partial_direct_execution",
+      "evidenceClass": "project_definition",
+      "sourceIds": [
+        "SCI-MULTIMEDIA-01",
+        "XHS-ROUTE-01"
+      ],
+      "actualExecution": "标签、来源图片观察、图片计划、图片简报、标题、正文、参考问答和部署计划会装配为同一 OrchDraft，并附六阶段 productionArtifacts 状态账本和三层一致性结果。",
+      "boundary": "来源素材不是 FinalImg，ImageBrief 不是像素资产，DeploymentPlan 不是实际发布；当前 finalImageAsset=absent、entrySnapshot=absent、deployment=not_deployed，所以 OrchRealized 未完成。",
+      "proposedStatus": "partial",
+      "reviewIds": [
+        "R07",
+        "R10",
+        "R19"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "d7cf70158f0c1496cfa86d9fcf131f21217aebbb72700837403dd0b7a62b5f30",
+      "executionClass": "direct-executable",
+      "implementedStages": [
+        "planning",
+        "generation",
+        "validation"
+      ],
+      "declaredStages": [
+        "planning",
+        "generation",
+        "validation"
+      ],
+      "controlMode": "partially-gated",
+      "directGenerationInstruction": true
+    },
+    {
+      "formulaId": "F41",
+      "equation": "sseed=(entry,stage,preContactKnown,availableEvidence,hypothesizedGaps,readerConstraints,availableBoundaries,history,status=hypothesis)",
+      "equationFingerprint": "84316798f78d773a513f73c69b54f55abdeae821438ba86bba49d0283910a922",
+      "currentStatus": "partial",
+      "auditVerdict": "partial_hypothesis",
+      "evidenceClass": "unvalidated_heuristic_state_hypothesis",
+      "sourceIds": [
+        "SCI-SEARCH-01",
+        "SCI-SEARCH-02",
+        "SCI-MOTIVATION-01",
+        "SCI-CLOSURE-01"
+      ],
+      "actualExecution": "状态种子合同分别保存 preContactKnown、availableEvidence、hypothesizedGaps、readerConstraints、availableBoundaries、history 与未标定状态假设。",
+      "boundary": "项目 verifiedFacts 只能进入 availableEvidence，不能冒充读者原本已知；项目边界也不能冒充读者个人约束。",
+      "proposedStatus": "partial",
+      "reviewIds": [
+        "R07",
+        "R08"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "84316798f78d773a513f73c69b54f55abdeae821438ba86bba49d0283910a922",
+      "executionClass": "hypothesis",
+      "implementedStages": [
+        "planning"
+      ],
+      "declaredStages": [
+        "planning"
+      ],
+      "controlMode": "always-on",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F42",
+      "equation": "(O1,O2,O3)=SampleControlled(Ofeasible,seed,diversity)",
+      "equationFingerprint": "ba403444195c866edd64d9a8a980ed9adb5ccec9a5bea107142019e472b32b4b",
+      "currentStatus": "active",
+      "auditVerdict": "implemented_local_contract",
+      "evidenceClass": "project_architecture_with_IR_analogy",
+      "sourceIds": [
+        "SCI-DIVERSITY-01",
+        "SCI-DIVERSITY-02"
+      ],
+      "actualExecution": "带种子的受控采样会精确返回三套结构不同且保留获批依赖的计划。",
+      "boundary": "只在本地采样合同上完整执行；多样性权重不证明效果更好或语义原创。",
+      "proposedStatus": "active",
+      "reviewIds": [
+        "R07",
+        "R17"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "ba403444195c866edd64d9a8a980ed9adb5ccec9a5bea107142019e472b32b4b",
+      "executionClass": "direct-executable",
+      "implementedStages": [
+        "planning"
+      ],
+      "declaredStages": [
+        "planning"
+      ],
+      "controlMode": "always-on",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "F43",
+      "equation": "σ(U)=Hash(topic,gaps,allocation,strategy,imageRole)",
+      "equationFingerprint": "1a07725d41014ba4caabf9df1297e7ddd05534f39ac9989739a97f2e2bf584fc",
+      "currentStatus": "active",
+      "auditVerdict": "implemented_local_contract",
+      "evidenceClass": "project_architecture_with_IR_analogy",
+      "sourceIds": [
+        "SCI-DIVERSITY-01"
+      ],
+      "actualExecution": "内容寻址签名会记录选题、缺口、分配、策略和图片角色，用于控制近期重合。",
+      "boundary": "只在草稿规划记忆上完整执行；草稿覆盖不等于发布记忆、结果观测或知识更新。",
+      "proposedStatus": "active",
+      "reviewIds": [
+        "R07",
+        "R15"
+      ],
+      "requiresUserApproval": false,
+      "semanticFingerprint": "1a07725d41014ba4caabf9df1297e7ddd05534f39ac9989739a97f2e2bf584fc",
+      "executionClass": "direct-executable",
+      "implementedStages": [
+        "planning"
+      ],
+      "declaredStages": [
+        "planning"
+      ],
+      "controlMode": "always-on",
+      "directGenerationInstruction": false
+    },
+    {
+      "formulaId": "M-CLOSE",
+      "equation": "Completeness=(Resolved+ExplicitlyDeferred+UnknownWithVerification+AwaitingUserInput)/AllPlannedGaps; ResolvedRate=Resolved/AllPlannedGaps",
+      "equationFingerprint": "a4ae583ac43fb2ec3e47ffb09603a698cb6497ebf95b363eee37955c29eb4cd5",
+      "currentStatus": "unnumbered_method",
+      "auditVerdict": "misaligned",
+      "evidenceClass": "project_architecture",
+      "sourceIds": [
+        "SCI-INFO-01",
+        "SCI-FIDELITY-01"
+      ],
+      "actualExecution": "Every gap receives a planned ledger state and thread capacity can expand, but closureRate is nearly always one and resolved states do not inspect realized content or claim support.",
+      "boundary": "Ledger completeness is not content completeness or user understanding.",
+      "proposedStatus": "partial_until_realized_resolution",
+      "reviewIds": [
+        "R01",
+        "R02",
+        "R03"
+      ],
+      "requiresUserApproval": true
+    },
+    {
+      "formulaId": "M-DISCOVERY",
+      "equation": "Discovery=Cue+EasyInference+Reveal+SelfCheck+Boundary; Vdiscover=Relevance*Inferability*Verification*Resolution-Ambiguity-Effort-FalseClosure",
+      "equationFingerprint": "6eac01f83f7293cd58946440b8b24e69955d7b088b45c475d635790812242f15",
+      "currentStatus": "unnumbered_method",
+      "auditVerdict": "partial",
+      "evidenceClass": "project_structure_plus_unvalidated_psychological_hypothesis",
+      "sourceIds": [
+        "SCI-CURIOSITY-01",
+        "SCI-FALSE-INSIGHT-01",
+        "SCI-GENERATION-01",
+        "SCI-GENERATION-02",
+        "SCI-SELFEXPLAIN-01",
+        "SCI-SELFARG-01",
+        "SCI-CURIOSITY-02",
+        "SCI-DISFLUENCY-01",
+        "SCI-DISFLUENCY-02"
+      ],
+      "actualExecution": "Five-part plan, same-thread reveal, difficulty limits, binder and several validators exist; Vdiscover is not computed and visible SelfCheck/Boundary are not always enforced.",
+      "boundary": "Discovery structure is not evidence; memory/learning effects do not establish trust, correctness, recommendation or conversion.",
+      "proposedStatus": "active_structure_unvalidated_effect",
+      "reviewIds": [
+        "R16",
+        "R17",
+        "R28"
+      ],
+      "requiresUserApproval": true
+    }
+  ],
+  "executionPolicyVersion": "3.6.0",
+  "executionPolicyDigest": "607e6af95a91104b38c452b9e3947d32f0665068229e0ff566422dc8c6b92111"
+}
