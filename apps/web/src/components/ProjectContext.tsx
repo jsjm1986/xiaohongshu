@@ -11,6 +11,8 @@ interface ProjectContextValue {
   loading: boolean;
   refresh: () => Promise<void>;
   addProject: (input: Pick<Project, 'name' | 'description' | 'domain'>) => Promise<Project>;
+  updateProject: (id: string, input: Partial<Project>) => Promise<Project>;
+  removeProject: (id: string) => Promise<void>;
 }
 
 const ProjectContext = createContext<ProjectContextValue | null>(null);
@@ -65,6 +67,21 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     return project;
   };
 
+  const updateProject = async (id: string, input: Partial<Project>) => {
+    const updated = await api.projects.update(id, input);
+    setProjects((current) => current.map((item) => (item.id === id ? updated : item)));
+    return updated;
+  };
+
+  const removeProject = async (id: string) => {
+    await api.projects.remove(id);
+    setProjects((current) => {
+      const next = current.filter((item) => item.id !== id);
+      if (id === projectId) setProjectId(next[0]?.id ?? '');
+      return next;
+    });
+  };
+
   const value = useMemo(
     () => ({
       projects,
@@ -74,6 +91,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       loading,
       refresh,
       addProject,
+      updateProject,
+      removeProject,
     }),
     [projects, projectId, loading],
   );

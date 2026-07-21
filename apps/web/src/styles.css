@@ -229,6 +229,11 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .profile-dropdown > div span { color: var(--muted); font-size: 10px; }
 .profile-dropdown button { width: 100%; padding: 9px 10px; display: flex; align-items: center; gap: 8px; border: 0; border-radius: 7px; background: transparent; color: var(--ink-2); font-size: 11px; cursor: pointer; }
 .profile-dropdown button:hover { background: #f3f5f2; }
+.card-menu { position: relative; }
+.card-menu__pop { position: absolute; z-index: 10; right: 0; top: calc(100% + 5px); width: 130px; padding: 5px; border: 1px solid var(--line); border-radius: 9px; background: #fff; box-shadow: var(--shadow-md); }
+.card-menu__pop button { width: 100%; padding: 8px 10px; display: flex; align-items: center; gap: 8px; border: 0; border-radius: 6px; background: transparent; color: var(--ink-2); font-size: 11px; cursor: pointer; }
+.card-menu__pop button:hover { background: #f3f5f2; }
+.card-menu__pop button.danger { color: var(--danger, #d64545); }
 .mobile-menu { display: none; }
 .content { min-height: calc(100vh - 64px); }
 

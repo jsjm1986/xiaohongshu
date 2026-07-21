@@ -807,6 +807,10 @@ export const api = {
           body: JSON.stringify(input),
         }),
       ),
+    remove: (id: string) =>
+      request<void>(`/api/projects/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      }),
   },
   knowledge: {
     list: async (projectId: string) => {
