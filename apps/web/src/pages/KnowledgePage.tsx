@@ -36,6 +36,7 @@ export function KnowledgePage() {
   const [preview, setPreview] = useState<{ name: string; content: string } | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const previewSeq = useRef(0);
   const toast = useToast();
 
   const load = () => {
@@ -87,15 +88,18 @@ export function KnowledgePage() {
   };
 
   const openPreview = async (file: KnowledgeFile) => {
+    const seq = ++previewSeq.current;
     setPreviewLoading(true);
     setPreview({ name: file.name, content: '' });
     try {
       const full = await api.knowledge.get(file.id);
+      if (seq !== previewSeq.current) return;
       setPreview({ name: file.name, content: full.content || '（文件为空）' });
     } catch {
+      if (seq !== previewSeq.current) return;
       setPreview({ name: file.name, content: '无法加载文件内容。' });
     } finally {
-      setPreviewLoading(false);
+      if (seq === previewSeq.current) setPreviewLoading(false);
     }
   };
 
@@ -118,7 +122,7 @@ export function KnowledgePage() {
         <div className="upload-form"><button className={`dropzone ${pendingFile ? 'dropzone--selected' : ''}`} onClick={() => inputRef.current?.click()}><input ref={inputRef} type="file" accept=".md,.txt,text/markdown,text/plain" onChange={chooseFile} hidden />{pendingFile ? <><CheckCircle2 size={28} /><strong>{pendingFile.name}</strong><span>{formatBytes(pendingFile.size)} · 点击更换</span></> : <><UploadCloud size={30} /><strong>点击选择 .md 或 .txt 文件</strong><span>文件内容只作为数据，不会覆盖 Agent 系统规则</span></>}</button><div className="field-grid field-grid--two"><Field label="知识分类"><select value={uploadCategory} onChange={(event) => setUploadCategory(event.target.value)}>{categories.map((item) => <option key={item}>{item}</option>)}</select></Field><Field label="知识性质"><select value={uploadKind} onChange={(event) => setUploadKind(event.target.value as EvidenceStatus)}>{evidenceKinds.map((item) => <option key={item}>{item}</option>)}</select></Field></div></div>
       </Modal>
 
-      <Modal open={Boolean(preview)} onClose={() => setPreview(null)} title={preview?.name || '文件内容'} description="只读预览。文件内容仅作为数据，不会覆盖 Agent 系统规则。">
+      <Modal open={Boolean(preview)} onClose={() => { previewSeq.current += 1; setPreviewLoading(false); setPreview(null); }} title={preview?.name || '文件内容'} description="只读预览。文件内容仅作为数据，不会覆盖 Agent 系统规则。">
         {previewLoading ? <Skeleton lines={6} /> : <pre style={{ whiteSpace: 'pre-wrap', maxHeight: '60vh', overflow: 'auto' }}>{preview?.content}</pre>}
       </Modal>
     </div>
