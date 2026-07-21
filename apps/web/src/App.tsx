@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { AppShell } from './components/AppShell';
 import { ProtectedRoute } from './components/AuthContext';
+import { AuditPage } from './pages/AuditPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { FormulasPage } from './pages/FormulasPage';
 import { GenerationResultPage } from './pages/GenerationResultPage';
@@ -28,6 +29,7 @@ export default function App() {
         <Route path="generations/:id" element={<GenerationResultPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="team" element={<TeamPage />} />
+        <Route path="audit" element={<AuditPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
