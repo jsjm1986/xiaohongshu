@@ -206,6 +206,12 @@ export class IntelligenceController {
     return this.intelligence.createOpportunity(projectId, requireObject(body), this.principal(request));
   }
 
+  @Post('topic-opportunities/refresh')
+  @RequirePermission({ permission: 'project.write', projectParam: 'projectId' })
+  refreshOpportunities(@Req() request: Request, @Param('projectId') projectId: string) {
+    return this.intelligence.refreshTopicOpportunities(projectId, this.principal(request));
+  }
+
   @Get('topic-opportunities/:id')
   @RequirePermission({ permission: 'project.read', projectParam: 'projectId' })
   getOpportunity(@Param('projectId') projectId: string, @Param('id') id: string) {
