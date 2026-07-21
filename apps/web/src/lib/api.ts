@@ -957,6 +957,13 @@ export const api = {
       });
       return normalizeImage(await request<JsonRecord>(`/api/projects/${encodeURIComponent(projectId)}/image-assets/${encodeURIComponent(id)}`));
     },
+    updateAnalysis: async (projectId: string, id: string, analysisId: string, quality: { clarity: number; relevance: number; textLegibility: number }) => {
+      await request<JsonRecord>(`/api/projects/${encodeURIComponent(projectId)}/image-assets/${encodeURIComponent(id)}/analyses/${encodeURIComponent(analysisId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ quality }),
+      });
+      return normalizeImage(await request<JsonRecord>(`/api/projects/${encodeURIComponent(projectId)}/image-assets/${encodeURIComponent(id)}`));
+    },
     remove: (projectId: string, id: string) =>
       request<void>(`/api/projects/${encodeURIComponent(projectId)}/image-assets/${encodeURIComponent(id)}`, { method: "DELETE" }),
     contentUrl: (projectId: string, id: string) =>

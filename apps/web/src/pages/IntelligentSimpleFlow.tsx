@@ -221,6 +221,8 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const [editingBlueprintModule, setEditingBlueprintModule] = useState<ProjectBlueprintModule | null>(null);
   const [editingBlueprintJson, setEditingBlueprintJson] = useState("");
   const [editingOpportunity, setEditingOpportunity] = useState<Partial<TopicOpportunity> | null>(null);
+  const [editingQuality, setEditingQuality] = useState<ImageAsset | null>(null);
+  const [qualityDraft, setQualityDraft] = useState<{ clarity: number; relevance: number; textLegibility: number }>({ clarity: 0.5, relevance: 0.5, textLegibility: 0.5 });
   const [settingOverrides, setSettingOverrides] = useState<SimpleSettingOverrides>({});
   const fileInput = useRef<HTMLInputElement>(null);
   const toast = useToast();
@@ -351,10 +353,34 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     }
   };
 
+  const openQualityEditor = (asset: ImageAsset) => {
+    const q = asset.analysis?.quality;
+    setQualityDraft({
+      clarity: q?.clarity ?? 0.5,
+      relevance: q?.relevance ?? 0.5,
+      textLegibility: q?.textLegibility ?? 0.5,
+    });
+    setEditingQuality(asset);
+  };
+
   const approveAsset = async (asset: ImageAsset) => {
+    const q = asset.analysis?.quality;
+    const missing = !q || [q.clarity, q.relevance, q.textLegibility].some((v) => v === null || v === undefined);
+    if (missing) {
+      openQualityEditor(asset);
+      return;
+    }
     const updated = await api.imageAssets.approve(projectId, asset.id, asset.latestAnalysisId);
     setAssets((current) => current.map((item) => item.id === asset.id ? { ...updated, previewUrl: item.previewUrl } : item));
     toast.push("图片观察已确认，可用于支撑可见事实");
+  };
+
+  const saveQuality = async () => {
+    if (!editingQuality?.latestAnalysisId) return;
+    const saved = await api.imageAssets.updateAnalysis(projectId, editingQuality.id, editingQuality.latestAnalysisId, qualityDraft);
+    setAssets((current) => current.map((item) => (item.id === saved.id ? { ...saved, previewUrl: item.previewUrl } : item)));
+    setEditingQuality(null);
+    toast.push("源素材质量评估已补全，可确认");
   };
 
   const gapMetricsMissing = (gap: Partial<InformationGap>): boolean =>
@@ -684,7 +710,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     <section className="image-library panel">
       <header><div><span>第 4 步</span><h2>选择源素材，让多模态模型观察并参与规划</h2><p>正式生成时会再次发送原图；这里管理的是源素材与可见观察，只供图片计划和 imageBrief 参考。</p></div><Button loading={uploading} disabled={!selectedOpportunity} icon={<ImagePlus size={16} />} onClick={() => fileInput.current?.click()}>上传源素材</Button><input ref={fileInput} hidden multiple type="file" accept="image/jpeg,image/png,image/webp" onChange={uploadImages} /></header>
       <div className="image-library-boundary"><Images size={17} /><div><strong>这里的状态上限：源素材观察 / 计划参考</strong><p>批准观察只表示“原图中可见什么”已确认；选中只表示“图片计划可以参考它”。这里不会生成最终图片，也不会产生真实入口截图或实际部署记录。</p></div><Badge tone="warning">不是最终图片资产</Badge></div>
-      {assets.length ? <div className="asset-grid">{assets.map((asset) => { const selected = selectedAssetIds.includes(asset.id); return <article className={`asset-card ${selected ? "selected" : ""}`} key={asset.id}><button type="button" className="asset-card__image" onClick={() => setSelectedAssetIds((current) => selected ? current.filter((id) => id !== asset.id) : current.length < 9 ? [...current, asset.id] : current)}><img src={asset.previewUrl || api.imageAssets.contentUrl(projectId, asset.id)} alt={asset.filename} /><span>{selected && <Check size={16} />}</span></button><div><strong>{asset.filename}</strong><small>{asset.analysis?.imageType || "等待源素材分析"} · {asset.approved ? "源素材观察已确认" : asset.status === "ready" ? "AI 源素材观察待确认" : asset.status}</small>{asset.analysis && <p title={asset.analysis.visibleFacts.join("；")}>{asset.analysis.scene || asset.analysis.visibleFacts.slice(0, 2).join("；") || "模型未提取到可见事实"}</p>}<div>{selected && <Badge tone="blue">计划参考源素材</Badge>}{asset.approved ? <Badge tone="positive">批准的源素材可见观察</Badge> : asset.status === "ready" ? <button type="button" onClick={() => void approveAsset(asset)}>确认上述源素材观察</button> : null}</div></div></article>; })}</div> : <EmptyState icon={<Images size={24} />} title="源素材图库还是空的" description="可不选源素材，只生成结构化图片计划和文字简报；上传原图也不会在这里生成最终图片资产。" />}
+      {assets.length ? <div className="asset-grid">{assets.map((asset) => { const selected = selectedAssetIds.includes(asset.id); return <article className={`asset-card ${selected ? "selected" : ""}`} key={asset.id}><button type="button" className="asset-card__image" onClick={() => setSelectedAssetIds((current) => selected ? current.filter((id) => id !== asset.id) : current.length < 9 ? [...current, asset.id] : current)}><img src={asset.previewUrl || api.imageAssets.contentUrl(projectId, asset.id)} alt={asset.filename} /><span>{selected && <Check size={16} />}</span></button><div><strong>{asset.filename}</strong><small>{asset.analysis?.imageType || "等待源素材分析"} · {asset.approved ? "源素材观察已确认" : asset.status === "ready" ? "AI 源素材观察待确认" : asset.status}</small>{asset.analysis && <p title={asset.analysis.visibleFacts.join("；")}>{asset.analysis.scene || asset.analysis.visibleFacts.slice(0, 2).join("；") || "模型未提取到可见事实"}</p>}<div>{selected && <Badge tone="blue">计划参考源素材</Badge>}{asset.approved ? <Badge tone="positive">批准的源素材可见观察</Badge> : asset.status === "ready" ? <button type="button" onClick={() => void approveAsset(asset)}>确认上述源素材观察</button> : null}{asset.analysis && asset.latestAnalysisId ? <button type="button" onClick={() => openQualityEditor(asset)}><Pencil size={13} /> 编辑质量评估</button> : null}</div></div></article>; })}</div> : <EmptyState icon={<Images size={24} />} title="源素材图库还是空的" description="可不选源素材，只生成结构化图片计划和文字简报；上传原图也不会在这里生成最终图片资产。" />}
       <footer className="intelligence-run"><div><strong>{selectedOpportunity ? `已选择：${selectedOpportunity.title}` : "请先选择一张选题卡"}</strong><p>{selectedAssetIds.length} 张源素材已选 · 只作为三套图片计划与 imageBrief 的参考输入</p>{!blueprintReady ? <small>七项项目创作模型尚未全部确认，正式生成已锁定。</small> : selectedOpportunity && missingDependencyCount > 0 ? <small>引用资源缺失：请换一批，或在资源池修复引用。</small> : selectedOpportunity && pendingDependencyCount > 0 ? <small>将先独立确认 {opportunityDependencies.unapprovedGaps.length} 个信息缺口和 {opportunityDependencies.unapprovedStrategies.length} 个表达策略，再确认选题；不会隐式级联。</small> : selectedOpportunity?.status !== "approved" && selectedOpportunity ? <small>继续后会明确确认这张选题卡；AI 草案不会在未确认时进入生成。</small> : selectedOpportunity ? <small>选题及其引用依赖均已独立确认。</small> : null}</div><Button disabled={!selectedOpportunity || intelligence?.status !== "ready" || !blueprintReady} loading={submitting || preparing} icon={<Sparkles size={17} />} onClick={() => void preview()}>{selectedOpportunity && pendingDependencyCount > 0 ? `先确认 ${pendingDependencyCount} 项依赖并预览` : selectedOpportunity?.status === "approved" ? "预览并生成 3 套内容方案" : "确认选题并预览"}</Button></footer>
     </section>
 
@@ -712,6 +738,8 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
         <Field label="入口"><select value={editingOpportunity?.entry || "search"} onChange={(event) => setEditingOpportunity((current) => ({ ...current, entry: event.target.value }))}>{ENTRY_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></Field>
         <Field label="资格状态" hint="度量齐全后设为 eligible 才可确认；blocked 表示不安全或禁止的选题。"><select value={editingOpportunity?.eligibilityStatus || "unknown"} onChange={(event) => setEditingOpportunity((current) => ({ ...current, eligibilityStatus: event.target.value }))}><option value="eligible">eligible（可用）</option><option value="blocked">blocked（不安全/禁止）</option><option value="unknown">unknown（待补）</option></select></Field>
       </div></Modal>
+    <Modal open={Boolean(editingQuality)} onClose={() => setEditingQuality(null)} title="补全源素材质量评估" description="模型未给出完整质量评估。以下为评审启发值（0–100，非事实断言），补全后即可确认；保存后该分析回到草稿需重新确认。" footer={<Button onClick={() => void saveQuality()}>保存并可确认</Button>}>
+      <div className="form-stack"><div className="metric-editor">{([["clarity", "清晰度"], ["relevance", "相关度"], ["textLegibility", "文字可辨识度"]] as const).map(([key, label]) => { const percent = Math.round(qualityDraft[key] * 100); return <Field key={key} label={`${label}（${percent}）`}><input type="range" min={0} max={100} step={1} value={percent} onChange={(event) => { const next = Number(event.target.value) / 100; setQualityDraft((current) => ({ ...current, [key]: next })); }} /></Field>; })}</div></div></Modal>
     <Modal open={Boolean(editingStrategy)} onClose={() => setEditingStrategy(null)} title={editingStrategy?.id ? "编辑完整表达策略" : "新增完整表达策略"} description="用日常语言说明标签、图片、正文和评论如何协同，系统保存为可复用策略。" footer={<Button onClick={() => void saveStrategy()}>保存</Button>}>
       <div className="form-stack">
         <Field label="策略名称" required><input value={editingStrategy?.name || ""} onChange={(event) => setEditingStrategy((current) => ({ ...current, name: event.target.value }))} /></Field>
