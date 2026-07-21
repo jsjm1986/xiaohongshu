@@ -111,6 +111,72 @@ function blueprintModuleSummary(module: ProjectBlueprintModule): string {
   }
 }
 
+type BlueprintHighlightGroup = { label: string; items: string[] };
+
+function blueprintModuleHighlights(module: ProjectBlueprintModule): BlueprintHighlightGroup[] {
+  const data = module.data ?? {};
+  const rows = (value: unknown): Record<string, unknown>[] =>
+    Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
+  const strings = (value: unknown, max = 8): string[] =>
+    Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()).slice(0, max) : [];
+  const label = (row: Record<string, unknown>, ...keys: string[]): string => {
+    for (const key of keys) { const value = row[key]; if (typeof value === "string" && value.trim()) return value.trim(); }
+    return "未命名";
+  };
+  const named = (value: unknown, keys: string[], max = 8): string[] => rows(value).map((row) => label(row, ...keys)).slice(0, max);
+  const group = (heading: string, items: string[]): BlueprintHighlightGroup[] => items.length ? [{ label: heading, items }] : [];
+
+  switch (module.moduleKey) {
+    case "knowledge_map":
+      return group("知识来源", rows(data.entries).map((entry) => {
+        const name = label(entry, "sourceName", "section", "id");
+        const purpose = typeof entry.purpose === "string" ? entry.purpose : "";
+        return purpose ? `${name}（${purpose}）` : name;
+      }).slice(0, 8));
+    case "domain_model":
+      return [
+        ...group("决策任务", strings(data.decisionTasks)),
+        ...group("核心概念", strings(data.concepts)),
+        ...group("对象/动作", [...strings(data.objects, 4), ...strings(data.actions, 4)]),
+        ...group("项目词汇", strings(data.vocabulary)),
+      ];
+    case "audience_model":
+      return group("读者状态", rows(data.states).map((state) => {
+        const name = label(state, "label", "id");
+        const stages = strings(state.stages, 3);
+        return stages.length ? `${name}（${stages.join("/")}）` : name;
+      }).slice(0, 8));
+    case "scenario_model":
+      return group("场景家族", rows(data.families).map((family) => {
+        const name = label(family, "label", "id");
+        const prototype = typeof family.prototype === "string" ? family.prototype : "";
+        return prototype ? `${name}·${prototype}` : name;
+      }).slice(0, 8));
+    case "role_model":
+      return [
+        ...group("评论角色", named(data.roles, ["displayRole", "id"])),
+        ...group("主播声音特质", strings(data.hostVoiceTraits)),
+      ];
+    case "claim_policy":
+      return [
+        ...group("声明规则", rows(data.rules).map((rule) => {
+          const name = label(rule, "label", "id");
+          const type = typeof rule.claimType === "string" ? rule.claimType : "";
+          return type ? `${name}·${type}` : name;
+        }).slice(0, 8)),
+        ...group("禁用声明", strings(data.prohibitedClaims)),
+      ];
+    case "surface_language":
+      return [
+        ...group("推荐词", strings(data.preferredTerms)),
+        ...group("禁用套话", strings(data.prohibitedCliches)),
+        ...group("可选口语", strings(data.optionalColloquialisms)),
+      ];
+    default:
+      return [];
+  }
+}
+
 interface Props {
   projects: Project[];
   projectId: string;
@@ -131,6 +197,12 @@ const intelligenceLabel: Record<ProjectIntelligence["status"], string> = {
   failed: "分析失败",
   rejected: "本版分析已退回",
 };
+
+// Backend analyzeProject runs three sequential model stages (blueprint →
+// planning gaps/strategies → opportunities). The request blocks until all
+// finish, so there is no server-side per-stage signal to poll; we advance
+// these labels on a timer purely to show the user work is progressing.
+const analysisStages = ["正在生成行业与项目蓝图…", "正在梳理信息缺口与表达策略…", "正在发现选题机会…"];
 
 const simpleRandomizationDimensions: PlanningRandomizationDimension[] = [
   "strategy",
@@ -211,6 +283,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
+  const [analyzeStage, setAnalyzeStage] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [approving, setApproving] = useState(false);
@@ -226,6 +299,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const [editingQuality, setEditingQuality] = useState<ImageAsset | null>(null);
   const [qualityDraft, setQualityDraft] = useState<{ clarity: number; relevance: number; textLegibility: number }>({ clarity: 0.5, relevance: 0.5, textLegibility: 0.5 });
   const [settingOverrides, setSettingOverrides] = useState<SimpleSettingOverrides>({});
+  const [showAllOpportunities, setShowAllOpportunities] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const toast = useToast();
 
@@ -316,6 +390,10 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
 
   const analyzeProject = async () => {
     setAnalyzing(true);
+    setAnalyzeStage(0);
+    const stageTimer = window.setInterval(() => {
+      setAnalyzeStage((current) => Math.min(current + 1, analysisStages.length - 1));
+    }, 6000);
     try {
       const result = await api.intelligence.analyze(projectId, true);
       setIntelligence(result.intelligence);
@@ -329,7 +407,9 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     } catch (error) {
       toast.push(error instanceof Error ? error.message : "项目分析失败", "error");
     } finally {
+      window.clearInterval(stageTimer);
       setAnalyzing(false);
+      setAnalyzeStage(0);
     }
   };
 
@@ -637,6 +717,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
       <div className="intelligence-project__body">
         <Field label="当前项目"><select value={projectId} onChange={(event) => onProject(event.target.value)}>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></Field>
         <div className="intelligence-status"><BrainCircuit size={22} /><div><strong>{intelligence?.entity || "等待识别项目核心名词"}</strong><p>{intelligence?.industry || "分析后形成行业概念树、决策任务和信息缺口池。"}</p>{intelligence?.staleReasons?.length ? <small>需要更新：{intelligence.staleReasons.join("；")}</small> : null}{intelligence?.status === "draft" ? <small>AI 生成的是待审核规划，不会自动升级为项目事实。</small> : null}</div><div className="panel-actions">{intelligence?.id && (intelligence.status !== "ready" || !blueprintReady) && <Button loading={approving} icon={<Check size={15} />} onClick={approvePlanningResources}>逐项确认本批模型</Button>}<Button variant={intelligence?.status === "draft" ? "secondary" : "primary"} loading={analyzing || intelligence?.status === "analyzing"} icon={<RefreshCw size={15} />} onClick={analyzeProject}>{intelligence?.status === "ready" ? "重新分析" : "分析项目"}</Button></div></div>
+        {analyzing && <div className="analysis-progress"><div className="analysis-progress__head"><RefreshCw size={16} className="spin" /><span>{analysisStages[analyzeStage]}</span><small>{analyzeStage + 1}/{analysisStages.length}</small></div><div className="analysis-progress__track"><span style={{ width: `${((analyzeStage + 1) / analysisStages.length) * 100}%` }} /></div></div>}
         {latestTask && latestTask.status === "failed" && <div className="blueprint-missing"><TriangleAlert size={16} /><span>后台分析失败（已尝试 {latestTask.attemptCount} 次）：{latestTask.error || "未知错误"}。请重新分析，或检查项目知识后再试。</span></div>}
         {latestTask && (latestTask.status === "running" || latestTask.status === "queued") && <div className="blueprint-missing"><RefreshCw size={16} /><span>后台分析进行中…（第 {latestTask.attemptCount} 次尝试）完成前请勿离开或重复触发。</span></div>}
         {blueprintModules.length ? <div className="blueprint-module-grid">
@@ -644,6 +725,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
             <header><div><strong>{meta.label}</strong><small>v{module.version}</small></div><Badge tone={module.status === "approved" ? "positive" : module.status === "stale" ? "warning" : "neutral"}>{module.status === "approved" ? "已确认" : module.status === "stale" ? "受上游修改影响" : "待确认"}</Badge></header>
             <p>{meta.description}</p>
             <small><strong>{blueprintModuleSummary(module)}</strong><br />这里的内容会作为项目参数进入生成；静态提示词不会替你补行业角色和场景。</small>
+            {blueprintModuleHighlights(module).length > 0 && <div className="blueprint-highlights">{blueprintModuleHighlights(module).map((group, index) => <div key={index} className="blueprint-highlights__group"><strong>{group.label}</strong><ul>{group.items.map((item, itemIndex) => <li key={itemIndex}>{item}</li>)}</ul></div>)}</div>}
             <footer>{module.status !== "approved" && <button type="button" onClick={() => void api.blueprintModules.approve(projectId, module.id).then((saved) => setBlueprintModules((current) => current.map((item) => item.id === saved.id ? saved : item)))}>确认模块</button>}<button type="button" onClick={() => openBlueprintEditor(module)}><Pencil size={13} /> 编辑</button></footer>
           </article>; })}
         </div> : intelligence?.id ? <div className="blueprint-missing"><TriangleAlert size={16} /><span>当前分析没有完整项目创作模型，必须重新分析后才能正式生成。</span></div> : null}
@@ -662,7 +744,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
       <div className="opportunity-ranking-boundary"><Info size={16} /><div><strong>排序只帮助比较当前候选，不证明平台效果</strong><p>OpportunityRankHeuristicV1 使用固定但未标定的内部权重；它不是 F28 的机会公式，不是需求、竞品、阅读量或转化因果预测。输入 unknown 的卡片保持待复核，不会显示成 0 分。</p></div></div>
       {opportunities.length ? (
         <div className="opportunity-grid">
-          {opportunities.slice(0, 12).map((item) => { const rankView = resolveOpportunityRankView(item); return (
+          {(showAllOpportunities ? opportunities : opportunities.slice(0, 12)).map((item) => { const rankView = resolveOpportunityRankView(item); return (
             <button type="button" key={item.id} className={`opportunity-card ${selectedOpportunityId === item.id ? "selected" : ""}`} onClick={() => { setSelectedOpportunityId(item.id); setSelectedAssetIds(item.suggestedImageAssetIds || []); }}>
               <div>
                 <Badge tone={item.answerability === "approved" ? "positive" : item.answerability === "verifiable" ? "warning" : "neutral"}>{item.answerability === "approved" ? "有批准答案" : item.answerability === "verifiable" ? "可给核验方法" : "保留未知"}</Badge>
@@ -679,6 +761,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
           ); })}
         </div>
       ) : <EmptyState icon={<BrainCircuit size={24} />} title="还没有选题卡" description={intelligence?.status === "ready" ? "点击“换一批”从信息缺口池生成选题。" : "先完成项目分析，再从行业和项目知识中发现选题。"} />}
+      {opportunities.length > 12 && <div className="opportunity-more"><Button variant="ghost" onClick={() => setShowAllOpportunities((value) => !value)}>{showAllOpportunities ? "收起" : `展开全部 ${opportunities.length} 个选题`}</Button></div>}
       {selectedOpportunity && <OpportunityRankDisclosure opportunity={selectedOpportunity} />}
     </section>
 
