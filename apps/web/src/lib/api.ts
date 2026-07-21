@@ -945,6 +945,8 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ status: "approved" }),
       })),
+    remove: (projectId: string, id: string) =>
+      request<void>(`/api/projects/${encodeURIComponent(projectId)}/topic-opportunities/${encodeURIComponent(id)}`, { method: "DELETE" }),
   },
   imageAssets: {
     list: async (projectId: string) => {

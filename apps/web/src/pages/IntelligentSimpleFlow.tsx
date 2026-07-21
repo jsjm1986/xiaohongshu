@@ -486,6 +486,13 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     toast.push("选题度量已保存；卡片回到待确认，需重新确认选题", "info");
   };
 
+  const deleteOpportunity = async (item: TopicOpportunity) => {
+    if (!window.confirm(`确定删除选题「${item.title}」吗？`)) return;
+    await api.opportunities.remove(projectId, item.id);
+    setOpportunities((current) => current.filter((opp) => opp.id !== item.id));
+    if (selectedOpportunityId === item.id) setSelectedOpportunityId("");
+  };
+
   const openBlueprintEditor = (module: ProjectBlueprintModule) => {
     setEditingBlueprintModule(module);
     setEditingBlueprintJson(JSON.stringify(module.data, null, 2));
@@ -662,7 +669,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
                 <Badge tone={item.status === "approved" ? "positive" : "neutral"}>{item.status === "approved" ? "选题已确认" : "AI 草案"}</Badge>
                 {item.coverageStatus && <Badge>{item.coverageStatus === "new" ? "近期未写" : "近期覆盖"}</Badge>}
               </div>
-              <div className={`opportunity-card__rank ${rankView.sortable ? "is-sortable" : "needs-review"}`}><strong>{rankView.title}</strong><Badge tone={rankView.sortable ? "positive" : "warning"}>{rankView.valueLabel}</Badge>{rankView.unknownMetrics.length > 0 && <small>unknown：{rankView.unknownMetrics.map((metric) => metric).join("、")}</small>}<span className="opportunity-card__edit" role="button" tabIndex={0} onClick={(event) => { event.stopPropagation(); setEditingOpportunity(item); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); setEditingOpportunity(item); } }}><Pencil size={13} /> 编辑度量</span></div>
+              <div className={`opportunity-card__rank ${rankView.sortable ? "is-sortable" : "needs-review"}`}><strong>{rankView.title}</strong><Badge tone={rankView.sortable ? "positive" : "warning"}>{rankView.valueLabel}</Badge>{rankView.unknownMetrics.length > 0 && <small>unknown：{rankView.unknownMetrics.map((metric) => metric).join("、")}</small>}<span className="opportunity-card__edit" role="button" tabIndex={0} onClick={(event) => { event.stopPropagation(); setEditingOpportunity(item); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); setEditingOpportunity(item); } }}><Pencil size={13} /> 编辑度量</span><span className="opportunity-card__edit" role="button" tabIndex={0} onClick={(event) => { event.stopPropagation(); void deleteOpportunity(item); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); void deleteOpportunity(item); } }}><Trash2 size={13} /> 删除</span></div>
               <h3>{item.title}</h3>
               <p>{item.summary || item.coreQuestion}</p>
               <small><strong>为什么值得写：</strong>{item.whyValuable}</small>
