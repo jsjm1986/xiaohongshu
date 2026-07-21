@@ -837,6 +837,10 @@ export const api = {
     },
     remove: (id: string) =>
       request<void>(`/api/knowledge/${id}`, { method: "DELETE" }),
+    get: async (id: string) => {
+      const raw = await request<JsonRecord>(`/api/knowledge/${encodeURIComponent(id)}`);
+      return { ...normalizeKnowledge(raw), content: typeof raw.content === "string" ? raw.content : "" };
+    },
   },
   intelligence: {
     get: async (projectId: string) => {
