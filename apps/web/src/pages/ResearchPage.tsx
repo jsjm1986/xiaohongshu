@@ -238,7 +238,7 @@ export function ResearchPage() {
     {tab !== "overview" && <label className="research-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索当前分类" /></label>}
 
     {tab === "overview" && overview && <Overview overview={overview} onTab={setTab} />}
-    {tab === "claims" && <ClaimList items={filtered.claims} busy={busy} approve={(item, status) => act(`claim:${item.id}`, () => api.research.reviewClaim(projectId, item.id, status), `主张已${status === "approved" ? "批准" : "拒绝"}`)} />}
+    {tab === "claims" && <ClaimList items={filtered.claims} busy={busy} evidenceSources={overview?.evidenceSources ?? []} approve={(item, status) => act(`claim:${item.id}`, () => api.research.reviewClaim(projectId, item.id, status), `主张已${status === "approved" ? "批准" : "拒绝"}`)} onLink={(claimId, evidenceSourceId, relation) => act(`claim-link:${claimId}`, () => api.research.linkEvidence(projectId, claimId, { evidenceSourceId, relation, strength: "unrated" }), "已添加证据链接")} />}
     {tab === "sources" && <SourceList items={filtered.sources} busy={busy} approve={(item, status) => act(`source:${item.id}`, () => api.research.reviewSource(projectId, item.id, status), `来源已${status === "approved" ? "批准" : "拒绝"}`)} />}
     {tab === "datasets" && <DatasetList items={filtered.datasets} busy={busy} approve={(item, status) => act(`dataset:${item.id}`, () => api.research.reviewDataset(projectId, item.id, status), `数据快照已${status === "approved" ? "批准" : "拒绝"}`)} />}
     {tab === "experiments" && <ExperimentList items={filtered.experiments} busy={busy} onResult={(item) => openCreate("result", item)} transition={(item, status) => act(`experiment:${item.id}`, () => api.research.transitionExperiment(projectId, item.id, status), `实验状态已更新为${researchStatusLabel[status]}`)} reviewResult={(result, status) => act(`result:${result.id}`, () => api.research.reviewExperimentResult(projectId, result.id, status), `结果已${status === "approved" ? "批准" : "拒绝"}`)} />}
@@ -281,13 +281,24 @@ function Overview({ overview, onTab }: { overview: ResearchOverview; onTab: (tab
   </div>;
 }
 
-function ClaimList({ items, busy, approve }: { items: ResearchClaim[]; busy: string; approve: (item: ResearchClaim, status: string) => void }) {
-  return <div className="research-list">{items.map((item) => <article className="research-card" key={item.id}>
+function ClaimList({ items, busy, approve, evidenceSources, onLink }: { items: ResearchClaim[]; busy: string; approve: (item: ResearchClaim, status: string) => void; evidenceSources: ResearchEvidenceSource[]; onLink: (claimId: string, evidenceSourceId: string, relation: string) => void }) {
+  return <div className="research-list">{items.map((item) => <ClaimCard key={item.id} item={item} busy={busy} approve={approve} evidenceSources={evidenceSources} onLink={onLink} />)}</div>;
+}
+
+function ClaimCard({ item, busy, approve, evidenceSources, onLink }: { item: ResearchClaim; busy: string; approve: (item: ResearchClaim, status: string) => void; evidenceSources: ResearchEvidenceSource[]; onLink: (claimId: string, evidenceSourceId: string, relation: string) => void }) {
+  const [sourceId, setSourceId] = useState("");
+  const [relation, setRelation] = useState("supports");
+  return <article className="research-card">
     <header><div><Badge tone={researchStatusTone(item.status)}>{researchStatusLabel[item.status] || item.status}</Badge><Badge tone="purple">{claimTypeLabel[item.claimType] || item.claimType}</Badge><span>v{item.version}</span></div><small>{item.evidenceCount ?? 0} 个证据链接</small></header>
     <h3>{item.title}</h3><p>{item.statement}</p>
     {typeof item.metadata?.boundary === "string" && <aside><strong>适用边界</strong>{item.metadata.boundary}</aside>}
+    <div className="claim-evidence-link">
+      <select value={sourceId} onChange={(event) => setSourceId(event.target.value)}><option value="">选择要关联的来源…</option>{evidenceSources.map((source) => <option key={source.id} value={source.id}>{source.citation}</option>)}</select>
+      <select value={relation} onChange={(event) => setRelation(event.target.value)}><option value="supports">支持</option><option value="contradicts">反驳</option><option value="limits">限定</option><option value="context">仅上下文</option></select>
+      <Button variant="ghost" disabled={!sourceId} loading={busy === `claim-link:${item.id}`} onClick={() => { onLink(item.id, sourceId, relation); setSourceId(""); }}>添加证据链接</Button>
+    </div>
     <footer><code>{item.logicalKey}</code><ReviewButtons status={item.status} loading={busy === `claim:${item.id}`} onReview={(status) => approve(item, status)} /></footer>
-  </article>)}</div>;
+  </article>;
 }
 
 function SourceList({ items, busy, approve }: { items: ResearchEvidenceSource[]; busy: string; approve: (item: ResearchEvidenceSource, status: string) => void }) {

@@ -1706,6 +1706,9 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .research-card > footer { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--line); }
 .research-card code { overflow: hidden; color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .research-card .button { min-height: 30px; padding: 0 9px; font-size: 9px; }
+.claim-evidence-link { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 9px 10px; border: 1px dashed var(--line); border-radius: 9px; }
+.claim-evidence-link select { min-height: 30px; padding: 0 8px; font-size: 9px; }
+.claim-evidence-link select:first-child { flex: 1 1 160px; min-width: 0; }
 .research-support-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .research-support-grid section { padding: 10px; border-radius: 9px; background: #f2faf6; }
 .research-support-grid section + section { background: #fff7f2; }
