@@ -316,6 +316,12 @@ export class IntelligenceController {
     return this.intelligence.approveImageAnalysis(projectId, assetId, analysisId, objectOrEmpty(body), this.principal(request));
   }
 
+  @Patch('image-assets/:assetId/analyses/:analysisId')
+  @RequirePermission({ permission: 'project.write', projectParam: 'projectId' })
+  updateImageAnalysis(@Req() request: Request, @Param('projectId') projectId: string, @Param('assetId') assetId: string, @Param('analysisId') analysisId: string, @Body() body: unknown) {
+    return this.intelligence.updateImageAnalysis(projectId, assetId, analysisId, requireObject(body), this.principal(request));
+  }
+
   @Get('coverage')
   @RequirePermission({ permission: 'project.read', projectParam: 'projectId' })
   listCoverage(@Param('projectId') projectId: string) {

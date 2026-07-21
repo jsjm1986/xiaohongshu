@@ -750,6 +750,30 @@ export class IntelligenceService implements OnModuleInit {
     return result;
   }
 
+  updateImageAnalysis(projectId: string, assetId: string, analysisId: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
+    const project = this.resources.projectRow(projectId);
+    this.imageRow(projectId, assetId);
+    const row = this.row('image_analysis_versions', projectId, analysisId);
+    if (String(row.image_asset_id) !== assetId) throw new BadRequestException('The analysis does not belong to this image asset.');
+    const current = parseJson<Record<string, unknown>>(row.observation_json, {});
+    const currentQuality = isRecord(current.quality) ? current.quality : {};
+    const incomingQuality = isRecord(body.quality) ? body.quality : {};
+    const nextQuality = {
+      ...currentQuality,
+      ...('clarity' in incomingQuality ? { clarity: optionalRatio(incomingQuality.clarity) } : {}),
+      ...('relevance' in incomingQuality ? { relevance: optionalRatio(incomingQuality.relevance) } : {}),
+      ...('textLegibility' in incomingQuality ? { textLegibility: optionalRatio(incomingQuality.textLegibility) } : {}),
+    };
+    const nextObservation = { ...current, quality: nextQuality };
+    this.database.prepare(
+      `UPDATE image_analysis_versions SET observation_json=?, status='draft',
+       approved_by=NULL, approved_at=NULL, updated_at=? WHERE id=?`,
+    ).run(JSON.stringify(nextObservation), nowIso(), analysisId);
+    this.record(project, principal, 'image-analysis.update', 'image_analysis_version', analysisId, { projectId, assetId });
+    this.markProjectStale(projectId);
+    return this.mapImageAnalysis(this.row('image_analysis_versions', projectId, analysisId));
+  }
+
   async analyzeProject(projectId: string, principal: SessionPrincipal, force = false): Promise<Record<string, unknown>> {
     const project = this.resources.projectRow(projectId);
     const source = await this.projectAnalysisSource(project);
