@@ -47,7 +47,7 @@ interface ResolvedPlanningOptions {
 
 /** Shared defaults for every caller that asks V1 to rank or gate candidates. */
 export const OpportunityRankHeuristicV1DefaultPolicy: Readonly<OpportunityRankPolicySnapshot> = Object.freeze({
-  minProofability: 0.35,
+  minProofability: 0.2,
   maxRisk: 0.7,
   recentPenaltyWeight: 0.35,
   reuseCooldown: 12,
