@@ -932,6 +932,20 @@ export interface ProjectIntelligence {
   map?: Record<string, unknown>;
 }
 
+export interface AnalysisTask {
+  id: string;
+  projectId: string;
+  kind: "project" | "image";
+  targetId: string | null;
+  status: "queued" | "running" | "completed" | "failed";
+  attemptCount: number;
+  resultId: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+
 export type ProjectBlueprintModuleKey =
   | "knowledge_map"
   | "domain_model"

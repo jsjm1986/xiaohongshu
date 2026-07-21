@@ -1,4 +1,5 @@
 import type {
+  AnalysisTask,
   ApiList,
   AuditEntry,
   AppSettings,
@@ -856,6 +857,12 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ status: "approved" }),
       }), projectId),
+    tasks: {
+      list: (projectId: string) =>
+        request<AnalysisTask[]>(`/api/projects/${encodeURIComponent(projectId)}/intelligence/analysis-tasks`),
+      get: (projectId: string, taskId: string) =>
+        request<AnalysisTask>(`/api/projects/${encodeURIComponent(projectId)}/intelligence/analysis-tasks/${encodeURIComponent(taskId)}`),
+    },
   },
   blueprintModules: {
     list: async (projectId: string) =>

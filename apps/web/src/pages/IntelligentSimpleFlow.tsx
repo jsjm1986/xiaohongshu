@@ -36,6 +36,7 @@ import {
   type SimpleSettingSource,
 } from "../lib/simple-generation";
 import type {
+  AnalysisTask,
   ContentPreset,
   ExpressionStrategy,
   GenerateInput,
@@ -200,6 +201,7 @@ function OpportunityRankDisclosure({ opportunity }: { opportunity: TopicOpportun
 
 export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, selectedPreset, submitting, onProject, onPreview }: Props) {
   const [intelligence, setIntelligence] = useState<ProjectIntelligence | null>(null);
+  const [latestTask, setLatestTask] = useState<AnalysisTask | null>(null);
   const [blueprintModules, setBlueprintModules] = useState<ProjectBlueprintModule[]>([]);
   const [opportunities, setOpportunities] = useState<TopicOpportunity[]>([]);
   const [gaps, setGaps] = useState<InformationGap[]>([]);
@@ -248,6 +250,12 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     } finally {
       setLoading(false);
     }
+    // Surface the most recent analysis task so background failures/retries stay
+    // visible; never coerced from intelligence.status alone. Non-fatal.
+    api.intelligence.tasks.list(projectId).then((tasks) => {
+      const sorted = [...tasks].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      setLatestTask(sorted[0] ?? null);
+    }).catch(() => { /* non-fatal */ });
   };
 
   useEffect(() => {
@@ -267,6 +275,10 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
           void refreshOpportunities();
         }
       }).catch(() => undefined);
+      api.intelligence.tasks.list(projectId).then((tasks) => {
+        const sorted = [...tasks].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        setLatestTask(sorted[0] ?? null);
+      }).catch(() => { /* non-fatal */ });
     }, 1800);
     return () => window.clearInterval(timer);
   }, [intelligence?.status, projectId]);
@@ -615,6 +627,8 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
       <div className="intelligence-project__body">
         <Field label="当前项目"><select value={projectId} onChange={(event) => onProject(event.target.value)}>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></Field>
         <div className="intelligence-status"><BrainCircuit size={22} /><div><strong>{intelligence?.entity || "等待识别项目核心名词"}</strong><p>{intelligence?.industry || "分析后形成行业概念树、决策任务和信息缺口池。"}</p>{intelligence?.staleReasons?.length ? <small>需要更新：{intelligence.staleReasons.join("；")}</small> : null}{intelligence?.status === "draft" ? <small>AI 生成的是待审核规划，不会自动升级为项目事实。</small> : null}</div><div className="panel-actions">{intelligence?.id && (intelligence.status !== "ready" || !blueprintReady) && <Button loading={approving} icon={<Check size={15} />} onClick={approvePlanningResources}>逐项确认本批模型</Button>}<Button variant={intelligence?.status === "draft" ? "secondary" : "primary"} loading={analyzing || intelligence?.status === "analyzing"} icon={<RefreshCw size={15} />} onClick={analyzeProject}>{intelligence?.status === "ready" ? "重新分析" : "分析项目"}</Button></div></div>
+        {latestTask && latestTask.status === "failed" && <div className="blueprint-missing"><TriangleAlert size={16} /><span>后台分析失败（已尝试 {latestTask.attemptCount} 次）：{latestTask.error || "未知错误"}。请重新分析，或检查项目知识后再试。</span></div>}
+        {latestTask && (latestTask.status === "running" || latestTask.status === "queued") && <div className="blueprint-missing"><RefreshCw size={16} /><span>后台分析进行中…（第 {latestTask.attemptCount} 次尝试）完成前请勿离开或重复触发。</span></div>}
         {blueprintModules.length ? <div className="blueprint-module-grid">
           {blueprintModules.map((module) => { const meta = blueprintModuleMeta[module.moduleKey]; return <article key={module.id}>
             <header><div><strong>{meta.label}</strong><small>v{module.version}</small></div><Badge tone={module.status === "approved" ? "positive" : module.status === "stale" ? "warning" : "neutral"}>{module.status === "approved" ? "已确认" : module.status === "stale" ? "受上游修改影响" : "待确认"}</Badge></header>
