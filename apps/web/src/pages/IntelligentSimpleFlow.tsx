@@ -229,6 +229,16 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const fileInput = useRef<HTMLInputElement>(null);
   const toast = useToast();
 
+  // Surface the most recent analysis task so background failures/retries stay
+  // visible; never coerced from intelligence.status alone. Non-fatal.
+  const refreshLatestTask = () => {
+    if (!projectId) return Promise.resolve();
+    return api.intelligence.tasks.list(projectId).then((tasks) => {
+      const sorted = [...tasks].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      setLatestTask(sorted[0] ?? null);
+    }).catch(() => { /* non-fatal */ });
+  };
+
   const load = async () => {
     if (!projectId) return;
     setLoading(true);
@@ -250,12 +260,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     } finally {
       setLoading(false);
     }
-    // Surface the most recent analysis task so background failures/retries stay
-    // visible; never coerced from intelligence.status alone. Non-fatal.
-    api.intelligence.tasks.list(projectId).then((tasks) => {
-      const sorted = [...tasks].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-      setLatestTask(sorted[0] ?? null);
-    }).catch(() => { /* non-fatal */ });
+    refreshLatestTask();
   };
 
   useEffect(() => {
@@ -275,10 +280,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
           void refreshOpportunities();
         }
       }).catch(() => undefined);
-      api.intelligence.tasks.list(projectId).then((tasks) => {
-        const sorted = [...tasks].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-        setLatestTask(sorted[0] ?? null);
-      }).catch(() => { /* non-fatal */ });
+      refreshLatestTask();
     }, 1800);
     return () => window.clearInterval(timer);
   }, [intelligence?.status, projectId]);
@@ -322,6 +324,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
       setStrategies(result.expressionStrategies);
       setOpportunities(result.topicOpportunities);
       setSelectedOpportunityId("");
+      await refreshLatestTask();
       toast.push("项目分析完成，请确认分析结果后用于创作", "info");
     } catch (error) {
       toast.push(error instanceof Error ? error.message : "项目分析失败", "error");
