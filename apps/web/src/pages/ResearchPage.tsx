@@ -325,7 +325,7 @@ function CalibrationList({ items, schema, busy, approve }: { items: ResearchCali
     <header><div><Badge tone={researchStatusTone(item.status)}>{researchStatusLabel[item.status] || item.status}</Badge><Badge>{item.targetType}</Badge></div>{item.appliedReleaseId && <small>发布 {shortDigest(item.appliedReleaseId)}</small>}</header>
     <h3>{parameter?.label || item.targetKey}</h3><div className="research-calibration-values"><span><small>当前值</small><strong>{String(item.current?.value ?? "未知")}</strong></span><b>→</b><span><small>建议值</small><strong>{String(item.proposed?.value ?? "未知")}</strong></span></div>
     <p>{item.rationale}</p>{parameter && <aside><strong>参数影响</strong>{parameter.increaseEffect} {parameter.risk}</aside>}
-    <footer><code>{item.targetKey}</code><ReviewButtons status={item.status} loading={busy === `calibration:${item.id}`} onReview={(status) => approve(item, status)} /></footer>
+    <footer><code>{item.targetKey}</code>{["draft", "under_review"].includes(item.status) && <ReviewButtons status={item.status} loading={busy === `calibration:${item.id}`} onReview={(status) => approve(item, status)} />}</footer>
   </article>; })}</div>;
 }
 

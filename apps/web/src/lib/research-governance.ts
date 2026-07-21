@@ -27,7 +27,7 @@ export function experimentTransitions(status: string): string[] {
   const transitions: Record<string, string[]> = {
     draft: ["preregistered", "rejected", "archived"],
     preregistered: ["running", "rejected", "archived"],
-    running: ["completed", "archived"],
+    running: ["completed", "rejected"],
     completed: ["replicated", "archived"],
     replicated: ["archived"],
     rejected: [],
