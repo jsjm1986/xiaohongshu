@@ -104,9 +104,12 @@ export class ProjectController {
     const body = requireObject(rawBody);
     const name = optionalString(body.name, 'name', 120) ?? String(row.name);
     const description = optionalString(body.description, 'description', 2_000) ?? String(row.description);
-    const profile = body.profile !== undefined || this.hasProfileFields(body)
+    const storedProfile = JSON.parse(String(row.profile_json)) as Record<string, unknown>;
+    const profile = body.profile !== undefined
       ? this.profileFromBody(body)
-      : JSON.parse(String(row.profile_json));
+      : this.hasProfileFields(body)
+        ? { ...storedProfile, ...this.profileFromBody(body) }
+        : storedProfile;
     const now = nowIso();
     this.database
       .prepare('UPDATE projects SET name = ?, description = ?, profile_json = ?, updated_at = ? WHERE id = ?')
