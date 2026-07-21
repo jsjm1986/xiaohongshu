@@ -780,6 +780,18 @@ export interface CoverageSignature {
   evidenceIds?: string[];
 }
 
+export interface CoverageRecord {
+  id: string;
+  projectId: string;
+  generationJobId: string | null;
+  contentPackageId: string | null;
+  opportunityId: string | null;
+  signature: CoverageSignature;
+  createdBy?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface DialogueThreadPlan extends CommentScenarioMetadata {
   id: string;
   gapId?: string;

@@ -3,6 +3,7 @@ import type {
   AuditEntry,
   AppSettings,
   ContentPreset,
+  CoverageRecord,
   EnsureReviewedFormulaDefaultsResult,
   FormulaVersion,
   FormulaCalculationResult,
@@ -963,7 +964,7 @@ export const api = {
   },
   coverage: {
     list: (projectId: string) =>
-      request<Array<{ signature: string; createdAt: string; opportunityId?: string }>>(`/api/projects/${encodeURIComponent(projectId)}/coverage`),
+      request<CoverageRecord[]>(`/api/projects/${encodeURIComponent(projectId)}/coverage`),
   },
   research: {
     overview: (projectId: string) =>
