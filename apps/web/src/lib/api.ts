@@ -1196,7 +1196,7 @@ export const api = {
         `/api/settings${workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : ""}`,
       ),
     update: (
-      input: Partial<AppSettings> & { apiKey?: string; workspaceId?: string },
+      input: Partial<AppSettings> & { apiKey?: string; workspaceId?: string; clearApiKey?: boolean },
     ) =>
       request<AppSettings>("/api/settings", {
         method: "PATCH",

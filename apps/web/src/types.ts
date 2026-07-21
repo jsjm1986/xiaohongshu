@@ -1633,6 +1633,7 @@ export interface AppSettings {
   monthlyQuota: number;
   quotaUsed: number;
   defaultTemperature?: number;
+  generationDefaults?: Record<string, unknown>;
 }
 
 export interface ApiList<T> {

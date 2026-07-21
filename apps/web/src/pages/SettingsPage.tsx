@@ -80,6 +80,27 @@ export function SettingsPage() {
     }
   };
 
+  const clearKey = async () => {
+    if (!settings) return;
+    if (!window.confirm("确定清除已保存的 API Key 吗？清除后 BYOK 模式需要重新填写。")) return;
+    setSaving(true);
+    try {
+      setSettings(
+        await api.settings.update({
+          ...settings,
+          workspaceId: currentProject?.workspaceId,
+          clearApiKey: true,
+        }),
+      );
+      toast.push("已清除保存的密钥");
+    } catch {
+      toast.push("清除失败", "error");
+    } finally {
+      setSaving(false);
+      setApiKey("");
+    }
+  };
+
   const changePassword = async (event: FormEvent) => {
     event.preventDefault();
     if (password.next.length < 12) {
@@ -288,6 +309,11 @@ export function SettingsPage() {
                             {showKey ? <EyeOff size={17} /> : <Eye size={17} />}
                           </button>
                         </span>
+                        {settings.hasApiKey && (
+                          <Button variant="ghost" type="button" loading={saving} onClick={() => void clearKey()}>
+                            清除已保存的密钥
+                          </Button>
+                        )}
                       </Field>
                     </>
                   )}
@@ -347,6 +373,9 @@ export function SettingsPage() {
                   <div className="quota-admin">
                     <Field label="平台测试额度">
                       <input type="number" min={0} value={settings.monthlyQuota} onChange={(event) => setSettings({ ...settings, monthlyQuota: Math.max(0, Number(event.target.value)) })} />
+                    </Field>
+                    <Field label="默认温度" hint="0–2，控制生成发散度。留空用平台默认。">
+                      <input type="number" min={0} max={2} step={0.1} value={settings.defaultTemperature ?? ""} onChange={(event) => setSettings({ ...settings, defaultTemperature: event.target.value === "" ? undefined : Math.max(0, Math.min(2, Number(event.target.value))) })} />
                     </Field>
                     <Button loading={saving} onClick={saveSettings}>更新额度</Button>
                   </div>
