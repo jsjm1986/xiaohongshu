@@ -857,6 +857,43 @@ export class IntelligenceService implements OnModuleInit {
     }
   }
 
+  async refreshTopicOpportunities(projectId: string, principal: SessionPrincipal): Promise<Record<string, unknown>> {
+    const project = this.resources.projectRow(projectId);
+    const source = await this.projectAnalysisSource(project);
+    const gapRows = this.approvedRows('information_gaps', projectId, 'priority DESC');
+    const gaps = gapRows.map(normalizeGap);
+    const gapIdMap = new Map<string, string>(gapRows.map((row) => [String(row.id), String(row.id)]));
+    const task = this.createTask(projectId, 'project', null, `${source.fingerprint}:topic-refresh`, principal);
+    try {
+      const opportunityPayload = await this.analyzeWithCurrentModel(
+        project, principal, projectOpportunityAnalysisPrompt(source.sourceJson, gaps), [], task.id,
+      );
+      const opportunities = recordArray(opportunityPayload.topicOpportunities);
+      const now = nowIso();
+      this.database.transaction(() => {
+        const draftRows = this.database.prepare(
+          `SELECT id FROM topic_opportunities WHERE project_id=? AND status='draft' AND deleted_at IS NULL`,
+        ).all(projectId) as unknown as Array<{ id: string }>;
+        for (const draft of draftRows) this.softDelete('topic_opportunities', projectId, String(draft.id));
+        for (const opportunity of opportunities.slice(0, 100)) {
+          this.insertAnalyzedOpportunity(projectId, task.id, opportunity, gapIdMap, principal.userId, now);
+        }
+        this.database.prepare(
+          `UPDATE analysis_tasks SET status='completed', error=NULL, completed_at=?, updated_at=? WHERE id=?`,
+        ).run(now, now, task.id);
+      });
+      this.record(project, principal, 'topic-opportunity.refresh', 'analysis_task', task.id, {
+        projectId,
+        opportunityCount: opportunities.length,
+        gapCatalogSize: gaps.length,
+      });
+      return { task: this.mapTask(this.taskRow(task.id)), topicOpportunities: this.listOpportunities(projectId) };
+    } catch (error) {
+      this.failTask(task.id, error);
+      throw error;
+    }
+  }
+
   async analyzeImage(projectId: string, assetId: string, principal: SessionPrincipal, force = false): Promise<Record<string, unknown>> {
     const project = this.resources.projectRow(projectId);
     const asset = this.imageRow(projectId, assetId);

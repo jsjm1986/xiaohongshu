@@ -932,8 +932,13 @@ export const api = {
     list: async (projectId: string) =>
       normalizeList((await request<JsonRecord[]>(`/api/projects/${encodeURIComponent(projectId)}/topic-opportunities`)).map(normalizeOpportunity)),
     refresh: async (projectId: string) => {
-      const result = await api.intelligence.analyze(projectId, true);
-      return normalizeList(result.topicOpportunities);
+      const result = await request<JsonRecord>(`/api/projects/${encodeURIComponent(projectId)}/topic-opportunities/refresh`, {
+        method: "POST",
+      });
+      const list = Array.isArray(result.topicOpportunities)
+        ? result.topicOpportunities.map((item) => normalizeOpportunity(recordValue(item)))
+        : [];
+      return normalizeList(list);
     },
     update: async (projectId: string, id: string, input: Partial<TopicOpportunity>) =>
       normalizeOpportunity(await request<JsonRecord>(`/api/projects/${encodeURIComponent(projectId)}/topic-opportunities/${encodeURIComponent(id)}`, {
