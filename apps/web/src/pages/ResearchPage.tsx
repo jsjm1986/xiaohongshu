@@ -19,7 +19,7 @@ import { Badge, Button, Field, Modal, PageHeader, Skeleton, useToast } from "../
 import { api, ApiError } from "../lib/api";
 import { defaultParameterSchema, normalizeParameterSchema } from "../lib/parameter-schema";
 import {
-  nextExperimentStatus,
+  experimentTransitions,
   releaseBindingSummary,
   researchStatusLabel,
   researchStatusTone,
@@ -308,13 +308,15 @@ function DatasetList({ items, busy, approve }: { items: ResearchDatasetSnapshot[
   </article>)}</div>;
 }
 
-function ExperimentList({ items, busy, onResult, transition, reviewResult }: { items: ResearchExperiment[]; busy: string; onResult: (item: ResearchExperiment) => void; transition: (item: ResearchExperiment, status: ResearchExperiment["status"]) => void; reviewResult: (item: ResearchExperimentResult, status: string) => void }) {
-  return <div className="research-list">{items.map((item) => { const next = nextExperimentStatus(item.status); return <article className="research-card research-card--experiment" key={item.id}>
+function ExperimentList({ items, busy, onResult, transition, reviewResult }: { items: ResearchExperiment[]; busy: string; onResult: (item: ResearchExperiment) => void; transition: (item: ResearchExperiment, status: string) => void; reviewResult: (item: ResearchExperimentResult, status: string) => void }) {
+  return <div className="research-list">{items.map((item) => { return <article className="research-card research-card--experiment" key={item.id}>
     <header><div><Badge tone={researchStatusTone(item.status)}>{researchStatusLabel[item.status] || item.status}</Badge><span>v{item.version}</span></div><code>{item.experimentKey}</code></header>
     <h3>{item.title}</h3><aside><strong>预先声明的假设</strong>{item.hypothesis}</aside>
     <details><summary>实验设计与分析计划</summary><pre>{JSON.stringify({ design: item.design, metrics: item.metrics, analysisPlan: item.analysisPlan }, null, 2)}</pre></details>
     {item.results?.map((result) => <section className="research-result" key={result.id}><header><strong>结果 v{result.version}</strong><Badge tone={researchStatusTone(result.status)}>{researchStatusLabel[result.status] || result.status}</Badge><Badge tone={result.conclusion === "supports" ? "positive" : result.conclusion === "contradicts" ? "danger" : "warning"}>{result.conclusion}</Badge></header><pre>{JSON.stringify(result.result, null, 2)}</pre>{["draft", "under_review"].includes(result.status) && <ReviewButtons status={result.status} loading={busy === `result:${result.id}`} onReview={(status) => reviewResult(result, status)} />}</section>)}
-    <footer><span>{formatDate(item.createdAt)}</span><div>{["running", "completed", "replicated"].includes(item.status) && <Button variant="secondary" onClick={() => onResult(item)}>登记结果</Button>}{next && <Button loading={busy === `experiment:${item.id}`} onClick={() => transition(item, next)}>推进到{researchStatusLabel[next]}</Button>}</div></footer>
+    <footer><span>{formatDate(item.createdAt)}</span><div>{["running", "completed", "replicated"].includes(item.status) && <Button variant="secondary" onClick={() => onResult(item)}>登记结果</Button>}{experimentTransitions(item.status).map((next) => (
+          <Button key={next} variant={next === "rejected" || next === "archived" ? "danger" : undefined} loading={busy === `experiment:${item.id}`} onClick={() => transition(item, next)}>{researchStatusLabel[next] || next}</Button>
+        ))}</div></footer>
   </article>; })}</div>;
 }
 
@@ -336,9 +338,27 @@ function ReleaseList({ items, busy, review, activate }: { items: ResearchRelease
   </article>)}</div>;
 }
 
+function reviewActionsForStatus(status: string): Array<{ next: string; label: string; variant?: "danger" | "ghost" }> {
+  // Backend accepts under_review/approved/deprecated/rejected for claims/sources/datasets.
+  switch (status) {
+    case "draft":
+      return [{ next: "under_review", label: "转入复核", variant: "ghost" }, { next: "rejected", label: "拒绝", variant: "danger" }, { next: "approved", label: "批准" }];
+    case "under_review":
+      return [{ next: "rejected", label: "拒绝", variant: "danger" }, { next: "approved", label: "批准" }];
+    case "approved":
+      return [{ next: "deprecated", label: "弃用", variant: "danger" }];
+    case "deprecated":
+    case "rejected":
+      return [];
+    default:
+      return [{ next: "approved", label: "批准" }];
+  }
+}
+
 function ReviewButtons({ status, loading, onReview }: { status: string; loading: boolean; onReview: (status: string) => void }) {
-  if (!["draft", "under_review"].includes(status)) return null;
-  return <div><Button variant="danger" loading={loading} onClick={() => onReview("rejected")}>拒绝</Button><Button loading={loading} onClick={() => onReview("approved")}>批准</Button></div>;
+  const actions = reviewActionsForStatus(status);
+  if (!actions.length) return null;
+  return <div>{actions.map((action) => <Button key={action.next} variant={action.variant} loading={loading} onClick={() => onReview(action.next)}>{action.label}</Button>)}</div>;
 }
 
 function CreateForm({ kind, form, setForm, overview, schema, bindings, setBindings }: { kind: CreateKind; form: Record<string, string>; setForm: (value: Record<string, string>) => void; overview: ResearchOverview | null; schema: GenerationParameterSchema; bindings: { datasets: string[]; results: string[]; calibrations: string[] }; setBindings: (value: { datasets: string[]; results: string[]; calibrations: string[] }) => void }) {

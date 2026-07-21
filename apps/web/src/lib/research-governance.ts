@@ -1,4 +1,4 @@
-import type { ResearchExperiment, ResearchReleaseManifest } from "../types";
+import type { ResearchReleaseManifest } from "../types";
 
 export const researchStatusLabel: Record<string, string> = {
   draft: "草稿",
@@ -23,11 +23,17 @@ export function researchStatusTone(status: string): "neutral" | "positive" | "wa
   return "neutral";
 }
 
-export function nextExperimentStatus(status: ResearchExperiment["status"]): ResearchExperiment["status"] | null {
-  const transitions: Partial<Record<ResearchExperiment["status"], ResearchExperiment["status"]>> = {
-    draft: "preregistered", preregistered: "running", running: "completed", completed: "replicated",
+export function experimentTransitions(status: string): string[] {
+  const transitions: Record<string, string[]> = {
+    draft: ["preregistered", "rejected", "archived"],
+    preregistered: ["running", "rejected", "archived"],
+    running: ["completed", "archived"],
+    completed: ["replicated", "archived"],
+    replicated: ["archived"],
+    rejected: [],
+    archived: [],
   };
-  return transitions[status] ?? null;
+  return transitions[status] ?? [];
 }
 
 export function safeResearchUrl(value?: string | null): string | null {
