@@ -341,6 +341,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     setSelectedOpportunityId("");
     setSelectedAssetIds([]);
     setSettingOverrides({});
+    setShowAllOpportunities(false);
     void load();
   }, [projectId]);
 
