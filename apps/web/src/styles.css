@@ -1505,10 +1505,10 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .opportunity-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 18px; }
 .opportunity-card { position: relative; display: flex; min-height: 225px; flex-direction: column; align-items: flex-start; gap: 8px; padding: 17px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); color: inherit; text-align: left; transition: .18s ease; }
 .opportunity-card:hover { border-color: color-mix(in srgb, var(--brand) 48%, var(--line)); transform: translateY(-1px); }
-.opportunity-card.selected { border-color: var(--brand); box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand) 15%, transparent); background: color-mix(in srgb, var(--brand) 4%, var(--surface)); }
 .opportunity-card.is-collected { border-color: color-mix(in srgb, var(--green) 45%, var(--line)); }
 .opportunity-card.is-archived { opacity: .62; }
 .opportunity-card.is-archived:hover { opacity: 1; }
+.opportunity-card.selected { border-color: var(--brand); box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand) 15%, transparent); background: color-mix(in srgb, var(--brand) 4%, var(--surface)); }
 .opportunity-card > div { display: flex; gap: 5px; flex-wrap: wrap; }
 .opportunity-card h3 { margin: 3px 25px 0 0; font-size: 16px; line-height: 1.45; }
 .opportunity-card p { margin: 0; color: var(--text); font-size: 12px; line-height: 1.65; }
@@ -1530,6 +1530,7 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .opportunity-card__edit--danger:hover { color: var(--red); }
 .opportunity-card__state { display: inline-flex; align-items: center; gap: 3px; padding: 1px 7px; border-radius: 999px; font-size: var(--font-2xs); }
 .opportunity-card__state--collected { color: var(--green); background: var(--green-soft); }
+.opportunity-card__state--collected .filled { fill: currentColor; }
 .opportunity-card__state--archived { color: var(--muted); background: var(--surface-soft); border: 1px solid var(--line); }
 .opportunity-rank-disclosure { margin: 0 18px 18px; padding: 15px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
 .opportunity-rank-disclosure > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; }

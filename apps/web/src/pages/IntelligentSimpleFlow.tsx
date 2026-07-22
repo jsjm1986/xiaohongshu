@@ -800,9 +800,9 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
       <header>
         <div><span>第 2 步</span><h2>选择一个值得写的信息缺口</h2><p>选题来自行业问题与项目可回答空间的交集，不要求你先写提示词。卡片顺序如有排序，仅采用“机会排序启发式 V1”。</p><p className="opportunity-refresh-note">“换一批”会基于现有蓝图和已确认信息缺口<strong>重新生成一批新选题并追加保留</strong>（约几十秒，消耗一次模型额度）；本批会自动提高随机性并避开已生成过的标题，也可填写方向引导词控制生成重点。<strong>旧选题不会被删除</strong>，可在下方按“未处理 / 已收藏 / 已归档”筛选。</p>{(collectionCounts.collected > 0 || collectionCounts.archived > 0) && (
           <p className="opportunity-collection-summary">
-            <button type="button" onClick={() => setCollectionFilter("collected")}>★ 已收藏 {collectionCounts.collected}</button>
-            <span aria-hidden="true">·</span>
-            <button type="button" onClick={() => setCollectionFilter("archived")}>已归档 {collectionCounts.archived}</button>
+            {collectionCounts.collected > 0 && <button type="button" onClick={() => setCollectionFilter("collected")}>★ 已收藏 {collectionCounts.collected}</button>}
+            {collectionCounts.collected > 0 && collectionCounts.archived > 0 && <span aria-hidden="true">·</span>}
+            {collectionCounts.archived > 0 && <button type="button" onClick={() => setCollectionFilter("archived")}>已归档 {collectionCounts.archived}</button>}
           </p>
         )}</div>
         <div className="panel-actions">
@@ -837,7 +837,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
         <div className="opportunity-filter">
           {(["all", "active", "collected", "archived"] as const).map((filter) => (
             <button type="button" key={filter} className={collectionFilter === filter ? "chip chip--active" : "chip"} onClick={() => setCollectionFilter(filter)}>
-              {{ all: "全部", active: "未处理", collected: "已收藏", archived: "已归档" }[filter]}
+              {{ all: "未归档", active: "未处理", collected: "已收藏", archived: "已归档" }[filter]}
             </button>
           ))}
         </div>
@@ -849,8 +849,6 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
               <div>
                 <Badge tone={item.answerability === "approved" ? "positive" : item.answerability === "verifiable" ? "warning" : "neutral"}>{item.answerability === "approved" ? "有批准答案" : item.answerability === "verifiable" ? "可给核验方法" : "保留未知"}</Badge>
                 <Badge tone={item.status === "approved" ? "positive" : "neutral"}>{item.status === "approved" ? "选题已确认" : "AI 草案"}</Badge>
-                {collectionStatus === "collected" && <Badge tone="positive">已收藏</Badge>}
-                {collectionStatus === "archived" && <Badge>已归档</Badge>}
                 {item.coverageStatus && <Badge>{item.coverageStatus === "new" ? "近期未写" : "近期覆盖"}</Badge>}
               </div>
               <div className={`opportunity-card__rank ${rankView.sortable ? "is-sortable" : "needs-review"}`}>
