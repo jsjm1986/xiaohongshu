@@ -507,7 +507,7 @@ test('migrates only exact official legacy F32/F33 contracts on the explicit mana
   ).get(draftProjectId) as { value: number }).value), migrationAuditBeforeDraft);
 });
 
-test('unknown opportunity metrics remain null and cannot be approved or ranked', async () => {
+test('unknown opportunity metrics remain null and no longer block selection or generation', async () => {
   const { app, request } = await startApp();
   const project = await request('/api/projects', {
     method: 'POST',
@@ -548,7 +548,10 @@ test('unknown opportunity metrics remain null and cannot be approved or ranked',
     assert.equal(incomplete.body[metric], null, metric);
     assert.equal(incomplete.body.data[metric], null, `stored ${metric}`);
   }
-  assert.equal(incomplete.body.eligibilityStatus, 'unknown');
+  // M10 解耦：资格状态由用户显式断言（此处提交 eligible），不再被未知度量改写为 unknown。
+  // 预测轴（reviewRequired / unknownMetrics）独立标记度量待复核，仅作参考提示；未知度量不再阻断
+  // 审批 / 选择 / 生成（需求 2.4 / 2.5 / 2.7），真正的阻断只来自结构轴硬门禁（需求 3）。
+  assert.equal(incomplete.body.eligibilityStatus, 'eligible');
   assert.equal(incomplete.body.reviewRequired, true);
   assert.deepEqual(incomplete.body.unknownMetrics, expectedUnknownMetrics);
   assert.equal(incomplete.body.heuristic.id, 'OpportunityRankHeuristicV1');
@@ -567,17 +570,24 @@ test('unknown opportunity metrics remain null and cannot be approved or ranked',
   assert.equal(incomplete.body.components.length, 7);
   assert.ok(incomplete.body.components.every((item: any) => item.rawValue === null));
   assert.ok(incomplete.body.components.every((item: any) => item.source.source === 'unknown'));
-  assert.equal(incomplete.body.data.status, 'unknown');
+  // M10 解耦：持久化的资格状态保留用户断言（eligible），不被未知度量改写。
+  assert.equal(incomplete.body.data.status, 'eligible');
   assert.equal(incomplete.body.data.score, null);
+  // 预测轴：度量 provenance 如实标记未知。
   assert.equal(incomplete.body.data.rankInputSources.metrics.relevance.source, 'unknown');
-  assert.equal(incomplete.body.data.rankInputSources.status.source, 'system_heuristic');
+  // 结构轴：资格状态 provenance 反映用户断言，两轴分列后不再被未知度量改写为 system_heuristic 的"被迫 unknown"。
+  assert.equal(incomplete.body.data.rankInputSources.status.source, 'user');
 
-  const rejectedIncomplete = await request(
+  // 需求 2.5 / 2.7 + 需求 3：未知度量不再阻断可选择性——此处 /select 不再因"缺度量"被拒绝
+  // （旧的 "missing metrics" 度量门禁已移除）。它被拒绝的原因是真正的结构轴硬门禁：引用的信息缺口
+  // 尚未独立审批。命中即拒绝且不持久化（approvalStatus 仍为 draft）。
+  const blockedByGapApproval = await request(
     `/api/projects/${projectId}/topic-opportunities/${incomplete.body.id}/select`,
     { method: 'POST' },
   );
-  assert.equal(rejectedIncomplete.response.status, 400);
-  assert.match(String(rejectedIncomplete.body.message), /missing metrics: relevance, importance, proofability, decisionLeverage, novelty, cognitiveCost, risk/);
+  assert.equal(blockedByGapApproval.response.status, 400);
+  assert.match(String(blockedByGapApproval.body.message), /Approve the referenced information gaps independently/);
+  assert.doesNotMatch(String(blockedByGapApproval.body.message), /missing metrics/);
   const unchangedIncomplete = await request(
     `/api/projects/${projectId}/topic-opportunities/${incomplete.body.id}`,
   );
@@ -606,9 +616,13 @@ test('unknown opportunity metrics remain null and cannot be approved or ranked',
     } as any],
   });
   assert.equal(hydrated?.opportunities?.[0]?.risk, null);
-  assert.equal(hydrated?.opportunities?.[0]?.status, 'unknown');
+  // M10 解耦：即使 risk 未知，资格状态仍保留用户断言（eligible），不被未知度量改写。
+  assert.equal(hydrated?.opportunities?.[0]?.status, 'eligible');
   assert.deepEqual((hydrated?.opportunities?.[0] as any).unknownMetrics, ['risk']);
-  assert.equal(filterTopicOpportunities(hydrated?.opportunities ?? []).length, 0);
+  // M3（需求 5.3/5.4）预期变化：filterTopicOpportunities 已降为结构过滤，未标定阈值
+  // （minProofability/maxRisk）与未知度量不再筛除结构可选选题。该选题 status=eligible、有主题、
+  // 有缺口引用，结构可选，故保留（length=1）；而非旧行为下因 risk 未知被度量门禁筛除（length=0）。
+  assert.equal(filterTopicOpportunities(hydrated?.opportunities ?? []).length, 1);
 
   const noGap = await request(`/api/projects/${projectId}/topic-opportunities`, {
     method: 'POST',
@@ -680,21 +694,18 @@ test('unknown opportunity metrics remain null and cannot be approved or ranked',
   assert.equal((await request(`/api/projects/${projectId}/information-gaps/${gap.body.id}`)).body.approvalStatus, 'draft');
   assert.equal((await request(`/api/projects/${projectId}/expression-strategies/${strategy.body.id}`)).body.approvalStatus, 'draft');
 
-  const rejectedUnknownGap = await request(`/api/projects/${projectId}/information-gaps/${gap.body.id}/approve`, {
-    method: 'POST',
-    body: JSON.stringify({ status: 'approved' }),
-  });
-  assert.equal(rejectedUnknownGap.response.status, 400);
-  assert.match(String(rejectedUnknownGap.body.message), /unknown metrics: importance, decisionLeverage, proofability/);
-  await request(`/api/projects/${projectId}/information-gaps/${gap.body.id}`, {
-    method: 'PATCH',
-    body: JSON.stringify({ importance: 0.9, decisionLeverage: 0.85, proofability: 0.8 }),
-  });
+  // 组件 B · M2（需求 2.1 / 2.2 / 2.3）：信息缺口的度量完备性不再作为硬门禁。
+  // 该缺口仍带未知度量（importance/decisionLeverage/proofability 均为 null），
+  // 但审批不再因此被阻断——可直接审批通过，且未知度量原样保留（不补零/中位值/默认值）。
   const approvedGap = await request(`/api/projects/${projectId}/information-gaps/${gap.body.id}/approve`, {
     method: 'POST',
     body: JSON.stringify({ status: 'approved' }),
   });
   assert.equal(approvedGap.response.status, 201, JSON.stringify(approvedGap.body));
+  assert.equal(approvedGap.body.approvalStatus, 'approved');
+  assert.equal(approvedGap.body.importance, null);
+  assert.equal(approvedGap.body.decisionLeverage, null);
+  assert.equal(approvedGap.body.proofability, null);
   const rejectedDraftStrategy = await request(
     `/api/projects/${projectId}/topic-opportunities/${complete.body.id}/select`,
     { method: 'POST' },
@@ -731,6 +742,34 @@ test('unknown opportunity metrics remain null and cannot be approved or ranked',
   assert.equal(approvedOpportunityData.approvalRankAudit.heuristic.notF28, true);
   assert.equal(selected.body.informationGaps[0].approvalStatus, 'approved');
   assert.equal(selected.body.expressionStrategy.approvalStatus, 'approved');
+
+  // 需求 2.4 / 2.5 / 2.7：含未知度量的 eligible 选题（引用已审批缺口与策略、非 blocked）应能成功选中。
+  // 此前（2.2 中间态）该 /select 被 assertOpportunitySelectable 的 review_required 门禁临时阻断；
+  // 放开后未知度量不再阻断可选择性，选中成功，且未知度量在审批后原样保留（不补零 / 中位值 / 默认值）。
+  const selectedIncomplete = await request(
+    `/api/projects/${projectId}/topic-opportunities/${incomplete.body.id}/select`,
+    { method: 'POST' },
+  );
+  assert.equal(selectedIncomplete.response.status, 201, JSON.stringify(selectedIncomplete.body));
+  assert.equal(selectedIncomplete.body.opportunity.approvalStatus, 'approved');
+  assert.equal(selectedIncomplete.body.opportunity.eligibilityStatus, 'eligible');
+  assert.deepEqual(selectedIncomplete.body.opportunity.unknownMetrics, expectedUnknownMetrics);
+  for (const metric of expectedUnknownMetrics) {
+    assert.equal(selectedIncomplete.body.opportunity[metric], null, `selected ${metric}`);
+  }
+
+  // 需求 2.5 / 2.6：生成准备对含未知度量的已选选题继续执行，并把未知度量原样透传给规划引擎
+  // （不补零 / 中位值 / 默认值）。
+  const preparedUnknown = service.prepareGeneration(projectId, { opportunityId: incomplete.body.id });
+  const preparedOpportunities = preparedUnknown.planningContext.opportunities as Record<string, unknown>[];
+  const preparedIncomplete = preparedOpportunities.find(
+    (item) => String(item.id) === String(incomplete.body.id),
+  );
+  assert.ok(preparedIncomplete, 'the unknown-metric opportunity should reach the planning context');
+  for (const metric of expectedUnknownMetrics) {
+    assert.equal(preparedIncomplete![metric], null, `planning ${metric}`);
+  }
+  assert.deepEqual((preparedIncomplete as Record<string, unknown>).unknownMetrics, expectedUnknownMetrics);
 });
 
 test('generation revalidates selected opportunity dependencies and locks its explicit strategy', async () => {

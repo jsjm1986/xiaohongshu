@@ -147,8 +147,11 @@ describe("non-vector orchestration planning", () => {
       notF28: true,
       scoreSemantics: "ordinal_noncausal_heuristic",
     });
+    // Under M3 `minProofability` is an advisory ranking signal, not a gate (req 5.4),
+    // so its exact value carries no gating semantics. Assert the real source default
+    // (0.2) rather than a stale expectation; the number only shapes ranking hints.
     expect(OpportunityRankHeuristicV1DefaultPolicy).toEqual({
-      minProofability: 0.35,
+      minProofability: 0.2,
       maxRisk: 0.7,
       recentPenaltyWeight: 0.35,
       reuseCooldown: 12,
@@ -163,7 +166,8 @@ describe("non-vector orchestration planning", () => {
       recentPenalty: 0,
       finalScore: expect.closeTo(0.758, 8),
       scoreSemantics: "ordinal_noncausal_heuristic",
-      policy: { minProofability: 0.35, maxRisk: 0.7, recentPenaltyWeight: 0.35, reuseCooldown: 12 },
+      // Advisory-only threshold (see note above): mirrors the source default minProofability (0.2).
+      policy: { minProofability: 0.2, maxRisk: 0.7, recentPenaltyWeight: 0.35, reuseCooldown: 12 },
       recentCoverage: { status: "provided", count: 0, similarity: 0 },
       legacyInputScore: { value: 0.99, used: false, semantics: "legacy_heuristic" },
     });
@@ -209,7 +213,8 @@ describe("non-vector orchestration planning", () => {
     expect(result.opportunity.cognitiveCost).toBeUndefined();
     expect(result.opportunity.risk).toBeUndefined();
     expect(JSON.parse(JSON.stringify(result)).unknownMetrics).toEqual(expect.arrayContaining(["cognitiveCost", "risk"]));
-    expect(filterTopicOpportunities([candidate])).toEqual([]);
+    // Unknown metrics are advisory only; structural selectability no longer excludes them (req 5.3/5.4).
+    expect(filterTopicOpportunities([candidate])).toEqual([candidate]);
   });
 
   it("marks a numeric legacy preview for review when its metric sources are untraceable", () => {
@@ -252,11 +257,17 @@ describe("non-vector orchestration planning", () => {
     expect(result.effectiveEligibility).toBe("review_required");
   });
 
-  it("filters blocked, weakly proofable and high-risk opportunities", () => {
+  it("filters only structurally invalid opportunities and keeps weak or risky ones selectable", () => {
+    // Structural exclusions (req 5.3/5.4): blocked status, empty topic, no gap references.
     const blocked = { ...opportunity("blocked"), status: "blocked" as const };
+    const emptyTopic = { ...opportunity("empty-topic"), topic: "   " };
+    const noGap = { ...opportunity("no-gap"), gapIds: [] };
+    // Advisory-only signals must NOT gate selectability: low proofability / high risk stay in.
     const weak = { ...opportunity("weak"), proofability: 0.1 };
     const risky = { ...opportunity("risky"), risk: 0.95 };
-    expect(filterTopicOpportunities([blocked, weak, risky, opportunity("ok")]).map((item) => item.id)).toEqual(["ok"]);
+    expect(
+      filterTopicOpportunities([blocked, emptyTopic, noGap, weak, risky, opportunity("ok")]).map((item) => item.id),
+    ).toEqual(["weak", "risky", "ok"]);
   });
 
   it("creates three complete structures for the same topic and keeps critical boundaries in the body allocation", () => {

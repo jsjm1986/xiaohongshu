@@ -399,6 +399,57 @@ describe("structured output parsing and validation", () => {
     expect(invalidIssues.map((item) => item.code)).toEqual(expect.arrayContaining(["comment_keyword_pile", "comment_repeats_body"]));
   });
 
+  it("treats densityProxy as an optional audit field and keeps gap multiplexing enforced (M7)", () => {
+    const config = createDefaultGenerationConfig(project, DEFAULT_FORMULA_VERSION);
+    config.task.theme = "测试";
+    config.content.bodyMinChars = 5;
+    config.content.bodyMaxChars = 500;
+    config.content.hashtagMin = 2;
+    config.content.commentThreadMin = 1;
+
+    // A thread with roleCard + primaryGapId but NO densityProxy is still a valid density
+    // contract: densityProxy is optional audit, so its absence must not trigger
+    // comment_density_metadata_incomplete nor comment_density_proxy_mismatch.
+    const value = validDraftJson();
+    value.content.Cref.disclaimer = "以下为模拟情景问答参考模板，不代表真实评论。";
+    Object.assign(value.content.Cref.threads[0] as any, {
+      stage: "collecting", gap: "fit", function: "clarify", nextStep: "继续核实条件",
+      question: "适用条件怎么核实？",
+      answer: "先按现有资料核实适用条件；资料外仍未知，下一步继续确认。",
+      roleCard: { stage: "collecting", knowledge: ["已看到可核验资料"], constraints: [], decisionTask: "核实适用条件", evidenceStance: "verification_seeking" },
+      primaryGapId: "fit", auxiliaryGapIds: [],
+      replyPlan: { directAnswer: "先核实适用条件", condition: "只在已知条件内", boundary: "保留个体边界", unknown: "资料外仍未知", nextQuestion: "确认成本范围" },
+    });
+    delete (value.content.Cref.threads[0] as any).densityProxy;
+    const parsed = parseGenerationDraft(JSON.stringify(value));
+    expect(parsed.content.Cref.threads[0]?.densityProxy).toBeUndefined();
+    const codes = validateGenerationDraft({ draft: parsed, config, ledger: buildKnowledgeLedger([]), allowedEvidenceIds: ["evidence_d1"] })
+      .map((item) => item.code);
+    expect(codes).not.toContain("comment_density_metadata_incomplete");
+    expect(codes).not.toContain("comment_density_proxy_mismatch");
+
+    // The real structural constraint (gap multiplexing) is retained even without densityProxy.
+    const exceeded = validDraftJson();
+    exceeded.content.Cref.disclaimer = "以下为模拟情景问答参考模板，不代表真实评论。";
+    Object.assign(exceeded.content.Cref.threads[0] as any, {
+      stage: "collecting", gap: "fit", function: "clarify", nextStep: "继续核实条件",
+      question: "适用条件怎么核实？",
+      answer: "先按现有资料核实适用条件；资料外仍未知，下一步继续确认。",
+      roleCard: { stage: "collecting", knowledge: ["已看到可核验资料"], constraints: [], decisionTask: "核实适用条件", evidenceStance: "verification_seeking" },
+      primaryGapId: "fit", auxiliaryGapIds: ["cost", "time"],
+      replyPlan: { directAnswer: "先核实适用条件", condition: "只在已知条件内", boundary: "保留个体边界", unknown: "资料外仍未知", nextQuestion: "确认成本范围" },
+    });
+    delete (exceeded.content.Cref.threads[0] as any).densityProxy;
+    const exceededCodes = validateGenerationDraft({
+      draft: parseGenerationDraft(JSON.stringify(exceeded)),
+      config,
+      ledger: buildKnowledgeLedger([]),
+      allowedEvidenceIds: ["evidence_d1"],
+    }).map((item) => item.code);
+    expect(exceededCodes).toContain("comment_gap_multiplexing_exceeded");
+    expect(exceededCodes).not.toContain("comment_density_metadata_incomplete");
+  });
+
   it("preserves same-thread discovery plans and warns when inference effort is too high", () => {
     const config = createDefaultGenerationConfig(project, DEFAULT_FORMULA_VERSION);
     config.task.theme = "测试";
@@ -479,6 +530,53 @@ describe("structured output parsing and validation", () => {
     const falseClosure = parseGenerationDraft(JSON.stringify(falseClosureValue));
     const issues = validateGenerationDraft({ draft: falseClosure, config, ledger: buildKnowledgeLedger([]), allowedEvidenceIds: ["evidence_d1"] });
     expect(issues).toContainEqual(expect.objectContaining({ code: "comment_discovery_false_closure", severity: "error", channel: "Cref" }));
+  });
+
+  it("accepts a streamlined discoveryPlan (boundary only) as present while keeping the safety checks at error", () => {
+    // M7 convergence: discoveryPlan may now be a streamlined form that keeps only the
+    // `boundary` semantics; the discovery scaffolding (cue/inferencePrompt/reveal/
+    // selfCheck/revealTiming/difficulty) is optional. A present-but-streamlined plan must
+    // NOT be treated as missing, and the three safety checks must remain error-level.
+    const config = createDefaultGenerationConfig(project, DEFAULT_FORMULA_VERSION);
+    config.task.theme = "测试";
+    config.content.bodyMinChars = 5;
+    config.content.bodyMaxChars = 500;
+    config.content.hashtagMin = 2;
+    config.content.commentThreadMin = 1;
+
+    // (a) benign streamlined plan → present, no `comment_discovery_plan_missing`, no discovery errors.
+    const benign = validDraftJson();
+    benign.content.Cref.disclaimer = "以下为模拟情景问答参考模板，不代表真实评论。";
+    Object.assign(benign.content.Cref.threads[0] as any, {
+      stage: "collecting", gap: "fit", function: "clarify", nextStep: "核实适用条件",
+      roleCard: { stage: "collecting", knowledge: [], constraints: [], decisionTask: "判断适用性", evidenceStance: "verification_seeking" },
+      primaryGapId: "fit", auxiliaryGapIds: [],
+      densityProxy: { primaryGapCount: 1, auxiliaryDimensionCount: 0, roleDimensionCount: 4, constraintCount: 0, expectedReplyComponents: 5, questionTargetChars: 22 },
+      replyPlan: { directAnswer: "先核实条件", condition: "只在已知条件内", boundary: "不代填个人情况", unknown: "个人情况未知", nextQuestion: "哪项条件会改变判断" },
+      discoveryPlan: { boundary: "个人条件仍需自行核实" },
+    });
+    const parsedBenign = parseGenerationDraft(JSON.stringify(benign));
+    expect(parsedBenign.content.Cref.threads[0]?.discoveryPlan?.boundary).toBe("个人条件仍需自行核实");
+    expect(parsedBenign.content.Cref.threads[0]?.discoveryPlan?.cue).toBeUndefined();
+    expect(parsedBenign.content.Cref.threads[0]?.discoveryPlan?.reveal).toBeUndefined();
+    const benignIssues = validateGenerationDraft({ draft: parsedBenign, config, ledger: buildKnowledgeLedger([]), allowedEvidenceIds: ["evidence_d1"] });
+    const discoveryCodes = ["comment_discovery_plan_missing", "comment_discovery_withholding", "comment_discovery_false_closure", "comment_discovery_as_evidence"];
+    expect(benignIssues.filter((issue) => discoveryCodes.includes(issue.code))).toEqual([]);
+
+    // (b) streamlined plan still trips false-closure via boundary + a certainty-claiming reply.
+    const closure = validDraftJson();
+    closure.content.Cref.disclaimer = "以下为模拟情景问答参考模板，不代表真实评论。";
+    Object.assign(closure.content.Cref.threads[0] as any, {
+      stage: "collecting", gap: "fit", function: "clarify", nextStep: "继续核实",
+      roleCard: { stage: "collecting", knowledge: [], constraints: [], decisionTask: "判断适用性", evidenceStance: "unknown_aware" },
+      primaryGapId: "fit", auxiliaryGapIds: [],
+      densityProxy: { primaryGapCount: 1, auxiliaryDimensionCount: 0, roleDimensionCount: 4, constraintCount: 0, expectedReplyComponents: 5, questionTargetChars: 22 },
+      replyPlan: { directAnswer: "现在已经完全确定", condition: "没有条件限制", boundary: "当前资料不足，不能确定", unknown: "个人适用条件未知", nextQuestion: "还需核实个人条件" },
+      discoveryPlan: { boundary: "当前资料不足，不能确定" },
+    });
+    const parsedClosure = parseGenerationDraft(JSON.stringify(closure));
+    const closureIssues = validateGenerationDraft({ draft: parsedClosure, config, ledger: buildKnowledgeLedger([]), allowedEvidenceIds: ["evidence_d1"] });
+    expect(closureIssues).toContainEqual(expect.objectContaining({ code: "comment_discovery_false_closure", severity: "error", channel: "Cref" }));
   });
 
   it("computes resolvedRate from the final body instead of the planning ledger", () => {

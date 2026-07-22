@@ -33,6 +33,7 @@ import type {
   WorkspaceMember,
   WorkspaceApiKey,
 } from "../types";
+import { gapPayload, opportunityPayload } from "./metric-payload";
 
 export class ApiError extends Error {
   constructor(
@@ -553,27 +554,6 @@ const normalizeImage = (raw: JsonRecord): ImageAsset => {
   };
 };
 
-const gapPayload = (input: Partial<InformationGap>) => ({
-  title: input.label || input.question,
-  description: input.description,
-  priority: input.priority,
-  // importance/decisionLeverage/proofability flow through as canonical 0-1 values;
-  // the backend optionalRatio accepts them as-is. metricStatus/unknownMetrics/
-  // reviewRequired are server-derived and recomputed on write, so they are dropped.
-  data: {
-    ...input,
-    id: undefined,
-    projectId: undefined,
-    status: undefined,
-    approvalStatus: undefined,
-    metricStatus: undefined,
-    unknownMetrics: undefined,
-    reviewRequired: undefined,
-    createdAt: undefined,
-    updatedAt: undefined,
-  },
-});
-
 const inferImageRole = (policy = ""): NonNullable<ExpressionStrategy["imageRole"]> => {
   if (/证据|可见|核验/u.test(policy)) return "evidence";
   if (/前后|对比/u.test(policy)) return "before_after";
@@ -613,47 +593,6 @@ const strategyPayload = (input: Partial<ExpressionStrategy>) => {
     updatedAt: undefined,
   };
   return { name: input.name, description: input.description, data };
-};
-
-/**
- * Build the PATCH body for a topic opportunity. Only fields the user may edit
- * are sent; the 20 server-derived ranking fields are never transmitted (the
- * server would strip them and sending them would falsely imply they are
- * editable). Metrics are canonical 0..1 here — the UI converts sliders at its
- * own boundary.
- */
-const opportunityPayload = (input: Partial<TopicOpportunity>) => {
-  const metric = (value: unknown): number | undefined => {
-    const parsed = typeof value === "number" ? value : Number.NaN;
-    return Number.isFinite(parsed) ? parsed : undefined;
-  };
-  const data: Record<string, unknown> = {
-    relevance: metric(input.relevance),
-    importance: metric(input.importance),
-    proofability: metric(input.proofability),
-    novelty: metric(input.novelty),
-    decisionLeverage: metric(input.decisionLeverage),
-    cognitiveCost: metric(input.cognitiveCost),
-    risk: metric(input.risk),
-    audienceStage: input.audienceStage,
-    entry: input.entry,
-    gapIds: input.gapIds,
-    strategyId: input.strategyId,
-    status: input.eligibilityStatus,
-    boundaries: input.boundaries,
-    tags: (input as { tags?: string[] }).tags,
-    imageAssetIds: input.suggestedImageAssetIds,
-    evidenceIds: input.evidenceIds,
-  };
-  for (const key of Object.keys(data)) {
-    if (data[key] === undefined) delete data[key];
-  }
-  return {
-    title: input.title,
-    angle: input.angle ?? input.projectAngle,
-    rationale: input.rationale ?? input.whyValuable,
-    data,
-  };
 };
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -979,7 +918,11 @@ export const api = {
       });
       return normalizeImage(await request<JsonRecord>(`/api/projects/${encodeURIComponent(projectId)}/image-assets/${encodeURIComponent(id)}`));
     },
-    updateAnalysis: async (projectId: string, id: string, analysisId: string, quality: { clarity: number; relevance: number; textLegibility: number }) => {
+    updateAnalysis: async (projectId: string, id: string, analysisId: string, quality: { clarity: number | null; relevance: number | null; textLegibility: number | null }) => {
+      // Each metric is sent explicitly (null = unknown). The backend merges
+      // quality by key and folds null via optionalRatio(null) === null, so an
+      // unset metric must be sent as explicit null (not omitted) to become
+      // unknown; user-set 0..1 values pass through verbatim.
       await request<JsonRecord>(`/api/projects/${encodeURIComponent(projectId)}/image-assets/${encodeURIComponent(id)}/analyses/${encodeURIComponent(analysisId)}`, {
         method: "PATCH",
         body: JSON.stringify({ quality }),

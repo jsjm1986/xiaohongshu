@@ -247,7 +247,10 @@ describe("three-candidate content generation engine", () => {
       .generate({ jobId: "repair-job", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge: [knowledge[0]!] });
     expect(calls.filter((item) => item.metadata?.purpose === "generate_core")).toHaveLength(3);
     expect(calls.filter((item) => item.metadata?.purpose === "generate_comments")).toHaveLength(3);
-    expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_growth")).toHaveLength(3);
+    // Task 7.3: multi-turn comment growth (stage 2B) is opt-in and conservative by
+    // default, so with the default config it never fires the extra LLM growth call.
+    // The pipeline still produces valid root comments and fails closed as expected.
+    expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_growth")).toHaveLength(0);
     const repairCalls = calls.filter((item) => item.metadata?.purpose === "repair");
     expect(repairCalls.length).toBeGreaterThanOrEqual(3);
     expect(repairCalls.length).toBeLessThanOrEqual(6);
@@ -379,6 +382,10 @@ describe("three-candidate content generation engine", () => {
     value.content.bodyMinChars = 20;
     value.content.commentThreadMin = 2;
     value.generation.maxRepairAttempts = 0;
+    // Task 7.3: explicitly opt in to the multi-turn comment growth pass (stage 2B)
+    // so this integration test still exercises the full staged flow (core +
+    // comments + growth + ledger) per candidate.
+    value.content.commentMultiTurnGrowthEnabled = true;
     const engine = new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-07-13T00:00:00Z") });
     const result = await engine.generate({
       jobId: "planned-job",
@@ -423,6 +430,8 @@ describe("three-candidate content generation engine", () => {
         imageAnalyses: approvedImageAnalyses,
       },
     });
+    // 3 candidates x 4 staged calls (core + comments + comment_growth + ledger);
+    // comment_growth is present because it was explicitly opted in above.
     expect(calls).toHaveLength(12);
     expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_growth")).toHaveLength(3);
     const promptTexts = calls.map((call) => {

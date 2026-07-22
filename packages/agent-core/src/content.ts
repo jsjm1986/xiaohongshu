@@ -75,17 +75,23 @@ function replyPlan(value: unknown): ContentPackageContent["Cref"]["threads"][num
 }
 
 function discoveryPlan(value: unknown): ContentPackageContent["Cref"]["threads"][number]["discoveryPlan"] {
-  if (!isRecord(value) || value.revealTiming !== "same_thread" || !["low", "moderate"].includes(String(value.difficulty))) return undefined;
-  const keys = ["cue", "inferencePrompt", "reveal", "selfCheck", "boundary"] as const;
-  if (!keys.every((key) => typeof value[key] === "string" && (value[key] as string).trim())) return undefined;
+  // M7 convergence: accept a streamlined discoveryPlan. Only `boundary` (the field the
+  // false-closure safety check anchors on) is required; the remaining discovery
+  // scaffolding is optional. A record without a usable boundary is treated as absent
+  // (=> `comment_discovery_plan_missing` warning downstream, never an error).
+  if (!isRecord(value) || typeof value.boundary !== "string" || !value.boundary.trim()) return undefined;
+  const optionalText = (key: "cue" | "inferencePrompt" | "reveal" | "selfCheck"): string | undefined => {
+    const raw = value[key];
+    return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
+  };
   return {
-    cue: (value.cue as string).trim(),
-    inferencePrompt: (value.inferencePrompt as string).trim(),
-    reveal: (value.reveal as string).trim(),
-    selfCheck: (value.selfCheck as string).trim(),
-    boundary: (value.boundary as string).trim(),
-    revealTiming: "same_thread",
-    difficulty: value.difficulty as "low" | "moderate",
+    boundary: value.boundary.trim(),
+    cue: optionalText("cue"),
+    inferencePrompt: optionalText("inferencePrompt"),
+    reveal: optionalText("reveal"),
+    selfCheck: optionalText("selfCheck"),
+    revealTiming: value.revealTiming === "same_thread" ? "same_thread" : undefined,
+    difficulty: value.difficulty === "low" || value.difficulty === "moderate" ? value.difficulty : undefined,
   };
 }
 
@@ -1124,19 +1130,29 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     if (thread.postingIdentity === "reader_question_template" && /(?:\u6211|\u672c\u4eba).{0,10}(?:\u505a\u4e86|\u505a\u5b8c|\u4eb2\u6d4b|\u672f\u540e|\u6548\u679c)/u.test(thread.answer)) {
       add("fabricated_testimonial", "error", "Cref", `Thread ${thread.id} uses a reader template to claim personal experience.`);
     }
-    const hasDensityContract = Boolean(thread.roleCard || thread.primaryGapId || thread.densityProxy);
+    // M7 convergence (design 组件 E · E1/E2, densityProxy row): the density "contract" is
+    // now anchored on roleCard + primaryGapId ONLY. densityProxy is downgraded to an
+    // OPTIONAL audit field, so its presence no longer forms the contract and its absence no
+    // longer triggers comment_density_metadata_incomplete. When densityProxy IS present it is
+    // still audited for consistency (comment_density_proxy_mismatch); the real structural
+    // constraint (缺口多路复用上限, comment_gap_multiplexing_exceeded) is retained.
+    const hasDensityContract = Boolean(thread.roleCard || thread.primaryGapId);
     if (!thread.replyPlan) {
       add("comment_reply_plan_missing", "warning", "Cref", `Thread ${thread.id} has no structured replyPlan; historical content remains readable but cannot be fully audited.`);
     }
     if (!thread.discoveryPlan) {
       add("comment_discovery_plan_missing", "warning", "Cref", `Thread ${thread.id} has no same-thread discoveryPlan; historical content remains readable but cannot be audited for timely reveal.`);
     } else {
-      const discoveryText = `${thread.discoveryPlan.cue}\n${thread.discoveryPlan.inferencePrompt}\n${thread.discoveryPlan.reveal}`;
+      // M7: discoveryPlan is now optional/streamlined, so its scaffolding fields may be
+      // absent. The three safety checks below are RETAINED at `error` level and stay
+      // correct on streamlined plans — absent optional fields fold to "" and simply do
+      // not trip a regex, while `boundary` (always present) still anchors false-closure.
+      const discoveryText = `${thread.discoveryPlan.cue ?? ""}\n${thread.discoveryPlan.inferencePrompt ?? ""}\n${thread.discoveryPlan.reveal ?? ""}`;
       if (/(?:评论区再说|评论里再说|懂的都懂|先不说答案|答案先不说|留到评论|想知道.*(?:评论|留言))/u.test(discoveryText)) {
         add("comment_discovery_withholding", "error", "Cref", `Thread ${thread.id} deliberately withholds information instead of revealing it in the same thread.`);
       }
-      const certainty = /(?:足以确定|完全确定|已经确定|一定适用|必然(?:适用|有效|正确)|毫无疑问|无需.{0,6}核实)/u.test(`${thread.discoveryPlan.reveal}\n${thread.replyPlan?.directAnswer ?? ""}`);
-      const unresolved = /(?:不足|不能确定|无法确定|未知|仍需|还需|缺少|不代填)/u.test(`${thread.discoveryPlan.boundary}\n${thread.replyPlan?.unknown ?? ""}\n${thread.discoveryPlan.selfCheck}`);
+      const certainty = /(?:足以确定|完全确定|已经确定|一定适用|必然(?:适用|有效|正确)|毫无疑问|无需.{0,6}核实)/u.test(`${thread.discoveryPlan.reveal ?? ""}\n${thread.replyPlan?.directAnswer ?? ""}`);
+      const unresolved = /(?:不足|不能确定|无法确定|未知|仍需|还需|缺少|不代填)/u.test(`${thread.discoveryPlan.boundary}\n${thread.replyPlan?.unknown ?? ""}\n${thread.discoveryPlan.selfCheck ?? ""}`);
       if (certainty && unresolved) {
         add("comment_discovery_false_closure", "error", "Cref", `Thread ${thread.id} turns a discovery cue into certainty despite an explicit unknown or boundary.`);
       }
@@ -1145,8 +1161,8 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
       }
     }
     if (hasDensityContract) {
-      if (!thread.roleCard || !thread.primaryGapId || !thread.densityProxy) {
-        add("comment_density_metadata_incomplete", "error", "Cref", `Thread ${thread.id} must include roleCard, one primaryGapId and densityProxy together.`);
+      if (!thread.roleCard || !thread.primaryGapId) {
+        add("comment_density_metadata_incomplete", "error", "Cref", `Thread ${thread.id} must include roleCard and one primaryGapId together.`);
       } else {
         if (thread.gap && thread.primaryGapId !== thread.gap) {
           add("comment_primary_gap_mismatch", "error", "Cref", `Thread ${thread.id} must have exactly one primary gap shared by gap and primaryGapId.`);
@@ -1160,16 +1176,23 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
         if (auxiliaryGapIds.length > auxiliaryLimit || auxiliaryGapIds.includes(thread.primaryGapId)) {
           add("comment_gap_multiplexing_exceeded", "error", "Cref", `Thread ${thread.id} may use one primary gap and at most ${auxiliaryLimit} distinct auxiliary dimensions.`);
         }
-        if (thread.densityProxy.primaryGapCount !== 1
-          || thread.densityProxy.auxiliaryDimensionCount !== auxiliaryGapIds.length
-          || thread.densityProxy.constraintCount !== thread.roleCard.constraints.length
-          || thread.densityProxy.expectedReplyComponents !== 5) {
+        // densityProxy is an OPTIONAL audit field (M7): validate its self-consistency only
+        // when it is present. A missing densityProxy is no longer an incompleteness error.
+        if (thread.densityProxy
+          && (thread.densityProxy.primaryGapCount !== 1
+            || thread.densityProxy.auxiliaryDimensionCount !== auxiliaryGapIds.length
+            || thread.densityProxy.constraintCount !== thread.roleCard.constraints.length
+            || thread.densityProxy.expectedReplyComponents !== 5)) {
           add("comment_density_proxy_mismatch", "error", "Cref", `Thread ${thread.id} densityProxy does not explain its actual structure.`);
         }
         const allowedRoleConstraints = new Set([
           ...config.informationWindow.boundaries,
           ...(config.task.city ? [`已披露地点范围：${config.task.city}`] : []),
         ]);
+        // M7 per-mechanism ruling — 需求 7.6/7.7 / design 组件 E · E1: role grounding (角色接地)
+        // is part of the persona-scene/dialogue (a)+(b) required backbone and is NOT downgraded.
+        // A simulated role may only assert constraints that were disclosed or explicitly marked
+        // for verification, so this stays an `error`-level hard gate.
         const unsafeConstraint = thread.roleCard.constraints.find((constraint) =>
           !allowedRoleConstraints.has(constraint)
           && !constraint.startsWith("待核实维度：")
@@ -1178,8 +1201,10 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
         if (unsafeConstraint) {
           add("comment_role_constraint_ungrounded", "error", "Cref", `Thread ${thread.id} contains a role constraint that is neither disclosed nor marked for verification: ${unsafeConstraint}`);
         }
-        const actualQuestionTarget = thread.surfaceRoleCard?.targetChars[1] ?? thread.densityProxy.questionTargetChars;
-        if ([...thread.question].length > actualQuestionTarget * 1.5) {
+        // The compression target comes from surfaceRoleCard or the now-optional densityProxy;
+        // when neither is present this warning is simply skipped.
+        const actualQuestionTarget = thread.surfaceRoleCard?.targetChars[1] ?? thread.densityProxy?.questionTargetChars;
+        if (actualQuestionTarget !== undefined && [...thread.question].length > actualQuestionTarget * 1.5) {
           add("comment_question_not_compressed", "warning", "Cref", `Thread ${thread.id} question exceeds its explainable compression target.`, false);
         }
       }

@@ -23,6 +23,7 @@ import {
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, EmptyState, Field, Modal, Skeleton, useToast } from "../components/Ui";
 import { api } from "../lib/api";
+import { gapMetricsInput, imageQualityPayload } from "../lib/metric-payload";
 import { inspectOpportunityApprovalDependencies, opportunityRequiresReview } from "../lib/opportunity-approval";
 import { resolveOpportunityRankView } from "../lib/opportunity-rank";
 import { TREND_FIT_SIMPLE_BOUNDARY_COPY } from "../lib/trend-fit";
@@ -298,7 +299,10 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const [editingBlueprintJson, setEditingBlueprintJson] = useState("");
   const [editingOpportunity, setEditingOpportunity] = useState<Partial<TopicOpportunity> | null>(null);
   const [editingQuality, setEditingQuality] = useState<ImageAsset | null>(null);
-  const [qualityDraft, setQualityDraft] = useState<{ clarity: number; relevance: number; textLegibility: number }>({ clarity: 0.5, relevance: 0.5, textLegibility: 0.5 });
+  // Image quality metrics are tri-state: a number in 0..1 (user-set) or null
+  // (unset = unknown metric). Never pre-filled with 0.5 — an unset metric is
+  // submitted as unknown rather than fabricated into a default.
+  const [qualityDraft, setQualityDraft] = useState<{ clarity: number | null; relevance: number | null; textLegibility: number | null }>({ clarity: null, relevance: null, textLegibility: null });
   const [settingOverrides, setSettingOverrides] = useState<SimpleSettingOverrides>({});
   const [showAllOpportunities, setShowAllOpportunities] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -452,21 +456,20 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
 
   const openQualityEditor = (asset: ImageAsset) => {
     const q = asset.analysis?.quality;
+    // Load existing values as-is; a metric the model/user never set stays null
+    // (unknown) rather than being pre-filled with 0.5.
     setQualityDraft({
-      clarity: q?.clarity ?? 0.5,
-      relevance: q?.relevance ?? 0.5,
-      textLegibility: q?.textLegibility ?? 0.5,
+      clarity: q?.clarity ?? null,
+      relevance: q?.relevance ?? null,
+      textLegibility: q?.textLegibility ?? null,
     });
     setEditingQuality(asset);
   };
 
   const approveAsset = async (asset: ImageAsset) => {
-    const q = asset.analysis?.quality;
-    const missing = !q || [q.clarity, q.relevance, q.textLegibility].some((v) => v === null || v === undefined);
-    if (missing) {
-      openQualityEditor(asset);
-      return;
-    }
+    // Quality metrics are advisory (predicted performance), not a hard gate:
+    // unknown/unset metrics no longer block approval nor force fabricating a
+    // value. Reviewers can still set them via the separate "编辑质量评估" action.
     const updated = await api.imageAssets.approve(projectId, asset.id, asset.latestAnalysisId);
     setAssets((current) => current.map((item) => item.id === asset.id ? { ...updated, previewUrl: item.previewUrl } : item));
     toast.push("图片观察已确认，可用于支撑可见事实");
@@ -474,29 +477,24 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
 
   const saveQuality = async () => {
     if (!editingQuality?.latestAnalysisId) return;
-    const saved = await api.imageAssets.updateAnalysis(projectId, editingQuality.id, editingQuality.latestAnalysisId, qualityDraft);
+    // Submit the tri-state draft verbatim: a metric left unset is null, which the
+    // backend records as an unknown metric (optionalRatio(null) === null); a
+    // user-set 0..1 value passes through unchanged. No 0.5 default is injected.
+    // The image-analysis PATCH merges by key, so unset metrics are sent as
+    // explicit null (not omitted) to clear any prior value back to unknown.
+    const saved = await api.imageAssets.updateAnalysis(projectId, editingQuality.id, editingQuality.latestAnalysisId, imageQualityPayload(qualityDraft));
     setAssets((current) => current.map((item) => (item.id === saved.id ? { ...saved, previewUrl: item.previewUrl } : item)));
     setEditingQuality(null);
-    toast.push("源素材质量评估已补全，可确认");
+    toast.push("源素材质量评估已保存");
   };
-
-  const gapMetricsMissing = (gap: Partial<InformationGap>): boolean =>
-    gap.importance == null || gap.decisionLeverage == null || gap.proofability == null;
 
   const approvePlanningResources = async () => {
     if (!intelligence?.id) return;
-    const pendingGaps = gaps.filter((item) => item.status !== "approved");
-    const gapsMissingMetrics = pendingGaps.filter(gapMetricsMissing);
-    if (gapsMissingMetrics.length) {
-      toast.push(
-        `有 ${gapsMissingMetrics.length} 个信息缺口缺少评审度量（重要性/决策撬动/可证性），无法确认：${gapsMissingMetrics.slice(0, 3).map((item) => item.label).join("、")}${gapsMissingMetrics.length > 3 ? " 等" : ""}。点击缺口的编辑按钮补齐这三项后再确认。`,
-        "error",
-      );
-      setEditingGap(gapsMissingMetrics[0]);
-      setPoolTab("gaps");
-      setPoolOpen(true);
-      return;
-    }
+    // Unknown/unset gap metrics (importance/decisionLeverage/proofability) no
+    // longer block confirming planning resources: metric completeness is a
+    // predicted-performance concern, not structural validity, so it is not a
+    // hard gate. Gaps with unknown metrics are submitted along the normal path
+    // and the backend records them as unknown metrics (requirement 2.3).
     setApproving(true);
     try {
       const approvedModules = await Promise.all(
@@ -521,14 +519,11 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
 
   const saveGap = async () => {
     if (!editingGap?.label?.trim() || !editingGap.question?.trim()) return;
-    // Metrics are edited as 0..1 in state; default any untouched metric to a
-    // conservative estimate so the gap can pass the backend approval gate.
-    const withMetrics: Partial<InformationGap> = {
-      ...editingGap,
-      importance: editingGap.importance ?? 0.5,
-      decisionLeverage: editingGap.decisionLeverage ?? 0.5,
-      proofability: editingGap.proofability ?? 0.3,
-    };
+    // Metrics are edited as 0..1 in state. Leave any untouched metric unset so it
+    // is submitted as an unknown metric: an omitted key is interpreted as null by
+    // the backend rather than fabricated into a default. User-entered 0..1 values
+    // (0 included) are submitted verbatim. No default injection.
+    const withMetrics = gapMetricsInput(editingGap);
     const saved = editingGap.id
       ? await api.informationGaps.update(projectId, editingGap.id, withMetrics)
       : await api.informationGaps.create(projectId, {
@@ -551,18 +546,16 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
 
   const saveOpportunity = async () => {
     if (!editingOpportunity?.id) return;
-    // Metrics are edited as 0..1 in state; default untouched ones conservatively.
-    const saved = await api.opportunities.update(projectId, editingOpportunity.id, {
-      ...editingOpportunity,
-      relevance: editingOpportunity.relevance ?? 0.5,
-      importance: editingOpportunity.importance ?? 0.5,
-      proofability: editingOpportunity.proofability ?? 0.3,
-      novelty: editingOpportunity.novelty ?? 0.5,
-      decisionLeverage: editingOpportunity.decisionLeverage ?? 0.5,
-      cognitiveCost: editingOpportunity.cognitiveCost ?? 0.5,
-      risk: editingOpportunity.risk ?? 0.3,
-      eligibilityStatus: editingOpportunity.eligibilityStatus || "eligible",
-    });
+    // Metrics are edited as 0..1 in state. Leave any untouched metric unset (no
+    // default injection): opportunityPayload omits any of the seven metrics
+    // (relevance/importance/proofability/decisionLeverage/novelty/cognitiveCost/
+    // risk) that is not a finite number, so an empty metric is submitted as an
+    // unknown metric (an omitted key the backend reads as null) rather than a
+    // fabricated 0.5/0.3. User-entered 0..1 values (0 included) pass through
+    // verbatim. Eligibility status is the user's explicit choice
+    // (eligible/blocked/unknown) and is never rewritten to a default when a
+    // metric is left blank.
+    const saved = await api.opportunities.update(projectId, editingOpportunity.id, editingOpportunity);
     setOpportunities((current) => current.map((item) => item.id === saved.id ? saved : item));
     setEditingOpportunity(null);
     toast.push("选题度量已保存；卡片回到待确认，需重新确认选题", "info");
@@ -850,18 +843,18 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     </Modal>
 
     <Modal open={Boolean(editingGap)} onClose={() => setEditingGap(null)} title={editingGap?.id ? "编辑信息缺口" : "新增信息缺口"} footer={<Button onClick={() => void saveGap()}>保存</Button>}><div className="form-stack"><Field label="缺口名称" required><input value={editingGap?.label || ""} onChange={(event) => setEditingGap((current) => ({ ...current, label: event.target.value }))} /></Field><Field label="自然问题" required><textarea rows={3} value={editingGap?.question || ""} onChange={(event) => setEditingGap((current) => ({ ...current, question: event.target.value }))} /></Field><Field label="已有批准答案"><textarea rows={3} value={editingGap?.answer || ""} onChange={(event) => setEditingGap((current) => ({ ...current, answer: event.target.value, answerability: event.target.value ? "approved" : "verifiable" }))} /></Field>
-      <div className="metric-editor"><p className="metric-editor__hint">以下三项是供人工审核的相对优先级估计（0–100），不是事实断言或平台效果预测。审核批准前必须给出数值。</p>
-        {GAP_METRIC_FIELDS.map(({ key, label, hint }) => { const current = editingGap?.[key]; const percent = typeof current === "number" ? Math.round(current * 100) : 50; return <Field key={key} label={`${label}（${percent}）`} hint={hint}><input type="range" min={0} max={100} step={1} value={percent} onChange={(event) => { const next = Number(event.target.value) / 100; setEditingGap((currentGap) => ({ ...currentGap, [key]: next })); }} /></Field>; })}
+      <div className="metric-editor"><p className="metric-editor__hint">以下三项是供人工审核的相对优先级估计（0–100），不是事实断言或平台效果预测。留空即未知/待复核，可不填即确认（未知度量不阻断审批）。</p>
+        {GAP_METRIC_FIELDS.map(({ key, label, hint }) => { const value = editingGap?.[key]; const isSet = typeof value === "number"; return <Field key={key} label={`${label}（${isSet ? Math.round(value * 100) : "未知/待复核"}）`} hint={hint}><div className="tri-state-metric"><input type="number" min={0} max={100} step={1} value={isSet ? Math.round(value * 100) : ""} placeholder="未设置" onChange={(event) => { const raw = event.target.value.trim(); if (raw === "") { setEditingGap((currentGap) => ({ ...currentGap, [key]: undefined })); return; } const parsed = Number(raw); if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) return; setEditingGap((currentGap) => ({ ...currentGap, [key]: parsed / 100 })); }} />{isSet ? <button type="button" className="tri-state-metric__clear" onClick={() => setEditingGap((currentGap) => ({ ...currentGap, [key]: undefined }))}>清空为未知</button> : <span className="tri-state-metric__unknown">未知/待复核</span>}</div></Field>; })}
       </div></div></Modal>
-    <Modal open={Boolean(editingOpportunity)} onClose={() => setEditingOpportunity(null)} title="编辑选题度量" description="七项度量是未标定的评审排序启发（0–100），非因果、非平台效果预测。全部给值并将状态设为 eligible 后才能确认；保存后选题回到草稿需重新确认。" footer={<Button onClick={() => void saveOpportunity()}>保存选题</Button>}>
+    <Modal open={Boolean(editingOpportunity)} onClose={() => setEditingOpportunity(null)} title="编辑选题度量" description="七项度量是未标定的评审排序启发（0–100），非因果、非平台效果预测。度量可留空为未知（不阻断确认）；将状态设为 eligible 后即可确认；保存后选题回到草稿需重新确认。" footer={<Button onClick={() => void saveOpportunity()}>保存选题</Button>}>
       <div className="form-stack"><Field label="选题标题"><input value={editingOpportunity?.title || ""} onChange={(event) => setEditingOpportunity((current) => ({ ...current, title: event.target.value }))} /></Field>
-        <div className="metric-editor">{OPPORTUNITY_METRIC_FIELDS.map(({ key, label, hint }) => { const current = editingOpportunity?.[key]; const percent = typeof current === "number" ? Math.round(current * 100) : 50; return <Field key={key} label={`${label}（${percent}）`} hint={hint}><input type="range" min={0} max={100} step={1} value={percent} onChange={(event) => { const next = Number(event.target.value) / 100; setEditingOpportunity((currentOpp) => ({ ...currentOpp, [key]: next })); }} /></Field>; })}</div>
+        <div className="metric-editor">{OPPORTUNITY_METRIC_FIELDS.map(({ key, label, hint }) => { const value = editingOpportunity?.[key]; const isSet = typeof value === "number"; return <Field key={key} label={`${label}（${isSet ? Math.round(value * 100) : "未知/待复核"}）`} hint={hint}><div className="tri-state-metric"><input type="number" min={0} max={100} step={1} value={isSet ? Math.round(value * 100) : ""} placeholder="未设置" onChange={(event) => { const raw = event.target.value.trim(); if (raw === "") { setEditingOpportunity((currentOpp) => ({ ...currentOpp, [key]: undefined })); return; } const parsed = Number(raw); if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) return; setEditingOpportunity((currentOpp) => ({ ...currentOpp, [key]: parsed / 100 })); }} />{isSet ? <button type="button" className="tri-state-metric__clear" onClick={() => setEditingOpportunity((currentOpp) => ({ ...currentOpp, [key]: undefined }))}>清空为未知</button> : <span className="tri-state-metric__unknown">未知/待复核</span>}</div></Field>; })}</div>
         <Field label="阶段"><select value={editingOpportunity?.audienceStage || "collecting"} onChange={(event) => setEditingOpportunity((current) => ({ ...current, audienceStage: event.target.value }))}>{AUDIENCE_STAGE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></Field>
         <Field label="入口"><select value={editingOpportunity?.entry || "search"} onChange={(event) => setEditingOpportunity((current) => ({ ...current, entry: event.target.value }))}>{ENTRY_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></Field>
         <Field label="资格状态" hint="度量齐全后设为 eligible 才可确认；blocked 表示不安全或禁止的选题。"><select value={editingOpportunity?.eligibilityStatus || "unknown"} onChange={(event) => setEditingOpportunity((current) => ({ ...current, eligibilityStatus: event.target.value }))}><option value="eligible">eligible（可用）</option><option value="blocked">blocked（不安全/禁止）</option><option value="unknown">unknown（待补）</option></select></Field>
       </div></Modal>
-    <Modal open={Boolean(editingQuality)} onClose={() => setEditingQuality(null)} title="补全源素材质量评估" description="模型未给出完整质量评估。以下为评审启发值（0–100，非事实断言），补全后即可确认；保存后该分析回到草稿需重新确认。" footer={<Button onClick={() => void saveQuality()}>保存并可确认</Button>}>
-      <div className="form-stack"><div className="metric-editor">{([["clarity", "清晰度"], ["relevance", "相关度"], ["textLegibility", "文字可辨识度"]] as const).map(([key, label]) => { const percent = Math.round(qualityDraft[key] * 100); return <Field key={key} label={`${label}（${percent}）`}><input type="range" min={0} max={100} step={1} value={percent} onChange={(event) => { const next = Number(event.target.value) / 100; setQualityDraft((current) => ({ ...current, [key]: next })); }} /></Field>; })}</div></div></Modal>
+    <Modal open={Boolean(editingQuality)} onClose={() => setEditingQuality(null)} title="编辑源素材质量评估" description="以下为评审启发值（0–100，非事实断言、非平台效果预测）。留空即未知/待复核，不写入默认值；无需填满也可确认。保存后该分析回到草稿需重新确认。" footer={<Button onClick={() => void saveQuality()}>保存</Button>}>
+      <div className="form-stack"><div className="metric-editor">{([["clarity", "清晰度"], ["relevance", "相关度"], ["textLegibility", "文字可辨识度"]] as const).map(([key, label]) => { const value = qualityDraft[key]; const isSet = typeof value === "number"; return <Field key={key} label={`${label}（${isSet ? Math.round(value * 100) : "未知/待复核"}）`} hint="填 0–100 表示设定值；留空表示未知/待复核，提交为未知而非默认值"><div className="tri-state-metric"><input type="number" min={0} max={100} step={1} value={isSet ? Math.round(value * 100) : ""} placeholder="未设置" onChange={(event) => { const raw = event.target.value.trim(); if (raw === "") { setQualityDraft((current) => ({ ...current, [key]: null })); return; } const parsed = Number(raw); if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) return; setQualityDraft((current) => ({ ...current, [key]: parsed / 100 })); }} />{isSet ? <button type="button" className="tri-state-metric__clear" onClick={() => setQualityDraft((current) => ({ ...current, [key]: null }))}>清空为未知</button> : <span className="tri-state-metric__unknown">未知/待复核</span>}</div></Field>; })}</div></div></Modal>
     <Modal open={Boolean(editingStrategy)} onClose={() => setEditingStrategy(null)} title={editingStrategy?.id ? "编辑完整表达策略" : "新增完整表达策略"} description="用日常语言说明标签、图片、正文和评论如何协同，系统保存为可复用策略。" footer={<Button onClick={() => void saveStrategy()}>保存</Button>}>
       <div className="form-stack">
         <Field label="策略名称" required><input value={editingStrategy?.name || ""} onChange={(event) => setEditingStrategy((current) => ({ ...current, name: event.target.value }))} /></Field>

@@ -186,23 +186,31 @@ function resolvedOptions(options?: PlanningOptions): ResolvedPlanningOptions {
   };
 }
 
-/** F39 feasibility gate. Unknown or risky cards remain visible upstream, but cannot be sampled here. */
+/**
+ * Structural selectability filter (formerly the F39 feasibility gate).
+ *
+ * Per requirement 5.3/5.4 the uncalibrated `OpportunityRankHeuristicV1` and its
+ * `minProofability`/`maxRisk` thresholds are advisory signals, not gates: they
+ * must not decide whether a candidate is selectable. This filter therefore
+ * keeps only the *structural* conditions — the topic is not `blocked`, has a
+ * non-empty subject, and references at least one information gap. Prediction
+ * metrics (including unknown metrics, i.e. `undefined` proofability/risk) never
+ * remove a candidate here.
+ *
+ * The `options` parameter is retained for signature stability (callers still
+ * pass planning options) but no longer influences selectability.
+ */
 export function filterTopicOpportunities(
   opportunities: TopicOpportunity[],
   options?: PlanningOptions,
 ): TopicOpportunity[] {
-  const thresholds = resolvedOptions(options);
-  return opportunities.filter((opportunity) => {
-    const proofability = metricValue(opportunity.proofability);
-    const risk = metricValue(opportunity.risk);
-    return opportunity.status === "eligible"
-      && proofability !== undefined
-      && proofability >= thresholds.minProofability
-      && risk !== undefined
-      && risk <= thresholds.maxRisk
+  void options;
+  return opportunities.filter(
+    (opportunity) =>
+      opportunity.status !== "blocked"
       && opportunity.topic.trim().length > 0
-      && opportunity.gapIds.length > 0;
-  });
+      && opportunity.gapIds.length > 0,
+  );
 }
 
 function opportunityCoverageSimilarity(opportunity: TopicOpportunity, coverage: CoverageSignature): number {
@@ -277,15 +285,28 @@ function evaluateOpportunity(
   const optionsProvided = input.options !== undefined;
   const optionsSource = input.optionsSource
     ?? source(optionsProvided ? "legacy_unspecified" : "default_policy");
+  // Hard reasons are STRUCTURAL only (req 5.2/5.4, design C2): a blocked status,
+  // an empty topic, or no gap references. These are the sole triggers for
+  // `ineligible`. The uncalibrated policy thresholds (minProofability/maxRisk)
+  // are advisory ranking signals — never gates — so a low proofability or high
+  // risk must NOT push a hard reason nor make a candidate ineligible here.
   const hardReasons: string[] = [];
   if (opportunity.status === "blocked") hardReasons.push("opportunity.status=blocked");
   if (!opportunity.topic.trim()) hardReasons.push("topic is empty");
   if (opportunity.gapIds.length === 0) hardReasons.push("gapIds is empty");
+  // Advisory-only threshold hints: recorded as ranking/prompt inputs and surfaced
+  // in `reasons`, but kept out of `hardReasons` so they never gate selectability
+  // (req 5.4). `policy` still carries the raw thresholds as a sorting input.
+  const advisoryNotes: string[] = [];
   if (proofability !== undefined && proofability < options.minProofability) {
-    hardReasons.push(`proofability below policy threshold (${options.minProofability.toFixed(2)})`);
+    advisoryNotes.push(
+      `proofability ${proofability.toFixed(2)} is below the advisory minProofability threshold (${options.minProofability.toFixed(2)}); ranking hint only, not a gate`,
+    );
   }
   if (risk !== undefined && risk > options.maxRisk) {
-    hardReasons.push(`risk above policy threshold (${options.maxRisk.toFixed(2)})`);
+    advisoryNotes.push(
+      `risk ${risk.toFixed(2)} is above the advisory maxRisk threshold (${options.maxRisk.toFixed(2)}); ranking hint only, not a gate`,
+    );
   }
   const reviewReasons: string[] = [];
   if (opportunity.status === "unknown") reviewReasons.push("opportunity.status is unknown");
@@ -337,6 +358,7 @@ function evaluateOpportunity(
     reviewRequired: effectiveEligibility === "review_required",
     reviewReasons,
     effectiveEligibility,
+    advisoryNotes,
     unboundedBaseScore,
     baseScore,
     recentPenalty,
@@ -352,6 +374,7 @@ function evaluateOpportunity(
     reasons: [
       ...hardReasons,
       ...reviewReasons,
+      ...advisoryNotes,
       ...(proofability === undefined ? [] : [`proofability=${proofability.toFixed(2)}`]),
       ...(values.decisionLeverage === undefined ? [] : [`decisionLeverage=${values.decisionLeverage.toFixed(2)}`]),
       ...(recentSimilarity === null ? [] : [`recentOverlap=${recentSimilarity.toFixed(2)}`]),
@@ -690,6 +713,23 @@ function surfaceTargets(prototype: PersonaScenePlan["prototype"]): PersonaSceneP
   return targets[prototype];
 }
 
+/**
+ * Persona-scene plan (commentCast / commentNetwork / surfaceTargets / crossChannelRules).
+ *
+ * M7 per-mechanism ruling — 需求 7.6 / design 组件 E · E1: classification = 部分(a) + (b) →
+ * REQUIRED (必需保留), NOT downgraded by tasks 7.1–7.3.
+ *  - (a) traceable evidence: commentCast/commentNetwork are derived from the *approved*
+ *    projectBlueprint (role_model / scenario_model / surface_language), so they are partly
+ *    evidence-backed rather than invented.
+ *  - (b) documented creative value: cross-channel consistency, the anti-sales-script rules,
+ *    and role grounding ("a role only says what its social position could know") each have a
+ *    recorded rationale.
+ * 需求 7.7 guard: this is a load-bearing mechanism. Its commentCast/commentNetwork/
+ * surfaceTargets are fed straight into the staged comment prompt (see prompt.ts) and anchor
+ * structural-validity/safety checks in content.ts (role grounding, cross-channel identity,
+ * surface-shape targets). Making it non-required would break valid output and the pipeline,
+ * so it stays mandatory in formal generation.
+ */
 function buildPersonaScenePlan(
   strategy: ExpressionStrategy,
   opportunity: TopicOpportunity,
@@ -1001,6 +1041,21 @@ function renderChannelAllocation(
   };
 }
 
+/**
+ * dialoguePlans / dialogueThreads (thread structure, primaryGapId, auxiliaryGapIds, replyPlan,
+ * and the now-optional discoveryPlan/densityProxy/conversationPlan sub-fields).
+ *
+ * M7 per-mechanism ruling — 需求 7.6 / design 组件 E · E1: classification = 部分(a) + (b) →
+ * REQUIRED (必需保留), NOT downgraded by tasks 7.1–7.3.
+ *  - (a) traceable evidence: each thread's gaps come from approved information gaps.
+ *  - (b) documented creative value: threads route gaps into the gapCoverageLedger so required
+ *    gaps are not silently dropped.
+ * 需求 7.7 guard: the thread *structure* is load-bearing — it produces the comment surface and
+ * feeds buildGapCoverageLedger; without it the coverage ledger and the comment network
+ * collapse, so it stays required. Per-field rulings for the optional sub-fields (replyPlan =
+ * (b)/warning, discoveryPlan = (c)→optional, densityProxy = (c)→optional audit, conversationPlan
+ * = derived/non-required) are recorded inline at their construction sites below.
+ */
 function dialoguePlans(
   opportunity: TopicOpportunity,
   gapCards: InformationGapPlanningCard[],
@@ -1145,6 +1200,11 @@ function dialoguePlans(
       evidenceStance,
     };
     const baseDirectAnswer = gap.answer ?? gap.framework ?? "当前不能直接下结论，先给出可执行核验路径";
+    // M7 per-mechanism ruling — 需求 7.6 / design 组件 E · E1: replyPlan = (b) → RETAINED but
+    // already NON-blocking. Evidence support is weak (a), but the answer-requirement template
+    // (directAnswer / condition / boundary / unknown / nextQuestion) carries recorded creative
+    // and safety value (b) — boundary + unknown declarations. A missing replyPlan is only a
+    // `warning` in content.ts (comment_reply_plan_missing), never a hard gate; kept as-is.
     const replyPlan: DialogueThreadPlan["replyPlan"] = {
       directAnswer: replyIncrement >= 70 && gap.evidenceIds.length
         ? `${baseDirectAnswer}；核验时只采用本线程列出的证据来源`
@@ -1189,6 +1249,18 @@ function dialoguePlans(
       questionIntent = `${baseQuestionIntent.replace(/[？?]+$/u, "")}，从${roleStage}阶段还缺哪项输入？`;
     }
     usedQuestionIntents.add(comparableQuestion(questionIntent));
+    // M7 per-mechanism ruling — 需求 7.6 / design 组件 E · E1: discoveryPlan STRUCTURE = (c)
+    // no traceable evidence → DOWNGRADED to optional (task 7.1). Its derived *safety* checks
+    // (不扣留信息 / 不伪闭合 / 发现感≠证据) carry (b) value and are RETAINED at `error` level in
+    // content.ts. So the scaffolding is optional while the safety guarantees stay mandatory.
+    //
+    // M7 convergence (design 组件 E · E1/E2): discoveryPlan is now an OPTIONAL,
+    // streamlined-capable contract — only `boundary` is required, the rest of the
+    // scaffolding (cue/inferencePrompt/reveal/selfCheck/revealTiming/difficulty) is
+    // optional. dialoguePlans is therefore no longer forced to emit a complete plan.
+    // We still emit the full form here so pre-convergence valid output stays valid and
+    // the pipeline keeps running (需求 7.3/7.4); a streamlined `{ boundary }` plan is
+    // equally accepted by content.ts, where the three safety checks remain `error`-level.
     const discoveryPlan: DialogueThreadPlan["discoveryPlan"] = {
       cue: `资料中已经披露：“${cueCore}”`,
       inferencePrompt: constraints[0]
@@ -1212,6 +1284,10 @@ function dialoguePlans(
     const topology: NonNullable<DialogueThreadPlan["conversationPlan"]>["topology"] = targetFollowUps === 0
       ? (surfaceRoleCard.utteranceMode === "social_reaction" ? "reaction_then_reply" : "single_exchange")
       : targetFollowUps === 2 ? "three_person_branch" : "two_turn";
+    // M7 per-mechanism ruling — 需求 7.6 / design 组件 E · E1: conversationPlan = derived,
+    // NON-required. Evidence is (c)/weak, but it is cheap and *derived* from the already-decided
+    // followUp count (targetFollowUps) rather than an extra input or LLM call, and no `error`-level
+    // check depends on it. Kept at current status — no further convergence action needed.
     const conversationPlan: NonNullable<DialogueThreadPlan["conversationPlan"]> = {
       topology,
       targetFollowUps,
@@ -1257,6 +1333,18 @@ function dialoguePlans(
       roleCard,
       primaryGapId: gap.gapId,
       auxiliaryGapIds,
+      // M7 per-mechanism ruling — 需求 7.6 / design 组件 E · E1: densityProxy = (c) no traceable
+      // evidence (constants like expectedReplyComponents=5) → DOWNGRADED to an optional audit
+      // field (task 7.2). The real structural constraint (缺口多路复用上限) is carried by
+      // comment_gap_multiplexing_exceeded, which is RETAINED at `error` level.
+      //
+      // M7 convergence (design 组件 E · E1/E2, densityProxy row): densityProxy is now an
+      // OPTIONAL audit field. content.ts anchors the density contract on roleCard +
+      // primaryGapId and only audits densityProxy consistency when present (a missing
+      // densityProxy no longer triggers comment_density_metadata_incomplete). The planner
+      // still emits the full proxy here so pre-convergence valid output stays valid and the
+      // pipeline keeps running (需求 7.3/7.4); the real structural constraint remains
+      // comment_gap_multiplexing_exceeded.
       densityProxy: {
         primaryGapCount: 1,
         auxiliaryDimensionCount: auxiliaryGapIds.length,
@@ -1273,6 +1361,18 @@ function dialoguePlans(
   });
 }
 
+/**
+ * gapCoverageLedger — required-gap routing audit.
+ *
+ * M7 per-mechanism ruling — 需求 7.6 / design 组件 E · E1: classification = (a) + (b) →
+ * REQUIRED as Structural_Validity, NOT downgraded by tasks 7.1–7.3.
+ *  - (a) traceable evidence: gap routing is derived from approved information gaps.
+ *  - (b) documented creative value: it guarantees required gaps are never silently dropped.
+ * 需求 7.7 guard: content.ts enforces `comment_gap_silently_dropped` (and the required-gap
+ * checks) at `error` level, so an incomplete ledger blocks generation. Making this
+ * non-required would let required gaps disappear silently — invalid output — so it stays
+ * mandatory in formal generation.
+ */
 function buildGapCoverageLedger(
   gapCards: InformationGapPlanningCard[],
   threads: DialogueThreadPlan[],

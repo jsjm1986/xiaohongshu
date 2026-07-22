@@ -111,6 +111,10 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .field__label { font-size: 13px; font-weight: 600; color: var(--ink-2); }
 .field__label em { color: var(--coral); font-style: normal; padding-left: 3px; }
 .field small { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.tri-state-metric { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tri-state-metric input[type="number"] { width: 88px; }
+.tri-state-metric__clear { font-size: 11px; color: var(--ink-2); background: none; border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; cursor: pointer; }
+.tri-state-metric__unknown { font-size: 11px; color: var(--amber); }
 .field-grid { display: grid; gap: 16px; }
 .field-grid--two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .field-grid--three { grid-template-columns: repeat(3, minmax(0, 1fr)); }

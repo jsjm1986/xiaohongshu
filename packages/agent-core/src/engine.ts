@@ -34,7 +34,6 @@ import {
 import type { ModelProvider } from "./model.js";
 import { buildParameterDiagnostics, compileGenerationParameters } from "./parameters.js";
 import {
-  filterTopicOpportunities,
   planTopicOrchestrations,
   rankTopicOpportunities,
   createCoverageSignature,
@@ -551,6 +550,21 @@ function defaultTopicOpportunity(
   };
 }
 
+/**
+ * M3 / component C: selectability lives on the Structural_Validity axis only.
+ * A topic opportunity is selectable iff it is structurally valid — not blocked,
+ * carries a non-empty topic, and references at least one gap. Predicted-performance
+ * signals (the uncalibrated OpportunityRankHeuristicV1 score, proofability/risk
+ * thresholds, and unknown/low metrics) are advisory: they order the default
+ * presentation but never decide whether a candidate can be selected.
+ * (Requirements 5.2, 5.3, 5.4, 5.7.)
+ */
+function isStructurallySelectable(opportunity: TopicOpportunity): boolean {
+  return opportunity.status !== "blocked"
+    && opportunity.topic.trim().length > 0
+    && opportunity.gapIds.length > 0;
+}
+
 function resolveGenerationPlanning(
   input: GenerationInput,
   context: KnowledgeContextSelection,
@@ -568,8 +582,11 @@ function resolveGenerationPlanning(
   if (planning?.selectedOpportunityId) {
     const selected = suppliedOpportunities.find((item) => item.id === planning.selectedOpportunityId);
     if (!selected) throw new Error(`Selected topic opportunity does not exist: ${planning.selectedOpportunityId}`);
-    if (!filterTopicOpportunities([selected], planning.orchestrationOptions).length) {
-      throw new Error(`Selected topic opportunity is not feasible: ${planning.selectedOpportunityId}`);
+    // An explicitly locked, approved dependency is rejected only when it is
+    // structurally invalid. Uncalibrated proofability/risk thresholds must not
+    // block it (Requirement 5.7).
+    if (!isStructurallySelectable(selected)) {
+      throw new Error(`Selected topic opportunity is not structurally selectable (blocked, empty topic, or no referenced gaps): ${planning.selectedOpportunityId}`);
     }
     opportunity = structuredClone(selected);
     opportunitySelectionAudit = {
@@ -587,11 +604,15 @@ function resolveGenerationPlanning(
       options: planning?.orchestrationOptions,
       optionsSource: planning?.orchestrationOptionsSource,
     });
-    const selectedRank = ranked.find((item) => item.effectiveEligibility === "eligible" && item.finalScore !== null);
+    // ranked[] is already in rank order (the uncalibrated heuristic only decides
+    // presentation order). The default selection is the first structurally
+    // selectable row; a null finalScore (unknown metrics) or a review_required
+    // hint never removes a candidate from selection (Requirements 5.2, 5.3).
+    const selectedRank = ranked.find((item) => isStructurallySelectable(item.opportunity));
     if (!selectedRank) {
-      const reviewIds = ranked.filter((item) => item.reviewRequired).map((item) => item.opportunity.id);
-      const detail = reviewIds.length ? ` Review required: ${reviewIds.join(", ")}.` : "";
-      throw new Error(`No traceable eligible topic opportunity remained after heuristic review.${detail}`);
+      const rejected = ranked.map((item) => item.opportunity.id);
+      const detail = rejected.length ? ` Rejected (blocked, empty topic, or no referenced gaps): ${rejected.join(", ")}.` : "";
+      throw new Error(`No structurally selectable topic opportunity was supplied.${detail}`);
     }
     opportunity = structuredClone(selectedRank.opportunity);
     opportunitySelectionAudit = {
@@ -869,7 +890,9 @@ function deterministicDraft(
   const personaQuestion = (planned: OrchestrationPlan["dialogueThreads"][number] | undefined, gap: string): string => {
     if (planned?.discoveryPlan && method.commentDiscoveryStrength >= 50) {
       const target = Math.max(16, planned.densityProxy.questionTargetChars);
-      const cue = planned.discoveryPlan.cue
+      // M7: discoveryPlan.cue is optional (streamlined form). Fold an absent cue to ""
+      // so this gracefully falls back to the constraint/decision-task question below.
+      const cue = (planned.discoveryPlan.cue ?? "")
         .replace(/^资料中已经披露[：:]?/u, "")
         .replace(/[“”"。；;！？!?]/gu, "")
         .slice(0, Math.max(4, Math.min(7, target - 10)));
@@ -1246,7 +1269,8 @@ function bindDialogueProvenance(
       auxiliaryGapIds: [...planned.auxiliaryGapIds],
       densityProxy: { ...planned.densityProxy },
       replyPlan: { ...planned.replyPlan },
-      discoveryPlan: { ...planned.discoveryPlan },
+      // M7: discoveryPlan is optional; preserve presence/absence rather than coercing to {}.
+      discoveryPlan: planned.discoveryPlan ? { ...planned.discoveryPlan } : undefined,
       conversationPlan: realizedConversation ? { ...realizedConversation } : undefined,
       surfaceRoleCard: selectedSurface ? { ...selectedSurface, targetChars: [...selectedSurface.targetChars] as [number, number] } : undefined,
     };
@@ -1644,39 +1668,57 @@ export class ContentGenerationAgent implements GenerationEngine {
         ...roots,
         threads: roots.threads.map((thread) => ({ ...thread, followUps: [] })),
       };
+      // M7 per-mechanism ruling — 需求 7.6 / design 组件 E · E1: multi-turn growth = (c/b) →
+      // no traceable evidence that extra turns improve outcomes (c), but "natural comment
+      // section" realism has recorded creative value (b) AND a real cost, so it was made a
+      // conservative-by-default FEATURE SWITCH (task 7.3) rather than removed. Not required:
+      // when skipped the root comments are still valid output.
+      //
+      // Task 7.3 (M7 收敛评论网络复杂度): the extra multi-turn comment growth pass
+      // (stage 2B) is a conservative, opt-in feature switch. The additional LLM
+      // growth call only fires when it is explicitly enabled AND followUpDepth > 0
+      // AND the comment conversation rate > 0. When skipped, the already-generated
+      // root comments are used directly — an equally valid output, identical to the
+      // pre-existing graceful-degradation path. See design 组件E(E2) / Error Handling.
+      const growthConversationRate = input.config.parameters?.commentConversationRate ?? 48;
+      const shouldGrowComments = input.config.content.commentMultiTurnGrowthEnabled === true
+        && input.config.content.followUpDepth > 0
+        && growthConversationRate > 0;
       let comments = normalizedRoots;
-      try {
-        const growthPrompt = buildStagedCommentGrowthPrompt(promptInput, core, normalizedRoots);
-        const growthResponse = await this.provider.generate({
-          messages: growthPrompt.messages,
-          responseSchema: growthPrompt.responseSchema,
-          schemaName: "content_candidate_comment_growth",
-          model: input.config.model.model,
-          seed: seed + 2,
-          temperature: input.config.model.temperature,
-          maxOutputTokens: input.config.model.maxOutputTokens,
-          metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_comment_growth", stage: 2.2 },
-        });
-        const grown = parseStagedCommentCopy(growthResponse.text);
-        const grownById = new Map(grown.threads.map((thread) => [thread.id, thread]));
-        if (normalizedRoots.threads.some((thread) => !grownById.has(thread.id))) {
-          throw new Error("Comment growth output omitted one or more root thread IDs.");
+      if (shouldGrowComments) {
+        try {
+          const growthPrompt = buildStagedCommentGrowthPrompt(promptInput, core, normalizedRoots);
+          const growthResponse = await this.provider.generate({
+            messages: growthPrompt.messages,
+            responseSchema: growthPrompt.responseSchema,
+            schemaName: "content_candidate_comment_growth",
+            model: input.config.model.model,
+            seed: seed + 2,
+            temperature: input.config.model.temperature,
+            maxOutputTokens: input.config.model.maxOutputTokens,
+            metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_comment_growth", stage: 2.2 },
+          });
+          const grown = parseStagedCommentCopy(growthResponse.text);
+          const grownById = new Map(grown.threads.map((thread) => [thread.id, thread]));
+          if (normalizedRoots.threads.some((thread) => !grownById.has(thread.id))) {
+            throw new Error("Comment growth output omitted one or more root thread IDs.");
+          }
+          comments = {
+            disclaimer: normalizedRoots.disclaimer,
+            threads: normalizedRoots.threads.map((root) => ({
+              ...root,
+              followUps: grownById.get(root.id)?.followUps ?? [],
+            })),
+          };
+        } catch (error) {
+          stageIssues.push({
+            code: "model_comment_growth_failed",
+            severity: "warning",
+            channel: "Cref",
+            message: `根评论已保留，但自然接龙阶段失败：${error instanceof Error ? error.message : String(error)}`,
+            repairable: false,
+          });
         }
-        comments = {
-          disclaimer: normalizedRoots.disclaimer,
-          threads: normalizedRoots.threads.map((root) => ({
-            ...root,
-            followUps: grownById.get(root.id)?.followUps ?? [],
-          })),
-        };
-      } catch (error) {
-        stageIssues.push({
-          code: "model_comment_growth_failed",
-          severity: "warning",
-          channel: "Cref",
-          message: `根评论已保留，但自然接龙阶段失败：${error instanceof Error ? error.message : String(error)}`,
-          repairable: false,
-        });
       }
       const maxVisibleCommentLines = orchestrationPlan.personaScenePlan?.surfaceTargets.visibleCommentLines[1]
         ?? comments.threads.length * 2 + input.config.content.followUpDepth * 2;

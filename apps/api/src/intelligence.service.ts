@@ -516,6 +516,13 @@ export class IntelligenceService implements OnModuleInit {
         ).get(strategyId, projectId) as Record<string, unknown>)
         : undefined,
     };
+    // 组件 B · M2（需求 3.8 命中即拒绝不持久化 / 需求 3.9 未知度量不豁免硬门禁）——保留边界：
+    // 以上全部为结构轴硬门禁，且均在此唯一审批写入之前执行：缺口引用（≥1）、blocked / 非 eligible
+    // 资格（assertOpportunitySelectable → assertOpportunityReviewFields）、被引用缺口存在且已独立审批、
+    // 表达策略已审批、项目分析已审批、七个蓝图模块全审批（Blueprint_Completeness）。任一未通过即
+    // 抛出 BadRequestException 终止——拒绝早于持久化，绝不写入 status='approved'，错误信息指明所命中门禁。
+    // 这些门禁只读取结构字段，从不读取任何性能度量；故含未知度量（null / undefined）的选题同样必须
+    // 逐一通过全部门禁，不因未知度量获得任何豁免。仅在全部结构门禁通过后，才执行此唯一的选题审批写入。
     this.database.prepare(
       `UPDATE topic_opportunities SET status='approved', data_json=?, approved_by=?, approved_at=?, updated_at=? WHERE id=?`,
     ).run(
@@ -783,33 +790,50 @@ export class IntelligenceService implements OnModuleInit {
     }
     const task = this.createTask(projectId, 'project', null, source.fingerprint, principal);
     try {
+      // Stage 1/3: project creative blueprint.
       const blueprintPayload = await this.analyzeWithCurrentModel(
         project, principal, projectBlueprintAnalysisPrompt(source.sourceJson), [], task.id,
       );
-      const planningPayload = await this.analyzeWithCurrentModel(
-        project, principal, projectPlanningResourcesPrompt(source.sourceJson), [], task.id,
-      );
-      const planningGaps = recordArray(planningPayload.informationGaps);
-      const opportunityPayload = await this.analyzeWithCurrentModel(
-        project,
-        principal,
-        projectOpportunityAnalysisPrompt(source.sourceJson, planningGaps),
-        [],
-        task.id,
-      );
+      // Extract stage 1 structured output so stage 2 can build on it (data-flow chaining, 需求 6.2).
       const intelligence = isRecord(blueprintPayload.intelligence) ? blueprintPayload.intelligence : blueprintPayload;
       const blueprintModules = isRecord(blueprintPayload.blueprintModules) ? blueprintPayload.blueprintModules : {};
+      // Fail-fast (需求 6.6): validate blueprint completeness right after stage 1 and BEFORE stage 2 begins.
+      // A missing module terminates the analysis so stage 2 never runs on an empty/incomplete blueprint.
       const missingBlueprintModules = PROJECT_BLUEPRINT_MODULE_KEYS.filter((key) => !isRecord(blueprintModules[key]));
       if (missingBlueprintModules.length) {
         throw new AnalysisGatewayError(
           `The analysis model omitted required project blueprint modules: ${missingBlueprintModules.join(', ')}.`,
         );
       }
-      const gaps = planningGaps;
+      // Stage 2/3: planning resources, grounded on the stage 1 blueprint.
+      const planningPayload = await this.analyzeWithCurrentModel(
+        project, principal, projectPlanningResourcesPrompt(source.sourceJson, { intelligence, blueprintModules }), [], task.id,
+      );
+      const planningGaps = recordArray(planningPayload.informationGaps);
       const strategies = recordArray(planningPayload.expressionStrategies);
+      // Fail-fast (需求 6.6): planning resources (informationGaps) are stage 3's required input.
+      // If empty, terminate before stage 3 rather than feeding an empty gap catalog forward.
+      if (!planningGaps.length) {
+        throw new AnalysisGatewayError(
+          'The analysis model produced empty planning resources: informationGaps 为空; cannot proceed to the topic opportunity stage.',
+        );
+      }
+      // Stage 3/3: topic opportunities, grounded on the stage 2 gap catalog + expression strategies (需求 6.3).
+      const opportunityPayload = await this.analyzeWithCurrentModel(
+        project,
+        principal,
+        projectOpportunityAnalysisPrompt(source.sourceJson, planningGaps, strategies),
+        [],
+        task.id,
+      );
+      const gaps = planningGaps;
       const opportunities = recordArray(opportunityPayload.topicOpportunities);
       const resultId = randomUUID();
       const now = nowIso();
+      // 审批检查点/schema 保留（需求 6.4/6.5）：三阶段串联（6.1）与 fail-fast（6.2）仅改变各阶段的提示输入上下文，
+      // 不改变落库与审批。各阶段产物（intelligence / blueprintModules 七键 / gap / strategy / opportunity）
+      // 仍以 status='draft' 独立落库，各自经 approve* 独立审批（无隐式级联）；下游依赖的输出 schema 不变；
+      // 各阶段的 retryAnalysis 重试与 analyzeProject 级 cachedTask 缓存均保持不变。
       this.database.transaction(() => {
         const version = this.nextVersion('project_intelligence', projectId);
         this.database.prepare(
@@ -969,6 +993,9 @@ export class IntelligenceService implements OnModuleInit {
       const opportunity = this.row('topic_opportunities', projectId, opportunityId);
       if (opportunity.status !== 'approved') throw new BadRequestException('The selected topic opportunity must be approved before generation.');
       const normalizedOpportunity = normalizeOpportunity(opportunity);
+      // 组件 B · M2（需求 2.5 / 2.6 / 2.7）：生成准备只走结构轴门禁——资格状态（blocked / 非 eligible）
+      // 与依赖新鲜度。未知度量属预测表现，不在此阻断；normalizeOpportunity 原样保留 null（未知），
+      // 生成准备继续执行并把未知度量原样透传给规划引擎（不补零 / 中位值 / 默认值）。
       assertOpportunityReviewFields(normalizedOpportunity);
       this.assertOpportunityDependenciesCurrent(projectId, opportunity, normalizedOpportunity);
       selectedOpportunityRow = opportunity;
@@ -1625,6 +1652,9 @@ export class IntelligenceService implements OnModuleInit {
     if (typeof requested !== 'string' || !APPROVAL_STATUSES.has(requested) || requested === 'stale') {
       throw new BadRequestException('status must be draft, approved or rejected.');
     }
+    // 组件 B · M2（需求 2.3）：assertResourceMetricsReady 现为 no-op（度量完备性不再作硬门禁），
+    // 故信息缺口 / 图片观察即使含未知度量也不再因此被阻断审批；未知度量原样持久化。
+    // 保留此调用点以维持结构不变，真正的硬门禁不在此函数内（见 assertResourceMetricsReady 注释）。
     if (requested === 'approved') assertResourceMetricsReady(table, this.row(table, projectId, id));
     const now = nowIso();
     this.database.prepare(
@@ -2020,6 +2050,82 @@ function projectAnalysisSourcePrefix(sourceJson: string): string {
   ].join('\n\n');
 }
 
+// 阶段串联（需求 6.2）：阶段 1 蓝图作为阶段 2 输入上下文的载体。仅作为提示注入用途，不改变阶段输出 schema。
+interface BlueprintStageContext {
+  intelligence: Record<string, unknown>;
+  blueprintModules: Record<string, unknown>;
+}
+
+// 从一个可能为字符串或对象的列表中提取有界的字符串摘要，供阶段串联提示注入使用。
+function summarizeList(value: unknown, max: number, limit: number): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const item of value) {
+    if (out.length >= limit) break;
+    if (typeof item === 'string') {
+      const text = item.trim().slice(0, max);
+      if (text) out.push(text);
+    } else if (isRecord(item)) {
+      const text = textFrom(item.label ?? item.title ?? item.name ?? item.id ?? item.task ?? item.statement, max);
+      if (text) out.push(text);
+    }
+  }
+  return out;
+}
+
+// 阶段串联（需求 6.2）：把阶段 1 结构化蓝图（intelligence 摘要 + 七个 blueprintModules 的结构化摘要）
+// 收敛为有界摘要，作为规划资源阶段（阶段 2）的输入上下文。仅用于提示注入，不改变任何阶段的输出 schema。
+function summarizeStage1Blueprint(context: BlueprintStageContext): Record<string, unknown> {
+  const { intelligence, blueprintModules } = context;
+  const moduleOf = (key: string): Record<string, unknown> => {
+    const value = blueprintModules[key];
+    return isRecord(value) ? value : {};
+  };
+  const domainModel = moduleOf('domain_model');
+  const audienceModel = moduleOf('audience_model');
+  const scenarioModel = moduleOf('scenario_model');
+  const claimPolicy = moduleOf('claim_policy');
+  return {
+    intelligence: {
+      industry: textFrom(intelligence.industry ?? domainModel.industry, 200),
+      domain: textFrom(intelligence.domain ?? domainModel.domain, 200),
+      projectSummary: textFrom(intelligence.projectSummary, 1_000),
+      differentiators: summarizeList(intelligence.differentiators, 300, 20),
+      hardBoundaries: summarizeList(intelligence.hardBoundaries, 300, 20),
+      prohibitedClaims: summarizeList(intelligence.prohibitedClaims, 300, 20),
+      dynamicUnknowns: summarizeList(intelligence.dynamicUnknowns, 300, 20),
+    },
+    domainModel: {
+      projectNoun: textFrom(domainModel.projectNoun, 200),
+      decisionTasks: summarizeList(domainModel.decisionTasks, 200, 30),
+      concepts: summarizeList(domainModel.concepts, 200, 30),
+      objects: summarizeList(domainModel.objects, 200, 30),
+      actions: summarizeList(domainModel.actions, 200, 30),
+    },
+    audienceStates: recordArray(audienceModel.states).slice(0, 20).map((state) => ({
+      id: textFrom(state.id, 200),
+      label: textFrom(state.label, 200),
+      stages: uniqueStrings(state.stages),
+      goals: summarizeList(state.goals, 200, 10),
+      hesitationReasons: summarizeList(state.hesitationReasons, 200, 10),
+    })),
+    scenarioFamilies: recordArray(scenarioModel.families).slice(0, 20).map((family) => ({
+      id: textFrom(family.id, 200),
+      label: textFrom(family.label, 200),
+      prototype: textFrom(family.prototype, 100),
+    })),
+    claimPolicy: {
+      prohibitedClaims: summarizeList(claimPolicy.prohibitedClaims, 300, 30),
+      dynamicInformation: summarizeList(claimPolicy.dynamicInformation, 300, 30),
+      rules: recordArray(claimPolicy.rules).slice(0, 20).map((rule) => ({
+        label: textFrom(rule.label ?? rule.id, 200),
+        claimType: textFrom(rule.claimType, 100),
+        handling: textFrom(rule.handling, 50),
+      })),
+    },
+  };
+}
+
 function projectBlueprintAnalysisPrompt(sourceJson: string): string {
   return [
     projectAnalysisSourcePrefix(sourceJson),
@@ -2038,19 +2144,31 @@ function projectBlueprintAnalysisPrompt(sourceJson: string): string {
   ].join('\n\n');
 }
 
-function projectPlanningResourcesPrompt(sourceJson: string): string {
-  return [
+function projectPlanningResourcesPrompt(sourceJson: string, blueprint?: BlueprintStageContext): string {
+  const sections = [
     projectAnalysisSourcePrefix(sourceJson),
     'PROJECT_ANALYSIS_STAGE: 2/3 INFORMATION GAPS AND EXPRESSION STRATEGIES. Return only one complete valid JSON object with informationGaps and expressionStrategies. Do not return blueprintModules, intelligence or topicOpportunities.',
+  ];
+  if (blueprint) {
+    // 阶段串联（需求 6.2）：把阶段 1 已产出的结构化蓝图作为规划资源阶段的输入上下文。
+    sections.push(`APPROVED_STAGE_1_BLUEPRINT=${JSON.stringify(summarizeStage1Blueprint(blueprint))}`);
+    sections.push('Build every information gap and expression strategy on the stage 1 blueprint above: reuse its decision tasks, audience states, domain concepts and scenario families, and stay within its claim policy, hard boundaries and prohibited claims. Do not contradict or re-derive the blueprint from scratch.');
+  }
+  sections.push(
     'Independently enumerate real decision tasks, recurring questions and information gaps in this domain; do not limit discovery to what the knowledge files explicitly answer. Project answers and boundaries must still use only supplied evidence.',
     'informationGaps item={"key":"stable_unique_key","title":"","description":"","priority":50,"label":"","question":"","category":"decision","audienceStages":["collecting"],"importance":0.5,"decisionLeverage":0.5,"proofability":0.3,"answer":"","framework":"","boundary":"","evidenceIds":[],"required":false,"preferredChannels":["N.body","Cref"],"sourceStatus":"supplied_fact|inference|hypothesis|unknown"}.',
     'importance, decisionLeverage and proofability are MANDATORY review-priority heuristics: emit a 0..1 number for every gap and NEVER null. They are uncalibrated, non-causal ordering aids for human review, not facts, predictions or population measurements. When evidence is weak still give a conservative estimate (e.g. proofability <= 0.3 when no verifiable source supports an answer) and record the weakness by setting sourceStatus to inference or hypothesis. Do not lower the estimate to null; null blocks human approval.',
     'expressionStrategies item={"name":"","description":"","label":"","prototype":"narrow_request|live_moment|expectation_reversal|process_log|outcome_observation|retrospective_update|relationship_moment|option_comparison","openingMode":"","narrativeMode":"","bodyRole":"","imageRole":"","commentMode":"","voice":"","sequence":[],"targetChannels":["H","N.imageBrief","N.title","N.body","Cref"]}.',
     'Produce 12 to 18 diverse editable information gaps and exactly 8 materially different expression strategies. Keep unanswered gaps visible; do not fabricate project answers. Every gap key must be unique and stable within this response.',
-  ].join('\n\n');
+  );
+  return sections.join('\n\n');
 }
 
-function projectOpportunityAnalysisPrompt(sourceJson: string, gaps: Record<string, unknown>[]): string {
+function projectOpportunityAnalysisPrompt(
+  sourceJson: string,
+  gaps: Record<string, unknown>[],
+  strategies: Record<string, unknown>[] = [],
+): string {
   const gapCatalog = gaps.map((gap) => ({
     key: textFrom(gap.key ?? gap.id, 500),
     title: textFrom(gap.title ?? gap.label, 500),
@@ -2058,16 +2176,30 @@ function projectOpportunityAnalysisPrompt(sourceJson: string, gaps: Record<strin
     audienceStages: uniqueStrings(gap.audienceStages),
     proofability: gap.proofability ?? null,
   }));
-  return [
+  // 阶段串联（需求 6.3）：把阶段 2 的表达策略摘要作为选题阶段的输入上下文（gapCatalog 已存在，保留）。
+  const strategyCatalog = strategies.slice(0, 20).map((strategy) => ({
+    name: textFrom(strategy.name ?? strategy.label, 200),
+    prototype: textFrom(strategy.prototype, 100),
+    description: textFrom(strategy.description, 500),
+    targetChannels: uniqueStrings(strategy.targetChannels),
+  }));
+  const sections = [
     projectAnalysisSourcePrefix(sourceJson),
     'PROJECT_ANALYSIS_STAGE: 3/3 TOPIC OPPORTUNITIES. Return only one complete valid JSON object with topicOpportunities. Do not repeat blueprintModules, intelligence, informationGaps or expressionStrategies.',
     `APPROVED_STAGE_2_GAP_CATALOG=${JSON.stringify(gapCatalog)}`,
+  ];
+  if (strategyCatalog.length) {
+    sections.push(`APPROVED_STAGE_2_EXPRESSION_STRATEGIES=${JSON.stringify(strategyCatalog)}`);
+    sections.push('Build topic opportunities on the stage 2 expression strategies above: each opportunity should be expressible through at least one listed strategy prototype and stay consistent with its target channels. Do not invent strategies outside this catalog.');
+  }
+  sections.push(
     'Each topic opportunity must reference one or more exact catalog keys through gapKeys. Do not copy one generic gap set to every topic.',
     'topic opportunity item={"title":"","topic":"","angle":"","rationale":"","gapKeys":["stable_gap_key"],"audienceStage":"discovering|collecting|comparing|hesitating|ready","entry":"search|recommendation|profile|return_visit","relevance":0.5,"importance":0.5,"proofability":0.3,"novelty":0.5,"decisionLeverage":0.5,"cognitiveCost":0.5,"risk":0.3,"evidenceIds":[],"boundaries":[],"tags":[],"imageAssetIds":[],"status":"eligible|blocked|unknown","sourceStatus":"supplied_fact|inference|hypothesis|unknown"}.',
     'For every topic opportunity assess relevance, importance, proofability, novelty, decisionLeverage, cognitiveCost and risk separately. All seven are MANDATORY: emit a 0..1 number for each and NEVER null. They are uncalibrated, non-causal review-ordering heuristics, not observations or population measurements. When support is weak still give a conservative estimate (e.g. proofability <= 0.3 without a verifiable source) and record the weakness through sourceStatus (inference or hypothesis). Set status="blocked" only for genuinely unsafe or prohibited topics; do not use null to signal uncertainty.',
     'Do not emit score, rank, finalScore, weights, causal claims or F28 labels: the server-owned OpportunityRankHeuristicV1 is the only ranking implementation. These values are model heuristics, not observations or calibrated population measurements.',
     'Populate imageAssetIds only with assetId values present in approvedImageObservations and only when visibly relevant; otherwise use []. Produce 12 to 18 diverse opportunities. Keep unsafe or unprovable opportunities visible as blocked/unknown.',
-  ].join('\n\n');
+  );
+  return sections.join('\n\n');
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -2207,39 +2339,51 @@ function mergeOpportunityResourceData(current: unknown, body: Record<string, unk
   };
 }
 
+// 组件 B · M2（B5：既有 0.5/0.3 历史数据处理策略；需求 2.2 / 设计 组件B(B5)）
+//
+// 本函数是 gap / opportunity / image 三类资源度量在读写两端的统一规范化入口
+// （读取侧 normalizeGap / normalizeOpportunity / normalizeImageAnalysis、
+// 写入侧 canonicalOpportunityData / updateAnalysis 均经此）。
+//
+// 策略——读取即按已知数值解释，不做破坏性迁移：对已持久化的合法数值（含历史上由前端
+// 默认注入写入的 0.5 / 0.3）一律【原样返回】（仅做越界钳制与 >1 的单位换算），既不清零、
+// 也不改写、更不迁移；缺失 / 非数值 / 越界折叠为 null（未知度量）。
+//
+// 为何不做批量清洗：数据层无法区分“历史默认注入的 0.5 / 0.3”与“用户真实录入的
+// 0.5 / 0.3”——二者在存储中完全同形。任何批量清零 / 重置都会误伤真实录入、制造新的失真，
+// 与“不再制造虚假确定性”的初衷相悖。因此【不提供】数据迁移脚本或批量清零逻辑；仅从此刻起
+// 改变写入语义——前端留空不再注入默认值，缺键经本函数折叠为 null（未知）。既有记录保持原值。
 function optionalRatio(value: unknown): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
   const normalized = value > 1 ? value / 100 : value;
   return Math.max(0, Math.min(1, normalized));
 }
 
-function assertResourceMetricsReady(table: string, row: Record<string, unknown>): void {
-  if (table === 'information_gaps') {
-    const data = parseJson<Record<string, unknown>>(row.data_json, {});
-    const required = ['importance', 'decisionLeverage', 'proofability'] as const;
-    const missing = required.filter((field) => optionalRatio(data[field]) === null);
-    if (missing.length) {
-      throw new BadRequestException(
-        `Information gap cannot be approved or ranked with unknown metrics: ${missing.join(', ')}. Review these values first.`,
-      );
-    }
-  }
-  if (table === 'image_analysis_versions') {
-    const data = parseJson<Record<string, unknown>>(row.observation_json, {});
-    const quality = isRecord(data.quality) ? data.quality : {};
-    const required = ['clarity', 'relevance', 'textLegibility'] as const;
-    const missing = required.filter((field) => optionalRatio(quality[field]) === null);
-    if (missing.length) {
-      throw new BadRequestException(
-        `Image analysis cannot be approved or ranked with unknown quality metrics: ${missing.join(', ')}. Review these values first.`,
-      );
-    }
-  }
+// 组件 B · M2（需求 2.1 / 2.2 / 2.3）：度量完备性不再作为硬门禁。
+//
+// 过去此函数强制 information_gaps 的 importance/decisionLeverage/proofability 与
+// image_analysis_versions 的 clarity/relevance/textLegibility 必须为已知数值，
+// 任一为 null 即抛错阻断审批 / 排序 / 生成——这与系统对外主张的“认知诚实”矛盾：
+// 它强迫用户为未知的性能度量编造数值才能通过门禁。
+//
+// 现移除该“度量完备性”校验：未知度量（optionalRatio 返回 null）一律放行。
+// 保留本函数与其既有调用点（approveResource / selectOpportunity / prepareGeneration /
+// 依赖新鲜度校验）不变，使这些路径自动放行未知度量，而无需改动调用方。
+//
+// 仅移除“强制编造数值度量”这一类门禁。真正的硬门禁——禁止声明、证据落地、
+// 蓝图完整性、缺口引用、依赖新鲜度、blocked 资格——均不在本函数内，保持不动。
+function assertResourceMetricsReady(_table: string, _row: Record<string, unknown>): void {
+  // no-op：未知度量（null）不再阻断审批 / 排序 / 生成（见上）。
 }
 
+// 组件 A · M10：解开预测表现与结构有效性的耦合。
+// 结构有效性轴（eligibility）取用户/分析显式断言的资格状态，不再被度量缺失改写为 unknown；
+// 预测表现轴（metricStatus / unknownMetrics）作为独立字段描述度量完整性，仅供参考。
+// 两轴互不推导：度量未知不改变 eligibility，eligibility 也不改变度量取值。
 function opportunityMetricReview(data: Record<string, unknown>): {
   metrics: Record<(typeof OPPORTUNITY_METRIC_FIELDS)[number], number | null>;
-  status: 'eligible' | 'blocked' | 'unknown';
+  eligibility: 'eligible' | 'blocked' | 'unknown';
+  metricStatus: 'complete' | 'unknown';
   unknownMetrics: string[];
 } {
   const metrics = Object.fromEntries(
@@ -2251,7 +2395,8 @@ function opportunityMetricReview(data: Record<string, unknown>): {
     : 'unknown';
   return {
     metrics,
-    status: unknownMetrics.length ? 'unknown' : requestedStatus,
+    eligibility: requestedStatus,
+    metricStatus: unknownMetrics.length ? 'unknown' : 'complete',
     unknownMetrics,
   };
 }
@@ -2329,23 +2474,18 @@ function canonicalOpportunityInputSources(
       asserted ? assertion?.sourceRef : undefined,
     );
   };
-  const status = review.unknownMetrics.length
-    ? opportunityProvenance(
-      undefined,
-      'system_heuristic',
-      'api:opportunity_review_gate',
-      'Eligibility was forced to unknown because one or more required metrics are unknown.',
-    )
-    : fieldSource('status');
+  // 结构轴：资格状态 provenance 取用户/分析显式断言（或历史未标注 legacy_unspecified），
+  // 不再因预测轴的未知度量被改写为 system_heuristic 的"资格被迫 unknown"。这样度量取值的变更
+  // 不再改动 status provenance，与两轴分列一致（需求 1.2）。
   return {
     metrics,
-    status,
+    status: fieldSource('status'),
     topic: fieldSource('topic'),
     gapIds: fieldSource('gapIds'),
   };
 }
 
-function canonicalOpportunityData(
+export function canonicalOpportunityData(
   data: Record<string, unknown>,
   assertion?: OpportunityInputAssertion,
 ): Record<string, unknown> {
@@ -2353,11 +2493,14 @@ function canonicalOpportunityData(
   return {
     ...data,
     ...review.metrics,
-    status: review.status,
-    metricStatus: review.unknownMetrics.length ? 'unknown' : 'complete',
+    // 结构轴：资格状态取用户/分析断言，不被预测轴（未知度量）改写。
+    status: review.eligibility,
+    // 预测轴：度量完整性描述，与资格状态相互独立。
+    metricStatus: review.metricStatus,
     unknownMetrics: review.unknownMetrics,
-    reviewRequired: review.status === 'unknown',
-    score: review.status === 'eligible' && typeof data.score === 'number' && Number.isFinite(data.score)
+    reviewRequired: review.metricStatus === 'unknown',
+    score: review.eligibility === 'eligible' && review.metricStatus === 'complete'
+      && typeof data.score === 'number' && Number.isFinite(data.score)
       ? ratio(data.score, 0)
       : null,
     rankInputSources: canonicalOpportunityInputSources(data, review, assertion),
@@ -2376,13 +2519,11 @@ function opportunityRankAudit(ranked: RankedTopicOpportunity): Record<string, un
   return Object.fromEntries(Object.entries(ranked).filter(([key]) => key !== 'opportunity'));
 }
 
-function assertOpportunityReviewFields(opportunity: Record<string, unknown>): void {
-  const unknownMetrics = uniqueStrings(opportunity.unknownMetrics);
-  if (unknownMetrics.length) {
-    throw new BadRequestException(
-      `Topic opportunity requires review before approval. Fill the missing metrics: ${unknownMetrics.join(', ')}.`,
-    );
-  }
+// 导出仅为可见性（便于 Property 4 属性测试直接驱动真实门禁）；逻辑零改动。
+export function assertOpportunityReviewFields(opportunity: Record<string, unknown>): void {
+  // 结构轴硬门禁（保留）：blocked 或非 eligible 的资格状态阻断审批。
+  // 预测轴的未知度量（unknownMetrics）不再阻断选题审批——未知度量属预测表现，
+  // 不参与结构有效性判定，不得作为门禁（需求 2.4；设计 组件B(B2)）。
   if (opportunity.status === 'blocked') {
     throw new BadRequestException('The topic opportunity is blocked and cannot be approved.');
   }
@@ -2393,22 +2534,29 @@ function assertOpportunityReviewFields(opportunity: Record<string, unknown>): vo
   }
 }
 
-function assertOpportunitySelectable(
+// 组件 B · M2（需求 2.5 / 2.7；设计 组件B(B2) 第4行）：选择可选择性仅由结构有效性决定。
+//
+// 结构轴硬门禁（保留）：blocked / 非 eligible 的资格状态阻断选择（assertOpportunityReviewFields）。
+//
+// 预测轴不再阻断可选择性：由未知度量或不可溯源触发的 review_required 属预测表现，仅作提示，
+// 不再作为门禁——含未知度量的 eligible 选题（引用缺口、非 blocked）应可被选中（需求 2.5 / 2.7）。
+// 因此移除既有的 `reviewRequired / effectiveEligibility==='review_required'` 阻断分支，
+// 以及"非 eligible 即拒绝"这一会连带拦下 review_required 的分支。
+//
+// 仅当排序审计因结构原因判定为 ineligible 时才阻断。task 5.2 后，planning.ts 的
+// evaluateOpportunity 仅在 structural-only hardReasons（status=blocked / 空 topic / 空 gapIds）
+// 命中时产生 ineligible，故此处 ineligible 恒为结构原因。ranked 恒由同一批选题行派生而必然存在，
+// 缺失时（防御性）不作阻断，交由 selectOpportunity 的结构门禁（缺口引用/审批、依赖新鲜度、
+// 蓝图完整性）与 assertOpportunityReviewFields 兜底。
+// 导出仅为可见性（便于 Property 4 属性测试直接驱动真实门禁）；逻辑零改动。
+export function assertOpportunitySelectable(
   opportunity: Record<string, unknown>,
   ranked?: RankedTopicOpportunity,
 ): void {
   assertOpportunityReviewFields(opportunity);
-  if (!ranked) {
-    throw new BadRequestException('The opportunity ranking audit could not be produced; review is required before approval.');
-  }
-  if (ranked.reviewRequired || ranked.effectiveEligibility === 'review_required') {
+  if (ranked?.effectiveEligibility === 'ineligible') {
     throw new BadRequestException(
-      `Topic opportunity requires review before approval: ${ranked.reviewReasons.join('; ') || 'ranking inputs are not traceable'}.`,
-    );
-  }
-  if (ranked.effectiveEligibility !== 'eligible') {
-    throw new BadRequestException(
-      `Topic opportunity is not eligible under the current planning policy: ${ranked.reasons.join('; ') || ranked.effectiveEligibility}.`,
+      `Topic opportunity is not selectable due to a structural constraint: ${ranked.reasons.join('; ') || ranked.effectiveEligibility}.`,
     );
   }
 }
@@ -2432,7 +2580,7 @@ function normalizeProjectIntelligence(projectId: string, raw: unknown): Record<s
   };
 }
 
-function normalizeGap(row: Record<string, unknown>): Record<string, unknown> {
+export function normalizeGap(row: Record<string, unknown>): Record<string, unknown> {
   const data = parseJson<Record<string, unknown>>(row.data_json, {});
   const label = textFrom(data.label ?? row.title, 300) || '未命名信息缺口';
   const importance = optionalRatio(data.importance);
@@ -2500,7 +2648,7 @@ function normalizeStrategy(row: Record<string, unknown>): Record<string, unknown
   };
 }
 
-function normalizeOpportunity(row: Record<string, unknown>): Record<string, unknown> {
+export function normalizeOpportunity(row: Record<string, unknown>): Record<string, unknown> {
   const data = parseJson<Record<string, unknown>>(row.data_json, {});
   const canonical = canonicalOpportunityData(data);
   const review = opportunityMetricReview(canonical);
@@ -2518,17 +2666,20 @@ function normalizeOpportunity(row: Record<string, unknown>): Record<string, unkn
     tags: uniqueStrings(data.tags),
     imageAssetIds: uniqueStrings(data.imageAssetIds),
     rankInputSources: canonical.rankInputSources,
-    status: review.status,
-    metricStatus: review.unknownMetrics.length ? 'unknown' : 'complete',
+    // 结构轴：资格状态取用户/分析断言，不被预测轴（未知度量）改写。
+    status: review.eligibility,
+    // 预测轴：度量完整性描述，与资格状态相互独立。
+    metricStatus: review.metricStatus,
     unknownMetrics: review.unknownMetrics,
-    reviewRequired: review.status === 'unknown',
-    score: review.status === 'eligible' && typeof data.score === 'number' && Number.isFinite(data.score)
+    reviewRequired: review.metricStatus === 'unknown',
+    score: review.eligibility === 'eligible' && review.metricStatus === 'complete'
+      && typeof data.score === 'number' && Number.isFinite(data.score)
       ? ratio(data.score, 0)
       : null,
   };
 }
 
-function normalizeImageAnalysis(asset: ImageRow, analysis: Record<string, unknown>): Record<string, unknown> {
+export function normalizeImageAnalysis(asset: ImageRow, analysis: Record<string, unknown>): Record<string, unknown> {
   const data = parseJson<Record<string, unknown>>(analysis.observation_json, {});
   const observations = isRecord(data.observations) ? data.observations : data;
   const quality = isRecord(data.quality) ? data.quality : {};

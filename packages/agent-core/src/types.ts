@@ -434,6 +434,14 @@ export interface ResolvedGenerationConfig {
     commentThreadMin: number;
     commentThreadMax: number;
     followUpDepth: number;
+    /**
+     * Feature switch for the extra multi-turn comment growth pass (stage 2B).
+     * Conservative default: when omitted or false, stage 2B (the additional LLM
+     * growth call) is skipped and the root comments are used directly, which is
+     * still a valid output. Set to true to opt in; growth then additionally
+     * requires followUpDepth > 0 and commentConversationRate > 0.
+     */
+    commentMultiTurnGrowthEnabled?: boolean;
     imageBriefEnabled: boolean;
   };
   formula: {
@@ -784,7 +792,16 @@ export interface PersonaScenePlan {
   sampleBasis: string;
 }
 
-/** Explainable structural proxy; its counts are not a quality or conversion score. */
+/**
+ * Explainable structural proxy; its counts are not a quality or conversion score.
+ *
+ * M7 convergence (design 组件 E · E1/E2, densityProxy row): densityProxy is downgraded to an
+ * OPTIONAL audit field. On the parsed/validated thread (`CommentReferenceThread.densityProxy`)
+ * it is optional — its absence never triggers `comment_density_metadata_incomplete`, and when
+ * present content.ts still audits its self-consistency. The density contract is anchored on
+ * roleCard + primaryGapId, and the real structural constraint remains
+ * `comment_gap_multiplexing_exceeded`.
+ */
 export interface CommentDensityProxy {
   primaryGapCount: 1;
   auxiliaryDimensionCount: number;
@@ -802,14 +819,26 @@ export interface CommentReplyPlan {
   nextQuestion: string;
 }
 
+/**
+ * M7 convergence (discoveryPlan → optional / streamlined form).
+ * Decision record (design 组件 E · E1, discoveryPlan row): the discovery scaffolding
+ * has (c) no traceable evidence, but the safety checks it feeds do carry creative value.
+ * So the structure is downgraded to optional while the safety semantics are kept.
+ *
+ * Only `boundary` (the field the false-closure safety check anchors on) is required.
+ * The remaining discovery scaffolding (cue / inferencePrompt / reveal / selfCheck /
+ * revealTiming / difficulty) is optional, so dialoguePlans may emit a streamlined plan.
+ * When a plan is present, content.ts still enforces the three safety checks
+ * (withholding / false-closure / discovery-as-evidence) at `error` level.
+ */
 export interface CommentDiscoveryPlan {
-  cue: string;
-  inferencePrompt: string;
-  reveal: string;
-  selfCheck: string;
   boundary: string;
-  revealTiming: "same_thread";
-  difficulty: "low" | "moderate";
+  cue?: string;
+  inferencePrompt?: string;
+  reveal?: string;
+  selfCheck?: string;
+  revealTiming?: "same_thread";
+  difficulty?: "low" | "moderate";
 }
 
 export interface CommentScenarioMetadata {
@@ -1194,6 +1223,13 @@ export interface RankedTopicOpportunity {
   reviewRequired: boolean;
   reviewReasons: string[];
   effectiveEligibility: OpportunityRankEffectiveEligibility;
+  /**
+   * Advisory-only hints derived from the uncalibrated policy thresholds
+   * (minProofability/maxRisk). These are ranking/prompt inputs, never gates:
+   * they never affect effectiveEligibility or a candidate's selectability
+   * (req 5.4, design C2).
+   */
+  advisoryNotes?: string[];
   unboundedBaseScore: number | null;
   baseScore: number | null;
   recentPenalty: number | null;
@@ -1374,9 +1410,16 @@ export interface DialogueThreadPlan {
   roleCard: DialogueRoleCard;
   primaryGapId: string;
   auxiliaryGapIds: string[];
+  /**
+   * M7: densityProxy is an optional audit field on the validated thread. The planner still
+   * always emits it (and engine.ts consumes `densityProxy.questionTargetChars`), so it stays
+   * required on this planning contract; content.ts treats a missing densityProxy as
+   * acceptable (optional audit) and never reports comment_density_metadata_incomplete for it.
+   */
   densityProxy: CommentDensityProxy;
   replyPlan: CommentReplyPlan;
-  discoveryPlan: CommentDiscoveryPlan;
+  /** M7: downgraded to optional (streamlined-capable); see CommentDiscoveryPlan. */
+  discoveryPlan?: CommentDiscoveryPlan;
   conversationPlan?: {
     topology: "single_exchange" | "two_turn" | "three_person_branch" | "reaction_then_reply";
     targetFollowUps: 0 | 1 | 2;
