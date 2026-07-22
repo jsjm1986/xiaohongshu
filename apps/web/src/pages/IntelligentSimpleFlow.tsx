@@ -375,7 +375,11 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
 
   const selectedOpportunity = opportunities.find((item) => item.id === selectedOpportunityId);
   const visibleOpportunities = useMemo(
-    () => opportunities.filter((item) => collectionFilter === "all" || (item.collectionStatus ?? "active") === collectionFilter),
+    () => opportunities.filter((item) => {
+      const status = item.collectionStatus ?? "active";
+      if (collectionFilter === "all") return status !== "archived";
+      return status === collectionFilter;
+    }),
     [opportunities, collectionFilter],
   );
   const collectionCounts = useMemo(() => {
