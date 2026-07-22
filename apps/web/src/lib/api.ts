@@ -603,16 +603,21 @@ const strategyPayload = (input: Partial<ExpressionStrategy>) => {
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const isFormData = options.body instanceof FormData;
+  const activeCsrf = decodeURIComponent(cookieValue("ca_csrf")) || csrfToken;
+  if (activeCsrf && activeCsrf !== csrfToken) {
+    csrfToken = activeCsrf;
+    sessionStorage.setItem("content-agent-csrf", activeCsrf);
+  }
   const response = await fetch(path, {
     credentials: "include",
     ...options,
     headers: {
       Accept: "application/json",
       ...(isFormData ? {} : { "Content-Type": "application/json" }),
-      ...(csrfToken &&
+      ...(activeCsrf &&
       options.method &&
       !["GET", "HEAD"].includes(options.method.toUpperCase())
-        ? { "X-CSRF-Token": csrfToken }
+        ? { "X-CSRF-Token": activeCsrf }
         : {}),
       ...options.headers,
     },

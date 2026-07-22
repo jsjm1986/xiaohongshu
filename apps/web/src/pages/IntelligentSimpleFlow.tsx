@@ -375,9 +375,23 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
 
   const selectedOpportunity = opportunities.find((item) => item.id === selectedOpportunityId);
   const visibleOpportunities = useMemo(
-    () => opportunities.filter((item) => collectionFilter === "all" || (item.collectionStatus ?? "active") === collectionFilter),
+    () => opportunities.filter((item) => {
+      const status = item.collectionStatus ?? "active";
+      if (collectionFilter === "all") return status !== "archived";
+      return status === collectionFilter;
+    }),
     [opportunities, collectionFilter],
   );
+  const collectionCounts = useMemo(() => {
+    let collected = 0;
+    let archived = 0;
+    for (const item of opportunities) {
+      const status = item.collectionStatus ?? "active";
+      if (status === "collected") collected += 1;
+      else if (status === "archived") archived += 1;
+    }
+    return { collected, archived };
+  }, [opportunities]);
   const blueprintReady = blueprintModules.length === Object.keys(blueprintModuleMeta).length
     && blueprintModules.every((module) => module.status === "approved");
   const currentProject = projects.find((project) => project.id === projectId);
@@ -451,6 +465,12 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     try {
       const updated = await api.opportunities.setCollection(projectId, item.id, next);
       setOpportunities((current) => current.map((opp) => opp.id === updated.id ? updated : opp));
+      const feedback: Record<"collected" | "archived" | "active", { text: string; kind: "success" | "info" }> = {
+        collected: { text: "已收藏", kind: "success" },
+        archived: { text: "已归档", kind: "success" },
+        active: { text: target === "collected" ? "已取消收藏" : "已取消归档", kind: "info" },
+      };
+      toast.push(feedback[next].text, feedback[next].kind);
     } catch (error) {
       toast.push(error instanceof Error ? error.message : "操作失败", "error");
     }
@@ -778,7 +798,13 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
 
     <section className="opportunity-panel panel">
       <header>
-        <div><span>第 2 步</span><h2>选择一个值得写的信息缺口</h2><p>选题来自行业问题与项目可回答空间的交集，不要求你先写提示词。卡片顺序如有排序，仅采用“机会排序启发式 V1”。</p><p className="opportunity-refresh-note">“换一批”会基于现有蓝图和已确认信息缺口<strong>重新生成一批新选题并追加保留</strong>（约几十秒，消耗一次模型额度）；本批会自动提高随机性并避开已生成过的标题，也可填写方向引导词控制生成重点。<strong>旧选题不会被删除</strong>，可在下方按“未处理 / 已收藏 / 已归档”筛选。</p></div>
+        <div><span>第 2 步</span><h2>选择一个值得写的信息缺口</h2><p>选题来自行业问题与项目可回答空间的交集，不要求你先写提示词。卡片顺序如有排序，仅采用“机会排序启发式 V1”。</p><p className="opportunity-refresh-note">“换一批”会基于现有蓝图和已确认信息缺口<strong>重新生成一批新选题并追加保留</strong>（约几十秒，消耗一次模型额度）；本批会自动提高随机性并避开已生成过的标题，也可填写方向引导词控制生成重点。<strong>旧选题不会被删除</strong>，可在下方按“未处理 / 已收藏 / 已归档”筛选。</p>{(collectionCounts.collected > 0 || collectionCounts.archived > 0) && (
+          <p className="opportunity-collection-summary">
+            {collectionCounts.collected > 0 && <button type="button" onClick={() => setCollectionFilter("collected")}>★ 已收藏 {collectionCounts.collected}</button>}
+            {collectionCounts.collected > 0 && collectionCounts.archived > 0 && <span aria-hidden="true">·</span>}
+            {collectionCounts.archived > 0 && <button type="button" onClick={() => setCollectionFilter("archived")}>已归档 {collectionCounts.archived}</button>}
+          </p>
+        )}</div>
         <div className="panel-actions">
           <Button variant="ghost" onClick={() => { setPoolTab("gaps"); setPoolOpen(true); }} icon={<Layers3 size={15} />}>信息缺口池</Button>
           <Button variant="ghost" onClick={() => { setPoolTab("strategies"); setPoolOpen(true); }} icon={<Sparkles size={15} />}>表达策略池</Button>
@@ -811,7 +837,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
         <div className="opportunity-filter">
           {(["all", "active", "collected", "archived"] as const).map((filter) => (
             <button type="button" key={filter} className={collectionFilter === filter ? "chip chip--active" : "chip"} onClick={() => setCollectionFilter(filter)}>
-              {{ all: "全部", active: "未处理", collected: "已收藏", archived: "已归档" }[filter]}
+              {{ all: "未归档", active: "未处理", collected: "已收藏", archived: "已归档" }[filter]}
             </button>
           ))}
         </div>
@@ -819,15 +845,27 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
       {visibleOpportunities.length ? (
         <div className="opportunity-grid">
           {(showAllOpportunities ? visibleOpportunities : visibleOpportunities.slice(0, 12)).map((item) => { const rankView = resolveOpportunityRankView(item); const collectionStatus = item.collectionStatus ?? "active"; return (
-            <button type="button" key={item.id} className={`opportunity-card ${selectedOpportunityId === item.id ? "selected" : ""}`} onClick={() => { setSelectedOpportunityId(item.id); setSelectedAssetIds(item.suggestedImageAssetIds || []); }}>
+            <button type="button" key={item.id} className={`opportunity-card ${selectedOpportunityId === item.id ? "selected" : ""} ${collectionStatus === "collected" ? "is-collected" : ""} ${collectionStatus === "archived" ? "is-archived" : ""}`} onClick={() => { setSelectedOpportunityId(item.id); setSelectedAssetIds(item.suggestedImageAssetIds || []); }}>
               <div>
                 <Badge tone={item.answerability === "approved" ? "positive" : item.answerability === "verifiable" ? "warning" : "neutral"}>{item.answerability === "approved" ? "有批准答案" : item.answerability === "verifiable" ? "可给核验方法" : "保留未知"}</Badge>
                 <Badge tone={item.status === "approved" ? "positive" : "neutral"}>{item.status === "approved" ? "选题已确认" : "AI 草案"}</Badge>
-                {collectionStatus === "collected" && <Badge tone="positive">已收藏</Badge>}
-                {collectionStatus === "archived" && <Badge>已归档</Badge>}
                 {item.coverageStatus && <Badge>{item.coverageStatus === "new" ? "近期未写" : "近期覆盖"}</Badge>}
               </div>
-              <div className={`opportunity-card__rank ${rankView.sortable ? "is-sortable" : "needs-review"}`}><strong>{rankView.title}</strong><Badge tone={rankView.sortable ? "positive" : "warning"}>{rankView.valueLabel}</Badge>{rankView.unknownMetrics.length > 0 && <small>unknown：{rankView.unknownMetrics.map((metric) => metric).join("、")}</small>}<span className="opportunity-card__edit" role="button" tabIndex={0} title={collectionStatus === "collected" ? "取消收藏" : "收藏"} onClick={(event) => { event.stopPropagation(); void toggleCollection(item, "collected"); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); void toggleCollection(item, "collected"); } }}><Star size={13} className={collectionStatus === "collected" ? "filled" : ""} /> {collectionStatus === "collected" ? "取消收藏" : "收藏"}</span><span className="opportunity-card__edit" role="button" tabIndex={0} title={collectionStatus === "archived" ? "取消归档" : "归档"} onClick={(event) => { event.stopPropagation(); void toggleCollection(item, "archived"); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); void toggleCollection(item, "archived"); } }}><Archive size={13} /> {collectionStatus === "archived" ? "取消归档" : "归档"}</span><span className="opportunity-card__edit" role="button" tabIndex={0} onClick={(event) => { event.stopPropagation(); setEditingOpportunity(item); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); setEditingOpportunity(item); } }}><Pencil size={13} /> 编辑度量</span><span className="opportunity-card__edit" role="button" tabIndex={0} onClick={(event) => { event.stopPropagation(); void deleteOpportunity(item); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); void deleteOpportunity(item); } }}><Trash2 size={13} /> 删除</span></div>
+              <div className={`opportunity-card__rank ${rankView.sortable ? "is-sortable" : "needs-review"}`}>
+                <div className="opportunity-card__rank-info">
+                  <strong>{rankView.title}</strong>
+                  <Badge tone={rankView.sortable ? "positive" : "warning"}>{rankView.valueLabel}</Badge>
+                  {collectionStatus === "collected" && <span className="opportunity-card__state opportunity-card__state--collected"><Star size={11} className="filled" /> 已收藏</span>}
+                  {collectionStatus === "archived" && <span className="opportunity-card__state opportunity-card__state--archived"><Archive size={11} /> 已归档</span>}
+                  {rankView.unknownMetrics.length > 0 && <small>unknown：{rankView.unknownMetrics.map((metric) => metric).join("、")}</small>}
+                </div>
+                <div className="opportunity-card__rank-actions">
+                  <span className="opportunity-card__edit" role="button" tabIndex={0} title={collectionStatus === "collected" ? "取消收藏" : "收藏"} onClick={(event) => { event.stopPropagation(); void toggleCollection(item, "collected"); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); void toggleCollection(item, "collected"); } }}><Star size={13} className={collectionStatus === "collected" ? "filled" : ""} /> {collectionStatus === "collected" ? "取消收藏" : "收藏"}</span>
+                  <span className="opportunity-card__edit" role="button" tabIndex={0} title={collectionStatus === "archived" ? "取消归档" : "归档"} onClick={(event) => { event.stopPropagation(); void toggleCollection(item, "archived"); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); void toggleCollection(item, "archived"); } }}><Archive size={13} /> {collectionStatus === "archived" ? "取消归档" : "归档"}</span>
+                  <span className="opportunity-card__edit" role="button" tabIndex={0} onClick={(event) => { event.stopPropagation(); setEditingOpportunity(item); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); setEditingOpportunity(item); } }}><Pencil size={13} /> 编辑度量</span>
+                  <span className="opportunity-card__edit opportunity-card__edit--danger" role="button" tabIndex={0} onClick={(event) => { event.stopPropagation(); void deleteOpportunity(item); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); void deleteOpportunity(item); } }}><Trash2 size={13} /> 删除</span>
+                </div>
+              </div>
               <h3>{item.title}</h3>
               <p>{item.summary || item.coreQuestion}</p>
               <small><strong>为什么值得写：</strong>{item.whyValuable}</small>
