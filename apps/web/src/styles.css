@@ -29,6 +29,12 @@
   --red-soft: #fff0f0;
   --shadow-sm: 0 1px 2px rgb(30 41 36 / 5%), 0 4px 12px rgb(30 41 36 / 3%);
   --shadow-md: 0 16px 45px rgb(25 38 31 / 10%);
+  --font-2xs: 11px;
+  --font-xs: 12px;
+  --font-sm: 13px;
+  --font-md: 14px;
+  --font-lg: 16px;
+  --font-h1: 29px;
 }
 
 * { box-sizing: border-box; }
