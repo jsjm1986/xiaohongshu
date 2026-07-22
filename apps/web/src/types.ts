@@ -1130,6 +1130,28 @@ export interface TopicOpportunity {
   doctor?: string;
   mustInclude?: string | string[];
   forbidden?: string | string[];
+  collectionStatus?: "active" | "collected" | "archived";
+  batchId?: string | null;
+}
+
+export interface OpportunityBatch {
+  id: string;
+  projectId: string;
+  trigger: string;
+  userGuidance: string;
+  temperature: number | null;
+  opportunityCount: number;
+  liveCount: number;
+  createdAt: string;
+}
+
+export interface PromptTemplate {
+  id: string;
+  projectId: string;
+  label: string;
+  guidance: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface OpportunityRankHeuristicMetadata {

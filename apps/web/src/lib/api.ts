@@ -13,7 +13,9 @@ import type {
   ImageAsset,
   InformationGap,
   KnowledgeFile,
+  OpportunityBatch,
   Project,
+  PromptTemplate,
   ProjectBlueprintModule,
   ProjectIntelligence,
   ResolvedConfigPreview,
@@ -456,6 +458,10 @@ const normalizeOpportunity = (raw: JsonRecord): TopicOpportunity => {
     status: approvalStatus,
     approvalStatus,
     eligibilityStatus,
+    collectionStatus: (["active", "collected", "archived"].includes(String(raw.collectionStatus))
+      ? String(raw.collectionStatus)
+      : "active") as TopicOpportunity["collectionStatus"],
+    batchId: raw.batchId ? String(raw.batchId) : null,
     reviewRequired: raw.reviewRequired === true || ranking.reviewRequired === true || data.reviewRequired === true,
     unknownMetrics: stringList(raw.unknownMetrics || ranking.unknownMetrics || data.unknownMetrics),
     relevance: finiteNumber(raw.relevance ?? data.relevance),
@@ -774,6 +780,11 @@ export const api = {
         body,
       }).then(normalizeKnowledge);
     },
+    create: (projectId: string, filename: string, content: string, category: string, kind: string) =>
+      request<JsonRecord>("/api/knowledge", {
+        method: "POST",
+        body: JSON.stringify({ projectId, filename, content, category, evidenceStatus: kind }),
+      }).then(normalizeKnowledge),
     remove: (id: string) =>
       request<void>(`/api/knowledge/${id}`, { method: "DELETE" }),
     get: async (id: string) => {
@@ -870,15 +881,23 @@ export const api = {
   opportunities: {
     list: async (projectId: string) =>
       normalizeList((await request<JsonRecord[]>(`/api/projects/${encodeURIComponent(projectId)}/topic-opportunities`)).map(normalizeOpportunity)),
-    refresh: async (projectId: string) => {
+    refresh: async (projectId: string, userGuidance?: string) => {
       const result = await request<JsonRecord>(`/api/projects/${encodeURIComponent(projectId)}/topic-opportunities/refresh`, {
         method: "POST",
+        body: JSON.stringify(userGuidance ? { userGuidance } : {}),
       });
       const list = Array.isArray(result.topicOpportunities)
         ? result.topicOpportunities.map((item) => normalizeOpportunity(recordValue(item)))
         : [];
       return normalizeList(list);
     },
+    setCollection: async (projectId: string, id: string, status: "active" | "collected" | "archived") =>
+      normalizeOpportunity(await request<JsonRecord>(`/api/projects/${encodeURIComponent(projectId)}/topic-opportunities/${encodeURIComponent(id)}/collection`, {
+        method: "POST",
+        body: JSON.stringify({ status }),
+      })),
+    listBatches: (projectId: string) =>
+      request<OpportunityBatch[]>(`/api/projects/${encodeURIComponent(projectId)}/topic-opportunity-batches`),
     update: async (projectId: string, id: string, input: Partial<TopicOpportunity>) =>
       normalizeOpportunity(await request<JsonRecord>(`/api/projects/${encodeURIComponent(projectId)}/topic-opportunities/${encodeURIComponent(id)}`, {
         method: "PATCH",
@@ -891,6 +910,19 @@ export const api = {
       })),
     remove: (projectId: string, id: string) =>
       request<void>(`/api/projects/${encodeURIComponent(projectId)}/topic-opportunities/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  },
+  promptTemplates: {
+    list: (projectId: string) =>
+      request<PromptTemplate[]>(`/api/projects/${encodeURIComponent(projectId)}/opportunity-prompt-templates`),
+    create: (projectId: string, label: string, guidance: string) =>
+      request<PromptTemplate>(`/api/projects/${encodeURIComponent(projectId)}/opportunity-prompt-templates`, {
+        method: "POST",
+        body: JSON.stringify({ label, guidance }),
+      }),
+    remove: (projectId: string, templateId: string) =>
+      request<void>(`/api/projects/${encodeURIComponent(projectId)}/opportunity-prompt-templates/${encodeURIComponent(templateId)}`, {
+        method: "DELETE",
+      }),
   },
   imageAssets: {
     list: async (projectId: string) => {

@@ -208,8 +208,10 @@ export class IntelligenceController {
 
   @Post('topic-opportunities/refresh')
   @RequirePermission({ permission: 'project.write', projectParam: 'projectId' })
-  refreshOpportunities(@Req() request: Request, @Param('projectId') projectId: string) {
-    return this.intelligence.refreshTopicOpportunities(projectId, this.principal(request));
+  refreshOpportunities(@Req() request: Request, @Param('projectId') projectId: string, @Body() body: unknown) {
+    const b = requireObject(body ?? {});
+    const userGuidance = typeof b.userGuidance === 'string' ? b.userGuidance : undefined;
+    return this.intelligence.refreshTopicOpportunities(projectId, this.principal(request), { userGuidance });
   }
 
   @Get('topic-opportunities/:id')
@@ -240,6 +242,41 @@ export class IntelligenceController {
   @RequirePermission({ permission: 'project.write', projectParam: 'projectId' })
   removeOpportunity(@Req() request: Request, @Param('projectId') projectId: string, @Param('id') id: string) {
     this.intelligence.removeOpportunity(projectId, id, this.principal(request));
+    return { ok: true };
+  }
+
+  @Post('topic-opportunities/:id/collection')
+  @RequirePermission({ permission: 'project.write', projectParam: 'projectId' })
+  setOpportunityCollection(@Req() request: Request, @Param('projectId') projectId: string, @Param('id') id: string, @Body() body: unknown) {
+    const b = requireObject(body);
+    const status = b.status === 'collected' || b.status === 'archived' || b.status === 'active' ? b.status : undefined;
+    if (!status) throw new BadRequestException('status 必须是 active/collected/archived');
+    return this.intelligence.setOpportunityCollectionStatus(projectId, id, status, this.principal(request));
+  }
+
+  @Get('topic-opportunity-batches')
+  @RequirePermission({ permission: 'project.read', projectParam: 'projectId' })
+  listOpportunityBatches(@Param('projectId') projectId: string) {
+    return this.intelligence.listBatches(projectId);
+  }
+
+  @Get('opportunity-prompt-templates')
+  @RequirePermission({ permission: 'project.read', projectParam: 'projectId' })
+  listPromptTemplates(@Param('projectId') projectId: string) {
+    return this.intelligence.listPromptTemplates(projectId);
+  }
+
+  @Post('opportunity-prompt-templates')
+  @RequirePermission({ permission: 'project.write', projectParam: 'projectId' })
+  createPromptTemplate(@Req() request: Request, @Param('projectId') projectId: string, @Body() body: unknown) {
+    const b = requireObject(body);
+    return this.intelligence.createPromptTemplate(projectId, String(b.label ?? ''), String(b.guidance ?? ''), this.principal(request));
+  }
+
+  @Delete('opportunity-prompt-templates/:templateId')
+  @RequirePermission({ permission: 'project.write', projectParam: 'projectId' })
+  deletePromptTemplate(@Req() request: Request, @Param('projectId') projectId: string, @Param('templateId') templateId: string) {
+    this.intelligence.deletePromptTemplate(projectId, templateId, this.principal(request));
     return { ok: true };
   }
 

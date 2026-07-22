@@ -682,6 +682,44 @@ export class DatabaseService implements OnModuleDestroy {
       `);
     });
     if (version < 8) version = 8;
+
+    if (version < 9) this.transaction(() => {
+      this.db.exec(`
+        ALTER TABLE topic_opportunities ADD COLUMN batch_id TEXT;
+        ALTER TABLE topic_opportunities ADD COLUMN collection_status TEXT NOT NULL DEFAULT 'active';
+        CREATE INDEX IF NOT EXISTS topic_opportunities_batch_idx
+          ON topic_opportunities(project_id, batch_id, deleted_at);
+        CREATE INDEX IF NOT EXISTS topic_opportunities_collection_idx
+          ON topic_opportunities(project_id, collection_status, deleted_at, updated_at DESC);
+        CREATE TABLE opportunity_batches (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          analysis_task_id TEXT,
+          trigger TEXT NOT NULL DEFAULT 'refresh',
+          user_guidance TEXT NOT NULL DEFAULT '',
+          temperature REAL,
+          opportunity_count INTEGER NOT NULL DEFAULT 0,
+          created_by TEXT NOT NULL REFERENCES users(id),
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX opportunity_batches_project_idx
+          ON opportunity_batches(project_id, created_at DESC);
+        CREATE TABLE opportunity_prompt_templates (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          label TEXT NOT NULL,
+          guidance TEXT NOT NULL,
+          created_by TEXT NOT NULL REFERENCES users(id),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          deleted_at TEXT
+        );
+        CREATE INDEX opportunity_prompt_templates_project_idx
+          ON opportunity_prompt_templates(project_id, deleted_at, updated_at DESC);
+        PRAGMA user_version = 9;
+      `);
+    });
+    if (version < 9) version = 9;
   }
 
   onModuleDestroy(): void {

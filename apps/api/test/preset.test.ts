@@ -453,7 +453,7 @@ test('legacy advanced request fields map to bottom-level config and generation s
   assert.ok(JSON.parse(String(row.config_impact_json)).parameterTraces.length > 0);
   assert.equal(
     Number(app.get(DatabaseService).prepare('PRAGMA user_version').get()?.user_version),
-    8,
+    9,
   );
 });
 
@@ -476,7 +476,7 @@ test('a version-2 SQLite database migrates incrementally without a service datab
   legacy.close();
   const migrated = new DatabaseService(resolveOptions({ dataDir: root, databasePath, logger: false }));
   try {
-    assert.equal(Number(migrated.prepare('PRAGMA user_version').get()?.user_version), 8);
+    assert.equal(Number(migrated.prepare('PRAGMA user_version').get()?.user_version), 9);
     const projectColumns = migrated.prepare('PRAGMA table_info(projects)').all() as unknown as Array<{ name: string }>;
     assert.ok(projectColumns.some((column) => column.name === 'style_profile_version'));
     const jobColumns = migrated.prepare('PRAGMA table_info(generation_jobs)').all() as unknown as Array<{ name: string }>;

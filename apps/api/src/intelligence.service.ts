@@ -367,9 +367,90 @@ export class IntelligenceService implements OnModuleInit {
     return this.approveResource('expression_strategies', projectId, id, body, principal, this.mapStrategy.bind(this), 'expression-strategy');
   }
 
-  listOpportunities(projectId: string): Record<string, unknown>[] {
+  listOpportunities(
+    projectId: string,
+    filter: { batchId?: string; collectionStatus?: 'active' | 'collected' | 'archived' } = {},
+  ): Record<string, unknown>[] {
     this.resources.projectRow(projectId);
-    return this.mapOpportunityRows(projectId, this.rows('topic_opportunities', projectId, 'updated_at DESC'));
+    const clauses = ['project_id=?', 'deleted_at IS NULL'];
+    const params: string[] = [projectId];
+    if (filter.batchId) { clauses.push('batch_id=?'); params.push(filter.batchId); }
+    if (filter.collectionStatus) { clauses.push('collection_status=?'); params.push(filter.collectionStatus); }
+    const rows = this.database.prepare(
+      `SELECT * FROM topic_opportunities WHERE ${clauses.join(' AND ')} ORDER BY updated_at DESC`,
+    ).all(...params) as unknown as Record<string, unknown>[];
+    return this.mapOpportunityRows(projectId, rows);
+  }
+
+  listBatches(projectId: string): Record<string, unknown>[] {
+    this.resources.projectRow(projectId);
+    return (this.database.prepare(
+      `SELECT b.*, COUNT(o.id) AS live_count
+       FROM opportunity_batches b
+       LEFT JOIN topic_opportunities o ON o.batch_id=b.id AND o.deleted_at IS NULL
+       WHERE b.project_id=? GROUP BY b.id ORDER BY b.created_at DESC`,
+    ).all(projectId) as unknown as Record<string, unknown>[]).map((row) => ({
+      id: row.id,
+      projectId: row.project_id,
+      trigger: row.trigger,
+      userGuidance: row.user_guidance,
+      temperature: row.temperature,
+      opportunityCount: Number(row.opportunity_count),
+      liveCount: Number(row.live_count),
+      createdAt: row.created_at,
+    }));
+  }
+
+  setOpportunityCollectionStatus(
+    projectId: string,
+    opportunityId: string,
+    status: 'active' | 'collected' | 'archived',
+    principal: SessionPrincipal,
+  ): Record<string, unknown> {
+    const project = this.resources.projectRow(projectId);
+    this.row('topic_opportunities', projectId, opportunityId);
+    this.database.prepare(
+      `UPDATE topic_opportunities SET collection_status=?, updated_at=? WHERE id=?`,
+    ).run(status, nowIso(), opportunityId);
+    this.record(project, principal, 'topic-opportunity.collection', 'topic_opportunity', opportunityId, { projectId, status });
+    return this.mapOpportunity(this.row('topic_opportunities', projectId, opportunityId));
+  }
+
+  listPromptTemplates(projectId: string): Record<string, unknown>[] {
+    this.resources.projectRow(projectId);
+    return (this.database.prepare(
+      `SELECT * FROM opportunity_prompt_templates WHERE project_id=? AND deleted_at IS NULL ORDER BY updated_at DESC`,
+    ).all(projectId) as unknown as Record<string, unknown>[]).map((row) => ({
+      id: row.id,
+      projectId: row.project_id,
+      label: row.label,
+      guidance: row.guidance,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  createPromptTemplate(projectId: string, label: string, guidance: string, principal: SessionPrincipal): Record<string, unknown> {
+    const project = this.resources.projectRow(projectId);
+    const cleanLabel = label.trim().slice(0, 80);
+    const cleanGuidance = guidance.trim().slice(0, 600);
+    if (!cleanLabel || !cleanGuidance) throw new BadRequestException('模板名称和引导词不能为空');
+    const id = randomUUID();
+    const now = nowIso();
+    this.database.prepare(
+      `INSERT INTO opportunity_prompt_templates (id, project_id, label, guidance, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, projectId, cleanLabel, cleanGuidance, principal.userId, now, now);
+    this.record(project, principal, 'prompt-template.create', 'prompt_template', id, { projectId });
+    return this.listPromptTemplates(projectId).find((template) => template.id === id)!;
+  }
+
+  deletePromptTemplate(projectId: string, templateId: string, principal: SessionPrincipal): void {
+    const project = this.resources.projectRow(projectId);
+    this.database.prepare(
+      `UPDATE opportunity_prompt_templates SET deleted_at=? WHERE id=? AND project_id=?`,
+    ).run(nowIso(), templateId, projectId);
+    this.record(project, principal, 'prompt-template.delete', 'prompt_template', templateId, { projectId });
   }
 
   getOpportunity(projectId: string, id: string): Record<string, unknown> {
@@ -881,26 +962,42 @@ export class IntelligenceService implements OnModuleInit {
     }
   }
 
-  async refreshTopicOpportunities(projectId: string, principal: SessionPrincipal): Promise<Record<string, unknown>> {
+  async refreshTopicOpportunities(
+    projectId: string,
+    principal: SessionPrincipal,
+    input: { userGuidance?: string } = {},
+  ): Promise<Record<string, unknown>> {
     const project = this.resources.projectRow(projectId);
     const source = await this.projectAnalysisSource(project);
     const gapRows = this.approvedRows('information_gaps', projectId, 'priority DESC');
     const gaps = gapRows.map(normalizeGap);
     const gapIdMap = new Map<string, string>(gapRows.map((row) => [String(row.id), String(row.id)]));
-    const task = this.createTask(projectId, 'project', null, `${source.fingerprint}:topic-refresh`, principal);
+    const existingTitles = (this.database.prepare(
+      `SELECT title FROM topic_opportunities WHERE project_id=? AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 60`,
+    ).all(projectId) as Array<{ title: string }>).map((row) => row.title);
+    const userGuidance = typeof input.userGuidance === 'string' ? input.userGuidance.trim().slice(0, 600) : '';
+    const batchId = randomUUID();
+    const DIVERSITY_TEMPERATURE = 0.85;
+    const task = this.createTask(projectId, 'project', null, `${source.fingerprint}:topic-refresh:${batchId}`, principal);
     try {
       const opportunityPayload = await this.analyzeWithCurrentModel(
-        project, principal, projectOpportunityAnalysisPrompt(source.sourceJson, gaps), [], task.id,
+        project,
+        principal,
+        projectOpportunityAnalysisPrompt(source.sourceJson, gaps, [], { userGuidance, existingTitles }),
+        [],
+        task.id,
+        DIVERSITY_TEMPERATURE,
       );
       const opportunities = recordArray(opportunityPayload.topicOpportunities);
       const now = nowIso();
       this.database.transaction(() => {
-        const draftRows = this.database.prepare(
-          `SELECT id FROM topic_opportunities WHERE project_id=? AND status='draft' AND deleted_at IS NULL`,
-        ).all(projectId) as unknown as Array<{ id: string }>;
-        for (const draft of draftRows) this.softDelete('topic_opportunities', projectId, String(draft.id));
+        this.database.prepare(
+          `INSERT INTO opportunity_batches
+             (id, project_id, analysis_task_id, trigger, user_guidance, temperature, opportunity_count, created_by, created_at)
+           VALUES (?, ?, ?, 'refresh', ?, ?, ?, ?, ?)`,
+        ).run(batchId, projectId, task.id, userGuidance, DIVERSITY_TEMPERATURE, Math.min(opportunities.length, 100), principal.userId, now);
         for (const opportunity of opportunities.slice(0, 100)) {
-          this.insertAnalyzedOpportunity(projectId, task.id, opportunity, gapIdMap, principal.userId, now);
+          this.insertAnalyzedOpportunity(projectId, task.id, opportunity, gapIdMap, principal.userId, now, batchId);
         }
         this.database.prepare(
           `UPDATE analysis_tasks SET status='completed', error=NULL, completed_at=?, updated_at=? WHERE id=?`,
@@ -908,10 +1005,17 @@ export class IntelligenceService implements OnModuleInit {
       });
       this.record(project, principal, 'topic-opportunity.refresh', 'analysis_task', task.id, {
         projectId,
+        batchId,
         opportunityCount: opportunities.length,
         gapCatalogSize: gaps.length,
+        hasUserGuidance: Boolean(userGuidance),
+        existingTitleCount: existingTitles.length,
       });
-      return { task: this.mapTask(this.taskRow(task.id)), topicOpportunities: this.listOpportunities(projectId) };
+      return {
+        task: this.mapTask(this.taskRow(task.id)),
+        batchId,
+        topicOpportunities: this.listOpportunities(projectId),
+      };
     } catch (error) {
       this.failTask(task.id, error);
       throw error;
@@ -1399,21 +1503,22 @@ export class IntelligenceService implements OnModuleInit {
     prompt: string,
     imageDataUrls: string[],
     taskId: string,
+    temperature = 0.2,
   ): Promise<Record<string, unknown>> {
     const settings = this.settings.provider(String(project.workspace_id), principal.userId);
     if (!settings.apiKey) throw new BadRequestException('Configure a model API key before running analysis.');
     if (settings.mode === 'platform') this.settings.consumePlatformQuota(String(project.workspace_id));
-    const result = this.analysisTail.then(() => this.retryAnalysis(settings, prompt, imageDataUrls, taskId));
+    const result = this.analysisTail.then(() => this.retryAnalysis(settings, prompt, imageDataUrls, taskId, temperature));
     this.analysisTail = result.then(() => undefined, () => undefined);
     return result;
   }
 
-  private async retryAnalysis(settings: ResolvedProviderSettings, prompt: string, images: string[], taskId: string): Promise<Record<string, unknown>> {
+  private async retryAnalysis(settings: ResolvedProviderSettings, prompt: string, images: string[], taskId: string, temperature = 0.2): Promise<Record<string, unknown>> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       this.database.prepare('UPDATE analysis_tasks SET attempt_count=?, updated_at=? WHERE id=?').run(attempt + 1, nowIso(), taskId);
       try {
-        return await this.callAnalysisModel(settings, prompt, images);
+        return await this.callAnalysisModel(settings, prompt, images, temperature);
       } catch (error) {
         lastError = error;
         const status = error instanceof AnalysisGatewayError ? error.status : undefined;
@@ -1424,7 +1529,7 @@ export class IntelligenceService implements OnModuleInit {
     throw lastError;
   }
 
-  private async callAnalysisModel(settings: ResolvedProviderSettings, prompt: string, images: string[]): Promise<Record<string, unknown>> {
+  private async callAnalysisModel(settings: ResolvedProviderSettings, prompt: string, images: string[], temperature = 0.2): Promise<Record<string, unknown>> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 180_000);
     const baseUrl = normalizeOpenAIBaseUrl(settings.baseUrl);
@@ -1437,14 +1542,14 @@ export class IntelligenceService implements OnModuleInit {
           model: settings.model,
           input: [{ role: 'user', content: [{ type: 'input_text', text: prompt }, ...imageParts] }],
           text: { format: { type: 'json_object' } },
-          temperature: 0.2,
+          temperature,
           max_output_tokens: 16_000,
         }
       : {
           model: settings.model,
           messages: [{ role: 'user', content: [{ type: 'text', text: prompt }, ...imageParts] }],
           response_format: { type: 'json_object' },
-          temperature: 0.2,
+          temperature,
           max_tokens: 16_000,
         };
     let response: Response;
@@ -1525,6 +1630,7 @@ export class IntelligenceService implements OnModuleInit {
     gapIdMap: Map<string, string>,
     userId: string,
     now: string,
+    batchId: string | null = null,
   ): void {
     const title = textFrom(item.title, 300);
     if (!title) return;
@@ -1533,7 +1639,7 @@ export class IntelligenceService implements OnModuleInit {
     this.database.prepare(
       `INSERT INTO topic_opportunities
        (id, project_id, title, angle, rationale, status, source_analysis_id, data_json,
-        created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?)`,
+        created_by, created_at, updated_at, batch_id) VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)`,
     ).run(
       randomUUID(),
       projectId,
@@ -1549,6 +1655,7 @@ export class IntelligenceService implements OnModuleInit {
       userId,
       now,
       now,
+      batchId,
     );
   }
 
@@ -1901,6 +2008,8 @@ export class IntelligenceService implements OnModuleInit {
       approvalStatus: row.status,
       evidenceStatus: row.status === 'approved' ? 'approved' : 'unapproved',
       sourceAnalysisId: row.source_analysis_id,
+      collectionStatus: row.collection_status ?? 'active',
+      batchId: row.batch_id ?? null,
       data: storedData,
       approvalRankAudit: isRecord(storedData.approvalRankAudit) ? storedData.approvalRankAudit : undefined,
       createdAt: row.created_at,
@@ -2168,6 +2277,7 @@ function projectOpportunityAnalysisPrompt(
   sourceJson: string,
   gaps: Record<string, unknown>[],
   strategies: Record<string, unknown>[] = [],
+  options: { userGuidance?: string; existingTitles?: string[] } = {},
 ): string {
   const gapCatalog = gaps.map((gap) => ({
     key: textFrom(gap.key ?? gap.id, 500),
@@ -2191,6 +2301,16 @@ function projectOpportunityAnalysisPrompt(
   if (strategyCatalog.length) {
     sections.push(`APPROVED_STAGE_2_EXPRESSION_STRATEGIES=${JSON.stringify(strategyCatalog)}`);
     sections.push('Build topic opportunities on the stage 2 expression strategies above: each opportunity should be expressible through at least one listed strategy prototype and stay consistent with its target channels. Do not invent strategies outside this catalog.');
+  }
+  const existing = (options.existingTitles ?? []).filter(Boolean).slice(0, 60);
+  if (existing.length) {
+    sections.push(`ALREADY_GENERATED_TITLES=${JSON.stringify(existing)}`);
+    sections.push('These titles were already generated for this project. Produce topics that are clearly DIFFERENT in angle, entry point, audience stage or decision task — do not paraphrase, re-order or lightly reword any listed title. Prefer unexplored gaps and scenario families.');
+  }
+  const guidance = (options.userGuidance ?? '').trim().slice(0, 600);
+  if (guidance) {
+    sections.push(`USER_DIRECTION=${JSON.stringify(guidance)}`);
+    sections.push('Treat USER_DIRECTION as a strong steer for topic angle, theme and emphasis. You MAY reach slightly beyond the strict knowledge/gap scope to satisfy it, but project ANSWERS and factual claims still must use only supplied evidence: when the direction outruns the evidence, keep the topic but mark unprovable parts via sourceStatus (inference/hypothesis) and status. Never fabricate project facts.');
   }
   sections.push(
     'Each topic opportunity must reference one or more exact catalog keys through gapKeys. Do not copy one generic gap set to every topic.',
