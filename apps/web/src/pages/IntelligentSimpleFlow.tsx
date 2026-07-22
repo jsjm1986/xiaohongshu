@@ -378,6 +378,16 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     () => opportunities.filter((item) => collectionFilter === "all" || (item.collectionStatus ?? "active") === collectionFilter),
     [opportunities, collectionFilter],
   );
+  const collectionCounts = useMemo(() => {
+    let collected = 0;
+    let archived = 0;
+    for (const item of opportunities) {
+      const status = item.collectionStatus ?? "active";
+      if (status === "collected") collected += 1;
+      else if (status === "archived") archived += 1;
+    }
+    return { collected, archived };
+  }, [opportunities]);
   const blueprintReady = blueprintModules.length === Object.keys(blueprintModuleMeta).length
     && blueprintModules.every((module) => module.status === "approved");
   const currentProject = projects.find((project) => project.id === projectId);
@@ -451,6 +461,12 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     try {
       const updated = await api.opportunities.setCollection(projectId, item.id, next);
       setOpportunities((current) => current.map((opp) => opp.id === updated.id ? updated : opp));
+      const feedback: Record<"collected" | "archived" | "active", { text: string; kind: "success" | "info" }> = {
+        collected: { text: "已收藏", kind: "success" },
+        archived: { text: "已归档", kind: "success" },
+        active: { text: target === "collected" ? "已取消收藏" : "已取消归档", kind: "info" },
+      };
+      toast.push(feedback[next].text, feedback[next].kind);
     } catch (error) {
       toast.push(error instanceof Error ? error.message : "操作失败", "error");
     }
@@ -778,7 +794,13 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
 
     <section className="opportunity-panel panel">
       <header>
-        <div><span>第 2 步</span><h2>选择一个值得写的信息缺口</h2><p>选题来自行业问题与项目可回答空间的交集，不要求你先写提示词。卡片顺序如有排序，仅采用“机会排序启发式 V1”。</p><p className="opportunity-refresh-note">“换一批”会基于现有蓝图和已确认信息缺口<strong>重新生成一批新选题并追加保留</strong>（约几十秒，消耗一次模型额度）；本批会自动提高随机性并避开已生成过的标题，也可填写方向引导词控制生成重点。<strong>旧选题不会被删除</strong>，可在下方按“未处理 / 已收藏 / 已归档”筛选。</p></div>
+        <div><span>第 2 步</span><h2>选择一个值得写的信息缺口</h2><p>选题来自行业问题与项目可回答空间的交集，不要求你先写提示词。卡片顺序如有排序，仅采用“机会排序启发式 V1”。</p><p className="opportunity-refresh-note">“换一批”会基于现有蓝图和已确认信息缺口<strong>重新生成一批新选题并追加保留</strong>（约几十秒，消耗一次模型额度）；本批会自动提高随机性并避开已生成过的标题，也可填写方向引导词控制生成重点。<strong>旧选题不会被删除</strong>，可在下方按“未处理 / 已收藏 / 已归档”筛选。</p>{(collectionCounts.collected > 0 || collectionCounts.archived > 0) && (
+          <p className="opportunity-collection-summary">
+            <button type="button" onClick={() => setCollectionFilter("collected")}>★ 已收藏 {collectionCounts.collected}</button>
+            <span aria-hidden="true">·</span>
+            <button type="button" onClick={() => setCollectionFilter("archived")}>已归档 {collectionCounts.archived}</button>
+          </p>
+        )}</div>
         <div className="panel-actions">
           <Button variant="ghost" onClick={() => { setPoolTab("gaps"); setPoolOpen(true); }} icon={<Layers3 size={15} />}>信息缺口池</Button>
           <Button variant="ghost" onClick={() => { setPoolTab("strategies"); setPoolOpen(true); }} icon={<Sparkles size={15} />}>表达策略池</Button>

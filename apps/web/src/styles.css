@@ -995,6 +995,9 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .upload-note strong { color: var(--text-primary, #111827); font-weight: 600; }
 .opportunity-refresh-note { margin: 8px 0 0; padding: 9px 12px; border-radius: 9px; background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.18); color: var(--text-secondary, #4b5563); font-size: 12.5px; line-height: 1.6; }
 .opportunity-refresh-note strong { color: var(--text-primary, #111827); font-weight: 600; }
+.opportunity-collection-summary { display: flex; align-items: center; gap: 8px; margin: 8px 0 0; font-size: var(--font-xs); color: var(--muted); }
+.opportunity-collection-summary button { padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--ink-2); font-size: var(--font-2xs); cursor: pointer; }
+.opportunity-collection-summary button:hover { border-color: color-mix(in srgb, var(--brand) 45%, var(--line)); }
 .dropzone { min-height: 165px; padding: 25px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; border: 1.5px dashed #bdc8c1; border-radius: 11px; background: #fafbf9; color: var(--muted); cursor: pointer; }
 .dropzone:hover { border-color: var(--green); background: #f8fcfa; }
 .dropzone > svg { color: var(--green); }
