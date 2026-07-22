@@ -1,4 +1,5 @@
 import {
+  Archive,
   BrainCircuit,
   Check,
   ChevronDown,
@@ -15,6 +16,7 @@ import {
   Search,
   ShieldCheck,
   Sparkles,
+  Star,
   Target,
   Trash2,
   TriangleAlert,
@@ -47,6 +49,7 @@ import type {
   ProjectBlueprintModule,
   ProjectIntelligence,
   PlanningRandomizationDimension,
+  PromptTemplate,
   TopicOpportunity,
 } from "../types";
 
@@ -305,6 +308,10 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const [qualityDraft, setQualityDraft] = useState<{ clarity: number | null; relevance: number | null; textLegibility: number | null }>({ clarity: null, relevance: null, textLegibility: null });
   const [settingOverrides, setSettingOverrides] = useState<SimpleSettingOverrides>({});
   const [showAllOpportunities, setShowAllOpportunities] = useState(false);
+  const [guidance, setGuidance] = useState("");
+  const [showGuidance, setShowGuidance] = useState(false);
+  const [templates, setTemplates] = useState<PromptTemplate[]>([]);
+  const [collectionFilter, setCollectionFilter] = useState<"all" | "active" | "collected" | "archived">("all");
   const fileInput = useRef<HTMLInputElement>(null);
   const toast = useToast();
 
@@ -339,6 +346,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     } finally {
       setLoading(false);
     }
+    api.promptTemplates.list(projectId).then(setTemplates).catch(() => undefined);
     refreshLatestTask();
   };
 
@@ -366,6 +374,10 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   }, [intelligence?.status, projectId]);
 
   const selectedOpportunity = opportunities.find((item) => item.id === selectedOpportunityId);
+  const visibleOpportunities = useMemo(
+    () => opportunities.filter((item) => collectionFilter === "all" || (item.collectionStatus ?? "active") === collectionFilter),
+    [opportunities, collectionFilter],
+  );
   const blueprintReady = blueprintModules.length === Object.keys(blueprintModuleMeta).length
     && blueprintModules.every((module) => module.status === "approved");
   const currentProject = projects.find((project) => project.id === projectId);
@@ -422,15 +434,39 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const refreshOpportunities = async () => {
     setRefreshing(true);
     try {
-      const result = await api.opportunities.refresh(projectId);
+      const result = await api.opportunities.refresh(projectId, guidance.trim() || undefined);
       setOpportunities(result.items);
       setSelectedOpportunityId("");
-      await load();
-      toast.push(`已生成 ${result.items.length} 张待确认选题卡`, "info");
+      api.promptTemplates.list(projectId).then(setTemplates).catch(() => undefined);
+      toast.push(`已追加一批新选题（${result.items.length} 个），旧选题已保留`, "info");
     } catch (error) {
       toast.push(error instanceof Error ? error.message : "选题刷新失败", "error");
     } finally {
       setRefreshing(false);
+    }
+  };
+
+  const toggleCollection = async (item: TopicOpportunity, target: "collected" | "archived") => {
+    const next = (item.collectionStatus ?? "active") === target ? "active" : target;
+    try {
+      const updated = await api.opportunities.setCollection(projectId, item.id, next);
+      setOpportunities((current) => current.map((opp) => opp.id === updated.id ? updated : opp));
+    } catch (error) {
+      toast.push(error instanceof Error ? error.message : "操作失败", "error");
+    }
+  };
+
+  const saveGuidanceTemplate = async () => {
+    const clean = guidance.trim();
+    if (!clean) return;
+    const label = window.prompt("给这段方向引导起个名字，方便复用");
+    if (!label?.trim()) return;
+    try {
+      const created = await api.promptTemplates.create(projectId, label.trim(), clean);
+      setTemplates((current) => [created, ...current]);
+      toast.push("方向引导已保存为模板", "info");
+    } catch (error) {
+      toast.push(error instanceof Error ? error.message : "保存失败", "error");
     }
   };
 
@@ -742,24 +778,56 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
 
     <section className="opportunity-panel panel">
       <header>
-        <div><span>第 2 步</span><h2>选择一个值得写的信息缺口</h2><p>选题来自行业问题与项目可回答空间的交集，不要求你先写提示词。卡片顺序如有排序，仅采用“机会排序启发式 V1”。</p></div>
+        <div><span>第 2 步</span><h2>选择一个值得写的信息缺口</h2><p>选题来自行业问题与项目可回答空间的交集，不要求你先写提示词。卡片顺序如有排序，仅采用“机会排序启发式 V1”。</p><p className="opportunity-refresh-note">“换一批”会基于现有蓝图和已确认信息缺口<strong>重新生成一批新选题并追加保留</strong>（约几十秒，消耗一次模型额度）；本批会自动提高随机性并避开已生成过的标题，也可填写方向引导词控制生成重点。<strong>旧选题不会被删除</strong>，可在下方按“未处理 / 已收藏 / 已归档”筛选。</p></div>
         <div className="panel-actions">
           <Button variant="ghost" onClick={() => { setPoolTab("gaps"); setPoolOpen(true); }} icon={<Layers3 size={15} />}>信息缺口池</Button>
           <Button variant="ghost" onClick={() => { setPoolTab("strategies"); setPoolOpen(true); }} icon={<Sparkles size={15} />}>表达策略池</Button>
           <Button loading={refreshing} disabled={intelligence?.status !== "ready" || !blueprintReady} onClick={refreshOpportunities} icon={<RefreshCw size={15} />}>换一批</Button>
         </div>
       </header>
+      <div className="opportunity-guidance">
+        <button type="button" className="link-button" onClick={() => setShowGuidance((value) => !value)}>{showGuidance ? "收起方向引导" : "＋ 添加方向引导（可选）"}</button>
+        {showGuidance && (
+          <div className="guidance-panel">
+            <textarea value={guidance} rows={2} maxLength={600} placeholder="用一句话引导本批选题方向，例如：多聚焦术后恢复期的真实顾虑；可临时放宽到相邻话题。" onChange={(event) => setGuidance(event.target.value)} />
+            {templates.length > 0 && (
+              <div className="guidance-templates">
+                {templates.map((template) => (
+                  <span key={template.id} className="chip-group">
+                    <button type="button" className="chip" onClick={() => setGuidance(template.guidance)}>{template.label}</button>
+                    <button type="button" className="chip-remove" title="删除模板" onClick={async () => { try { await api.promptTemplates.remove(projectId, template.id); setTemplates((current) => current.filter((item) => item.id !== template.id)); } catch (error) { toast.push(error instanceof Error ? error.message : "删除失败", "error"); } }}>×</button>
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className="guidance-actions">
+              <button type="button" className="link-button" disabled={!guidance.trim()} onClick={() => void saveGuidanceTemplate()}>保存为模板</button>
+            </div>
+          </div>
+        )}
+      </div>
       <div className="opportunity-ranking-boundary"><Info size={16} /><div><strong>排序只帮助比较当前候选，不证明平台效果</strong><p>OpportunityRankHeuristicV1 使用固定但未标定的内部权重；它不是 F28 的机会公式，不是需求、竞品、阅读量或转化因果预测。输入 unknown 的卡片保持待复核，不会显示成 0 分。</p></div></div>
-      {opportunities.length ? (
+      {opportunities.length > 0 && (
+        <div className="opportunity-filter">
+          {(["all", "active", "collected", "archived"] as const).map((filter) => (
+            <button type="button" key={filter} className={collectionFilter === filter ? "chip chip--active" : "chip"} onClick={() => setCollectionFilter(filter)}>
+              {{ all: "全部", active: "未处理", collected: "已收藏", archived: "已归档" }[filter]}
+            </button>
+          ))}
+        </div>
+      )}
+      {visibleOpportunities.length ? (
         <div className="opportunity-grid">
-          {(showAllOpportunities ? opportunities : opportunities.slice(0, 12)).map((item) => { const rankView = resolveOpportunityRankView(item); return (
+          {(showAllOpportunities ? visibleOpportunities : visibleOpportunities.slice(0, 12)).map((item) => { const rankView = resolveOpportunityRankView(item); const collectionStatus = item.collectionStatus ?? "active"; return (
             <button type="button" key={item.id} className={`opportunity-card ${selectedOpportunityId === item.id ? "selected" : ""}`} onClick={() => { setSelectedOpportunityId(item.id); setSelectedAssetIds(item.suggestedImageAssetIds || []); }}>
               <div>
                 <Badge tone={item.answerability === "approved" ? "positive" : item.answerability === "verifiable" ? "warning" : "neutral"}>{item.answerability === "approved" ? "有批准答案" : item.answerability === "verifiable" ? "可给核验方法" : "保留未知"}</Badge>
                 <Badge tone={item.status === "approved" ? "positive" : "neutral"}>{item.status === "approved" ? "选题已确认" : "AI 草案"}</Badge>
+                {collectionStatus === "collected" && <Badge tone="positive">已收藏</Badge>}
+                {collectionStatus === "archived" && <Badge>已归档</Badge>}
                 {item.coverageStatus && <Badge>{item.coverageStatus === "new" ? "近期未写" : "近期覆盖"}</Badge>}
               </div>
-              <div className={`opportunity-card__rank ${rankView.sortable ? "is-sortable" : "needs-review"}`}><strong>{rankView.title}</strong><Badge tone={rankView.sortable ? "positive" : "warning"}>{rankView.valueLabel}</Badge>{rankView.unknownMetrics.length > 0 && <small>unknown：{rankView.unknownMetrics.map((metric) => metric).join("、")}</small>}<span className="opportunity-card__edit" role="button" tabIndex={0} onClick={(event) => { event.stopPropagation(); setEditingOpportunity(item); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); setEditingOpportunity(item); } }}><Pencil size={13} /> 编辑度量</span><span className="opportunity-card__edit" role="button" tabIndex={0} onClick={(event) => { event.stopPropagation(); void deleteOpportunity(item); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); void deleteOpportunity(item); } }}><Trash2 size={13} /> 删除</span></div>
+              <div className={`opportunity-card__rank ${rankView.sortable ? "is-sortable" : "needs-review"}`}><strong>{rankView.title}</strong><Badge tone={rankView.sortable ? "positive" : "warning"}>{rankView.valueLabel}</Badge>{rankView.unknownMetrics.length > 0 && <small>unknown：{rankView.unknownMetrics.map((metric) => metric).join("、")}</small>}<span className="opportunity-card__edit" role="button" tabIndex={0} title={collectionStatus === "collected" ? "取消收藏" : "收藏"} onClick={(event) => { event.stopPropagation(); void toggleCollection(item, "collected"); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); void toggleCollection(item, "collected"); } }}><Star size={13} className={collectionStatus === "collected" ? "filled" : ""} /> {collectionStatus === "collected" ? "取消收藏" : "收藏"}</span><span className="opportunity-card__edit" role="button" tabIndex={0} title={collectionStatus === "archived" ? "取消归档" : "归档"} onClick={(event) => { event.stopPropagation(); void toggleCollection(item, "archived"); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); void toggleCollection(item, "archived"); } }}><Archive size={13} /> {collectionStatus === "archived" ? "取消归档" : "归档"}</span><span className="opportunity-card__edit" role="button" tabIndex={0} onClick={(event) => { event.stopPropagation(); setEditingOpportunity(item); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); setEditingOpportunity(item); } }}><Pencil size={13} /> 编辑度量</span><span className="opportunity-card__edit" role="button" tabIndex={0} onClick={(event) => { event.stopPropagation(); void deleteOpportunity(item); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); void deleteOpportunity(item); } }}><Trash2 size={13} /> 删除</span></div>
               <h3>{item.title}</h3>
               <p>{item.summary || item.coreQuestion}</p>
               <small><strong>为什么值得写：</strong>{item.whyValuable}</small>
@@ -768,8 +836,8 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
             </button>
           ); })}
         </div>
-      ) : <EmptyState icon={<BrainCircuit size={24} />} title="还没有选题卡" description={intelligence?.status === "ready" ? "点击“换一批”从信息缺口池生成选题。" : "先完成项目分析，再从行业和项目知识中发现选题。"} />}
-      {opportunities.length > 12 && <div className="opportunity-more"><Button variant="ghost" onClick={() => setShowAllOpportunities((value) => !value)}>{showAllOpportunities ? "收起" : `展开全部 ${opportunities.length} 个选题`}</Button></div>}
+      ) : <EmptyState icon={<BrainCircuit size={24} />} title={opportunities.length ? "该筛选下暂无选题" : "还没有选题卡"} description={opportunities.length ? "切换上方筛选查看其他状态的选题。" : intelligence?.status === "ready" ? "点击“换一批”从信息缺口池生成选题。" : "先完成项目分析，再从行业和项目知识中发现选题。"} />}
+      {visibleOpportunities.length > 12 && <div className="opportunity-more"><Button variant="ghost" onClick={() => setShowAllOpportunities((value) => !value)}>{showAllOpportunities ? "收起" : `展开全部 ${visibleOpportunities.length} 个选题`}</Button></div>}
       {selectedOpportunity && <OpportunityRankDisclosure opportunity={selectedOpportunity} />}
     </section>
 
@@ -823,7 +891,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     </section>
 
     <section className="image-library panel">
-      <header><div><span>第 4 步</span><h2>选择源素材，让多模态模型观察并参与规划</h2><p>正式生成时会再次发送原图；这里管理的是源素材与可见观察，只供图片计划和 imageBrief 参考。</p></div><Button loading={uploading} disabled={!selectedOpportunity} icon={<ImagePlus size={16} />} onClick={() => fileInput.current?.click()}>上传源素材</Button><input ref={fileInput} hidden multiple type="file" accept="image/jpeg,image/png,image/webp" onChange={uploadImages} /></header>
+      <header><div><span>第 4 步 · 可选</span><h2>选择源素材，让多模态模型观察并参与规划</h2><p>可跳过：不上传也能生成（仅出图片计划与文字简报）。上传原图则让多模态模型观察真实素材、参与图片规划；正式生成时会再次发送原图。</p></div><Button loading={uploading} disabled={!selectedOpportunity} icon={<ImagePlus size={16} />} onClick={() => fileInput.current?.click()}>上传源素材</Button><input ref={fileInput} hidden multiple type="file" accept="image/jpeg,image/png,image/webp" onChange={uploadImages} /></header>
       <div className="image-library-boundary"><Images size={17} /><div><strong>这里的状态上限：源素材观察 / 计划参考</strong><p>批准观察只表示“原图中可见什么”已确认；选中只表示“图片计划可以参考它”。这里不会生成最终图片，也不会产生真实入口截图或实际部署记录。</p></div><Badge tone="warning">不是最终图片资产</Badge></div>
       {assets.length ? <div className="asset-grid">{assets.map((asset) => { const selected = selectedAssetIds.includes(asset.id); return <article className={`asset-card ${selected ? "selected" : ""}`} key={asset.id}><button type="button" className="asset-card__image" onClick={() => setSelectedAssetIds((current) => selected ? current.filter((id) => id !== asset.id) : current.length < 9 ? [...current, asset.id] : current)}><img src={asset.previewUrl || api.imageAssets.contentUrl(projectId, asset.id)} alt={asset.filename} /><span>{selected && <Check size={16} />}</span></button><div><strong>{asset.filename}</strong><small>{asset.analysis?.imageType || "等待源素材分析"} · {asset.approved ? "源素材观察已确认" : asset.status === "ready" ? "AI 源素材观察待确认" : asset.status}</small>{asset.analysis && <p title={asset.analysis.visibleFacts.join("；")}>{asset.analysis.scene || asset.analysis.visibleFacts.slice(0, 2).join("；") || "模型未提取到可见事实"}</p>}<div>{selected && <Badge tone="blue">计划参考源素材</Badge>}{asset.approved ? <Badge tone="positive">批准的源素材可见观察</Badge> : asset.status === "ready" ? <button type="button" onClick={() => void approveAsset(asset)}>确认上述源素材观察</button> : null}{asset.analysis && asset.latestAnalysisId ? <button type="button" onClick={() => openQualityEditor(asset)}><Pencil size={13} /> 编辑质量评估</button> : null}</div></div></article>; })}</div> : <EmptyState icon={<Images size={24} />} title="源素材图库还是空的" description="可不选源素材，只生成结构化图片计划和文字简报；上传原图也不会在这里生成最终图片资产。" />}
       <footer className="intelligence-run"><div><strong>{selectedOpportunity ? `已选择：${selectedOpportunity.title}` : "请先选择一张选题卡"}</strong><p>{selectedAssetIds.length} 张源素材已选 · 只作为三套图片计划与 imageBrief 的参考输入</p>{!blueprintReady ? <small>七项项目创作模型尚未全部确认，正式生成已锁定。</small> : selectedOpportunity && missingDependencyCount > 0 ? <small>引用资源缺失：请换一批，或在资源池修复引用。</small> : selectedOpportunity && pendingDependencyCount > 0 ? <small>将先独立确认 {opportunityDependencies.unapprovedGaps.length} 个信息缺口和 {opportunityDependencies.unapprovedStrategies.length} 个表达策略，再确认选题；不会隐式级联。</small> : selectedOpportunity?.status !== "approved" && selectedOpportunity ? <small>继续后会明确确认这张选题卡；AI 草案不会在未确认时进入生成。</small> : selectedOpportunity ? <small>选题及其引用依赖均已独立确认。</small> : null}</div><Button disabled={!selectedOpportunity || intelligence?.status !== "ready" || !blueprintReady} loading={submitting || preparing} icon={<Sparkles size={17} />} onClick={() => void preview()}>{selectedOpportunity && pendingDependencyCount > 0 ? `先确认 ${pendingDependencyCount} 项依赖并预览` : selectedOpportunity?.status === "approved" ? "预览并生成 3 套内容方案" : "确认选题并预览"}</Button></footer>
