@@ -652,7 +652,9 @@ export class GenerationService implements OnModuleInit {
       model: settings.model,
       baseUrl: settings.baseUrl,
       transport: settings.transport,
-      structuredOutput: settings.provider.toLowerCase().includes('compatible') ? 'json_object' : 'json_schema',
+      // BYOK 几乎总是第三方 OpenAI 兼容网关（maycran/deepseek/one-api 等），它们只支持 json_object；
+      // 仅 platform 模式直连官方 OpenAI，才支持 json_schema。
+      structuredOutput: settings.mode === 'byok' || settings.provider.toLowerCase().includes('compatible') ? 'json_object' : 'json_schema',
       includeTemperature: true,
       timeoutMs: Number.isFinite(this.options.modelRequestTimeoutMs)
         ? Math.max(10_000, Math.min(300_000, this.options.modelRequestTimeoutMs))
