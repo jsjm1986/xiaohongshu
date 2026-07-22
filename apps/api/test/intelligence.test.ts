@@ -147,7 +147,7 @@ test('migrates a v3 database to the current schema with source-image boundaries'
 
   const migrated = new DatabaseService(resolveOptions({ dataDir, databasePath, logger: false }));
   try {
-    assert.equal(Number(migrated.prepare('PRAGMA user_version').get()?.user_version), 8);
+    assert.equal(Number(migrated.prepare('PRAGMA user_version').get()?.user_version), 9);
     const tables = new Set((migrated.prepare(
       "SELECT name FROM sqlite_master WHERE type='table'",
     ).all() as Array<{ name: string }>).map((row) => row.name));
