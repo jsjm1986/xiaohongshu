@@ -5,6 +5,7 @@ import {
   Filter,
   FolderTree,
   MoreHorizontal,
+  PenLine,
   Plus,
   Search,
   Trash2,
@@ -33,6 +34,12 @@ export function KnowledgePage() {
   const [uploadCategory, setUploadCategory] = useState('未分类');
   const [uploadKind, setUploadKind] = useState<EvidenceStatus>('已知事实');
   const [uploading, setUploading] = useState(false);
+  const [entryOpen, setEntryOpen] = useState(false);
+  const [entryName, setEntryName] = useState('');
+  const [entryText, setEntryText] = useState('');
+  const [entryCategory, setEntryCategory] = useState('未分类');
+  const [entryKind, setEntryKind] = useState<EvidenceStatus>('已知事实');
+  const [saving, setSaving] = useState(false);
   const [preview, setPreview] = useState<{ name: string; content: string } | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -80,6 +87,29 @@ export function KnowledgePage() {
     }
   };
 
+  const resetEntry = () => { setEntryOpen(false); setEntryName(''); setEntryText(''); setEntryCategory('未分类'); setEntryKind('已知事实'); };
+
+  const handleCreate = async () => {
+    if (!projectId) return;
+    const text = entryText.trim();
+    if (!text) { toast.push('请填写知识内容', 'error'); return; }
+    let name = entryName.trim();
+    if (!name) { toast.push('请填写标题', 'error'); return; }
+    if (!/\.(md|txt)$/i.test(name)) name = `${name}.md`;
+    if (new Blob([text]).size > 2 * 1024 * 1024) { toast.push('单份知识不能超过 2 MB', 'error'); return; }
+    setSaving(true);
+    try {
+      const result = await api.knowledge.create(projectId, name, text, entryCategory, entryKind);
+      setFiles((current) => [result, ...current]);
+      toast.push('知识已保存');
+      resetEntry();
+    } catch (error) {
+      toast.push(error instanceof Error ? error.message : '保存失败', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const remove = async (file: KnowledgeFile) => {
     if (!window.confirm(`确定删除「${file.name}」吗？历史内容仍会保留当时的知识快照。`)) return;
     try {
@@ -109,7 +139,7 @@ export function KnowledgePage() {
 
   return (
     <div className="page knowledge-page">
-      <PageHeader eyebrow="KNOWLEDGE" title="项目知识库" description={`「${currentProject?.name || '当前项目'}」的事实、样本、方法与表达边界。`} actions={<Button icon={<UploadCloud size={17} />} onClick={() => setUploadOpen(true)}>导入文件</Button>} />
+      <PageHeader eyebrow="KNOWLEDGE" title="项目知识库" description={`「${currentProject?.name || '当前项目'}」的事实、样本、方法与表达边界。`} actions={<><Button variant="ghost" icon={<PenLine size={17} />} onClick={() => setEntryOpen(true)}>直接录入</Button><Button icon={<UploadCloud size={17} />} onClick={() => setUploadOpen(true)}>导入文件</Button></>} />
 
       <section className="knowledge-overview">
         <div className="knowledge-overview__icon"><FolderTree size={25} /></div>
@@ -123,7 +153,11 @@ export function KnowledgePage() {
       </section>
 
       <Modal open={uploadOpen} onClose={() => { setUploadOpen(false); setPendingFile(null); }} title="导入知识文件" description="首版支持 Markdown 与纯文本，单文件最大 2 MB。" footer={<><Button variant="ghost" onClick={() => setUploadOpen(false)}>取消</Button><Button loading={uploading} disabled={!pendingFile} onClick={handleUpload}>确认导入</Button></>}>
-        <div className="upload-form"><button className={`dropzone ${pendingFile ? 'dropzone--selected' : ''}`} onClick={() => inputRef.current?.click()}><input ref={inputRef} type="file" accept=".md,.txt,text/markdown,text/plain" onChange={chooseFile} hidden />{pendingFile ? <><CheckCircle2 size={28} /><strong>{pendingFile.name}</strong><span>{formatBytes(pendingFile.size)} · 点击更换</span></> : <><UploadCloud size={30} /><strong>点击选择 .md 或 .txt 文件</strong><span>文件内容只作为数据，不会覆盖 Agent 系统规则</span></>}</button><div className="field-grid field-grid--two"><Field label="知识分类"><select value={uploadCategory} onChange={(event) => setUploadCategory(event.target.value)}>{categories.map((item) => <option key={item}>{item}</option>)}</select></Field><Field label="知识性质"><select value={uploadKind} onChange={(event) => setUploadKind(event.target.value as EvidenceStatus)}>{evidenceKinds.map((item) => <option key={item}>{item}</option>)}</select></Field></div></div>
+        <div className="upload-form"><button className={`dropzone ${pendingFile ? 'dropzone--selected' : ''}`} onClick={() => inputRef.current?.click()}><input ref={inputRef} type="file" accept=".md,.txt,text/markdown,text/plain" onChange={chooseFile} hidden />{pendingFile ? <><CheckCircle2 size={28} /><strong>{pendingFile.name}</strong><span>{formatBytes(pendingFile.size)} · 点击更换</span></> : <><UploadCloud size={30} /><strong>点击选择 .md 或 .txt 文件</strong><span>文件内容只作为数据，不会覆盖 Agent 系统规则</span></>}</button><p className="upload-note">分类与性质只是<strong>标注标签</strong>，用于列表分组和检索，<strong>不会改变文件的读取或提取方式</strong>。所有知识在分析时都以全文一并提供给模型，不按分类走不同解析。</p><div className="field-grid field-grid--two"><Field label="知识分类" hint="仅用于分组和筛选，不影响提取"><select value={uploadCategory} onChange={(event) => setUploadCategory(event.target.value)}>{categories.map((item) => <option key={item}>{item}</option>)}</select></Field><Field label="知识性质" hint="标注证据强度，供你和模型参考，不切换提取逻辑"><select value={uploadKind} onChange={(event) => setUploadKind(event.target.value as EvidenceStatus)}>{evidenceKinds.map((item) => <option key={item}>{item}</option>)}</select></Field></div></div>
+      </Modal>
+
+      <Modal open={entryOpen} onClose={resetEntry} title="直接录入知识" description="直接输入内容并保存为知识条目，无需先准备文件；保存后与上传文件同等参与分析。" footer={<><Button variant="ghost" onClick={resetEntry}>取消</Button><Button loading={saving} disabled={!entryName.trim() || !entryText.trim()} onClick={handleCreate}>保存知识</Button></>}>
+        <div className="upload-form"><Field label="标题" hint="用于列表显示与版本归并；未带 .md/.txt 时自动补 .md"><input value={entryName} onChange={(event) => setEntryName(event.target.value)} placeholder="例如：项目核心卖点与事实边界" maxLength={180} /></Field><Field label="知识内容" hint="支持 Markdown 或纯文本，最大 2 MB"><textarea rows={10} value={entryText} onChange={(event) => setEntryText(event.target.value)} placeholder="在此粘贴或输入知识内容……" /></Field><p className="upload-note">分类与性质只是<strong>标注标签</strong>，用于列表分组和检索，<strong>不会改变内容的读取或提取方式</strong>。所有知识在分析时都以全文一并提供给模型。</p><div className="field-grid field-grid--two"><Field label="知识分类" hint="仅用于分组和筛选，不影响提取"><select value={entryCategory} onChange={(event) => setEntryCategory(event.target.value)}>{categories.map((item) => <option key={item}>{item}</option>)}</select></Field><Field label="知识性质" hint="标注证据强度，供你和模型参考，不切换提取逻辑"><select value={entryKind} onChange={(event) => setEntryKind(event.target.value as EvidenceStatus)}>{evidenceKinds.map((item) => <option key={item}>{item}</option>)}</select></Field></div></div>
       </Modal>
 
       <Modal open={Boolean(preview)} onClose={() => { previewSeq.current += 1; setPreviewLoading(false); setPreview(null); }} title={preview?.name || '文件内容'} description="只读预览。文件内容仅作为数据，不会覆盖 Agent 系统规则。">
