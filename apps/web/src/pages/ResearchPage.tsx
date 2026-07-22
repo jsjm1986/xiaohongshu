@@ -210,9 +210,9 @@ export function ResearchPage() {
     };
   }, [overview, query]);
 
-  if (loading) return <><PageHeader title="研究与证据" description="正在装载版本化研究记录" /><Skeleton lines={8} /></>;
+  if (loading) return <div className="page research-page"><PageHeader title="研究与证据" description="正在装载版本化研究记录" /><Skeleton lines={8} /></div>;
 
-  return <div className="research-page">
+  return <div className="page research-page">
     <PageHeader
       eyebrow="Research & Evidence"
       title="研究与证据中心"
