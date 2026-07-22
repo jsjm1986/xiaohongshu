@@ -367,9 +367,90 @@ export class IntelligenceService implements OnModuleInit {
     return this.approveResource('expression_strategies', projectId, id, body, principal, this.mapStrategy.bind(this), 'expression-strategy');
   }
 
-  listOpportunities(projectId: string): Record<string, unknown>[] {
+  listOpportunities(
+    projectId: string,
+    filter: { batchId?: string; collectionStatus?: 'active' | 'collected' | 'archived' } = {},
+  ): Record<string, unknown>[] {
     this.resources.projectRow(projectId);
-    return this.mapOpportunityRows(projectId, this.rows('topic_opportunities', projectId, 'updated_at DESC'));
+    const clauses = ['project_id=?', 'deleted_at IS NULL'];
+    const params: string[] = [projectId];
+    if (filter.batchId) { clauses.push('batch_id=?'); params.push(filter.batchId); }
+    if (filter.collectionStatus) { clauses.push('collection_status=?'); params.push(filter.collectionStatus); }
+    const rows = this.database.prepare(
+      `SELECT * FROM topic_opportunities WHERE ${clauses.join(' AND ')} ORDER BY updated_at DESC`,
+    ).all(...params) as unknown as Record<string, unknown>[];
+    return this.mapOpportunityRows(projectId, rows);
+  }
+
+  listBatches(projectId: string): Record<string, unknown>[] {
+    this.resources.projectRow(projectId);
+    return (this.database.prepare(
+      `SELECT b.*, COUNT(o.id) AS live_count
+       FROM opportunity_batches b
+       LEFT JOIN topic_opportunities o ON o.batch_id=b.id AND o.deleted_at IS NULL
+       WHERE b.project_id=? GROUP BY b.id ORDER BY b.created_at DESC`,
+    ).all(projectId) as unknown as Record<string, unknown>[]).map((row) => ({
+      id: row.id,
+      projectId: row.project_id,
+      trigger: row.trigger,
+      userGuidance: row.user_guidance,
+      temperature: row.temperature,
+      opportunityCount: Number(row.opportunity_count),
+      liveCount: Number(row.live_count),
+      createdAt: row.created_at,
+    }));
+  }
+
+  setOpportunityCollectionStatus(
+    projectId: string,
+    opportunityId: string,
+    status: 'active' | 'collected' | 'archived',
+    principal: SessionPrincipal,
+  ): Record<string, unknown> {
+    const project = this.resources.projectRow(projectId);
+    this.row('topic_opportunities', projectId, opportunityId);
+    this.database.prepare(
+      `UPDATE topic_opportunities SET collection_status=?, updated_at=? WHERE id=?`,
+    ).run(status, nowIso(), opportunityId);
+    this.record(project, principal, 'topic-opportunity.collection', 'topic_opportunity', opportunityId, { projectId, status });
+    return this.mapOpportunity(this.row('topic_opportunities', projectId, opportunityId));
+  }
+
+  listPromptTemplates(projectId: string): Record<string, unknown>[] {
+    this.resources.projectRow(projectId);
+    return (this.database.prepare(
+      `SELECT * FROM opportunity_prompt_templates WHERE project_id=? AND deleted_at IS NULL ORDER BY updated_at DESC`,
+    ).all(projectId) as unknown as Record<string, unknown>[]).map((row) => ({
+      id: row.id,
+      projectId: row.project_id,
+      label: row.label,
+      guidance: row.guidance,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  createPromptTemplate(projectId: string, label: string, guidance: string, principal: SessionPrincipal): Record<string, unknown> {
+    const project = this.resources.projectRow(projectId);
+    const cleanLabel = label.trim().slice(0, 80);
+    const cleanGuidance = guidance.trim().slice(0, 600);
+    if (!cleanLabel || !cleanGuidance) throw new BadRequestException('模板名称和引导词不能为空');
+    const id = randomUUID();
+    const now = nowIso();
+    this.database.prepare(
+      `INSERT INTO opportunity_prompt_templates (id, project_id, label, guidance, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, projectId, cleanLabel, cleanGuidance, principal.userId, now, now);
+    this.record(project, principal, 'prompt-template.create', 'prompt_template', id, { projectId });
+    return this.listPromptTemplates(projectId).find((template) => template.id === id)!;
+  }
+
+  deletePromptTemplate(projectId: string, templateId: string, principal: SessionPrincipal): void {
+    const project = this.resources.projectRow(projectId);
+    this.database.prepare(
+      `UPDATE opportunity_prompt_templates SET deleted_at=? WHERE id=? AND project_id=?`,
+    ).run(nowIso(), templateId, projectId);
+    this.record(project, principal, 'prompt-template.delete', 'prompt_template', templateId, { projectId });
   }
 
   getOpportunity(projectId: string, id: string): Record<string, unknown> {
@@ -1927,6 +2008,8 @@ export class IntelligenceService implements OnModuleInit {
       approvalStatus: row.status,
       evidenceStatus: row.status === 'approved' ? 'approved' : 'unapproved',
       sourceAnalysisId: row.source_analysis_id,
+      collectionStatus: row.collection_status ?? 'active',
+      batchId: row.batch_id ?? null,
       data: storedData,
       approvalRankAudit: isRecord(storedData.approvalRankAudit) ? storedData.approvalRankAudit : undefined,
       createdAt: row.created_at,
