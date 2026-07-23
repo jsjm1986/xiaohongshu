@@ -68,7 +68,7 @@
 
 ## 5. 遗留事项（按优先级）
 
-1. **P0 数据确认（用户动作，模板已备好）**：`docs/p0-data-templates/` — 知识 4 文件上传+旧文件删除、8 个缺口答案+证据 ID 填入（7 个保持 unknown）、role_model 替换、scenario_model 词表修正；全部走 draft→approve。价格/资质等口径需机构确认后再批准。
+1. **P0 数据确认（用户动作，路径已修正为 AI 分析为主）**：分析源已为每篇知识文件携带节级 `evidenceSections`（与生成接受的证据引用逐位一致），Stage 2 提示词强制"知识能答的缺口必须填 answer+boundary+evidenceIds"。**用户只需：点一次「分析项目」→ 对照 `docs/p0-data-templates/` 的复核清单批准**（gap-answers.md 复核答案、role-model.md 复核角色谱、scenario-prohibited-histories.md 复核动作词表）。无需手工填表、无需拆分知识库（单文件即可；4 个拆分文件已废弃移除）。AI 分析留空/答错时才退回手工按清单补填。价格/资质等口径需机构确认后再批准。
 2. **真实模型 smoke（需密钥，供应商不稳属已知风险）**：验证 2A/2B/台账在真实模型的表现——重点指标：台账 fact 率（基线 5/179）、citedEvidence、踢皮球句式占比、Reveal 落实率、角色去重（P0 数据后）。
 3. **api 基线 2 项失败**（夹具过期，与本次无关，建议另起小任务修夹具）。
 4. `comment_surface_roles_flat` 保持 warning，P0 role_model 生效后自然达标；如需更早硬约束可再升 error。
@@ -95,6 +95,7 @@
 | U4 | release 阻断（ACTIVE_RELEASE_REQUIRED）无 UI 引导 | 生成失败 toast 命中 release 类错误时追加「研究与证据 → 发布版本」激活指引 |
 | U5 | needs_review 无下一步指引；丰富度档位未说明成本 | 结果页新增「没有候选通过自动校验，可以怎么用」说明块；均衡/高密度档描述注明开启多轮接龙与耗时 |
 | U6 | demo 文案：场景线索入正文、正式问句织口语、首评拼接啰嗦 | demo 生成器：元数据式身份线索过滤（"用户直接问价"类不再入正文）、>10 字正式问句不织入口语（唯一性由模板轮换承担）、首评拼接随之自然 |
+| U7 | **设计纠偏（用户指出）**：AI 分析本应自动抽取缺口答案，实际全空——分析源只给原文不给可引用证据句柄，Stage 2 提示词"必须用证据"但模型无 ID 可引 | `projectAnalysisSource` 为每篇知识文件携带节级 `evidenceSections`（与生成时索引参数完全一致，证据 ID 逐位匹配）；Stage 2 提示词强制"知识能答的缺口必须填 answer+boundary+evidenceIds"；Stage 1 knowledge_map 同步引用节 ID。**P0 从"手工填表"回归"AI 分析+人工复核"原生设计** |
 
 复审同时确认业务主干逻辑正确：身份契约（2A→planning→bind→校验→展示→aC）端到端一致；缺口答案→评论的证据链闭环；claim_policy qualify/block 与提示词三路径一致；历史包兼容。
 
