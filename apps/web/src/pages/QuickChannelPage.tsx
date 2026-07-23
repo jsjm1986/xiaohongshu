@@ -3,6 +3,7 @@ import { useProjects } from '../components/ProjectContext';
 import { useToast } from '../components/Ui';
 import { V2Hero } from '../components/V2';
 import { ProjectKnowledgeTab } from '../components/quick/ProjectKnowledgeTab';
+import { TopicTab } from '../components/quick/TopicTab';
 import { type QuickCandidateView } from '../lib/quick-generation';
 import { tabReachable, clearDownstreamOfProject, clearResults, type QuickTab } from '../lib/quick-channel-state';
 import type { ContentPreset, GenerationJob, Project, TopicOpportunity } from '../types';
@@ -111,7 +112,12 @@ export function QuickChannelPage() {
             onProjectChosen={onProjectChosen} onAnalyzed={onAnalyzed}
           />
         )}
-        {activeTab === 'topic' && <div>[选题]</div>}
+        {activeTab === 'topic' && (
+          <TopicTab
+            project={project} opportunities={opportunities} opportunityId={opportunityId}
+            busy={busy} setBusy={setBusy} fail={fail} onPickTopic={onPickTopic} onAnalyzed={onAnalyzed}
+          />
+        )}
         {activeTab === 'config' && <div>[配置]</div>}
         {activeTab === 'result' && <div>[结果]</div>}
         {activeTab === 'history' && <div>[历史]</div>}
