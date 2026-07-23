@@ -19,7 +19,6 @@ import { useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "./AuthContext";
 import { ProjectProvider, useProjects } from "./ProjectContext";
-import { ToastProvider } from "./Ui";
 
 const navigation = [
   { to: "/", label: "概览", icon: LayoutDashboard, end: true },
@@ -217,10 +216,8 @@ function ShellContent() {
 
 export function AppShell() {
   return (
-    <ToastProvider>
-      <ProjectProvider>
-        <ShellContent />
-      </ProjectProvider>
-    </ToastProvider>
+    <ProjectProvider>
+      <ShellContent />
+    </ProjectProvider>
   );
 }
