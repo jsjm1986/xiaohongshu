@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { DatabaseService } from '../src/database.service.js';
 import type { ApiOptions } from '../src/config.js';
 import { AuthService } from '../src/auth.service.js';
+import { RegistrationService } from '../src/registration.service.js';
 
 function makeDb(): DatabaseService {
   const dir = mkdtempSync(join(tmpdir(), 'reg-test-'));
@@ -53,4 +54,67 @@ test('provisionUserWithWorkspace creates user + workspace + Owner member', async
   assert.equal(Number(user.must_change_password), 0);
   const member = db.prepare('SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?').get(workspaceId, userId) as any;
   assert.equal(member.role, 'Owner');
+});
+
+function makeReg(db: DatabaseService, auth: AuthService): RegistrationService {
+  const audit = { record: () => undefined } as any;
+  return new RegistrationService(db, auth, audit);
+}
+
+const validInput = () => ({
+  username: 'clinicA',
+  password: 'a-strong-password-123',
+  organizationName: 'A 口腔',
+  phone: '13800138000',
+});
+
+test('submit stores a pending request with hashed password', async () => {
+  const db = makeDb();
+  const reg = makeReg(db, makeAuth(db));
+  await reg.submit(validInput());
+  const row = db.prepare('SELECT status, password_hash, phone FROM registration_requests WHERE username = ?').get('clinicA') as any;
+  assert.equal(row.status, 'pending');
+  assert.notEqual(row.password_hash, 'a-strong-password-123');
+  assert.match(row.password_hash, /^\$argon2/);
+});
+
+test('submit rejects duplicate username taken by an existing user', async () => {
+  const db = makeDb();
+  const auth = makeAuth(db);
+  db.transaction(() => auth.provisionUserWithWorkspace({ username: 'taken', passwordHash: 'x', systemRole: 'user', mustChangePassword: false, workspaceName: 'w' }));
+  const reg = makeReg(db, auth);
+  await assert.rejects(() => reg.submit({ ...validInput(), username: 'taken' }));
+});
+
+test('submit rejects duplicate pending phone', async () => {
+  const db = makeDb();
+  const reg = makeReg(db, makeAuth(db));
+  await reg.submit(validInput());
+  await assert.rejects(() => reg.submit({ ...validInput(), username: 'clinicB' }));
+});
+
+test('approve provisions user and marks request approved', async () => {
+  const db = makeDb();
+  const auth = makeAuth(db);
+  const reg = makeReg(db, auth);
+  await reg.submit(validInput());
+  const req = db.prepare('SELECT id FROM registration_requests WHERE username = ?').get('clinicA') as any;
+  const { userId } = reg.approve(req.id, 'admin-id');
+  const user = db.prepare('SELECT username, must_change_password FROM users WHERE id = ?').get(userId) as any;
+  assert.equal(user.username, 'clinicA');
+  assert.equal(Number(user.must_change_password), 0);
+  const after = db.prepare('SELECT status, created_user_id FROM registration_requests WHERE id = ?').get(req.id) as any;
+  assert.equal(after.status, 'approved');
+  assert.equal(after.created_user_id, userId);
+});
+
+test('reject stores note and allows re-apply with same username', async () => {
+  const db = makeDb();
+  const reg = makeReg(db, makeAuth(db));
+  await reg.submit(validInput());
+  const req = db.prepare('SELECT id FROM registration_requests WHERE username = ?').get('clinicA') as any;
+  reg.reject(req.id, 'admin-id', '资料不全');
+  assert.equal(reg.loginHintFor('clinicA')?.status, 'rejected');
+  await reg.submit(validInput()); // 拒绝后可重申,不抛错
+  assert.equal(reg.loginHintFor('clinicA')?.status, 'pending');
 });
