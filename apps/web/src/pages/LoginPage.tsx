@@ -61,7 +61,7 @@ export function LoginPage() {
             <label className="field"><span className="field__label">用户名</span><input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder="请输入用户名" required /></label>
             <label className="field"><span className="field__label">密码</span><span className="password-input"><input type={showPassword ? 'text' : 'password'} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" placeholder="请输入密码" required /><button type="button" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? '隐藏密码' : '显示密码'}>{showPassword ? <EyeOff size={18} /> : <Eye size={18} />}</button></span></label>
             {error && <div className="form-error">{error}</div>}
-            <button className="login-submit" disabled={submitting}>{submitting ? <><span className="spinner spinner--small" />正在登录…</> : <><span>登录</span><ArrowRight size={18} /></>}</button>
+            <button type="submit" className="login-submit" disabled={submitting}>{submitting ? <><span className="spinner spinner--small" />正在登录…</> : <><span>登录</span><ArrowRight size={18} /></>}</button>
           </form>
           <p className="login-help">无法登录？请联系工作区管理员重置密码。</p>
         </div>

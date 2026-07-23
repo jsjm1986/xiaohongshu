@@ -306,19 +306,19 @@ export function GenerationResultPage() {
               导出 <ChevronDown size={14} />
             </Button>
             <div className="export-menu__dropdown">
-              <button disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "markdown"))}>
+              <button type="button" disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "markdown"))}>
                 <FileText size={16} />
                 Markdown
               </button>
-              <button disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "json"))}>
+              <button type="button" disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "json"))}>
                 <FileJson size={16} />
                 JSON
               </button>
-              <button disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "docx"))}>
+              <button type="button" disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "docx"))}>
                 <FileText size={16} />
                 DOCX
               </button>
-              <button disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "pdf"))}>
+              <button type="button" disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "pdf"))}>
                 <FileText size={16} />
                 PDF
               </button>
@@ -369,6 +369,7 @@ export function GenerationResultPage() {
           {job.candidates?.map((candidate, index) => {
             const readiness = resolveValidationReadinessHeuristic(candidate.validationHeuristic, candidate.score);
             return <button
+              type="button"
               key={candidate.id}
               className={`candidate-card ${candidate.id === selected.id ? "selected" : ""}`}
               onClick={() => setSelectedId(candidate.id)}
@@ -452,6 +453,7 @@ export function GenerationResultPage() {
             </div>
             <h2>{selected.title}</h2>
             <button
+              type="button"
               className="copy-mini"
               onClick={() =>
                 navigator.clipboard
@@ -770,6 +772,7 @@ export function GenerationResultPage() {
           )}
           <section className="result-insight">
             <button
+              type="button"
               className="result-insight__toggle"
               onClick={() => setDetailsOpen((value) => !value)}
             >

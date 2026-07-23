@@ -137,6 +137,7 @@ export function SettingsPage() {
       <div className="settings-layout">
         <aside className="settings-nav">
           <button
+            type="button"
             className={tab === "model" ? "active" : ""}
             onClick={() => setTab("model")}
           >
@@ -147,6 +148,7 @@ export function SettingsPage() {
             </span>
           </button>
           <button
+            type="button"
             className={tab === "quota" ? "active" : ""}
             onClick={() => setTab("quota")}
           >
@@ -157,6 +159,7 @@ export function SettingsPage() {
             </span>
           </button>
           <button
+            type="button"
             className={tab === "account" ? "active" : ""}
             onClick={() => setTab("account")}
           >
@@ -185,6 +188,7 @@ export function SettingsPage() {
                 </header>
                 <div className="provider-options">
                   <button
+                    type="button"
                     className={
                       settings.providerMode === "platform" ? "selected" : ""
                     }
@@ -206,6 +210,7 @@ export function SettingsPage() {
                     )}
                   </button>
                   <button
+                    type="button"
                     className={
                       settings.providerMode === "byok" ? "selected" : ""
                     }
@@ -305,7 +310,7 @@ export function SettingsPage() {
                             }
                             autoComplete="off"
                           />
-                          <button onClick={() => setShowKey((value) => !value)}>
+                          <button type="button" aria-label={showKey ? "隐藏密钥" : "显示密钥"} onClick={() => setShowKey((value) => !value)}>
                             {showKey ? <EyeOff size={17} /> : <Eye size={17} />}
                           </button>
                         </span>
