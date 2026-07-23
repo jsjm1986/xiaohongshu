@@ -2670,3 +2670,167 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .v2 .run-summary { padding: 10px 2px; border-radius: 0; border-top: 1px solid var(--v2-line); background: transparent; }
 .v2 .run-summary span { font-size: 11.5px; color: var(--v2-muted); }
 .v2 .run-summary svg { color: var(--v2-muted-2); }
+
+/* ==========================================================================
+   生成频道 R2：步骤 1 灰盒拆排 / 步骤 2 头瘦身 / 步骤轨当前态 / 小白解释降灰
+   ========================================================================== */
+
+/* 第 1 步：select 与状态行分列，灰盒改发丝分隔的仪表行 */
+.v2 .intelligence-project__body { grid-template-columns: minmax(230px, 300px) minmax(0, 1fr); gap: 24px; align-items: start; }
+.v2 .intelligence-status { min-height: 0; padding: 0 0 0 22px; border: 0; border-left: 1px solid var(--v2-line); border-radius: 0; background: transparent; }
+.v2 .intelligence-status p { font-size: 12px; line-height: 1.6; }
+.v2 .intelligence-status .panel-actions { flex-wrap: nowrap; }
+
+/* 第 2 步：头部只留标题与操作，说明与汇总移入正文；操作不堆叠 */
+.v2 .opportunity-panel > header .panel-actions { flex-wrap: nowrap; align-items: flex-start; }
+.v2 .opportunity-notes { margin: 14px var(--panel-inset) 0; display: grid; gap: 8px; }
+.v2 .opportunity-notes .opportunity-refresh-note { margin: 0; }
+.v2 .opportunity-collection-summary { margin: 0; display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--v2-muted); }
+.v2 .opportunity-collection-summary button { padding: 0; border: 0; background: transparent; color: var(--v2-ai-ink); font-size: 11px; cursor: pointer; }
+.v2 .opportunity-collection-summary button:hover { text-decoration: underline; }
+
+/* 步骤轨：当前待办步骤获得珊瑚刻度 */
+.v2 .protocol-rail li.is-current i { border-color: var(--v2-brand); background: var(--v2-brand-soft); color: var(--v2-brand-ink); }
+.v2 .protocol-rail li.is-current strong { color: var(--v2-ink); }
+.v2 .protocol-rail li.is-current button { background: var(--v2-unknown-soft); }
+
+/* 设置模式：小白解释去灰底，改蓝色发丝 quiet note */
+.v2 .parameter-novice { margin-top: 12px; padding: 2px 0 2px 10px; border-left: 2px solid var(--blue); border-radius: 0; background: transparent; }
+.v2 .parameter-novice svg { color: var(--blue); margin-top: 1px; }
+.v2 .parameter-novice p { color: var(--v2-muted); font-size: 11px; line-height: 1.6; }
+.v2 .parameter-novice strong { margin-bottom: 1px; color: var(--blue); font-size: 10px; letter-spacing: 0.04em; }
+
+/* ==========================================================================
+   生成频道 R2：字号系统正常化（legacy 7–10px → v2 阅读尺度）
+   全部作用域限定 .generate-page，不影响其他频道
+   ========================================================================== */
+
+/* 预设架 */
+.v2 .generate-page .preset-shelf > header > div > span { font-family: var(--v2-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; }
+.v2 .generate-page .preset-shelf > header p { font-size: 11.5px; line-height: 1.55; }
+.v2 .generate-page .preset-card__apply strong { font-size: 12.5px; font-weight: 650; }
+.v2 .generate-page .preset-card__apply small { font-size: 11px; line-height: 1.55; }
+.v2 .generate-page .preset-card__apply i { font-family: var(--v2-mono); font-size: 9.5px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--v2-ai-ink); }
+.v2 .generate-page .preset-card__actions button { font-size: 10.5px; }
+.v2 .generate-page .preset-card__actions button svg { width: 13px; height: 13px; }
+.v2 .generate-page .preset-save-summary strong { font-size: 12.5px; }
+.v2 .generate-page .preset-save-summary small { font-size: 11px; }
+
+/* 设置模式视图栏 */
+.v2 .generate-page .advanced-viewbar > div:first-child > span { font-family: var(--v2-mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; }
+.v2 .generate-page .advanced-viewbar > div:first-child p { font-size: 11.5px; }
+.v2 .generate-page .view-switch strong { font-size: 12px; font-weight: 650; }
+.v2 .generate-page .view-switch small { font-size: 10.5px; }
+
+/* 参数卡 */
+.v2 .generate-page .parameter-card > header strong { font-size: 13px; font-weight: 650; }
+.v2 .generate-page .parameter-card > header small { font-size: 11px; line-height: 1.5; }
+.v2 .generate-page .parameter-code { min-width: 36px; height: 26px; font-family: var(--v2-mono); font-size: 10px; font-weight: 500; }
+.v2 .generate-page .parameter-trendfit-warning strong, .v2 .generate-page .parameter-diagnostic-boundary strong { font-size: 11.5px; }
+.v2 .generate-page .parameter-trendfit-warning small, .v2 .generate-page .parameter-diagnostic-boundary small { font-size: 11px; line-height: 1.6; }
+.v2 .generate-page .schema-slider > div > span { font-family: var(--v2-mono); font-size: 10px; }
+.v2 .generate-page .schema-slider > div strong { font-family: var(--v2-mono); font-size: 12.5px; font-weight: 600; }
+.v2 .generate-page .schema-slider > small { font-size: 10.5px; }
+.v2 .generate-page .schema-toggle strong { font-size: 12px; }
+.v2 .generate-page .schema-toggle small { font-size: 10.5px; white-space: normal; }
+.v2 .generate-page .schema-list textarea { font-size: 12px; line-height: 1.6; }
+.v2 .generate-page .schema-multi-select strong { font-size: 11.5px; }
+.v2 .generate-page .schema-multi-select small { font-size: 10.5px; line-height: 1.45; }
+.v2 .generate-page .parameter-more summary { font-size: 11px; }
+.v2 .generate-page .parameter-more code, .v2 .generate-page .parameter-equation code { font-size: 11px; }
+.v2 .generate-page .parameter-more p { font-size: 11px; line-height: 1.6; }
+.v2 .generate-page .parameter-equation > span { font-family: var(--v2-mono); font-size: 10px; letter-spacing: 0.08em; }
+.v2 .generate-page .impact-pair strong, .v2 .generate-page .parameter-risk strong { font-size: 11.5px; }
+.v2 .generate-page .impact-pair small, .v2 .generate-page .parameter-risk small { font-size: 11px; line-height: 1.6; }
+.v2 .generate-page .formula-links > span { font-family: var(--v2-mono); font-size: 10px; font-weight: 500; }
+.v2 .generate-page .formula-view-intro strong { font-size: 13px; font-weight: 650; }
+.v2 .generate-page .formula-view-intro p { font-size: 11.5px; line-height: 1.6; }
+
+/* JSON 覆盖 + 配置预览弹窗 */
+.v2 .generate-page .json-overrides summary strong { font-size: 13px; font-weight: 650; }
+.v2 .generate-page .json-overrides summary small { font-size: 11px; }
+.v2 .generate-page .preview-loading strong { font-size: 13px; }
+.v2 .generate-page .preview-loading p { font-size: 11.5px; }
+.v2 .generate-page .preview-inheritance span { font-family: var(--v2-mono); font-size: 10.5px; }
+.v2 .generate-page .preview-inheritance i { font-size: 11px; }
+.v2 .generate-page .preview-facts small { font-family: var(--v2-mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
+.v2 .generate-page .preview-facts strong { font-size: 12.5px; font-weight: 650; }
+.v2 .generate-page .preview-conflicts h3, .v2 .generate-page .preview-impacts h3 { font-size: 13px; font-weight: 650; }
+.v2 .generate-page .preview-conflict strong { font-size: 12.5px; }
+.v2 .generate-page .preview-conflict p { font-size: 11.5px; line-height: 1.6; }
+.v2 .generate-page .preview-conflict small { font-size: 11px; }
+.v2 .generate-page .preview-clear strong { font-size: 12.5px; }
+.v2 .generate-page .preview-clear small { font-size: 11px; }
+.v2 .generate-page .preview-impacts article strong { font-size: 12px; font-weight: 650; }
+.v2 .generate-page .preview-impacts article b { font-family: var(--v2-mono); font-size: 11px; }
+.v2 .generate-page .preview-impacts article p { font-size: 11px; line-height: 1.55; }
+.v2 .generate-page .preview-impacts article small { font-size: 10.5px; }
+
+/* 筛选 chips：激活色归一到品牌珊瑚 */
+.v2 .generate-page .chip--active { background: var(--v2-brand-soft); border-color: var(--v2-brand); color: var(--v2-brand-ink); }
+
+/* 生成频道 R2b：预览事实台账化 + 公式视图导言降色 */
+.v2 .generate-page .preview-facts { gap: 0; }
+.v2 .generate-page .preview-facts > div { padding: 10px 2px; border-radius: 0; border-bottom: 1px solid var(--v2-line); background: transparent; }
+.v2 .generate-page .preview-facts > div:nth-last-child(-n+2) { border-bottom: 0; }
+.v2 .generate-page .formula-view-intro { border: 1px solid var(--v2-line); border-left: 3px solid var(--v2-ai); border-radius: var(--v2-radius); background: var(--v2-surface); }
+
+/* ==========================================================================
+   生成频道 R3：第 3 步版面重排（模板卡紧凑 / 字段三列 / 台账单行 / 徽章归位）
+   ========================================================================== */
+
+/* 生效模板：标签行 + 「名称 · 描述」一行 + 右侧小操作，消灭死白 */
+.v2 .simple-preset-context { padding: 11px 16px; gap: 16px; }
+.v2 .simple-preset-context > div { display: flex; flex-direction: column; gap: 3px; }
+.v2 .simple-preset-context strong, .v2 .simple-preset-context p { display: inline; }
+.v2 .simple-preset-context strong { margin: 0; font-size: 13.5px; font-weight: 650; }
+.v2 .simple-preset-context p { margin: 0 0 0 10px; font-size: 11.5px; }
+.v2 .simple-preset-context .button { flex: 0 0 auto; }
+
+/* 字段：徽章紧跟标签（不再推到最右），select 收薄，说明最多两行 */
+.v2 .simple-setting-field > span { min-height: 18px; justify-content: flex-start; gap: 8px; }
+.v2 .simple-setting-field select, .v2 .simple-setting-field input { min-height: 38px; }
+.v2 .simple-setting-field > small { overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+
+/* 三个关键设置一排放完，丰富度不再通铺 */
+.v2 .simple-settings-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.v2 .simple-setting-field--wide { grid-column: auto; }
+
+/* 约束折叠条收薄 */
+.v2 .simple-constraints > summary { min-height: 48px; }
+
+/* 当前采用信息：单行台账（mono 标签左、值右、描述整行），不再双列挤压 */
+.v2 .simple-info-grid { grid-template-columns: 1fr; }
+.v2 .simple-info-grid > div { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 1px 10px; padding: 8px 2px; }
+.v2 .simple-info-grid > div:nth-last-child(2) { border-bottom: 1px solid var(--v2-line); }
+.v2 .simple-info-grid > div:last-child { border-bottom: 0; }
+.v2 .simple-info-grid strong { margin-top: 0; max-width: 62%; font-size: 12px; text-align: right; }
+.v2 .simple-info-grid p { flex-basis: 100%; margin-top: 1px; font-size: 10.5px; }
+
+/* 边界声明徽章顶对齐，不再漂在中线 */
+.v2 .trendfit-simple-boundary > .badge, .v2 .image-library-boundary > .badge { align-self: flex-start; }
+
+/* R3b：模板卡容器改回流，名称与描述真正同行 */
+.v2 .simple-preset-context > div { display: block; }
+.v2 .simple-preset-context > div > small { display: flex; align-items: center; gap: 7px; margin-bottom: 4px; }
+
+/* R3c：设置模式 TrendFit 声明徽章同样顶对齐 */
+.v2 .trendfit-settings-boundary > .badge { align-self: flex-start; }
+
+/* R3d：选择框/输入框字号归一到 13px（原继承 body 16px，与 10.5–12.5px 系统脱节） */
+.v2 .generate-page input, .v2 .generate-page textarea, .v2 .generate-page select { font-size: 13px; }
+
+/* ==========================================================================
+   生成频道 R4：第 1 步仪表行对齐重构
+   ========================================================================== */
+
+/* 标签与第 3 步同一套 mono 小标 */
+.v2 .intelligence-project__body .field__label { font-family: var(--v2-mono); font-size: 10.5px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; color: var(--v2-muted-2); }
+.v2 .intelligence-project__body select { min-height: 38px; padding-top: 0; padding-bottom: 0; }
+
+/* 状态区：顶部与 select 行对齐，图标贴首行，按钮归右上，消灭中线漂浮 */
+.v2 .intelligence-status { padding-top: 23px; padding-bottom: 0; align-items: flex-start; gap: 12px; }
+.v2 .intelligence-status > svg { width: 20px; height: 20px; margin-top: 1px; }
+.v2 .intelligence-status strong { font-size: 13.5px; line-height: 1.4; }
+.v2 .intelligence-status p { margin: 2px 0 0; }
+.v2 .intelligence-status .panel-actions { margin-top: 0; align-items: flex-start; }
