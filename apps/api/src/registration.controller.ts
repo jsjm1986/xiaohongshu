@@ -1,10 +1,10 @@
-import { Body, Controller, Ip, Post } from '@nestjs/common';
+import { Body, Controller, Inject, Ip, Post } from '@nestjs/common';
 import { RegistrationService } from './registration.service.js';
 import { requireObject } from './utils.js';
 
 @Controller('api/register')
 export class RegistrationController {
-  constructor(private readonly registration: RegistrationService) {}
+  constructor(@Inject(RegistrationService) private readonly registration: RegistrationService) {}
 
   @Post()
   async submit(@Ip() ip: string, @Body() rawBody: unknown) {
