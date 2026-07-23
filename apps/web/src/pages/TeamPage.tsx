@@ -20,6 +20,7 @@ import { V2Hero } from "../components/V2";
 import { api } from "../lib/api";
 import type {
   AuditEntry,
+  RegistrationRequest,
   SystemUser,
   WorkspaceApiKey,
   WorkspaceMember,
@@ -71,6 +72,9 @@ export function TeamPage() {
   const [permissionMember, setPermissionMember] =
     useState<WorkspaceMember | null>(null);
   const [saving, setSaving] = useState(false);
+  const [registrations, setRegistrations] = useState<RegistrationRequest[]>([]);
+  const [rejecting, setRejecting] = useState<RegistrationRequest | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
   const [form, setForm] = useState({
     username: "",
     password: "",
@@ -89,16 +93,21 @@ export function TeamPage() {
       const selected = requestedWorkspaceId || workspaceId || workspaces[0]?.id || "";
       setWorkspaceId(selected);
       if (!selected) return;
-      const [userList, memberList, auditList, keyList] = await Promise.all([
-        isSystemAdmin ? api.admin.users() : Promise.resolve([]),
-        api.workspaces.members(selected),
-        api.audit.list(selected),
-        api.workspaces.apiKeys(selected),
-      ]);
+      const [userList, memberList, auditList, keyList, registrationList] =
+        await Promise.all([
+          isSystemAdmin ? api.admin.users() : Promise.resolve([]),
+          api.workspaces.members(selected),
+          api.audit.list(selected),
+          api.workspaces.apiKeys(selected),
+          isSystemAdmin
+            ? api.admin.registrations("pending")
+            : Promise.resolve([]),
+        ]);
       setUsers(userList);
       setMembers(memberList);
       setAudit(auditList);
       setApiKeys(keyList);
+      setRegistrations(registrationList);
     } catch (error) {
       toast.push(
         error instanceof Error ? error.message : "无法读取团队权限",
@@ -197,6 +206,30 @@ export function TeamPage() {
       toast.push(error instanceof Error ? error.message : "创建密钥失败", "error");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const approve = async (item: RegistrationRequest) => {
+    try {
+      await api.admin.approveRegistration(item.id);
+      setRegistrations((cur) => cur.filter((r) => r.id !== item.id));
+      toast.push(`已通过 ${item.organizationName} 的申请，账号与工作区已创建`);
+      await load();
+    } catch (error) {
+      toast.push(error instanceof Error ? error.message : "操作失败", "error");
+    }
+  };
+
+  const confirmReject = async () => {
+    if (!rejecting || !rejectReason.trim()) return;
+    try {
+      await api.admin.rejectRegistration(rejecting.id, rejectReason.trim());
+      setRegistrations((cur) => cur.filter((r) => r.id !== rejecting.id));
+      setRejecting(null);
+      setRejectReason("");
+      toast.push("已拒绝该申请");
+    } catch (error) {
+      toast.push(error instanceof Error ? error.message : "操作失败", "error");
     }
   };
 
@@ -300,6 +333,28 @@ export function TeamPage() {
                       <Trash2 size={15} />
                     </button>
                   )}
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+      {!loading && isSystemAdmin && registrations.length > 0 && (
+        <section className="panel team-panel">
+          <header className="panel__header">
+            <div><h2>注册申请</h2><p>{registrations.length} 条待审核 · 通过后自动创建账号与专属工作区</p></div>
+          </header>
+          <div className="team-table">
+            <div className="team-row team-row--head"><span>机构</span><span>用户名</span><span>手机号</span><span>申请时间</span><span>操作</span></div>
+            {registrations.map((item) => (
+              <div className="team-row" key={item.id}>
+                <span><strong>{item.organizationName}</strong></span>
+                <span>{item.username}</span>
+                <span>{item.phone}</span>
+                <span>{new Date(item.createdAt).toLocaleString("zh-CN")}</span>
+                <span className="team-actions">
+                  <button type="button" onClick={() => void approve(item)}>通过</button>
+                  <button type="button" className="danger" onClick={() => { setRejecting(item); setRejectReason(""); }}>拒绝</button>
                 </span>
               </div>
             ))}
@@ -487,6 +542,16 @@ export function TeamPage() {
             ))}
           </div>
         )}
+      </Modal>
+
+      <Modal
+        open={Boolean(rejecting)}
+        onClose={() => setRejecting(null)}
+        title={`拒绝申请 · ${rejecting?.organizationName || ""}`}
+        description="填写拒绝原因，用户下次登录时可见。"
+        footer={<><Button variant="ghost" onClick={() => setRejecting(null)}>取消</Button><Button loading={saving} disabled={!rejectReason.trim()} onClick={() => void confirmReject()}>确认拒绝</Button></>}
+      >
+        <Field label="拒绝原因"><textarea value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} rows={3} maxLength={500} /></Field>
       </Modal>
     </div>
   );

@@ -4,7 +4,9 @@ import {
   ForbiddenException,
   Get,
   Inject,
+  Param,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -14,6 +16,7 @@ import { AuditService } from './audit.service.js';
 import { DatabaseService } from './database.service.js';
 import { CsrfGuard, SessionAuthGuard } from './guards.js';
 import type { AuthenticatedRequest, SessionPrincipal } from './models.js';
+import { RegistrationService } from './registration.service.js';
 import { requireObject } from './utils.js';
 
 @Controller('api/admin')
@@ -23,6 +26,7 @@ export class AdminController {
     @Inject(AuthService) private readonly auth: AuthService,
     @Inject(DatabaseService) private readonly database: DatabaseService,
     @Inject(AuditService) private readonly audit: AuditService,
+    @Inject(RegistrationService) private readonly registration: RegistrationService,
   ) {}
 
   @Get('users')
@@ -54,6 +58,29 @@ export class AdminController {
     const principal = (request as unknown as AuthenticatedRequest).principal as SessionPrincipal;
     this.audit.record({ userId: principal.userId, action: 'user.create', entityType: 'user', entityId: String(result.id), details: { username: result.username, systemRole: result.systemRole } });
     return result;
+  }
+
+  @Get('registrations')
+  registrations(@Req() request: Request, @Query('status') status?: string) {
+    this.requireSystemAdmin(request);
+    return this.registration.list(status || 'pending');
+  }
+
+  @Post('registrations/:id/approve')
+  approveRegistration(@Req() request: Request, @Param('id') id: string) {
+    this.requireSystemAdmin(request);
+    const principal = (request as unknown as AuthenticatedRequest).principal as SessionPrincipal;
+    return this.registration.approve(id, principal.userId);
+  }
+
+  @Post('registrations/:id/reject')
+  rejectRegistration(@Req() request: Request, @Param('id') id: string, @Body() rawBody: unknown) {
+    this.requireSystemAdmin(request);
+    const principal = (request as unknown as AuthenticatedRequest).principal as SessionPrincipal;
+    const body = requireObject(rawBody);
+    const reason = typeof body.reason === 'string' ? body.reason : '';
+    this.registration.reject(id, principal.userId, reason);
+    return { ok: true };
   }
 
   private requireSystemAdmin(rawRequest: Request): void {

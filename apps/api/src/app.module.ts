@@ -26,6 +26,8 @@ import { KnowledgeController, ProjectKnowledgeController } from './knowledge.con
 import { KnowledgeService } from './knowledge.service.js';
 import { ProjectController } from './project.controller.js';
 import { PresetController } from './preset.controller.js';
+import { RegistrationController } from './registration.controller.js';
+import { RegistrationService } from './registration.service.js';
 import { PresetService } from './preset.service.js';
 import { ResourceService } from './resource.service.js';
 import { ResearchController } from './research.controller.js';
@@ -44,6 +46,7 @@ export class AppModule {
         HealthController,
         AppController,
         AuthController,
+        RegistrationController,
         AuditController,
         AdminController,
         WorkspaceController,
@@ -73,6 +76,7 @@ export class AppModule {
         GenerationService,
         PresetService,
         ExportService,
+        RegistrationService,
         SessionAuthGuard,
         CsrfGuard,
         ReadOnlyAuthGuard,

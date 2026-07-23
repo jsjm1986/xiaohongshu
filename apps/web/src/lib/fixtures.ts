@@ -1,12 +1,5 @@
-import type { AppSettings, Candidate, FormulaVersion, GenerationJob, KnowledgeFile, Project, User } from '../types';
+import type { AppSettings, Candidate, FormulaVersion, GenerationJob, KnowledgeFile, Project } from '../types';
 import { diagnosticsFromValidationIssues } from './generation-record';
-
-export const demoUser: User = {
-  id: 'demo-user',
-  username: 'admin',
-  displayName: '内容管理员',
-  role: '工作区管理员',
-};
 
 export const demoProjects: Project[] = [
   {

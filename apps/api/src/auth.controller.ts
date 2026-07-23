@@ -5,6 +5,7 @@ import {
   Post,
   Req,
   Res,
+  UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
@@ -13,6 +14,7 @@ import { APP_OPTIONS, type ApiOptions } from './config.js';
 import { CsrfGuard, SessionAuthGuard } from './guards.js';
 import type { AuthenticatedRequest, SessionPrincipal } from './models.js';
 import { Inject } from '@nestjs/common';
+import { RegistrationService } from './registration.service.js';
 import { requireObject } from './utils.js';
 
 @Controller('api/auth')
@@ -20,6 +22,7 @@ export class AuthController {
   constructor(
     @Inject(AuthService) private readonly auth: AuthService,
     @Inject(APP_OPTIONS) private readonly options: ApiOptions,
+    @Inject(RegistrationService) private readonly registration: RegistrationService,
   ) {}
 
   @Post('login')
@@ -33,6 +36,11 @@ export class AuthController {
       this.auth.clearLoginFailures(loginKey);
     } catch (error) {
       this.auth.recordLoginFailure(loginKey);
+      if (error instanceof UnauthorizedException && typeof body.username === 'string') {
+        const hint = this.registration.loginHintFor(body.username);
+        if (hint?.status === 'pending') throw new UnauthorizedException('你的申请正在审核中,请耐心等待');
+        if (hint?.status === 'rejected') throw new UnauthorizedException(`申请未通过:${hint.note || '请联系客服'}`);
+      }
       throw error;
     }
     response.cookie('ca_session', result.token, {

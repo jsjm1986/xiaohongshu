@@ -1,6 +1,6 @@
 import { ArrowRight, BookOpenText, Check, Eye, EyeOff, Layers3, Sparkles } from 'lucide-react';
 import { type FormEvent, useEffect, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../components/AuthContext';
 import { ApiError } from '../lib/api';
 
@@ -64,6 +64,7 @@ export function LoginPage() {
             <button type="submit" className="login-submit" disabled={submitting}>{submitting ? <><span className="spinner spinner--small" />正在登录…</> : <><span>登录</span><ArrowRight size={18} /></>}</button>
           </form>
           <p className="login-help">无法登录？请联系工作区管理员重置密码。</p>
+          <p className="login-help">还没有账号?<Link to="/register">申请开通 →</Link></p>
         </div>
         <footer>© 2026 内容智造台 · 你的知识始终属于你</footer>
       </section>
