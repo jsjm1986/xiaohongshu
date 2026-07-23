@@ -156,6 +156,34 @@ describe("explainable generation parameter registry", () => {
     expect(compiled.resolutionSnapshot.sourceByParameter.comment_inference_effort).toEqual({ source: "override" });
   });
 
+  it("registers the multi-turn growth switch and compiles it to the config path (P2-11)", () => {
+    const definition = GENERATION_PARAMETER_REGISTRY.find((item) => item.id === "comment_multi_turn_growth");
+    expect(definition).toBeDefined();
+    expect(definition).toMatchObject({
+      path: "content.commentMultiTurnGrowthEnabled",
+      group: "channel",
+      defaultValue: false,
+      evidenceStatus: "operational_default",
+      control: { kind: "toggle" },
+    });
+    // Conservative default: an old config without the field compiles to off.
+    const defaulted = compileGenerationParameters(baseConfig(), DEFAULT_FORMULA_VERSION);
+    expect(defaulted.config.content.commentMultiTurnGrowthEnabled).toBe(false);
+    expect(defaulted.resolutionSnapshot.sourceByParameter.comment_multi_turn_growth).toEqual({ source: "default" });
+    expect(defaulted.impactReport.behaviorInstructions.join("\n")).toContain("根评论直接成稿");
+    // Explicit opt-in flows through the override channel onto the config path.
+    const enabled = compileGenerationParameters(baseConfig(), DEFAULT_FORMULA_VERSION, {
+      overrides: { comment_multi_turn_growth: true },
+    });
+    expect(enabled.config.content.commentMultiTurnGrowthEnabled).toBe(true);
+    expect(enabled.resolutionSnapshot.sourceByParameter.comment_multi_turn_growth).toEqual({ source: "override" });
+    expect(enabled.impactReport.behaviorInstructions.join("\n")).toContain("无自然话头不续");
+    // Toggle values must be boolean; nothing is silently coerced.
+    expect(() => compileGenerationParameters(baseConfig(), DEFAULT_FORMULA_VERSION, {
+      overrides: { comment_multi_turn_growth: 1 as unknown as boolean },
+    })).toThrow(/must be boolean/u);
+  });
+
   it("compiles the comment density formulas into actionable Chinese instructions", () => {
     const compiled = compileGenerationParameters(baseConfig(), DEFAULT_FORMULA_VERSION, {
       overrides: { comment_gap_multiplexing: 80, comment_reply_increment: 90, question_compression: 85 },

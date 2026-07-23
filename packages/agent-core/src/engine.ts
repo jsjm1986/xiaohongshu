@@ -3,8 +3,10 @@ import { createHash } from "node:crypto";
 import {
   applyGenerationPatch,
   channelsForIssues,
+  commentThreadFunction,
   diagnosticsFromValidation,
   evaluateGapCoverageRealization,
+  mergeCrefPatchById,
   parseGenerationDraft,
   parseGenerationPatch,
   parseJsonObject,
@@ -754,7 +756,10 @@ function deterministicDraft(
   const host = personaScene?.host;
   const event = personaScene?.event;
   const primaryGap = bodyGapCards[0]?.question ?? gaps[0] ?? `关于${topic}到底该先看什么？`;
-  const hostLead = host?.identityCue ?? ["上班族", "第一次认真做功课的人", "最近一直在刷相关内容的人"][candidateIndex]!;
+  const rawHostLead = host?.identityCue ?? ["上班族", "第一次认真做功课的人", "最近一直在刷相关内容的人"][candidateIndex]!;
+  // Blueprint identity cues written as metadata ("用户直接问价") must not be
+  // narrated as the host's self-description in the demo body.
+  const hostLead = /^(?:用户|客户|读者|目标人群)/u.test(rawHostLead) ? "最近一直在刷相关内容的人" : rawHostLead;
   const sceneLead = event?.setting ?? "最近刷内容的时候";
   const friction = host?.immediateConstraint ?? event?.friction ?? "怕影响平时安排";
   const openQuestion = primaryGap.replace(/[。！!]+$/u, "").replace(/^[：:]/u, "");
@@ -793,6 +798,8 @@ function deterministicDraft(
   const stageLabel: Record<ResolvedGenerationConfig["task"]["audienceStage"], string> = {
     discovering: "刚发现问题", collecting: "收集信息", comparing: "比较方案", hesitating: "犹豫核实", ready: "准备行动",
   };
+  const usedNaturalQuestions = new Set<string>();
+  const usedNaturalAnswers = new Set<string>();
   const naturalThreads = personaScene ? Array.from({ length: threadCount }, (_, index) => {
     const planned = orchestrationPlan?.dialogueThreads[index % Math.max(1, orchestrationPlan.dialogueThreads.length)];
     const surface = planned?.surfaceRoleCard ?? personaScene.commentCast[index % personaScene.commentCast.length]!;
@@ -800,30 +807,35 @@ function deterministicDraft(
       ?? commentGapCards[index % Math.max(1, commentGapCards.length)];
     const gapText = (gapCard?.question ?? planned?.questionIntent ?? primaryGap).replace(/[。！!]+$/u, "");
     const shortGap = [...gapText].slice(0, 20).join("");
+    const shortGapCore = shortGap.replace(/[？?]+$/u, "");
+    // Weave the gap phrase only when it is short enough to read naturally inside
+    // a casual sentence; long formal gap questions would produce stilted copy.
+    // Uniqueness among threads is carried by template cycling below, not by weaving.
+    const weave = shortGapCore.length <= 10 ? shortGapCore : "";
     const questions: Record<string, string> = {
       direct_question: shortGap.endsWith("？") ? shortGap : `${shortGap}？`,
-      shared_concern: "我也卡在这个，越看越不敢定",
-      experience_fragment: `我也在查这个，${shortGap.replace(/[？?]$/u, "")}还没弄明白`,
-      counterexample: "我不会只看一个答案，还会问条件不一样怎么办",
+      shared_concern: weave ? `我也卡在${weave}，越看越不敢定` : "我也卡在这个，越看越不敢定",
+      experience_fragment: `我也在查这个，${shortGapCore}还没弄明白`,
+      counterexample: weave ? `我不会只看一个答案，${weave}还得问条件不一样怎么办` : "我不会只看一个答案，还会问条件不一样怎么办",
       social_reaction: "这个状态看着真的轻松了一点",
-      detail_spotter: "我才看到你说的这个细节，是不是也得单独问",
+      detail_spotter: weave ? `我才看到你说的这个细节，${weave}是不是也得单独问` : "我才看到你说的这个细节，是不是也得单独问",
       knowledge_translation: "这个简单说主要看哪一点呀",
       identity_route: "这个具体找谁或去哪里核实呀",
       service_answer: "这个现在怎么确认比较准呀",
     };
     const answers: Record<string, string> = {
-      direct_question: "我也还没定，就是怕这个才来问问",
-      shared_concern: "对，我现在也是信息越多越纠结",
+      direct_question: "我也还没定，就是怕这个才发出来问",
+      shared_concern: weave ? `对，${weave}我现在也是信息越多越纠结` : "对，我现在也是信息越多越纠结",
       experience_fragment: "这个办法好，我也把自己的现实安排一起带去问",
-      counterexample: "对，先把备选情况问出来心里更有数",
+      counterexample: "对，先把条件不一样的情况问出来，心里更有数",
       social_reaction: "哈哈我也是今天才后知后觉",
-      detail_spotter: "对，我也是看素材才注意到，准备确认时一起问",
-      knowledge_translation: "我先把自己的情况说清楚，让对方按情况讲人话",
-      identity_route: "我还在看，等确定了核验路径再回你",
-      service_answer: "动态信息会变，采取行动前再确认一下比较稳",
+      detail_spotter: "对，我也是看素材才注意到，准备去的时候一起问",
+      knowledge_translation: "我打算先把自己的情况说清楚，让对方按情况讲人话",
+      identity_route: "我还在看，等确定了具体问谁再回你",
+      service_answer: "这个会变，我行动前再确认一下比较稳",
     };
-    const question = questions[surface.utteranceMode] ?? shortGap;
-    const requiredUnknown = Boolean(gapCard?.required && !((gapCard.answer || gapCard.framework) && gapCard.evidenceIds.length));
+    const rawQuestion = questions[surface.utteranceMode] ?? shortGap;
+    const ungroundedGap = !((gapCard?.answer || gapCard?.framework) && (gapCard?.evidenceIds.length ?? 0) > 0);
     const unknownAnswerVariants: Record<string, string> = {
       direct_question: "这点我也还没问明白，得再确认具体情况",
       shared_concern: "我现在也拿不准，准备再问清情况",
@@ -835,9 +847,27 @@ function deterministicDraft(
       identity_route: "我还没问清，确定了来回你",
       service_answer: "具体情况还没确认，采取行动前再问一下比较稳",
     };
-    const answer = requiredUnknown
+    const rawAnswer = ungroundedGap
       ? (unknownAnswerVariants[surface.utteranceMode] ?? "这点我也还没问明白，得再确认具体情况")
       : (answers[surface.utteranceMode] ?? "我也是想先把这个问明白");
+    // The canned voice pool is keyed by utterance mode, so two threads sharing a
+    // mode would repeat verbatim; cycle to the next structurally-distinct
+    // template on collision (duplicate/near-duplicate comment checks are
+    // error-level and containment-aware, so a suffix does not help).
+    const comparable = (value: string) => value.replace(/[\s\p{P}\p{S}]+/gu, "");
+    const utteranceModePool = ["direct_question", "shared_concern", "experience_fragment", "counterexample", "social_reaction", "detail_spotter", "knowledge_translation", "identity_route", "service_answer"];
+    const pickDistinct = (table: Record<string, string>, used: Set<string>, fallback: string): string => {
+      const start = Math.max(0, utteranceModePool.indexOf(surface.utteranceMode));
+      for (let offset = 0; offset < utteranceModePool.length; offset += 1) {
+        const candidate = table[utteranceModePool[(start + offset) % utteranceModePool.length]!];
+        if (candidate && !used.has(comparable(candidate))) return candidate;
+      }
+      return fallback;
+    };
+    const question = pickDistinct(questions, usedNaturalQuestions, rawQuestion);
+    usedNaturalQuestions.add(comparable(question));
+    const answer = pickDistinct(ungroundedGap ? unknownAnswerVariants : answers, usedNaturalAnswers, rawAnswer);
+    usedNaturalAnswers.add(comparable(answer));
     const plannedFollowUps = planned?.conversationPlan?.targetFollowUps ?? 0;
     const fallbackFollowUpLines = [
       { question: "等等，你说的是紧接着就有重要安排吗", answer: "对，我最怕的就是现实时间对不上" },
@@ -848,6 +878,8 @@ function deterministicDraft(
       return {
           question: visible.question,
           answer: visible.answer,
+          // Cref contract v1.1 (demo): a follow-up node extends the thread.
+          kind: "follow_up" as const,
           evidenceIds: [],
           personaRole: planned?.personaRole ?? "information_collector" as const,
           speakerType: "simulated_reader" as const,
@@ -866,7 +898,12 @@ function deterministicDraft(
       question,
       answer,
       followUps,
-      postingIdentity: planned?.postingIdentity ?? "author" as const,
+      // Cref contract v1.1 (demo): root nodes are positionally question/answer;
+      // the thread boundary comes from the planned reply boundary, never invented.
+      kind: "question" as const,
+      answerKind: "answer" as const,
+      boundary: planned?.replyPlan?.boundary,
+      postingIdentity: planned?.postingIdentity ?? "publisher" as const,
       sourceClusterIds: [],
       evidenceIds: [],
       nextStep: planned?.nextStep ?? "按真实新问题继续接话",
@@ -1019,7 +1056,7 @@ function deterministicDraft(
         simulated: true,
         simulationLabel: "模拟潜在读者追问",
       })),
-      postingIdentity: planned?.postingIdentity ?? "author" as const,
+      postingIdentity: planned?.postingIdentity ?? "publisher" as const,
       sourceClusterIds: planned?.sourceClusterIds.length ? planned.sourceClusterIds : context.selectedDocumentIds.slice(0, 3),
       evidenceIds: planned?.evidenceIds.length ? planned.evidenceIds : primaryEvidence ? [primaryEvidence] : [],
       nextStep: planned?.nextStep ?? (primaryEvidence ? "记录自己的条件，并按来源逐项核实。" : "补充可信来源后再形成结论。"),
@@ -1039,6 +1076,18 @@ function deterministicDraft(
       surfaceRoleCard: planned?.surfaceRoleCard,
     };
   });
+  // Cref contract v1.1 (demo): assemble a deterministic publisher-owned first
+  // comment from the first two thread Q&As. Only the persona-scene path
+  // produces publisher-voice copy clean enough to pin; the FAQ fallback stays
+  // without one rather than dressing audit language up as a publishable
+  // comment, and no threads means no first comment.
+  const ownedFirstComment = personaScene && threads.length
+    ? `常见问题整理——${threads.slice(0, 2).map((thread) => {
+        const q = thread.question.trim().replace(/[。！!；;]+$/u, "");
+        const a = thread.answer.trim().replace(/[。！!；;]+$/u, "");
+        return `问：${q}，答：${a}`;
+      }).join("；")}。以上为常见问题整理，具体情况以当面评估为准。`
+    : undefined;
   const titleTarget = Math.max(1, method.titleTargetChars);
   const titleOptions = [`${topic}：先核实什么`, `${topic}：怎么比较`, `${topic}：别急着定`];
   const misconceptionTitles = [`${topic}别只看一个结论`, `${topic}先拆一个误区`, `${topic}别被单一说法带走`];
@@ -1149,7 +1198,7 @@ function deterministicDraft(
         title: sanitizeText(title, config.task.forbidden),
         body,
       },
-      Cref: { disclaimer: "以下为完整评论区创作参考，不代表已经发生的真实互动或观测口碑。", threads },
+      Cref: { disclaimer: "以下为完整评论区创作参考，不代表已经发生的真实互动或观测口碑。", ownedFirstComment, threads },
     },
     evidenceIds: citedEvidenceIds,
     reasoning,
@@ -1234,6 +1283,9 @@ function bindDialogueProvenance(
       question: cleanVisibleText(followUp.question),
       answer: cleanVisibleText(followUp.answer),
       replyTo: planned.id,
+      // Positional default: a follow-up node extends the thread, so its kind is
+      // "follow_up" (its answer side is positionally a "clarification").
+      kind: followUp.kind ?? "follow_up" as const,
       evidenceIds: [...new Set(remappedDraft.reasoning
         .filter((item) => item.status === "fact" && item.location === "Cref.followUp"
           && item.occurrence?.threadId === planned.id && item.occurrence.followUpIndex === followUpIndex)
@@ -1245,13 +1297,22 @@ function bindDialogueProvenance(
       id: planned.id,
       question,
       answer,
+      // Cref contract v1.1: keep model-stated dialogic kinds/boundary; when the
+      // model did not state them, derive kinds positionally (root nodes) and
+      // fall back to the planned reply boundary. A boundary is never invented.
+      kind: base.kind ?? "question" as const,
+      answerKind: base.answerKind ?? "answer" as const,
+      boundary: base.boundary ?? planned.replyPlan?.boundary,
       postingIdentity: planned.postingIdentity,
       sourceClusterIds: [...planned.sourceClusterIds],
       evidenceIds,
       followUps,
       stage: planned.stage,
       gap: planned.gapId,
-      function: planned.function,
+      // P3-15: the model may state the thread function in the staged schema; a
+      // legal enum value wins, anything else silently falls back to the
+      // content-derived planning value (no more positional rotation anywhere).
+      function: commentThreadFunction(base.function) ?? planned.function,
       nextStep: planned.nextStep,
       personaRole: planned.personaRole,
       speakerType: planned.speakerType,
@@ -1275,11 +1336,36 @@ function bindDialogueProvenance(
       surfaceRoleCard: selectedSurface ? { ...selectedSurface, targetChars: [...selectedSurface.targetChars] as [number, number] } : undefined,
     };
   });
+  // Plan-level uncovered-gap projection (Cref contract v1.1): a gap selected
+  // for this candidate counts as covered by Cref when at least one dialogue
+  // thread takes it as primaryGapId or lists it in auxiliaryGapIds; cards
+  // planned for N.body belong to the body channel, not to Cref. The projection
+  // is derived deterministically from the plan, never from model text, and is
+  // distinct from gapCoverageLedger.uncoveredGapIds, which grades the final
+  // draft's realization quality after generation. When the plan carries no
+  // gapPlanningCards (historical snapshot) the field stays absent — an
+  // uncomputable projection must not masquerade as an empty one.
+  const coveredGapIds = new Set(plan.dialogueThreads
+    .flatMap((planned) => [planned.primaryGapId, ...planned.auxiliaryGapIds]));
+  const uncoveredGaps = plan.gapPlanningCards
+    ? plan.gapPlanningCards
+      .filter((card) => !coveredGapIds.has(card.gapId) && !card.plannedPlacements.includes("N.body"))
+      .map((card) => card.gapId)
+    : undefined;
   const bound: GenerationDraft = {
     ...remappedDraft,
     content: {
       ...remappedDraft.content,
-      Cref: { ...remappedDraft.content.Cref, threads },
+      Cref: {
+        ...remappedDraft.content.Cref,
+        threads,
+        uncoveredGaps,
+        // Model-produced visible copy, cleaned like any other comment text;
+        // when the staged flow produced none it stays absent (never synthesized).
+        ownedFirstComment: remappedDraft.content.Cref.ownedFirstComment
+          ? cleanVisibleText(remappedDraft.content.Cref.ownedFirstComment)
+          : undefined,
+      },
     },
   };
   const reconciled = reconcileReasoningEvidence(bound, allowedEvidenceIds, evidenceSources);
@@ -1704,7 +1790,7 @@ export class ContentGenerationAgent implements GenerationEngine {
             throw new Error("Comment growth output omitted one or more root thread IDs.");
           }
           comments = {
-            disclaimer: normalizedRoots.disclaimer,
+            ...normalizedRoots,
             threads: normalizedRoots.threads.map((root) => ({
               ...root,
               followUps: grownById.get(root.id)?.followUps ?? [],
@@ -1728,6 +1814,9 @@ export class ContentGenerationAgent implements GenerationEngine {
         N: core.N,
         Cref: {
           disclaimer: comments.disclaimer,
+          // Carried only when the model produced one; bindDialogueProvenance
+          // cleans it like any other visible copy. Absent stays absent.
+          ownedFirstComment: comments.ownedFirstComment,
           threads: deterministicBase.content.Cref.threads.map((base, threadIndex) => {
             const visible = comments.threads[threadIndex]!;
             const root = normalizedRoots.threads[threadIndex]!;
@@ -1749,6 +1838,14 @@ export class ContentGenerationAgent implements GenerationEngine {
               id: root.id,
               question: root.question,
               answer: rootAnswer,
+              // Model-stated Cref contract v1.1 fields; bindDialogueProvenance
+              // fills the positional defaults when the model left them out.
+              kind: root.kind,
+              answerKind: root.answerKind,
+              boundary: root.boundary,
+              // P3-15: a legal model-stated function wins at bind time; an absent
+              // or illegal one falls back to the planning derivation.
+              function: root.function,
               surfaceRoleCard: selectedSurface,
               conversationPlan: {
                 topology,
@@ -1769,6 +1866,8 @@ export class ContentGenerationAgent implements GenerationEngine {
                 }),
                 question: visibleFollowUp.question,
                 answer: visibleFollowUp.answer,
+                kind: visibleFollowUp.kind,
+                boundary: visibleFollowUp.boundary,
                 evidenceIds: [],
               })),
             };
@@ -1857,48 +1956,27 @@ export class ContentGenerationAgent implements GenerationEngine {
           });
           const patch = parseGenerationPatch(response.text);
           if (patch.Cref) {
-            const currentIds = draft.content.Cref.threads.map((thread) => thread.id);
-            const patchIds = patch.Cref.threads.map((thread) => thread.id);
-            if (patchIds.length !== currentIds.length || patchIds.some((id, index) => id !== currentIds[index])) {
-              throw new Error(`Comment repair must preserve all ${currentIds.length} root thread IDs in their original order.`);
-            }
-            patch.Cref = {
-              disclaimer: patch.Cref.disclaimer,
-              threads: patch.Cref.threads.map((visibleThread, threadIndex) => {
-                const currentThread = draft.content.Cref.threads[threadIndex];
-                if (!currentThread) return visibleThread;
-                return {
-                  ...currentThread,
-                  question: visibleThread.question,
-                  answer: visibleThread.answer,
-                  followUps: visibleThread.followUps.map((visibleFollowUp, followUpIndex) => ({
-                    ...(currentThread.followUps[followUpIndex] ?? {
-                      personaRole: currentThread.personaRole,
-                      speakerType: "simulated_reader" as const,
-                      claimStatus: "hypothetical" as const,
-                      replyTo: currentThread.id,
-                      threadDepth: followUpIndex + 1,
-                      simulated: true,
-                      simulationLabel: "模拟潜在读者接话",
-                      evidenceIds: [],
-                    }),
-                    question: visibleFollowUp.question,
-                    answer: visibleFollowUp.answer,
-                    evidenceIds: [],
-                  })),
-                };
-              }),
-            };
+            // P4-22: merge the visible-copy patch by thread id — out-of-order
+            // and partial patches are fine (unreturned threads keep their
+            // prose); only unplanned ids or a missing disclaimer fail.
+            patch.Cref = mergeCrefPatchById(draft.content.Cref, patch.Cref);
           }
           draft = applyGenerationPatch(draft, patch);
         } catch (error) {
-          issues = [...issues, {
-            code: "repair_parse_failed",
-            severity: "error",
-            channel: "package",
-            message: error instanceof Error ? error.message : String(error),
-            repairable: repairAttempts < input.config.generation.maxRepairAttempts,
-          }];
+          // P4-22: a failed repair never fails the whole candidate. Record one
+          // issue (terminal attempts are repairable:false), keep the channel's
+          // original issues and the pre-repair draft; the candidate survives
+          // for human review (surfaced as needs_review downstream).
+          issues = [
+            ...issues.filter((item) => item.code !== "repair_parse_failed"),
+            {
+              code: "repair_parse_failed",
+              severity: "error",
+              channel: "package",
+              message: error instanceof Error ? error.message : String(error),
+              repairable: repairAttempts < input.config.generation.maxRepairAttempts,
+            },
+          ];
           continue;
         }
       }
@@ -1936,7 +2014,7 @@ export class ContentGenerationAgent implements GenerationEngine {
     const createdAt = this.now().toISOString();
     const id = packageId(input.jobId, candidateIndex, seed);
     return {
-      schemaVersion: "1.0",
+      schemaVersion: "1.1",
       id,
       projectId: input.config.project.id,
       jobId: input.jobId,
