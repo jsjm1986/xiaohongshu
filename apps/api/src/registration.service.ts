@@ -38,6 +38,12 @@ export class RegistrationService {
   recordSubmit(key: string): void {
     const now = Date.now();
     const current = this.submitFailures.get(key);
+    if (this.submitFailures.size > 10_000) {
+      for (const [candidate, value] of this.submitFailures) {
+        if (value.resetAt <= now) this.submitFailures.delete(candidate);
+      }
+      if (this.submitFailures.size > 10_000) this.submitFailures.delete(this.submitFailures.keys().next().value as string);
+    }
     this.submitFailures.set(key, current && current.resetAt > now
       ? { count: current.count + 1, resetAt: current.resetAt }
       : { count: 1, resetAt: now + 15 * 60_000 });
