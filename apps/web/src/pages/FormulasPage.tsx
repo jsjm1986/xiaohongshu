@@ -243,7 +243,7 @@ export function FormulasPage() {
         <div className="formula-layout">
           <aside className="version-list">
             <header><h2>版本记录</h2><Badge>{versions.length} 个版本</Badge></header>
-            {versions.map((version) => <button key={version.id} className={selected?.id === version.id ? "selected" : ""} onClick={() => setSelected(version)}><span className={`version-dot version-dot--${version.status}`} /><span><strong>{version.version}<Badge tone={version.status === "active" ? "positive" : version.status === "draft" ? "warning" : "neutral"}>{version.status === "active" ? "已启用" : version.status === "draft" ? "草稿" : "已归档"}</Badge></strong><small>{version.description}</small><i>{formatDate(version.createdAt)} · {version.formulas?.length ?? version.formulaCount ?? 0} 个公式单元</i></span><ArrowRight size={15} /></button>)}
+            {versions.map((version) => <button type="button" key={version.id} className={selected?.id === version.id ? "selected" : ""} onClick={() => setSelected(version)}><span className={`version-dot version-dot--${version.status}`} /><span><strong>{version.version}<Badge tone={version.status === "active" ? "positive" : version.status === "draft" ? "warning" : "neutral"}>{version.status === "active" ? "已启用" : version.status === "draft" ? "草稿" : "已归档"}</Badge></strong><small>{version.description}</small><i>{formatDate(version.createdAt)} · {version.formulas?.length ?? version.formulaCount ?? 0} 个公式单元</i></span><ArrowRight size={15} /></button>)}
           </aside>
 
           {selected ? <main className="formula-detail">

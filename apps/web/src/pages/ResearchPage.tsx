@@ -230,7 +230,7 @@ export function ResearchPage() {
     </section>
 
     <nav className="research-tabs" aria-label="研究资料分类">
-      {tabs.map(({ id, label, icon: Icon, count }) => <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}>
+      {tabs.map(({ id, label, icon: Icon, count }) => <button type="button" key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}>
         <Icon size={16} /><span>{label}</span>{count && <i>{overview?.counts[count] ?? 0}</i>}
       </button>)}
     </nav>
@@ -271,7 +271,7 @@ function Overview({ overview, onTab }: { overview: ResearchOverview; onTab: (tab
         <span><small>证据目录</small><strong>{active.evidenceCatalogVersion}</strong></span>
       </div>}
     </section>
-    <div className="research-metric-grid">{cards.map(([id, title, value, detail]) => <button key={id} onClick={() => onTab(id)}><strong>{value}</strong><span>{title}</span><small>{detail}</small></button>)}</div>
+    <div className="research-metric-grid">{cards.map(([id, title, value, detail]) => <button type="button" key={id} onClick={() => onTab(id)}><strong>{value}</strong><span>{title}</span><small>{detail}</small></button>)}</div>
     <section className="research-boundary-grid">
       <article><ShieldCheck size={19} /><div><strong>不会自动注入</strong><p>研究文字不直接进入生成提示词，避免未批准猜想改变文案。</p></div></article>
       <article><FlaskConical size={19} /><div><strong>实验不会自动套用</strong><p>完成或支持假设都不等于可发布；结果还需独立复核。</p></div></article>
