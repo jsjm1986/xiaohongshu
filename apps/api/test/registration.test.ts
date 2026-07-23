@@ -3,8 +3,8 @@ import { test } from 'node:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseService } from './database.service.js';
-import type { ApiOptions } from './config.js';
+import { DatabaseService } from '../src/database.service.js';
+import type { ApiOptions } from '../src/config.js';
 
 function makeDb(): DatabaseService {
   const dir = mkdtempSync(join(tmpdir(), 'reg-test-'));
