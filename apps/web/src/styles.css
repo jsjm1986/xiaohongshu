@@ -1793,6 +1793,26 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .chip-remove:hover { color: #ef4444; }
 .opportunity-card__edit .filled { fill: currentColor; color: #f59e0b; }
 
+/* 缺口编辑器的证据点选器（Cref v1.1）：从知识库分节点选，失效引用显式警示。 */
+.evidence-picker { display: flex; flex-direction: column; gap: 10px; }
+.evidence-picker__selected { display: flex; flex-wrap: wrap; gap: 6px; }
+.evidence-picker__selected .chip { display: inline-flex; align-items: center; max-width: 100%; overflow-wrap: anywhere; }
+.evidence-picker .chip--stale { background: var(--amber-soft); border-color: var(--amber); color: var(--amber); }
+.evidence-picker__stale-warning { display: flex; align-items: flex-start; gap: 6px; margin: 0; color: var(--amber); font-size: 11px; line-height: 1.5; }
+.evidence-picker__stale-warning svg { flex: 0 0 auto; margin-top: 1px; }
+.evidence-picker__empty { margin: 0; color: var(--muted); font-size: 11px; }
+.evidence-picker__groups { display: flex; flex-direction: column; gap: 10px; max-height: 320px; overflow-y: auto; }
+.evidence-picker__group { display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
+.evidence-picker__group > header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.evidence-picker__group > header small { color: var(--muted); }
+.evidence-picker__section { display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-radius: 8px; cursor: pointer; }
+.evidence-picker__section.selected { background: var(--surface-soft); }
+.evidence-picker__section input { margin-top: 2px; }
+.evidence-picker__section-text { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
+.evidence-picker__section-text small { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.evidence-picker__badges { display: flex; flex: 0 0 auto; gap: 4px; }
+.evidence-picker__more { align-self: flex-start; padding: 2px 0; border: none; background: none; color: var(--accent, #3b82f6); font-size: 11px; cursor: pointer; }
+
 @media (max-width: 1100px) {
   .research-active-release { grid-template-columns: auto 1fr; }
   .research-version-grid { grid-column: 1 / -1; }

@@ -148,6 +148,12 @@ export class ProjectKnowledgeController {
     return { projectId, content: this.knowledge.index(projectId) };
   }
 
+  @Get('evidence-sections')
+  evidenceSections(@Req() rawRequest: Request, @Param('projectId') projectId: string) {
+    this.assert(rawRequest, projectId, 'project.read');
+    return this.knowledge.evidenceSections(projectId);
+  }
+
   @Post()
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 2 * 1024 * 1024, files: 1 } }))
   async upload(

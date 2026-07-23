@@ -70,14 +70,16 @@ export class ExportService {
 
   toMarkdown(rawPackage: unknown): string {
     const pkg = this.validatePackage(rawPackage);
+    // Cref contract v1.1 packages export in the two-part layout (executive
+    // copy first, audit appendix last). Historical packages without any v1.1
+    // marker keep the legacy single-flow output below byte-for-byte.
+    if (isCrefV11Package(pkg)) return renderCrefV11TwoPartMarkdown(pkg);
     const content = asObject(pkg.content);
     const headline = asObject(content.N);
     const hashtags = stringArray(asObject(content.H).hashtags);
     const comments = asObject(content.Cref);
     const threads = objectArray(comments.threads);
     const dialoguePlans = objectArray(pkg.dialogueThreads);
-    const orchestration = asObject(pkg.orchestrationSnapshot);
-    const coverageLedger = asObject(orchestration.gapCoverageLedger);
     const title = text(headline.title) || '未命名内容包';
     const lines: string[] = [
       `# ${title}`,
@@ -104,112 +106,22 @@ export class ExportService {
 
     const disclaimer = text(comments.disclaimer);
     lines.push(`> 【模拟情景，非真实评论】${disclaimer || '以下内容仅用于演练潜在读者问题与可追责答复。'}`, '');
+    // Cref contract v1.1: publisher-owned first comment, only when the model
+    // actually produced one (never synthesized after the fact).
+    if (text(comments.ownedFirstComment)) {
+      lines.push(`> 【可发布首评参考】由发布账号（publisher）身份发布：${text(comments.ownedFirstComment)}`, '');
+    }
     if (threads.length === 0) {
       lines.push('_未提供评论区参考_', '');
     } else {
-      threads.forEach((thread, index) => {
-        const plan = dialoguePlans.find((item) => text(item.id) && text(item.id) === text(thread.id)) ?? dialoguePlans[index] ?? {};
-        const metadata = (key: string) => thread[key] ?? plan[key];
-        const simulated = metadata('simulated') === true;
-        const roleCard = asObject(metadata('roleCard'));
-        const density = asObject(metadata('densityProxy'));
-        const replyPlan = asObject(metadata('replyPlan'));
-        const discoveryPlan = asObject(metadata('discoveryPlan'));
-        lines.push(
-          `### 模拟问答 ${index + 1}`,
-          '',
-          `- 情景标识：${simulated ? text(metadata('simulationLabel')) || '模拟潜在读者情景' : '历史内容，未标注模拟字段'}${simulated ? '（不是真实评论）' : ''}`,
-          `- 潜在读者角色：${text(metadata('personaRole')) || '未标注'}`,
-          `- 提问方类型：${text(metadata('speakerType')) || '未标注'}`,
-          `- 声明状态：${text(metadata('claimStatus')) || '未标注'}`,
-          `- 回复关系：${text(metadata('replyTo')) || '根线程'} ｜ 深度：${text(metadata('threadDepth')) || '0'}`,
-          `- 提问：${text(thread.question) || '未提供'}`,
-          `- 回复：${text(thread.answer) || '未提供'}`,
-          `- 可追责答复身份：${text(thread.postingIdentity) || '未标注'}`,
-        );
-        if (Object.keys(roleCard).length) lines.push(
-          `- 动态角色卡：阶段=${text(roleCard.stage) || '未标注'}；知识=${stringArray(roleCard.knowledge).join('、') || '未标注'}；约束=${stringArray(roleCard.constraints).join('、') || '无'}；任务=${text(roleCard.decisionTask) || '未标注'}；证据态度=${text(roleCard.evidenceStance) || '未标注'}`,
-          `- 缺口结构：主缺口=${text(metadata('primaryGapId')) || '未标注'}；辅助缺口=${stringArray(metadata('auxiliaryGapIds')).join('、') || '无'}`,
-        );
-        if (Object.keys(density).length) lines.push(
-          `- 信息密度代理：角色维度=${text(density.roleDimensionCount) || '0'}；现实约束=${text(density.constraintCount) || '0'}；辅助维度=${text(density.auxiliaryDimensionCount) || '0'}；短问软目标≈${text(density.questionTargetChars) || '未标注'}字（非效果分）`,
-        );
-        if (Object.keys(replyPlan).length) lines.push(
-          `- 隐藏答复计划：直接回答=${text(replyPlan.directAnswer)}；条件=${text(replyPlan.condition)}；边界=${text(replyPlan.boundary)}；未知=${text(replyPlan.unknown)}；下一问=${text(replyPlan.nextQuestion)}`,
-        );
-        if (Object.keys(discoveryPlan).length) lines.push(
-          `- 发现式路径：线索=${text(discoveryPlan.cue)}；一步推断=${text(discoveryPlan.inferencePrompt)}；同线程揭示=${text(discoveryPlan.reveal)}；自检=${text(discoveryPlan.selfCheck)}；边界=${text(discoveryPlan.boundary)}；难度=${text(discoveryPlan.difficulty)}`,
-        );
-        const followUps = objectArray(thread.followUps);
-        for (const followUp of followUps) {
-          lines.push(
-            `  - 追问：${text(followUp.question) || '未提供'}`,
-            `  - 补充：${text(followUp.answer) || '未提供'}`,
-            `  - 追问角色 / 声明：${text(followUp.personaRole) || text(metadata('personaRole')) || '未标注'} / ${text(followUp.claimStatus) || '未标注'}`,
-          );
-        }
-        lines.push('');
-      });
+      appendCommentThreadAudit(lines, threads, dialoguePlans);
     }
 
-    if (Object.keys(coverageLedger).length) {
-      lines.push('## 信息闭合台账', '');
-      lines.push(
-        `- 闭合覆盖率：${text(coverageLedger.closureRate) || '未标注'}（包含明确未知/延后）`,
-        `- 真正解决率：${text(coverageLedger.resolvedRate) || '未标注'}（仅正文/评论已回答）`,
-        `- 线程可读性目标 / 实际：${text(coverageLedger.targetThreadCount) || '0'} / ${text(coverageLedger.effectiveThreadCount) || '0'}`,
-      );
-      if (text(coverageLedger.capacityWarning)) lines.push(`- 容量提示：${text(coverageLedger.capacityWarning)}`);
-      for (const entry of objectArray(coverageLedger.entries)) lines.push(
-        `- ${text(entry.label) || text(entry.gapId) || 'gap'}：${text(entry.status) || '未标注'}；${text(entry.reason) || '无说明'}${text(entry.requiredInput) ? `；所需输入=${text(entry.requiredInput)}` : ''}${text(entry.verificationPath) ? `；核验路径=${text(entry.verificationPath)}` : ''}`,
-      );
-      lines.push('');
-    }
+    appendUncoveredGapProjection(lines, comments);
 
-    appendObjectList(lines, '证据来源', objectArray(pkg.evidence), (item) => {
-      const location = [text(item.path), text(item.section)].filter(Boolean).join(' · ');
-      const quote = text(item.quote);
-      return `${text(item.id) || 'evidence'}：${location || '未注明来源'}${quote ? `；摘录：${quote}` : ''}`;
-    });
-    appendObjectList(lines, '事实、推理与猜想', objectArray(pkg.reasoning), (item) => {
-      return `[${text(item.status) || 'unknown'}] ${text(item.statement) || '未提供'}`;
-    });
-    appendObjectList(lines, '未知信息', objectArray(pkg.unknowns), (item) => {
-      return `[${text(item.impact) || 'unknown'}] ${text(item.question) || text(item.key) || '未提供'}：${text(item.reason) || '未说明原因'}`;
-    });
-    appendObjectList(lines, '知识冲突', objectArray(pkg.conflicts), (item) => {
-      return `${text(item.key) || text(item.id) || '未命名冲突'}（${text(item.status) || 'unresolved'}）${text(item.resolution) ? `：${text(item.resolution)}` : ''}`;
-    });
-    appendDiagnosticLedger(lines, pkg);
+    appendDeploymentOperations(lines, pkg);
 
-    appendVisualProductionLedger(lines, pkg, text(headline.imageBrief));
-    appendOpportunityRankAudit(lines, pkg);
-
-    const validation = asObject(pkg.validation);
-    lines.push(
-      '## 校验结果',
-      '',
-      `- 是否通过：${validation.valid === true ? '是' : '否'}`,
-      `- 修复次数：${typeof validation.repairAttempts === 'number' ? validation.repairAttempts : 0}`,
-    );
-    for (const issue of objectArray(validation.issues)) {
-      lines.push(`- [${text(issue.severity) || 'warning'}] ${text(issue.message) || text(issue.code) || '未说明'}`);
-    }
-
-    const formula = asObject(pkg.formulaSnapshot);
-    const knowledge = asObject(pkg.knowledgeSnapshot);
-    lines.push(
-      '',
-      '## 生成追溯',
-      '',
-      `- 生成时间：${text(pkg.createdAt) || 'unknown'}`,
-      `- 随机种子：${text(pkg.seed) || 'unknown'}`,
-      `- 公式版本：${text(formula.versionId) || 'unknown'}`,
-      `- 公式摘要：${text(formula.digest) || 'unknown'}`,
-      `- 知识注入模式：${text(knowledge.mode) || 'unknown'}`,
-      `- 知识文件数：${objectArray(knowledge.documents).length}`,
-      '',
-    );
+    appendAuditTrail(lines, pkg);
     return lines.join('\n');
   }
 
@@ -312,6 +224,271 @@ export class ExportService {
   }
 }
 
+/**
+ * Two-part layout gate (Cref contract v1.1). Returns true only when the
+ * package actually carries v1.1 Cref data: schemaVersion "1.1", a Cref-level
+ * ownedFirstComment / uncoveredGaps projection, or any thread / followUp
+ * v1.1 field (kind / answerKind / boundary / nextStep / evidenceIds).
+ * Historical v1.0 packages without those markers keep the legacy single-flow
+ * markdown byte-for-byte. Deployment-plan v1.1 markers alone (sla /
+ * updatePolicy / structured liveRouting) do not flip the layout — they only
+ * open the aC rules section within whichever layout applies.
+ */
+function isCrefV11Package(pkg: JsonObject): boolean {
+  if (text(pkg.schemaVersion) === '1.1') return true;
+  const comments = asObject(asObject(pkg.content).Cref);
+  if (text(comments.ownedFirstComment)) return true;
+  if (Array.isArray(comments.uncoveredGaps)) return true;
+  return objectArray(comments.threads).some((thread) => hasCrefV11NodeFields(thread));
+}
+
+function hasCrefV11NodeFields(node: JsonObject): boolean {
+  if (text(node.kind) || text(node.answerKind) || text(node.boundary) || text(node.nextStep)) return true;
+  if (stringArray(node.evidenceIds).length > 0) return true;
+  return objectArray(node.followUps).some((followUp) => hasCrefV11NodeFields(followUp));
+}
+
+/**
+ * Two-part markdown for Cref contract v1.1 packages: an executive part the
+ * operator can act on directly (publish copy, owned first comment, dialogue
+ * scripts, aC operating rules), then a clearly separated audit appendix with
+ * the full metadata trail. Audit vocabulary (role cards, density proxies,
+ * reply plans, discovery plans, evidence ids) stays out of the executive part.
+ */
+function renderCrefV11TwoPartMarkdown(pkg: JsonObject): string {
+  const content = asObject(pkg.content);
+  const headline = asObject(content.N);
+  const hashtags = stringArray(asObject(content.H).hashtags);
+  const comments = asObject(content.Cref);
+  const threads = objectArray(comments.threads);
+  const dialoguePlans = objectArray(pkg.dialogueThreads);
+  const title = text(headline.title) || '未命名内容包';
+  const lines: string[] = [
+    `# ${title}`,
+    '',
+    `> 内容包 ID：${text(pkg.id) || 'unknown'} ｜ 项目：${text(pkg.projectId) || 'unknown'} ｜ 候选：${text(pkg.candidateIndex) || '0'}`,
+    '',
+    '## 发布内容',
+    '',
+    '### 图片简报（实际 N.imageBrief，非图片成品）',
+    '',
+    text(headline.imageBrief) || '_未提供_',
+    '',
+    '### 正文',
+    '',
+    text(headline.body) || '_未提供_',
+    '',
+    '### 标签',
+    '',
+    hashtags.length ? hashtags.map(normalizeHashtag).join(' ') : '_未提供_',
+    '',
+  ];
+
+  // Publisher-owned first comment, only when the model actually produced one
+  // (never synthesized after the fact).
+  if (text(comments.ownedFirstComment)) {
+    lines.push(
+      '## 可发布首评参考',
+      '',
+      `> 【可发布首评参考】由发布账号（publisher）身份发布：${text(comments.ownedFirstComment)}`,
+      '',
+    );
+  }
+
+  // Dialogue scripts: only what the operator needs to reply — question,
+  // answer, accountable identity, boundary, next step and follow-up pairs.
+  lines.push(
+    '## 问答话术（模拟情景演练，非真实评论）',
+    '',
+    `> 【模拟情景，非真实评论】${text(comments.disclaimer) || '以下内容仅用于演练潜在读者问题与可追责答复。'}`,
+    '',
+  );
+  if (threads.length === 0) {
+    lines.push('_未提供问答话术_', '');
+  } else {
+    threads.forEach((thread, index) => {
+      lines.push(
+        `### 话术 ${index + 1}`,
+        '',
+        `- 提问：${text(thread.question) || '未提供'}`,
+        `- 回复：${text(thread.answer) || '未提供'}`,
+        `- 可追责答复身份：${postingIdentityText(thread.postingIdentity) || '未标注'}`,
+      );
+      if (text(thread.boundary)) lines.push(`- 答复边界：${text(thread.boundary)}`);
+      if (text(thread.nextStep)) lines.push(`- 下一步：${text(thread.nextStep)}`);
+      for (const followUp of objectArray(thread.followUps)) {
+        lines.push(
+          `  - 追问：${text(followUp.question) || '未提供'}`,
+          `  - 补充：${text(followUp.answer) || '未提供'}`,
+        );
+      }
+      lines.push('');
+    });
+  }
+
+  appendDeploymentOperations(lines, pkg);
+
+  lines.push(
+    '---',
+    '',
+    '# 审计附录（非发布素材）',
+    '',
+    '## 评论线程完整元数据',
+    '',
+  );
+  if (threads.length === 0) {
+    lines.push('_无评论线程_', '');
+  } else {
+    appendCommentThreadAudit(lines, threads, dialoguePlans);
+  }
+  appendUncoveredGapProjection(lines, comments);
+  appendAuditTrail(lines, pkg);
+  return lines.join('\n');
+}
+
+/** Full per-thread audit metadata, shared by the legacy flow and the v1.1 audit appendix. */
+function appendCommentThreadAudit(lines: string[], threads: JsonObject[], dialoguePlans: JsonObject[]): void {
+  threads.forEach((thread, index) => {
+    const plan = dialoguePlans.find((item) => text(item.id) && text(item.id) === text(thread.id)) ?? dialoguePlans[index] ?? {};
+    const metadata = (key: string) => thread[key] ?? plan[key];
+    const simulated = metadata('simulated') === true;
+    const roleCard = asObject(metadata('roleCard'));
+    const density = asObject(metadata('densityProxy'));
+    const replyPlan = asObject(metadata('replyPlan'));
+    const discoveryPlan = asObject(metadata('discoveryPlan'));
+    lines.push(
+      `### 模拟问答 ${index + 1}`,
+      '',
+      `- 情景标识：${simulated ? text(metadata('simulationLabel')) || '模拟潜在读者情景' : '历史内容，未标注模拟字段'}${simulated ? '（不是真实评论）' : ''}`,
+      `- 潜在读者角色：${text(metadata('personaRole')) || '未标注'}`,
+      `- 提问方类型：${text(metadata('speakerType')) || '未标注'}`,
+      `- 声明状态：${text(metadata('claimStatus')) || '未标注'}`,
+      `- 回复关系：${text(metadata('replyTo')) || '根线程'} ｜ 深度：${text(metadata('threadDepth')) || '0'}`,
+      `- 提问：${text(thread.question) || '未提供'}`,
+      `- 回复：${text(thread.answer) || '未提供'}`,
+      `- 可追责答复身份：${postingIdentityText(thread.postingIdentity) || '未标注'}`,
+    );
+    // v1.1 node metadata; each line renders only when the field exists, so
+    // historical packages keep their previous output verbatim.
+    if (text(thread.kind) || text(thread.answerKind)) lines.push(
+      `- 节点类型：提问=${commentKindText(text(thread.kind)) || '问题（默认）'}；答复=${commentKindText(text(thread.answerKind)) || '回答（默认）'}`,
+    );
+    if (text(thread.boundary)) lines.push(`- 答复边界：${text(thread.boundary)}`);
+    if (stringArray(thread.evidenceIds).length) lines.push(`- 证据引用：${stringArray(thread.evidenceIds).join('、')}`);
+    if (text(thread.nextStep)) lines.push(`- 下一步：${text(thread.nextStep)}`);
+    if (Object.keys(roleCard).length) lines.push(
+      `- 动态角色卡：阶段=${text(roleCard.stage) || '未标注'}；知识=${stringArray(roleCard.knowledge).join('、') || '未标注'}；约束=${stringArray(roleCard.constraints).join('、') || '无'}；任务=${text(roleCard.decisionTask) || '未标注'}；证据态度=${text(roleCard.evidenceStance) || '未标注'}`,
+      `- 缺口结构：主缺口=${text(metadata('primaryGapId')) || '未标注'}；辅助缺口=${stringArray(metadata('auxiliaryGapIds')).join('、') || '无'}`,
+    );
+    if (Object.keys(density).length) lines.push(
+      `- 信息密度代理：角色维度=${text(density.roleDimensionCount) || '0'}；现实约束=${text(density.constraintCount) || '0'}；辅助维度=${text(density.auxiliaryDimensionCount) || '0'}；短问软目标≈${text(density.questionTargetChars) || '未标注'}字（非效果分）`,
+    );
+    if (Object.keys(replyPlan).length) lines.push(
+      `- 隐藏答复计划：直接回答=${text(replyPlan.directAnswer)}；条件=${text(replyPlan.condition)}；边界=${text(replyPlan.boundary)}；未知=${text(replyPlan.unknown)}；下一问=${text(replyPlan.nextQuestion)}`,
+    );
+    if (Object.keys(discoveryPlan).length) lines.push(
+      `- 发现式路径：线索=${text(discoveryPlan.cue)}；一步推断=${text(discoveryPlan.inferencePrompt)}；同线程揭示=${text(discoveryPlan.reveal)}；自检=${text(discoveryPlan.selfCheck)}；边界=${text(discoveryPlan.boundary)}；难度=${text(discoveryPlan.difficulty)}`,
+    );
+    const followUps = objectArray(thread.followUps);
+    for (const followUp of followUps) {
+      lines.push(
+        `  - 追问：${text(followUp.question) || '未提供'}`,
+        `  - 补充：${text(followUp.answer) || '未提供'}`,
+        `  - 追问角色 / 声明：${text(followUp.personaRole) || text(metadata('personaRole')) || '未标注'} / ${text(followUp.claimStatus) || '未标注'}`,
+      );
+      if (text(followUp.kind)) lines.push(`  - 追问节点类型：${commentKindText(text(followUp.kind)) || text(followUp.kind)}`);
+      if (text(followUp.boundary)) lines.push(`  - 追问边界：${text(followUp.boundary)}`);
+      if (stringArray(followUp.evidenceIds).length) lines.push(`  - 追问证据引用：${stringArray(followUp.evidenceIds).join('、')}`);
+    }
+    lines.push('');
+  });
+}
+
+/**
+ * Cref contract v1.1: plan-level uncovered-gap projection. Absent means "not
+ * computed" (historical packages) and renders nothing; an empty list is an
+ * honest computed result, not a missing field.
+ */
+function appendUncoveredGapProjection(lines: string[], comments: JsonObject): void {
+  if (Array.isArray(comments.uncoveredGaps)) {
+    const uncovered = stringArray(comments.uncoveredGaps);
+    lines.push(
+      uncovered.length
+        ? `- 本篇未展开缺口（规划期投影，非遗漏错误）：${uncovered.join('、')}`
+        : '- 本篇未展开缺口（规划期投影）：无；所有选中缺口已由评论线程或正文承担。',
+      '',
+    );
+  }
+}
+
+/**
+ * Audit-trail sections after the comment content: coverage ledger, evidence,
+ * reasoning, unknowns, conflicts, diagnostics, production ledger, opportunity
+ * audit, validation result and generation trace. Shared verbatim by the
+ * legacy single flow and the v1.1 audit appendix.
+ */
+function appendAuditTrail(lines: string[], pkg: JsonObject): void {
+  const coverageLedger = asObject(asObject(pkg.orchestrationSnapshot).gapCoverageLedger);
+  if (Object.keys(coverageLedger).length) {
+    lines.push('## 信息闭合台账', '');
+    lines.push(
+      `- 闭合覆盖率：${text(coverageLedger.closureRate) || '未标注'}（包含明确未知/延后）`,
+      `- 真正解决率：${text(coverageLedger.resolvedRate) || '未标注'}（仅正文/评论已回答）`,
+      `- 线程可读性目标 / 实际：${text(coverageLedger.targetThreadCount) || '0'} / ${text(coverageLedger.effectiveThreadCount) || '0'}`,
+    );
+    if (text(coverageLedger.capacityWarning)) lines.push(`- 容量提示：${text(coverageLedger.capacityWarning)}`);
+    for (const entry of objectArray(coverageLedger.entries)) lines.push(
+      `- ${text(entry.label) || text(entry.gapId) || 'gap'}：${text(entry.status) || '未标注'}；${text(entry.reason) || '无说明'}${text(entry.requiredInput) ? `；所需输入=${text(entry.requiredInput)}` : ''}${text(entry.verificationPath) ? `；核验路径=${text(entry.verificationPath)}` : ''}`,
+    );
+    lines.push('');
+  }
+
+  appendObjectList(lines, '证据来源', objectArray(pkg.evidence), (item) => {
+    const location = [text(item.path), text(item.section)].filter(Boolean).join(' · ');
+    const quote = text(item.quote);
+    return `${text(item.id) || 'evidence'}：${location || '未注明来源'}${quote ? `；摘录：${quote}` : ''}`;
+  });
+  appendObjectList(lines, '事实、推理与猜想', objectArray(pkg.reasoning), (item) => {
+    return `[${text(item.status) || 'unknown'}] ${text(item.statement) || '未提供'}`;
+  });
+  appendObjectList(lines, '未知信息', objectArray(pkg.unknowns), (item) => {
+    return `[${text(item.impact) || 'unknown'}] ${text(item.question) || text(item.key) || '未提供'}：${text(item.reason) || '未说明原因'}`;
+  });
+  appendObjectList(lines, '知识冲突', objectArray(pkg.conflicts), (item) => {
+    return `${text(item.key) || text(item.id) || '未命名冲突'}（${text(item.status) || 'unresolved'}）${text(item.resolution) ? `：${text(item.resolution)}` : ''}`;
+  });
+  appendDiagnosticLedger(lines, pkg);
+
+  appendVisualProductionLedger(lines, pkg, text(asObject(asObject(pkg.content).N).imageBrief));
+  appendOpportunityRankAudit(lines, pkg);
+
+  const validation = asObject(pkg.validation);
+  lines.push(
+    '## 校验结果',
+    '',
+    `- 是否通过：${validation.valid === true ? '是' : '否'}`,
+    `- 修复次数：${typeof validation.repairAttempts === 'number' ? validation.repairAttempts : 0}`,
+  );
+  for (const issue of objectArray(validation.issues)) {
+    lines.push(`- [${text(issue.severity) || 'warning'}] ${text(issue.message) || text(issue.code) || '未说明'}`);
+  }
+
+  const formula = asObject(pkg.formulaSnapshot);
+  const knowledge = asObject(pkg.knowledgeSnapshot);
+  lines.push(
+    '',
+    '## 生成追溯',
+    '',
+    `- 生成时间：${text(pkg.createdAt) || 'unknown'}`,
+    `- 随机种子：${text(pkg.seed) || 'unknown'}`,
+    `- 公式版本：${text(formula.versionId) || 'unknown'}`,
+    `- 公式摘要：${text(formula.digest) || 'unknown'}`,
+    `- 知识注入模式：${text(knowledge.mode) || 'unknown'}`,
+    `- 知识文件数：${objectArray(knowledge.documents).length}`,
+    '',
+  );
+}
+
 function markdownLineToParagraph(line: string, font: string): Paragraph {
   if (line.startsWith('# ')) {
     return new Paragraph({
@@ -364,6 +541,46 @@ function appendObjectList(
     return;
   }
   for (const item of items) lines.push(`- ${render(item)}`);
+  lines.push('');
+}
+
+/**
+ * aC operating rules (Cref contract v1.1), listed separately from Cref
+ * reference content (F03). The section renders only when the deployment plan
+ * carries v1.1 markers (sla / updatePolicy / structured liveRouting), so
+ * historical packages with a legacy static template keep their previous
+ * output verbatim.
+ */
+function appendDeploymentOperations(lines: string[], pkg: JsonObject): void {
+  const deployment = asObject(pkg.deploymentPlan);
+  if (!Object.keys(deployment).length) return;
+  const routing = Array.isArray(deployment.liveRouting) ? deployment.liveRouting : [];
+  const hasStructuredRouting = routing.some(
+    (rule) => typeof rule === 'object' && rule !== null && !Array.isArray(rule)
+      && ('route' in rule || 'condition' in rule || 'action' in rule),
+  );
+  const hasV11Operations = Boolean(text(deployment.sla))
+    || stringArray(deployment.updatePolicy).length > 0
+    || hasStructuredRouting;
+  if (!hasV11Operations) return;
+
+  lines.push('## aC · 评论运营规则（运营动作计划，非 Cref 内容，非已执行）', '');
+  if (text(deployment.sla) || text(deployment.responseSla)) {
+    lines.push(`- 答复时效（SLA）：${text(deployment.sla) || text(deployment.responseSla)}`);
+  }
+  for (const rule of routing) {
+    if (typeof rule === 'string') {
+      lines.push(`- 路由：${rule}`);
+      continue;
+    }
+    const structured = asObject(rule);
+    lines.push(
+      `- 路由 ${text(structured.route) || text(structured.intent) || '未命名'}：${text(structured.condition) || text(structured.reason) || '条件未标注'} → ${text(structured.action) || text(structured.target) || '动作未标注'}`,
+    );
+  }
+  for (const item of stringArray(deployment.updatePolicy)) lines.push(`- 更新政策：${item}`);
+  for (const item of stringArray(deployment.updateTriggers)) lines.push(`- 更新触发：${item}`);
+  for (const item of stringArray(deployment.stopRules)) lines.push(`- 停止规则：${item}`);
   lines.push('');
 }
 
@@ -564,6 +781,27 @@ function appendOpportunityRankAudit(lines: string[], pkg: JsonObject): void {
 
 function asObject(value: unknown): JsonObject {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as JsonObject) : {};
+}
+
+/** Dialogic node kind → Chinese label (Cref contract v1.1); unknown values pass through raw. */
+function commentKindText(value: string): string {
+  const labels: Record<string, string> = {
+    question: '问题',
+    answer: '回答',
+    follow_up: '追问',
+    clarification: '澄清',
+  };
+  return value ? labels[value] || value : '';
+}
+
+/**
+ * Accountable posting identity for export. `publisher` (v1.1) is the
+ * publishing account itself; historical values stay raw for readability.
+ */
+function postingIdentityText(value: unknown): string {
+  const raw = text(value);
+  if (!raw) return '';
+  return raw === 'publisher' ? '发布账号（publisher）' : raw;
 }
 
 function objectArray(value: unknown): JsonObject[] {

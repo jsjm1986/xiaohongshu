@@ -26,6 +26,14 @@ import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, EmptyState, Field, Modal, Skeleton, useToast } from "../components/Ui";
 import { api } from "../lib/api";
 import { gapMetricsInput, imageQualityPayload } from "../lib/metric-payload";
+import {
+  countEvidenceSections,
+  EVIDENCE_GROUP_COLLAPSE_THRESHOLD,
+  EVIDENCE_SEARCH_THRESHOLD,
+  filterEvidenceDocuments,
+  partitionGapEvidenceIds,
+  toggleGapEvidenceId,
+} from "../lib/gap-evidence";
 import { inspectOpportunityApprovalDependencies, opportunityRequiresReview } from "../lib/opportunity-approval";
 import { resolveOpportunityRankView } from "../lib/opportunity-rank";
 import { TREND_FIT_SIMPLE_BOUNDARY_COPY } from "../lib/trend-fit";
@@ -45,6 +53,7 @@ import type {
   GenerateInput,
   ImageAsset,
   InformationGap,
+  KnowledgeEvidenceDocument,
   Project,
   ProjectBlueprintModule,
   ProjectIntelligence,
@@ -297,6 +306,14 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const [poolTab, setPoolTab] = useState<PoolTab>("gaps");
   const [search, setSearch] = useState("");
   const [editingGap, setEditingGap] = useState<Partial<InformationGap> | null>(null);
+  // Gap answer evidence is picked from knowledge sections, never typed as a raw
+  // hash. The section list is fetched once per project when the editor opens;
+  // a saved id missing from it stays visible as a stale reference (Cref v1.1 —
+  // no silent evidence loss).
+  const [gapEvidenceDocuments, setGapEvidenceDocuments] = useState<KnowledgeEvidenceDocument[] | null>(null);
+  const [gapEvidenceError, setGapEvidenceError] = useState("");
+  const [gapEvidenceSearch, setGapEvidenceSearch] = useState("");
+  const [expandedEvidenceDocs, setExpandedEvidenceDocs] = useState<string[]>([]);
   const [editingStrategy, setEditingStrategy] = useState<Partial<ExpressionStrategy> | null>(null);
   const [editingBlueprintModule, setEditingBlueprintModule] = useState<ProjectBlueprintModule | null>(null);
   const [editingBlueprintJson, setEditingBlueprintJson] = useState("");
@@ -313,6 +330,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const [templates, setTemplates] = useState<PromptTemplate[]>([]);
   const [collectionFilter, setCollectionFilter] = useState<"all" | "active" | "collected" | "archived">("all");
   const fileInput = useRef<HTMLInputElement>(null);
+  const evidenceSectionsCache = useRef(new Map<string, KnowledgeEvidenceDocument[]>());
   const toast = useToast();
 
   // Surface the most recent analysis task so background failures/retries stay
@@ -372,6 +390,47 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     }, 1800);
     return () => window.clearInterval(timer);
   }, [intelligence?.status, projectId]);
+
+  // Load the pickable knowledge sections once per project when the gap editor
+  // opens; cached so reopening the modal does not refetch.
+  const gapEditorOpen = Boolean(editingGap);
+  useEffect(() => {
+    if (!gapEditorOpen || !projectId) return;
+    setGapEvidenceSearch("");
+    setExpandedEvidenceDocs([]);
+    const cached = evidenceSectionsCache.current.get(projectId);
+    if (cached) {
+      setGapEvidenceDocuments(cached);
+      setGapEvidenceError("");
+      return;
+    }
+    let cancelled = false;
+    setGapEvidenceDocuments(null);
+    api.knowledge.evidenceSections(projectId)
+      .then((result) => {
+        evidenceSectionsCache.current.set(projectId, result.documents);
+        if (!cancelled) {
+          setGapEvidenceDocuments(result.documents);
+          setGapEvidenceError("");
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setGapEvidenceDocuments([]);
+          setGapEvidenceError(error instanceof Error ? error.message : "知识分节加载失败");
+        }
+      });
+    return () => { cancelled = true; };
+  }, [gapEditorOpen, projectId]);
+
+  const gapEvidenceSelection = editingGap?.evidenceIds ?? [];
+  // Partition only when the section list loaded: while loading (or after a load
+  // failure) saved ids cannot be classified, so saving stays unblocked and the
+  // ids pass through untouched.
+  const gapEvidencePartition = gapEvidenceDocuments ? partitionGapEvidenceIds(gapEvidenceSelection, gapEvidenceDocuments) : null;
+  const staleGapEvidenceCount = gapEvidencePartition?.stale.length ?? 0;
+  const visibleEvidenceDocuments = gapEvidenceDocuments ? filterEvidenceDocuments(gapEvidenceDocuments, gapEvidenceSearch) : [];
+  const evidenceSectionTotal = gapEvidenceDocuments ? countEvidenceSections(gapEvidenceDocuments) : 0;
 
   const selectedOpportunity = opportunities.find((item) => item.id === selectedOpportunityId);
   const visibleOpportunities = useMemo(
@@ -575,11 +634,23 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
 
   const saveGap = async () => {
     if (!editingGap?.label?.trim() || !editingGap.question?.trim()) return;
+    // Save-time validation: stale evidence references must be removed explicitly
+    // (the save button is disabled as well); they are never silently dropped.
+    if (staleGapEvidenceCount > 0) return;
     // Metrics are edited as 0..1 in state. Leave any untouched metric unset so it
     // is submitted as an unknown metric: an omitted key is interpreted as null by
     // the backend rather than fabricated into a default. User-entered 0..1 values
     // (0 included) are submitted verbatim. No default injection.
-    const withMetrics = gapMetricsInput(editingGap);
+    // answer/evidenceIds/boundary sit at data_json top level (Cref v1.1); the
+    // backend updateGap merges them and reverts the gap to draft, so an edited
+    // gap must be re-approved before it re-enters generation. evidenceIds come
+    // only from the section picker, so every id here is one the current
+    // knowledge base actually discloses.
+    const withMetrics = {
+      ...gapMetricsInput(editingGap),
+      evidenceIds: [...new Set(editingGap.evidenceIds ?? [])],
+      boundary: editingGap.boundary?.trim() || "",
+    };
     const saved = editingGap.id
       ? await api.informationGaps.update(projectId, editingGap.id, withMetrics)
       : await api.informationGaps.create(projectId, {
@@ -590,7 +661,6 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
           sourceType: "user",
           evidenceStatus: "user_supplied",
           answerability: editingGap.answerability || "verifiable",
-          evidenceIds: editingGap.evidenceIds || [],
           priority: editingGap.priority ?? 60,
           enabled: true,
           locked: false,
@@ -598,6 +668,9 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
         });
     setGaps((current) => [saved, ...current.filter((item) => item.id !== saved.id)]);
     setEditingGap(null);
+    if (editingGap.id) {
+      toast.push("缺口已保存；编辑后状态回到待确认，需重新确认", "info");
+    }
   };
 
   const saveOpportunity = async () => {
@@ -936,7 +1009,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     </section>
 
     <Modal open={poolOpen} onClose={() => setPoolOpen(false)} title="内容智能资源池" description="信息缺口决定写什么，完整表达策略决定标签、图文与评论怎样协同。" size="wide">
-      <div className="pool-manager"><div className="pool-tabs"><button className={poolTab === "gaps" ? "active" : ""} onClick={() => setPoolTab("gaps")}>信息缺口池 <b>{gaps.length}</b></button><button className={poolTab === "strategies" ? "active" : ""} onClick={() => setPoolTab("strategies")}>完整表达策略池 <b>{strategies.length}</b></button></div><div className="pool-toolbar"><label><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索资源" /></label><Button icon={<Plus size={15} />} onClick={() => poolTab === "gaps" ? setEditingGap({}) : setEditingStrategy({})}>新增</Button></div>
+      <div className="pool-manager"><div className="pool-tabs"><button className={poolTab === "gaps" ? "active" : ""} onClick={() => setPoolTab("gaps")}>信息缺口池 <b>{gaps.length}</b></button><button className={poolTab === "strategies" ? "active" : ""} onClick={() => setPoolTab("strategies")}>完整表达策略池 <b>{strategies.length}</b></button></div><div className="pool-toolbar"><label><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索资源" /></label><Button icon={<Plus size={15} />} onClick={() => { if (poolTab === "gaps") { setEditingGap({}); } else { setEditingStrategy({}); } }}>新增</Button></div>
         {poolTab === "gaps" ? <div className="pool-list">{filteredGaps.map((gap) => <article key={gap.id} className={!gap.enabled ? "disabled" : ""}><div><Badge>{gap.category}</Badge><Badge tone={gap.status === "approved" ? "positive" : "warning"}>{gap.status === "approved" ? "已确认" : "待确认"}</Badge></div><h3>{gap.label}</h3><p>{gap.question}</p><small>{gap.sourceType} · 优先级 {gap.priority}</small><footer>{gap.status !== "approved" && <button onClick={() => void api.informationGaps.approve(projectId, gap.id).then((saved) => setGaps((current) => current.map((item) => item.id === saved.id ? saved : item)))}>确认使用</button>}<button onClick={() => void api.informationGaps.update(projectId, gap.id, { ...gap, enabled: !gap.enabled }).then((saved) => setGaps((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{gap.enabled ? "已启用" : "已停用"}</button><button onClick={() => void api.informationGaps.update(projectId, gap.id, { ...gap, locked: !gap.locked }).then((saved) => setGaps((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{gap.locked ? <Lock size={13} /> : <Unlock size={13} />}</button><button onClick={() => setEditingGap(gap)}><Pencil size={13} /></button><button onClick={() => void api.informationGaps.remove(projectId, gap.id).then(() => setGaps((current) => current.filter((item) => item.id !== gap.id)))}><Trash2 size={13} /></button></footer></article>)}</div> : <div className="pool-list">{filteredStrategies.map((strategy) => <article key={strategy.id} className={!strategy.enabled ? "disabled" : ""}><div><Badge>{strategy.source}</Badge><Badge tone={strategy.status === "approved" ? "positive" : "warning"}>{strategy.status === "approved" ? "已确认" : "待确认"}</Badge></div><h3>{strategy.name}</h3><p>{strategy.description}</p><small>{strategy.imagePolicy}</small><footer>{strategy.status !== "approved" && <button onClick={() => void api.expressionStrategies.approve(projectId, strategy.id).then((saved) => setStrategies((current) => current.map((item) => item.id === saved.id ? saved : item)))}>确认使用</button>}<button onClick={() => void api.expressionStrategies.update(projectId, strategy.id, { ...strategy, enabled: !strategy.enabled }).then((saved) => setStrategies((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{strategy.enabled ? "已启用" : "已停用"}</button><button onClick={() => void api.expressionStrategies.update(projectId, strategy.id, { ...strategy, locked: !strategy.locked }).then((saved) => setStrategies((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{strategy.locked ? <Lock size={13} /> : <Unlock size={13} />}</button><button onClick={() => setEditingStrategy(strategy)}><Pencil size={13} /></button>{strategy.source !== "builtin" && <button onClick={() => void api.expressionStrategies.remove(projectId, strategy.id).then(() => setStrategies((current) => current.filter((item) => item.id !== strategy.id)))}><Trash2 size={13} /></button>}</footer></article>)}</div>}
       </div>
     </Modal>
@@ -948,7 +1021,43 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
       </div>
     </Modal>
 
-    <Modal open={Boolean(editingGap)} onClose={() => setEditingGap(null)} title={editingGap?.id ? "编辑信息缺口" : "新增信息缺口"} footer={<Button onClick={() => void saveGap()}>保存</Button>}><div className="form-stack"><Field label="缺口名称" required><input value={editingGap?.label || ""} onChange={(event) => setEditingGap((current) => ({ ...current, label: event.target.value }))} /></Field><Field label="自然问题" required><textarea rows={3} value={editingGap?.question || ""} onChange={(event) => setEditingGap((current) => ({ ...current, question: event.target.value }))} /></Field><Field label="已有批准答案"><textarea rows={3} value={editingGap?.answer || ""} onChange={(event) => setEditingGap((current) => ({ ...current, answer: event.target.value, answerability: event.target.value ? "approved" : "verifiable" }))} /></Field>
+    <Modal open={Boolean(editingGap)} onClose={() => setEditingGap(null)} title={editingGap?.id ? "编辑信息缺口" : "新增信息缺口"} description={editingGap?.id ? "保存后该缺口回到待确认状态，需重新确认后才会进入生成。" : undefined} footer={<Button disabled={staleGapEvidenceCount > 0} onClick={() => void saveGap()}>保存</Button>}><div className="form-stack"><Field label="缺口名称" required><input value={editingGap?.label || ""} onChange={(event) => setEditingGap((current) => ({ ...current, label: event.target.value }))} /></Field><Field label="自然问题" required><textarea rows={3} value={editingGap?.question || ""} onChange={(event) => setEditingGap((current) => ({ ...current, question: event.target.value }))} /></Field><Field label="已有批准答案"><textarea rows={3} value={editingGap?.answer || ""} onChange={(event) => setEditingGap((current) => ({ ...current, answer: event.target.value, answerability: event.target.value ? "approved" : "verifiable" }))} /></Field>
+      {/* 不用 Field（渲染为 <label>）：点选器内含多个 checkbox，嵌套 label 会导致点击穿透到首个 checkbox。className 与 Field 保持一致。 */}
+      <div className="field">
+        <span className="field__label">答案证据</span>
+        <div className="evidence-picker">
+          {gapEvidencePartition && (gapEvidencePartition.known.length > 0 || gapEvidencePartition.stale.length > 0) ? <div className="evidence-picker__selected">
+            {gapEvidencePartition.known.map((ref) => <span className="chip chip--active" key={ref.evidenceId} title={ref.evidenceId}>{ref.documentTitle}{ref.heading ? ` · ${ref.heading}` : ""}<button type="button" className="chip-remove" aria-label={`移除证据 ${ref.evidenceId}`} onClick={() => setEditingGap((current) => ({ ...current, evidenceIds: toggleGapEvidenceId(current?.evidenceIds ?? [], ref.evidenceId) }))}>×</button></span>)}
+            {gapEvidencePartition.stale.map((evidenceId) => <span className="chip chip--stale" key={evidenceId} title={`失效引用：当前知识库分节中不存在 ${evidenceId}`}>失效引用：{evidenceId}<button type="button" className="chip-remove" aria-label={`移除失效引用 ${evidenceId}`} onClick={() => setEditingGap((current) => ({ ...current, evidenceIds: (current?.evidenceIds ?? []).filter((id) => id !== evidenceId) }))}>×</button></span>)}
+          </div> : null}
+          {gapEvidencePartition && gapEvidencePartition.stale.length > 0 ? <p className="evidence-picker__stale-warning"><TriangleAlert size={13} /> {gapEvidencePartition.stale.length} 个已保存证据在当前知识库分节中不存在（旧 ID 或文档已更新/删除）。请点 chip 上的 × 显式移除——不会替你静默丢弃；存在失效引用时无法保存。</p> : null}
+          {gapEvidenceError ? <p className="evidence-picker__stale-warning"><TriangleAlert size={13} /> 知识分节加载失败（{gapEvidenceError}），暂无法校验证据有效性；已保存的证据 ID 将原样保留。</p> : null}
+          {gapEvidenceDocuments === null && !gapEvidenceError ? <p className="evidence-picker__empty">正在加载知识库分节…</p> : null}
+          {gapEvidenceDocuments && gapEvidenceDocuments.length === 0 && !gapEvidenceError ? <p className="evidence-picker__empty">项目知识库暂无可点选的分节（风格语料不作为证据）。</p> : null}
+          {evidenceSectionTotal > EVIDENCE_SEARCH_THRESHOLD ? <input value={gapEvidenceSearch} placeholder="搜索分节标题、摘要或文档名" onChange={(event) => setGapEvidenceSearch(event.target.value)} /> : null}
+          {visibleEvidenceDocuments.length > 0 ? <div className="evidence-picker__groups">
+            {visibleEvidenceDocuments.map((document) => {
+              const expanded = gapEvidenceSearch.trim() !== "" || expandedEvidenceDocs.includes(document.id);
+              const sections = expanded ? document.sections : document.sections.slice(0, EVIDENCE_GROUP_COLLAPSE_THRESHOLD);
+              return <section className="evidence-picker__group" key={document.id}>
+                <header><strong>{document.title}</strong><small>{document.path} · {document.sections.length} 节</small></header>
+                {sections.map((section) => {
+                  const checked = gapEvidenceSelection.includes(section.evidenceId);
+                  return <label className={checked ? "evidence-picker__section selected" : "evidence-picker__section"} key={section.evidenceId}>
+                    <input type="checkbox" checked={checked} onChange={() => setEditingGap((current) => ({ ...current, evidenceIds: toggleGapEvidenceId(current?.evidenceIds ?? [], section.evidenceId) }))} />
+                    <span className="evidence-picker__section-text"><strong>{section.heading || "（全文档）"}</strong><small>{section.excerpt}</small></span>
+                    <span className="evidence-picker__badges"><Badge>{section.kind}</Badge><Badge tone={section.evidenceStatus === "observed" ? "positive" : section.evidenceStatus === "unknown" ? "warning" : "neutral"}>{section.evidenceStatus}</Badge></span>
+                  </label>;
+                })}
+                {!expanded && document.sections.length > EVIDENCE_GROUP_COLLAPSE_THRESHOLD ? <button type="button" className="evidence-picker__more" onClick={() => setExpandedEvidenceDocs((current) => [...current, document.id])}>展开剩余 {document.sections.length - EVIDENCE_GROUP_COLLAPSE_THRESHOLD} 节</button> : null}
+              </section>;
+            })}
+          </div> : null}
+          {gapEvidenceDocuments && gapEvidenceDocuments.length > 0 && visibleEvidenceDocuments.length === 0 ? <p className="evidence-picker__empty">没有匹配「{gapEvidenceSearch}」的分节。</p> : null}
+        </div>
+        <small>从知识库分节点选；有证据的答案才能作为事实口径进入评论答复。</small>
+      </div>
+      <Field label="答案边界" hint="该答案不得越界的条件（如“以当期确认为准”“不承诺统一天数”）；答复必须保留边界。"><input value={editingGap?.boundary || ""} placeholder="无额外边界可留空" onChange={(event) => setEditingGap((current) => ({ ...current, boundary: event.target.value }))} /></Field>
       <div className="metric-editor"><p className="metric-editor__hint">以下三项是供人工审核的相对优先级估计（0–100），不是事实断言或平台效果预测。留空即未知/待复核，可不填即确认（未知度量不阻断审批）。</p>
         {GAP_METRIC_FIELDS.map(({ key, label, hint }) => { const value = editingGap?.[key]; const isSet = typeof value === "number"; return <Field key={key} label={`${label}（${isSet ? Math.round(value * 100) : "未知/待复核"}）`} hint={hint}><div className="tri-state-metric"><input type="number" min={0} max={100} step={1} value={isSet ? Math.round(value * 100) : ""} placeholder="未设置" onChange={(event) => { const raw = event.target.value.trim(); if (raw === "") { setEditingGap((currentGap) => ({ ...currentGap, [key]: undefined })); return; } const parsed = Number(raw); if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) return; setEditingGap((currentGap) => ({ ...currentGap, [key]: parsed / 100 })); }} />{isSet ? <button type="button" className="tri-state-metric__clear" onClick={() => setEditingGap((currentGap) => ({ ...currentGap, [key]: undefined }))}>清空为未知</button> : <span className="tri-state-metric__unknown">未知/待复核</span>}</div></Field>; })}
       </div></div></Modal>

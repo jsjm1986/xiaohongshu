@@ -32,6 +32,12 @@ import {
 } from "../components/Ui";
 import { api } from "../lib/api";
 import {
+  commentNodeKindLabel,
+  deploymentSla,
+  liveRoutingLines,
+  uncoveredGapLabels,
+} from "../lib/comment-cref";
+import {
   isDiagnosticEmphasisParameterId,
   isDiagnosticProxyFormulaId,
   resolveDiagnosticProxyView,
@@ -321,6 +327,16 @@ export function GenerationResultPage() {
         </div>
       </header>
 
+      {job.qualityStatus === "needs_review" && (
+        <div className="generation-fallback-notice" role="status">
+          <TriangleAlert size={18} />
+          <div>
+            <strong>没有候选通过自动校验，可以怎么用</strong>
+            <p>请逐条查看下方「校验与一般诊断」中的问题项：若是事实或身份类错误，建议调整知识口径或设置后重新生成；若只是形态提醒，可人工复核候选后酌情使用。未通过校验的候选不能导出，这是系统保留的底线。</p>
+          </div>
+        </div>
+      )}
+
       {recordNotice.isFallback && <div className="generation-fallback-notice" role="status">
         <TriangleAlert size={18} />
         <div><strong>{recordNotice.label}</strong><p>{recordNotice.detail}</p></div>
@@ -526,6 +542,27 @@ export function GenerationResultPage() {
                 ))}
               </div>
             )}
+            {selected.commentOwnedFirstComment && (
+              <div className="comment-thread">
+                <div className="comment-meta">
+                  <Badge tone="positive">可发布首评参考</Badge>
+                  <Badge tone="blue">由发布账号身份发布</Badge>
+                </div>
+                <div className="comment-answer">
+                  <span className="comment-avatar comment-avatar--answer">首</span>
+                  <p>{selected.commentOwnedFirstComment}</p>
+                </div>
+              </div>
+            )}
+            {selected.commentUncoveredGaps && (
+              <div className="tag-reach-boundary">
+                <Info size={14} />
+                <span>
+                  本篇未展开缺口（规划期投影，非遗漏错误）：
+                  {uncoveredGapLabels(selected.commentUncoveredGaps, selected.orchestrationSnapshot?.gapPlanningCards).join("、") || "无；所有选中缺口已由评论线程或正文承担。"}
+                </span>
+              </div>
+            )}
             <div className="comment-threads">
               {selected.comments.map((comment, index) => (
                 <div
@@ -535,7 +572,7 @@ export function GenerationResultPage() {
                   <div className="comment-question">
                     <span className="comment-avatar">评</span>
                     <div>
-                      <div className="comment-meta">{comment.simulated && <Badge tone="warning">{comment.simulationLabel || "模拟潜在读者"}</Badge>}{comment.personaRole && <Badge>{personaRoleLabel(comment.personaRole)}</Badge>}{comment.speakerType && <Badge>{speakerTypeLabel(comment.speakerType)}</Badge>}{comment.stage && <Badge>{comment.stage}</Badge>}{comment.function && <Badge tone="purple">{commentFunctionLabel(comment.function)}</Badge>}{comment.claimStatus && <Badge tone={comment.claimStatus === "verified" ? "positive" : comment.claimStatus === "unknown" ? "warning" : "blue"}>{claimStatusLabel(comment.claimStatus)}</Badge>}{comment.postingIdentity && <Badge tone="blue">{identityLabel(comment.postingIdentity)}可追责答复</Badge>}</div>
+                      <div className="comment-meta">{comment.simulated && <Badge tone="warning">{comment.simulationLabel || "模拟潜在读者"}</Badge>}{comment.kind && <Badge>{commentNodeKindLabel(comment.kind)}</Badge>}{comment.personaRole && <Badge>{personaRoleLabel(comment.personaRole)}</Badge>}{comment.speakerType && <Badge>{speakerTypeLabel(comment.speakerType)}</Badge>}{comment.stage && <Badge>{comment.stage}</Badge>}{comment.function && <Badge tone="purple">{commentFunctionLabel(comment.function)}</Badge>}{comment.claimStatus && <Badge tone={comment.claimStatus === "verified" ? "positive" : comment.claimStatus === "unknown" ? "warning" : "blue"}>{claimStatusLabel(comment.claimStatus)}</Badge>}{comment.postingIdentity && <Badge tone="blue">{identityLabel(comment.postingIdentity)}可追责答复</Badge>}</div>
                       <strong>{comment.question}</strong>
                       {comment.purpose && (
                         <small>信息任务：{comment.purpose}</small>
@@ -581,13 +618,20 @@ export function GenerationResultPage() {
                     <span className="comment-avatar comment-avatar--answer">
                       回
                     </span>
-                    <p>{primaryCommentAnswer(comment)}</p>
+                    <div>
+                      {comment.answerKind && <div className="comment-meta"><Badge tone="positive">{commentNodeKindLabel(comment.answerKind)}</Badge></div>}
+                      <p>{primaryCommentAnswer(comment)}</p>
+                    </div>
                   </div>
+                  {comment.boundary && <div className="comment-next-step"><Info size={14} /><span>答复边界：{comment.boundary}</span></div>}
+                  {comment.evidenceIds?.length ? <div className="comment-next-step"><Info size={14} /><span>证据引用：{comment.evidenceIds.join("、")}</span></div> : null}
                   {comment.followUps?.map((followUp, followUpIndex) => (
                     <div className="comment-follow-up" key={`${followUp.question}-${followUpIndex}`}>
-                      {(followUp.personaRole || followUp.claimStatus || followUp.threadDepth !== undefined) && <div className="comment-meta">{followUp.personaRole && <Badge>{personaRoleLabel(followUp.personaRole)}</Badge>}{followUp.claimStatus && <Badge tone="blue">{claimStatusLabel(followUp.claimStatus)}</Badge>}{followUp.threadDepth !== undefined && <Badge>第 {followUp.threadDepth} 层</Badge>}</div>}
+                      {(followUp.kind || followUp.personaRole || followUp.claimStatus || followUp.threadDepth !== undefined) && <div className="comment-meta">{followUp.kind && <Badge>{commentNodeKindLabel(followUp.kind)}</Badge>}{followUp.personaRole && <Badge>{personaRoleLabel(followUp.personaRole)}</Badge>}{followUp.claimStatus && <Badge tone="blue">{claimStatusLabel(followUp.claimStatus)}</Badge>}{followUp.threadDepth !== undefined && <Badge>第 {followUp.threadDepth} 层</Badge>}</div>}
                       <strong>接话：{followUp.question}</strong>
                       <p>{followUp.answer}</p>
+                      {followUp.boundary && <p>边界：{followUp.boundary}</p>}
+                      {followUp.evidenceIds?.length ? <p>证据引用：{followUp.evidenceIds.join("、")}</p> : null}
                     </div>
                   ))}
                   {comment.nextStep && <div className="comment-next-step"><ChevronDown size={14} /><span>下一步：{comment.nextStep}</span></div>}
@@ -659,6 +703,7 @@ export function GenerationResultPage() {
                 <article><small>发布身份</small><strong>{identityLabel(selected.deploymentPlan.postingIdentity)}</strong></article>
                 <article><small>首条自有评论</small><strong>{typeof selected.deploymentPlan.ownedFirstComment === "boolean" ? (selected.deploymentPlan.ownedFirstComment ? "需要" : "不需要") : selected.deploymentPlan.ownedFirstComment || "按实际情况"}</strong></article>
                 <article><small>优先置顶</small><strong>{selected.deploymentPlan.pinPriority?.map(commentFunctionLabel).join(" / ") || "根据真实问题"}</strong></article>
+                {deploymentSla(selected.deploymentPlan) && <article><small>答复时效</small><strong>{deploymentSla(selected.deploymentPlan)}</strong></article>}
               </div>
               <DeploymentDetails plan={selected.deploymentPlan} />
             </div>
@@ -819,6 +864,7 @@ function identityLabel(value?: string) {
     staff: "工作人员",
     expert: "专业人员",
     reader_question_template: "读者提问模板",
+    publisher: "发布账号",
   };
   return value ? labels[value] || value : "可追责发布者";
 }
@@ -916,12 +962,12 @@ function imageRoleLabel(value?: string) {
 }
 
 function DeploymentDetails({ plan }: { plan: NonNullable<Candidate["deploymentPlan"]> }) {
-  const routing = plan.liveRouting || [];
-  const updates = plan.updateTriggers || plan.updatePolicy || [];
+  const routingLines = liveRoutingLines(plan.liveRouting);
   return (
     <div className="deployment-details">
-      {routing.length > 0 && <div><strong>真实评论如何路由</strong><ul>{routing.map((item, index) => <li key={index}>{typeof item === "string" ? item : `${item.intent} → ${item.target}${item.reason ? `：${item.reason}` : ""}`}</li>)}</ul></div>}
-      {updates.length > 0 && <div><strong>何时更新内容</strong><ul>{updates.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul></div>}
+      {routingLines.length > 0 && <div><strong>真实评论如何路由</strong><ul>{routingLines.map((line, index) => <li key={index}>{line}</li>)}</ul></div>}
+      {plan.updatePolicy?.length ? <div><strong>更新政策（新高频问题如何回流）</strong><ul>{plan.updatePolicy.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul></div> : null}
+      {plan.updateTriggers?.length ? <div><strong>何时更新内容</strong><ul>{plan.updateTriggers.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul></div> : null}
       {plan.stopRules?.length ? <div className="deployment-stop"><strong>停止规则</strong><ul>{plan.stopRules.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul></div> : null}
     </div>
   );
