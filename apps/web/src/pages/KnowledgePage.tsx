@@ -1,9 +1,10 @@
 import {
+  Ban,
   BookOpenText,
+  BrainCircuit,
   CheckCircle2,
   FileText,
   Filter,
-  FolderTree,
   MoreHorizontal,
   PenLine,
   Plus,
@@ -14,7 +15,8 @@ import {
 } from 'lucide-react';
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { useProjects } from '../components/ProjectContext';
-import { Badge, Button, EmptyState, Field, Modal, PageHeader, Skeleton, useToast } from '../components/Ui';
+import { Badge, Button, EmptyState, Field, Modal, Skeleton, useToast } from '../components/Ui';
+import { V2Hero, V2Instrument, V2InstrumentCell, V2SecLabel } from '../components/V2';
 import { api } from '../lib/api';
 import { demoKnowledge } from '../lib/fixtures';
 import { formatBytes, formatDate } from '../lib/utils';
@@ -55,6 +57,12 @@ export function KnowledgePage() {
 
   const visibleFiles = useMemo(() => files.filter((file) => (category === 'all' || file.category === category) && (!search || `${file.name}${file.summary || ''}`.toLowerCase().includes(search.toLowerCase()))), [files, search, category]);
   const indexFile = files.find((file) => file.name.toUpperCase() === 'INDEX.MD');
+  const kindCounts = useMemo(() => ({
+    fact: files.filter((file) => file.kind === '已知事实').length,
+    reasoning: files.filter((file) => file.kind === '方法论推理' || file.kind === '猜想').length,
+    banned: files.filter((file) => file.kind === '禁止表达').length,
+    totalSize: formatBytes(files.reduce((sum, file) => sum + file.size, 0)),
+  }), [files]);
 
   const chooseFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -139,17 +147,65 @@ export function KnowledgePage() {
 
   return (
     <div className="page knowledge-page">
-      <PageHeader eyebrow="KNOWLEDGE" title="项目知识库" description={`「${currentProject?.name || '当前项目'}」的事实、样本、方法与表达边界。`} actions={<><Button variant="ghost" icon={<PenLine size={17} />} onClick={() => setEntryOpen(true)}>直接录入</Button><Button icon={<UploadCloud size={17} />} onClick={() => setUploadOpen(true)}>导入文件</Button></>} />
+      <V2Hero
+        index="04"
+        status={<>{currentProject?.name || '当前项目'} · {indexFile ? '知识地图已就绪 · 可全量注入' : '等待建立索引'}</>}
+        title="项目知识库"
+        description={`「${currentProject?.name || '当前项目'}」的事实、样本、方法与表达边界。`}
+        actions={
+          <>
+            <button type="button" className="v2-hero__link" onClick={() => setEntryOpen(true)}>
+              <PenLine size={15} /> 直接录入
+            </button>
+            <Button icon={<UploadCloud size={17} />} onClick={() => setUploadOpen(true)}>导入文件</Button>
+          </>
+        }
+      />
 
-      <section className="knowledge-overview">
-        <div className="knowledge-overview__icon"><FolderTree size={25} /></div>
-        <div><span>渐进式知识地图</span><h2>{indexFile ? 'INDEX.md 已就绪' : '建议创建 INDEX.md'}</h2><p>{indexFile ? '知识库较小时会全量注入；超出上下文预算时，按知识地图继续披露相关文件。' : '将文件用途、分类和阅读顺序写入 INDEX.md，让超长知识库仍可稳定使用。'}</p></div>
-        <div className="knowledge-overview__stats"><span><strong>{files.length}</strong>份文件</span><span><strong>{formatBytes(files.reduce((sum, file) => sum + file.size, 0))}</strong>总大小</span><Badge tone={indexFile ? 'positive' : 'warning'}>{indexFile ? '可全量注入' : '等待建立索引'}</Badge></div>
-      </section>
+      <V2Instrument>
+        <V2InstrumentCell
+          tone="blue"
+          icon={<BookOpenText size={15} />}
+          label="文件总数"
+          value={files.length}
+          unit="份"
+          note={`共 ${kindCounts.totalSize} · 预算内全量注入`}
+        />
+        <V2InstrumentCell
+          tone="ok"
+          icon={<CheckCircle2 size={15} />}
+          label="已知事实"
+          value={kindCounts.fact}
+          unit="份"
+          note="已确认，可直接引用"
+        />
+        <V2InstrumentCell
+          tone="ai"
+          icon={<BrainCircuit size={15} />}
+          label="推理与猜想"
+          value={kindCounts.reasoning}
+          unit="份"
+          note="推断内容，需人工复核"
+        />
+        <V2InstrumentCell
+          tone="error"
+          icon={<Ban size={15} />}
+          label="禁止表达"
+          value={kindCounts.banned}
+          unit="份"
+          note="风险词与承诺边界，约束生效中"
+        />
+      </V2Instrument>
 
       <section className="panel knowledge-table-panel">
+        <header className="panel__header">
+          <div>
+            <h2><V2SecLabel>LIB · 文件台账</V2SecLabel>全部知识文件</h2>
+            <p>知识库较小时会全量注入；超出上下文预算时，按知识地图继续披露相关文件。</p>
+          </div>
+        </header>
         <div className="table-toolbar"><div className="search-input"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索文件名或摘要" />{search && <button type="button" aria-label="清除搜索" onClick={() => setSearch('')}><X size={14} /></button>}</div><label className="filter-select"><Filter size={16} /><select value={category} onChange={(event) => setCategory(event.target.value)}><option value="all">全部分类</option>{categories.map((item) => <option key={item}>{item}</option>)}</select></label><span className="table-toolbar__count">{visibleFiles.length} 份文件</span></div>
-        {loading ? <div className="table-loading"><Skeleton lines={5} /></div> : visibleFiles.length ? <div className="data-table knowledge-table"><div className="data-table__head"><span>文件</span><span>知识性质</span><span>分类</span><span>版本 / 更新</span><span /></div>{visibleFiles.map((file) => <div className="data-table__row" key={file.id}><span className="file-cell"><i className={file.name.endsWith('.md') ? 'md' : 'txt'}>{file.name.endsWith('.md') ? 'MD' : 'TXT'}</i><span><strong>{file.name}</strong><small>{file.summary || `${formatBytes(file.size)} · 暂无摘要`}</small></span></span><span><Badge tone={file.kind === '已知事实' ? 'positive' : file.kind === '禁止表达' ? 'danger' : file.kind === '猜想' ? 'purple' : file.kind === '方法论推理' ? 'blue' : 'neutral'}>{file.kind || '未标记'}</Badge></span><span>{file.category || '未分类'}</span><span className="version-cell"><strong>v{file.version || 1}</strong><small>{formatDate(file.updatedAt, true)}</small></span><span className="row-actions"><button type="button" className="icon-button" title="删除" aria-label="删除" onClick={() => remove(file)}><Trash2 size={16} /></button><button type="button" className="icon-button" title="查看内容" aria-label="查看内容" onClick={() => void openPreview(file)}><MoreHorizontal size={17} /></button></span></div>)}</div> : <EmptyState icon={<FileText size={24} />} title="没有找到知识文件" description={search || category !== 'all' ? '试试清除搜索或分类条件。' : '导入第一份 Markdown 或文本文件后开始生成。'} action={!search && category === 'all' ? <Button icon={<Plus size={16} />} onClick={() => setUploadOpen(true)}>导入文件</Button> : undefined} />}
+        {loading ? <div className="table-loading"><Skeleton lines={5} /></div> : visibleFiles.length ? <div className="data-table knowledge-table"><div className="data-table__head"><span>编号</span><span>文件</span><span>知识性质</span><span>分类</span><span>版本 / 更新</span><span /></div>{visibleFiles.map((file, fileIndex) => <div className="data-table__row" key={file.id}><span className="v2-lab-id">K-{String(fileIndex + 1).padStart(3, '0')}</span><span className="file-cell"><i className={file.name.endsWith('.md') ? 'md' : 'txt'}>{file.name.endsWith('.md') ? 'MD' : 'TXT'}</i><span><strong>{file.name}</strong><small>{file.summary || `${formatBytes(file.size)} · 暂无摘要`}</small></span></span><span><Badge tone={file.kind === '已知事实' ? 'positive' : file.kind === '禁止表达' ? 'danger' : file.kind === '猜想' ? 'purple' : file.kind === '方法论推理' ? 'blue' : 'neutral'}>{file.kind || '未标记'}</Badge></span><span>{file.category || '未分类'}</span><span className="version-cell"><strong>v{file.version || 1}</strong><small>{formatDate(file.updatedAt, true)}</small></span><span className="row-actions"><button type="button" className="icon-button" title="删除" aria-label="删除" onClick={() => remove(file)}><Trash2 size={16} /></button><button type="button" className="icon-button" title="查看内容" aria-label="查看内容" onClick={() => void openPreview(file)}><MoreHorizontal size={17} /></button></span></div>)}</div> : <EmptyState icon={<FileText size={24} />} title="没有找到知识文件" description={search || category !== 'all' ? '试试清除搜索或分类条件。' : '导入第一份 Markdown 或文本文件后开始生成。'} action={!search && category === 'all' ? <Button icon={<Plus size={16} />} onClick={() => setUploadOpen(true)}>导入文件</Button> : undefined} />}
       </section>
 
       <Modal open={uploadOpen} onClose={() => { setUploadOpen(false); setPendingFile(null); }} title="导入知识文件" description="首版支持 Markdown 与纯文本，单文件最大 2 MB。" footer={<><Button variant="ghost" onClick={() => setUploadOpen(false)}>取消</Button><Button loading={uploading} disabled={!pendingFile} onClick={handleUpload}>确认导入</Button></>}>

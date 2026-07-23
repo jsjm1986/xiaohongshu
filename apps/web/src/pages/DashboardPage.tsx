@@ -18,6 +18,7 @@ import {
   PageHeader,
   Skeleton,
 } from "../components/Ui";
+import { V2Hero, V2Instrument, V2InstrumentCell } from "../components/V2";
 import { useProjects } from "../components/ProjectContext";
 import { api } from "../lib/api";
 import { demoGenerations, demoKnowledge } from "../lib/fixtures";
@@ -91,80 +92,59 @@ export function DashboardPage() {
 
   return (
     <div className="page dashboard-page">
-      <section className="v2-hero">
-        <span className="v2-hero__ghost">01</span>
-        <div className="v2-hero__text">
-          <div className="v2-hero__status">
-            <i />{currentProject?.name || "当前项目"} · 系统正常
-          </div>
-          <h1>上午好，继续完善「{currentProject?.name || "当前项目"}」</h1>
-          <p>从项目知识出发，把每一次生成变成可解释、可复用的内容资产。</p>
-        </div>
-        <div className="v2-hero__actions">
-          <Link className="v2-hero__link" to="/generate">
-            进入向导 <ArrowRight size={15} />
-          </Link>
-          <Button icon={<Sparkles size={17} />} onClick={() => navigate("/generate")}>
-            开始生成
-          </Button>
-        </div>
-      </section>
+      <V2Hero
+        index="01"
+        status={<>{currentProject?.name || "当前项目"} · 系统正常</>}
+        title={<>上午好，继续完善「{currentProject?.name || "当前项目"}」</>}
+        description="从项目知识出发，把每一次生成变成可解释、可复用的内容资产。"
+        actions={
+          <>
+            <Link className="v2-hero__link" to="/generate">
+              进入向导 <ArrowRight size={15} />
+            </Link>
+            <Button icon={<Sparkles size={17} />} onClick={() => navigate("/generate")}>
+              开始生成
+            </Button>
+          </>
+        }
+      />
 
-      <section className="v2-instrument">
-        <div className="v2-instrument__cell v2-instrument__cell--brand">
-          <div className="v2-instrument__label">
-            <span className="v2-instrument__chip v2-instrument__chip--brand"><FileClock size={15} /></span>
-            累计生成
-          </div>
-          <div className="v2-instrument__value">
-            {currentProject?.generationCount ?? history.length}
-            <small>次</small>
-          </div>
-          <div className="v2-instrument__note">
-            <TrendingUp size={13} /> 近 7 天新增 {Math.min(history.length, 12)} 次
-          </div>
-        </div>
-        <div className="v2-instrument__cell v2-instrument__cell--blue">
-          <div className="v2-instrument__label">
-            <span className="v2-instrument__chip v2-instrument__chip--blue"><BookOpenText size={15} /></span>
-            知识文件
-          </div>
-          <div className="v2-instrument__value">
-            {currentProject?.knowledgeCount ?? knowledge.length}
-            <small>份</small>
-          </div>
-          <div className="v2-instrument__note">
-            {knowledge.reduce((sum, item) => sum + item.size, 0) > 1024 * 1024
-              ? `${(knowledge.reduce((sum, item) => sum + item.size, 0) / 1024 / 1024).toFixed(1)} MB`
-              : "轻量全量注入"}
-          </div>
-        </div>
-        <div className="v2-instrument__cell v2-instrument__cell--ai">
-          <div className="v2-instrument__label">
-            <span className="v2-instrument__chip v2-instrument__chip--ai"><FlaskConical size={15} /></span>
-            当前公式
-          </div>
-          <div className="v2-instrument__value v2-instrument__value--mono">
-            {currentProject?.activeFormulaVersion || "尚未启用"}
-          </div>
-          <div className="v2-instrument__note">
-            <CheckCircle2 size={13} /> 已启用·版本锁定
-          </div>
-        </div>
-        <div className="v2-instrument__cell v2-instrument__cell--ok">
-          <div className="v2-instrument__label">
-            <span className="v2-instrument__chip v2-instrument__chip--ok"><CheckCircle2 size={15} /></span>
-            候选校验状态
-          </div>
-          <div className="v2-instrument__value">
-            {validationSummary.known ? `${validationSummary.passed}/${validationSummary.known}` : "unknown"}
-            <small>通过/已记录</small>
-          </div>
-          <div className="v2-instrument__note">
-            {validationSummary.unknown ? `${validationSummary.unknown} 个历史候选没有校验状态` : "只统计明确的通过/未通过，不合成质量分"}
-          </div>
-        </div>
-      </section>
+      <V2Instrument>
+        <V2InstrumentCell
+          tone="brand"
+          icon={<FileClock size={15} />}
+          label="累计生成"
+          value={currentProject?.generationCount ?? history.length}
+          unit="次"
+          note={<><TrendingUp size={13} /> 近 7 天新增 {Math.min(history.length, 12)} 次</>}
+        />
+        <V2InstrumentCell
+          tone="blue"
+          icon={<BookOpenText size={15} />}
+          label="知识文件"
+          value={currentProject?.knowledgeCount ?? knowledge.length}
+          unit="份"
+          note={knowledge.reduce((sum, item) => sum + item.size, 0) > 1024 * 1024
+            ? `${(knowledge.reduce((sum, item) => sum + item.size, 0) / 1024 / 1024).toFixed(1)} MB`
+            : "轻量全量注入"}
+        />
+        <V2InstrumentCell
+          tone="ai"
+          icon={<FlaskConical size={15} />}
+          label="当前公式"
+          value={currentProject?.activeFormulaVersion || "尚未启用"}
+          mono
+          note={<><CheckCircle2 size={13} /> 已启用·版本锁定</>}
+        />
+        <V2InstrumentCell
+          tone="ok"
+          icon={<CheckCircle2 size={15} />}
+          label="候选校验状态"
+          value={validationSummary.known ? `${validationSummary.passed}/${validationSummary.known}` : "unknown"}
+          unit="通过/已记录"
+          note={validationSummary.unknown ? `${validationSummary.unknown} 个历史候选没有校验状态` : "只统计明确的通过/未通过，不合成质量分"}
+        />
+      </V2Instrument>
 
       <section className="v2-dash-grid">
         <article className="panel v2-recent">

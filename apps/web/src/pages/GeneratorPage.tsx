@@ -45,10 +45,10 @@ import {
   Button,
   Field,
   Modal,
-  PageHeader,
   Skeleton,
   useToast,
 } from "../components/Ui";
+import { V2Hero } from "../components/V2";
 import { api, ApiError } from "../lib/api";
 import { demoGenerations } from "../lib/fixtures";
 import {
@@ -573,8 +573,9 @@ export function GeneratorPage() {
 
   return (
     <div className="page generate-page">
-      <PageHeader
-        eyebrow="CREATE"
+      <V2Hero
+        index="02"
+        status={<>{currentProject?.name || "当前项目"} · {mode === "simple" ? "简单模式" : "设置模式"}</>}
         title="生成完整内容"
         description="标题、正文、标签和评论区共用同一个信息补全计划；每个参数都能解释它将影响什么。"
       />

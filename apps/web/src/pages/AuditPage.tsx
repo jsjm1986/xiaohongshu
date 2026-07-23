@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { ShieldCheck } from 'lucide-react';
 import { useProjects } from '../components/ProjectContext';
-import { Badge, EmptyState, PageHeader, Skeleton, useToast } from '../components/Ui';
+import { Badge, EmptyState, Skeleton, useToast } from '../components/Ui';
+import { V2Hero } from '../components/V2';
 import { api } from '../lib/api';
 import { formatDate } from '../lib/utils';
 import type { AuditEntry } from '../types';
@@ -42,8 +43,9 @@ export function AuditPage() {
 
   return (
     <div className="page audit-page">
-      <PageHeader
-        eyebrow="AUDIT"
+      <V2Hero
+        index="10"
+        status={<>{currentProject?.name || '当前工作区'} · 操作留痕</>}
         title="操作审计"
         description="关键操作留痕：谁在什么时间对哪个资源做了什么。"
       />
