@@ -297,6 +297,8 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeStage, setAnalyzeStage] = useState(0);
+  const [modulesExpanded, setModulesExpanded] = useState(false);
+  const [reanalyzeOpen, setReanalyzeOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [approving, setApproving] = useState(false);
@@ -373,6 +375,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     setSelectedAssetIds([]);
     setSettingOverrides({});
     setShowAllOpportunities(false);
+    setModulesExpanded(false);
     void load();
   }, [projectId]);
 
@@ -453,6 +456,17 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   }, [opportunities]);
   const blueprintReady = blueprintModules.length === Object.keys(blueprintModuleMeta).length
     && blueprintModules.every((module) => module.status === "approved");
+  // 第 1 步状态机：一次分析长期受用。就绪态折叠为一行；异常(待确认/stale)才占空间。
+  const isAnalyzed = Boolean(intelligence?.id);
+  const analysisReady = intelligence?.status === "ready" && blueprintReady;
+  const staleReasons = intelligence?.staleReasons ?? [];
+  const showCardWall = blueprintModules.length > 0 && (!analysisReady || modulesExpanded);
+  const requestAnalyze = () => {
+    // 重新分析会生成新草稿版模型并重置确认状态,必须经说明型弹窗显性确认;
+    // 首次分析无可失去之物,直接发起。
+    if (isAnalyzed) setReanalyzeOpen(true);
+    else void analyzeProject();
+  };
   const currentProject = projects.find((project) => project.id === projectId);
   const resolvedSettings = useMemo(() => resolveSimpleGenerationSettings({
     overrides: settingOverrides,
@@ -900,19 +914,29 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
       <header><div><span>第 1 步</span><h2>选择项目，让 AI 建立内容地图</h2><p>行业知识负责发现问题，项目知识负责特色答案与事实边界。</p></div><Badge tone={intelligence?.status === "ready" && blueprintReady ? "positive" : "warning"}>{intelligence?.status === "ready" && !blueprintReady ? "项目模型待确认" : intelligence ? intelligenceLabel[intelligence.status] : "尚未分析"}</Badge></header>
       <div className="intelligence-project__body">
         <Field label="当前项目"><select value={projectId} onChange={(event) => onProject(event.target.value)}>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></Field>
-        <div className="intelligence-status"><BrainCircuit size={22} /><div><strong>{intelligence?.entity || "等待识别项目核心名词"}</strong><p>{intelligence?.industry || "分析后形成行业概念树、决策任务和信息缺口池。"}</p>{intelligence?.staleReasons?.length ? <small>需要更新：{intelligence.staleReasons.join("；")}</small> : null}{intelligence?.status === "draft" ? <small>AI 生成的是待审核规划，不会自动升级为项目事实。</small> : null}</div><div className="panel-actions">{intelligence?.id && (intelligence.status !== "ready" || !blueprintReady) && <Button loading={approving} icon={<Check size={15} />} onClick={approvePlanningResources}>逐项确认本批模型</Button>}<Button variant={intelligence?.status === "draft" ? "secondary" : "primary"} loading={analyzing || intelligence?.status === "analyzing"} icon={<RefreshCw size={15} />} onClick={analyzeProject}>{intelligence?.status === "ready" ? "重新分析" : "分析项目"}</Button></div></div>
+        <div className="intelligence-status"><BrainCircuit size={22} /><div><strong>{intelligence?.entity || "等待识别项目核心名词"}</strong><p>{intelligence?.industry || "分析后形成行业概念树、决策任务和信息缺口池。"}</p>{!analysisReady && staleReasons.length ? <small>需要更新：{staleReasons.join("；")}</small> : null}{intelligence?.status === "draft" ? <small>AI 生成的是待审核规划，不会自动升级为项目事实。</small> : null}{analysisReady ? <small className="intelligence-ready-note">{blueprintModules.length}/{Object.keys(blueprintModuleMeta).length} 创作模型已确认</small> : null}</div><div className="panel-actions">{isAnalyzed && !analysisReady && <Button loading={approving} icon={<Check size={15} />} onClick={approvePlanningResources}>逐项确认本批模型</Button>}{analysisReady && <Button variant="ghost" icon={<ChevronDown size={15} className={modulesExpanded ? "flip" : ""} />} onClick={() => setModulesExpanded((value) => !value)}>{modulesExpanded ? "收起模型" : "查看模型"}</Button>}<Button variant={isAnalyzed ? "ghost" : "primary"} loading={analyzing || intelligence?.status === "analyzing"} icon={<RefreshCw size={15} />} onClick={requestAnalyze}>{isAnalyzed ? "重新分析" : "分析项目"}</Button></div></div>
+        {analysisReady && staleReasons.length > 0 && <div className="intelligence-stale-note"><TriangleAlert size={15} /><span>知识库或公式有更新：{staleReasons.join("；")}。建议重新分析后再正式生成。</span><button type="button" onClick={requestAnalyze}>重新分析</button></div>}
         {analyzing && <div className="analysis-progress"><div className="analysis-progress__head"><RefreshCw size={16} className="spin" /><span>{analysisStages[analyzeStage]}</span><small>{analyzeStage + 1}/{analysisStages.length}</small></div><div className="analysis-progress__track"><span style={{ width: `${((analyzeStage + 1) / analysisStages.length) * 100}%` }} /></div></div>}
         {latestTask && latestTask.status === "failed" && <div className="blueprint-missing"><TriangleAlert size={16} /><span>后台分析失败（已尝试 {latestTask.attemptCount} 次）：{latestTask.error || "未知错误"}。请重新分析，或检查项目知识后再试。</span></div>}
         {latestTask && (latestTask.status === "running" || latestTask.status === "queued") && <div className="blueprint-missing"><RefreshCw size={16} /><span>后台分析进行中…（第 {latestTask.attemptCount} 次尝试）完成前请勿离开或重复触发。</span></div>}
-        {blueprintModules.length ? <div className="blueprint-module-grid">
-          {blueprintModules.map((module) => { const meta = blueprintModuleMeta[module.moduleKey]; return <article key={module.id}>
-            <header><div><strong>{meta.label}</strong><small>v{module.version}</small></div><Badge tone={module.status === "approved" ? "positive" : module.status === "stale" ? "warning" : "neutral"}>{module.status === "approved" ? "已确认" : module.status === "stale" ? "受上游修改影响" : "待确认"}</Badge></header>
-            <p>{meta.description}</p>
-            <small><strong>{blueprintModuleSummary(module)}</strong><br />这里的内容会作为项目参数进入生成；静态提示词不会替你补行业角色和场景。</small>
-            {blueprintModuleHighlights(module).length > 0 && <div className="blueprint-highlights">{blueprintModuleHighlights(module).map((group, index) => <div key={index} className="blueprint-highlights__group"><strong>{group.label}</strong><ul>{group.items.map((item, itemIndex) => <li key={itemIndex}>{item}</li>)}</ul></div>)}</div>}
+        {showCardWall ? <>
+          <p className="blueprint-grid-note">这些模型的内容会作为项目参数进入生成；静态提示词不会替你补行业角色和场景。</p>
+          <div className="blueprint-module-grid">
+          {blueprintModules.map((module) => { const meta = blueprintModuleMeta[module.moduleKey]; const highlights = blueprintModuleHighlights(module); return <article key={module.id}>
+            <header><div><strong>{meta.label}</strong><span className="blueprint-version">v{module.version}</span></div><Badge tone={module.status === "approved" ? "positive" : module.status === "stale" ? "warning" : "neutral"}>{module.status === "approved" ? "已确认" : module.status === "stale" ? "受上游修改影响" : "待确认"}</Badge></header>
+            <p className="blueprint-desc">{meta.description}</p>
+            <p className="blueprint-summary">{blueprintModuleSummary(module)}</p>
+            {highlights.length > 0 && <div className="blueprint-ledger">
+              {highlights.map((group, index) => <div className="blueprint-ledger__row" key={index}>
+                <small>{group.label}</small>
+                <span className="blueprint-ledger__count">{group.items.length}</span>
+                <span className="blueprint-ledger__preview" title={group.items.join(" · ")}>{group.items.slice(0, 2).join(" · ")}{group.items.length > 2 ? ` +${group.items.length - 2}` : ""}</span>
+              </div>)}
+            </div>}
             <footer>{module.status !== "approved" && <button type="button" disabled={approvingModuleId === module.id} onClick={() => void approveBlueprintModule(module)}>{approvingModuleId === module.id ? "确认中…" : "确认模块"}</button>}<button type="button" onClick={() => openBlueprintEditor(module)}><Pencil size={13} /> 编辑</button></footer>
           </article>; })}
-        </div> : intelligence?.id ? <div className="blueprint-missing"><TriangleAlert size={16} /><span>当前分析没有完整项目创作模型，必须重新分析后才能正式生成。</span></div> : null}
+          </div>
+        </> : isAnalyzed && !blueprintModules.length ? <div className="blueprint-missing"><TriangleAlert size={16} /><span>当前分析没有完整项目创作模型，必须重新分析后才能正式生成。</span></div> : null}
       </div>
     </section>
 
@@ -1037,6 +1061,16 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
       {assets.length ? <div className="asset-grid">{assets.map((asset) => { const selected = selectedAssetIds.includes(asset.id); return <article className={`asset-card ${selected ? "selected" : ""}`} key={asset.id}><button type="button" className="asset-card__image" onClick={() => setSelectedAssetIds((current) => selected ? current.filter((id) => id !== asset.id) : current.length < 9 ? [...current, asset.id] : current)}><img src={asset.previewUrl || api.imageAssets.contentUrl(projectId, asset.id)} alt={asset.filename} /><span>{selected && <Check size={16} />}</span></button><div><strong>{asset.filename}</strong><small>{asset.analysis?.imageType || "等待源素材分析"} · {asset.approved ? "源素材观察已确认" : asset.status === "ready" ? "AI 源素材观察待确认" : asset.status}</small>{asset.analysis && <p title={asset.analysis.visibleFacts.join("；")}>{asset.analysis.scene || asset.analysis.visibleFacts.slice(0, 2).join("；") || "模型未提取到可见事实"}</p>}<div>{selected && <Badge tone="blue">计划参考源素材</Badge>}{asset.approved ? <Badge tone="positive">批准的源素材可见观察</Badge> : asset.status === "ready" ? <button type="button" onClick={() => void approveAsset(asset)}>确认上述源素材观察</button> : null}{asset.analysis && asset.latestAnalysisId ? <button type="button" onClick={() => openQualityEditor(asset)}><Pencil size={13} /> 编辑质量评估</button> : null}</div></div></article>; })}</div> : <EmptyState icon={<Images size={24} />} title="源素材图库还是空的" description="可不选源素材，只生成结构化图片计划和文字简报；上传原图也不会在这里生成最终图片资产。" />}
       <footer className="intelligence-run"><div><strong>{selectedOpportunity ? `已选择：${selectedOpportunity.title}` : "请先选择一张选题卡"}</strong><p>{selectedAssetIds.length} 张源素材已选 · 只作为三套图片计划与 imageBrief 的参考输入</p>{!blueprintReady ? <small>七项项目创作模型尚未全部确认，正式生成已锁定。</small> : selectedOpportunity && missingDependencyCount > 0 ? <small>引用资源缺失：请换一批，或在资源池修复引用。</small> : selectedOpportunity && pendingDependencyCount > 0 ? <small>将先独立确认 {opportunityDependencies.unapprovedGaps.length} 个信息缺口和 {opportunityDependencies.unapprovedStrategies.length} 个表达策略，再确认选题；不会隐式级联。</small> : selectedOpportunity?.status !== "approved" && selectedOpportunity ? <small>继续后会明确确认这张选题卡；AI 草案不会在未确认时进入生成。</small> : selectedOpportunity ? <small>选题及其引用依赖均已独立确认。</small> : null}</div><Button disabled={!selectedOpportunity || intelligence?.status !== "ready" || !blueprintReady} loading={submitting || preparing} icon={<Sparkles size={17} />} onClick={() => void preview()}>{selectedOpportunity && pendingDependencyCount > 0 ? `先确认 ${pendingDependencyCount} 项依赖并预览` : selectedOpportunity?.status === "approved" ? "预览并生成 3 套内容方案" : "确认选题并预览"}</Button></footer>
     </section>
+
+    <Modal open={reanalyzeOpen} onClose={() => setReanalyzeOpen(false)} title="重新分析项目？" description="将基于当前项目知识重新运行三段模型，生成一批新的草稿版内容地图；不会删除任何已确认的历史版本。" footer={<><Button variant="ghost" onClick={() => setReanalyzeOpen(false)}>取消</Button><Button icon={<RefreshCw size={15} />} onClick={() => { setReanalyzeOpen(false); void analyzeProject(); }}>确认重新分析</Button></>}>
+      <div className="reanalyze-impact">
+        <div><Layers3 size={16} /><span><strong>创作模型</strong><p>生成 v+1 草稿；当前已确认的 {blueprintModules.length || 7} 个模型转为「待确认」，重新逐项确认前，正式生成保持锁定。</p></span></div>
+        <div><Sparkles size={16} /><span><strong>缺口 / 策略 / 选题</strong><p>追加一批新草稿；已收藏、已归档和手动新增的条目全部保留。</p></span></div>
+        <div><Target size={16} /><span><strong>当前选题</strong><p>已选择的选题卡会被取消，需要重新选择。</p></span></div>
+        <div><Info size={16} /><span><strong>成本</strong><p>三段模型串联运行，约几十秒，消耗一次模型调用。</p></span></div>
+      </div>
+      {staleReasons.length > 0 && <p className="reanalyze-stale">建议原因：{staleReasons.join("；")}</p>}
+    </Modal>
 
     <Modal open={refreshOpen} onClose={() => setRefreshOpen(false)} title="换一批新选题" description="基于现有蓝图与已确认信息缺口重新生成一批并追加保留；旧选题不会被删除。约几十秒，消耗一次模型额度。" footer={<><Button variant="secondary" loading={refreshing} onClick={() => void runRefresh(undefined)}>直接生成</Button><Button loading={refreshing} disabled={!guidance.trim()} onClick={() => void runRefresh(guidance.trim())}>按引导生成</Button></>}>
       <div className="guidance-panel">
