@@ -12,7 +12,7 @@ import { HistoryPage } from './pages/HistoryPage';
 import { KnowledgePage } from './pages/KnowledgePage';
 import { LoginPage } from './pages/LoginPage';
 import { ProjectsPage } from './pages/ProjectsPage';
-import { QuickCreatePage } from './pages/QuickCreatePage';
+import { QuickChannelPage } from './pages/QuickChannelPage';
 import { RegisterPage } from './pages/RegisterPage';
 import { ResearchPage } from './pages/ResearchPage';
 import { SettingsPage } from './pages/SettingsPage';
@@ -28,7 +28,7 @@ export default function App() {
       <Route element={<ProtectedRoute><AppShell /></ProtectedRoute>}>
         <Route index element={<DashboardPage />} />
         <Route path="generate" element={<GeneratorPage />} />
-        <Route path="quick" element={<QuickCreatePage />} />
+        <Route path="quick" element={<QuickChannelPage />} />
         <Route path="projects" element={<ProjectsPage />} />
         <Route path="knowledge" element={<KnowledgePage />} />
         <Route path="formulas" element={<FormulasPage />} />
