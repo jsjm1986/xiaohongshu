@@ -553,7 +553,10 @@ export function GeneratorPage() {
         const message = error instanceof ApiError
           ? error.message
           : error instanceof Error ? error.message : "生成任务创建失败";
-        toast.push(`生成失败：${message}`, "error");
+        const releaseGuidance = /发布清单|ACTIVE_RELEASE|release/i.test(message)
+          ? "。请到「研究与证据 → 发布版本」新建一个发布清单，批准并激活到生成运行时后重试"
+          : "";
+        toast.push(`生成失败：${message}${releaseGuidance}`, "error");
       }
     } finally {
       setSubmitting(false);

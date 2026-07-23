@@ -52,6 +52,28 @@ export interface KnowledgeFile {
   path?: string;
 }
 
+/** One pickable knowledge section in the gap editor's evidence picker (Cref v1.1). */
+export interface KnowledgeEvidenceSection {
+  evidenceId: string;
+  sectionId: string;
+  heading: string;
+  excerpt: string;
+  charLength: number;
+  kind: string;
+  evidenceStatus: string;
+  caveats: string[];
+}
+
+/** A latest-version knowledge document grouped with its pickable sections. */
+export interface KnowledgeEvidenceDocument {
+  id: string;
+  path: string;
+  title: string;
+  kind: string;
+  evidenceStatus: string;
+  sections: KnowledgeEvidenceSection[];
+}
+
 export interface FormulaVersion {
   id: string;
   projectId: string;
@@ -562,6 +584,9 @@ export interface CommentScenarioMetadata {
   simulationLabel?: string;
 }
 
+/** Dialogic node kind (Cref contract v1.1). Optional everywhere so historical packages stay readable. */
+export type CommentNodeKind = "question" | "answer" | "follow_up" | "clarification";
+
 export interface CommentThread extends CommentScenarioMetadata {
   question: string;
   answer: string;
@@ -573,7 +598,13 @@ export interface CommentThread extends CommentScenarioMetadata {
   readerState?: ReaderStateProxy;
   dialogue?: CommentDialogueTurn[];
   nextStep?: string;
-  followUps?: Array<CommentScenarioMetadata & { id?: string; question: string; answer: string; evidenceIds?: string[] }>;
+  followUps?: Array<CommentScenarioMetadata & { id?: string; question: string; answer: string; evidenceIds?: string[]; kind?: CommentNodeKind | string; boundary?: string }>;
+  /** Dialogic kind of the root question node; positional default `question`. */
+  kind?: CommentNodeKind | string;
+  /** Dialogic kind of the root answer node; positional default `answer`. */
+  answerKind?: CommentNodeKind | string;
+  /** Thread-level boundary (Cref contract v1.1). */
+  boundary?: string;
   postingIdentity?: "author" | "brand" | "staff" | "expert" | "reader_question_template" | string;
   sourceClusterIds?: string[];
   evidenceIds?: string[];
@@ -745,6 +776,9 @@ export interface DeploymentPlan {
   postingIdentity?: string;
   ownedFirstComment?: boolean | string;
   pinPriority?: string[];
+  /** Response-time tier (Cref contract v1.1). */
+  sla?: string;
+  /** @deprecated Historical snapshots stored the SLA here. */
   responseSla?: string;
   actions?: Array<{
     order: number;
@@ -753,7 +787,8 @@ export interface DeploymentPlan {
     postingIdentity: string;
     condition?: string;
   }>;
-  liveRouting?: Array<{ intent: string; target: string; reason?: string }> | string[];
+  /** v1.1 structured {route,condition,action} rules; historical snapshots stored plain strings or legacy intent/target objects. */
+  liveRouting?: Array<{ route: string; condition: string; action: string } | { intent: string; target: string; reason?: string } | string>;
   updatePolicy?: string[];
   updateTriggers?: string[];
   stopRules?: string[];
@@ -887,6 +922,13 @@ export interface Candidate {
   tags: string[];
   comments: CommentThread[];
   commentDisclaimer?: string;
+  /** Publisher-owned first comment text (Cref contract v1.1); absent means none was produced. */
+  commentOwnedFirstComment?: string;
+  /**
+   * Plan-level projection of selected gap ids no thread/body covers (Cref v1.1).
+   * Absent on historical packages means "not computed", not "nothing uncovered".
+   */
+  commentUncoveredGaps?: string[];
   imageBrief?: string;
   /** Legacy compatibility value; display only when bound to validationHeuristic. */
   score?: number;
@@ -983,6 +1025,8 @@ export interface InformationGap {
   answerability: "approved" | "verifiable" | "unknown";
   answer?: string;
   evidenceIds: string[];
+  /** Singular answer boundary (Cref contract v1.1); stored at data_json top level. */
+  boundary?: string;
   frameworks?: string[];
   boundaries?: string[];
   priority: number;

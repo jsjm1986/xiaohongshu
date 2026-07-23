@@ -453,7 +453,7 @@ describe("three-candidate content generation engine", () => {
       && item.productionArtifacts.finalImageAsset.status === "absent"
       && item.productionArtifacts.entrySnapshot.status === "absent"
       && item.productionArtifacts.deployment.status === "not_deployed")).toBe(true);
-    expect(result.packages.every((item) => item.dialogueThreads?.[0]?.postingIdentity === "author")).toBe(true);
+    expect(result.packages.every((item) => item.dialogueThreads?.[0]?.postingIdentity === "publisher")).toBe(true);
     expect(result.packages.every((item) => item.dialogueThreads?.every((thread) => thread.roleCard.stage === thread.stage && Object.values(thread.replyPlan).every(Boolean)))).toBe(true);
     expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => Boolean(thread.roleCard && thread.replyPlan && thread.primaryGapId)))).toBe(true);
     expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => thread.followUps.length <= 2))).toBe(true);

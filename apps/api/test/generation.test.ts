@@ -636,7 +636,7 @@ test('formula registry, settings and deterministic generation form one working f
   assert.ok(job.candidates.every((item: any) => new Set(item.comments.map((comment: any) => comment.surfaceRoleCard?.displayRole)).size >= 3));
   assert.ok(job.candidates.every((item: any) => item.gapCoverageLedger?.closureRate === 1 && item.gapCoverageLedger?.uncoveredGapIds?.length === 0));
   assert.ok(job.candidates.every((item: any) => item.effectiveThreadCount === item.comments.length));
-  assert.ok(job.candidates.every((item: any) => item.comments.every((comment: any) => ['author', 'brand', 'staff', 'expert'].includes(comment.postingIdentity))));
+  assert.ok(job.candidates.every((item: any) => item.comments.every((comment: any) => ['publisher', 'brand', 'staff', 'expert'].includes(comment.postingIdentity))));
   assert.ok(job.candidates.every((candidate: any) => candidate.sources.every((source: any) => candidate.reasoning.some((entry: any) =>
     entry.status === 'fact' && entry.sourceSpans?.some((span: any) => span.evidenceId === source.id),
   ))), 'selected context must not be presented as a cited source without an exact visible claim span');
@@ -690,7 +690,10 @@ test('formula registry, settings and deterministic generation form one working f
   const exportCandidateId = job.candidates[1].id;
   const markdown = await request(`/api/generations/${jobId}/candidates/${encodeURIComponent(exportCandidateId)}/export?format=markdown`);
   assert.equal(markdown.response.status, 200);
-  assert.match(Buffer.from(markdown.body).toString('utf8'), /评论区信息补全参考/u);
+  // Generated packages are schemaVersion 1.1, so the export uses the two-part
+  // executive + audit appendix layout; thread metadata lives in the appendix.
+  assert.match(Buffer.from(markdown.body).toString('utf8'), /# 审计附录（非发布素材）/u);
+  assert.match(Buffer.from(markdown.body).toString('utf8'), /评论线程完整元数据/u);
   assert.match(Buffer.from(markdown.body).toString('utf8'), /模拟情景，非真实评论/u);
   assert.match(Buffer.from(markdown.body).toString('utf8'), /发现式路径/u);
   assert.match(Buffer.from(markdown.body).toString('utf8'), /信息闭合台账/u);

@@ -21,14 +21,27 @@ export const COMMENT_RICHNESS_PROFILES: Record<CommentRichnessLevel, {
   },
   balanced: {
     label: "均衡",
-    description: "兼顾人物差异、自然口语、单轮与多轮分支，默认适合大多数选题。",
+    description: "兼顾人物差异、自然口语、单轮与多轮分支，默认适合大多数选题。开启多轮接龙（每次生成多一步评论生长，耗时略增）。",
     values: { comment_role_diversity: 65, comment_constraint_density: 60, comment_gap_multiplexing: 55, comment_reply_increment: 70, question_compression: 60, comment_platform_register: 68, comment_conversation_rate: 48, comment_branching_strength: 62, comment_organic_variation: 58, comment_discovery_strength: 65, comment_inference_effort: 35, comment_self_verification: 70, comment_false_closure_guard: 95 },
   },
   dense: {
     label: "高密度",
-    description: "增加角色、圈内语域、多轮接话和相邻信息延展；仍保持一条主线且不制造虚假口碑。",
+    description: "增加角色、圈内语域、多轮接话和相邻信息延展；仍保持一条主线且不制造虚假口碑。开启多轮接龙且接话更密（生成最慢）。",
     values: { comment_role_diversity: 90, comment_constraint_density: 85, comment_gap_multiplexing: 80, comment_reply_increment: 88, question_compression: 80, comment_platform_register: 82, comment_conversation_rate: 70, comment_branching_strength: 80, comment_organic_variation: 82, comment_discovery_strength: 80, comment_inference_effort: 45, comment_self_verification: 85, comment_false_closure_guard: 98 },
   },
+};
+
+/**
+ * P2-11 三档 → 多轮接龙生长开关映射（克制→关、均衡→开、高密度→开）。
+ * 设计决策：开关是 boolean（config 路径 content.commentMultiTurnGrowthEnabled），
+ * 而上面的 values 是 Record<string, number> 的滑杆值，类型不同不能混入；因此
+ * 开关按注册表参数 id（comment_multi_turn_growth）作为额外 override 注入，
+ * 与数值走同一条 overrides 通道，由 api 按注册表编译到 config 路径。
+ */
+export const COMMENT_MULTI_TURN_GROWTH_BY_LEVEL: Record<CommentRichnessLevel, boolean> = {
+  restrained: false,
+  balanced: true,
+  dense: true,
 };
 
 export interface SimpleSetting<T> {
@@ -202,7 +215,13 @@ export function shouldShowSimpleLocalFields(audienceStage: string, presetId?: st
 const cleanText = (value: string) => value.trim();
 
 export function mergeCommentRichnessOverrides(existing: Record<string, unknown> = {}, level: CommentRichnessLevel) {
-  return { ...existing, ...COMMENT_RICHNESS_PROFILES[level].values };
+  // 数值滑杆与布尔开关共用一条 overrides 通道；开关键为注册表参数 id，
+  // api 端经 CORE_PARAMETER_IDS 进入 selection.overrides 并编译到 config.content。
+  return {
+    ...existing,
+    ...COMMENT_RICHNESS_PROFILES[level].values,
+    comment_multi_turn_growth: COMMENT_MULTI_TURN_GROWTH_BY_LEVEL[level],
+  };
 }
 
 /** Map exactly what simple mode displays into the generation request. */

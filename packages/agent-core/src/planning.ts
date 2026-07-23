@@ -809,10 +809,17 @@ function buildPersonaScenePlan(
   const platformRegister: PersonaScenePlan["commentNetwork"]["platformRegister"] = registerStrength >= 72
     ? "sample_rich" : registerStrength >= 35 ? "light_platform" : "plain";
   const estimatedThreads = Math.max(1, config.content.commentThreadMax);
-  const multiTurnCount = Math.min(
-    estimatedThreads,
-    config.content.followUpDepth > 0 ? Math.round(estimatedThreads * conversationRate / 100) : 0,
-  );
+  // P2-11: the multi-turn target only exists when the growth pass (stage 2B) is
+  // actually enabled. With the switch off the engine never grows follow-ups, so a
+  // non-zero target would make comment_network_under_grown a guaranteed false
+  // positive; the honest target is [0, 0].
+  const growthEnabled = config.content.commentMultiTurnGrowthEnabled === true;
+  const multiTurnCount = growthEnabled
+    ? Math.min(
+      estimatedThreads,
+      config.content.followUpDepth > 0 ? Math.round(estimatedThreads * conversationRate / 100) : 0,
+    )
+    : 0;
   const commentNetwork: PersonaScenePlan["commentNetwork"] = {
     platformRegister,
     platformLanguageRule: platformRegister === "sample_rich"
@@ -820,7 +827,9 @@ function buildPersonaScenePlan(
       : platformRegister === "light_platform"
         ? "少数角色可用一个自然称呼、语气词或行动短语，其他人保持普通口语。"
         : "使用普通互联网口语，不为制造网感强塞圈内词。",
-    multiTurnTarget: [Math.max(0, multiTurnCount - 1), Math.min(estimatedThreads, multiTurnCount + 1)],
+    multiTurnTarget: growthEnabled
+      ? [Math.max(0, multiTurnCount - 1), Math.min(estimatedThreads, multiTurnCount + 1)]
+      : [0, 0],
     branchMoves: branchingStrength >= 70
       ? ["上一句的现实限制→安排问题", "可见细节→相邻追问", "对象线索→核验路径", "不同选择→适用条件"]
       : ["围绕原问题补一个条件", "从回答中的一个词继续追问"],
@@ -1056,6 +1065,49 @@ function renderChannelAllocation(
  * (b)/warning, discoveryPlan = (c)→optional, densityProxy = (c)→optional audit, conversationPlan
  * = derived/non-required) are recorded inline at their construction sites below.
  */
+/**
+ * P3-15: fallback dialogic function of a thread, derived from the gap card's
+ * content instead of the old positional `functionCycle` rotation. The card's
+ * answer state decides what the exchange is *for*:
+ * - grounded answer (answer/framework plus evidence) → "verification"（核验适用条件）
+ * - required card without an answer → "next_step"（必须指向一个核验动作）
+ * - anything else → "clarify"
+ * When the strategy's commentMode allows a counterexample, exactly one thread per
+ * plan (the first "clarify" slot) is promoted to "counterexample", so the mode is
+ * represented without re-introducing positional rotation. A model-stated function
+ * from the staged schema overrides this fallback at bind time when it is a legal
+ * enum value; illegal values silently fall back to this derivation.
+ */
+function deriveThreadFunction(
+  gap: InformationGapPlanningCard,
+  counterexampleAvailable: boolean,
+): DialogueThreadPlan["function"] {
+  const grounded = Boolean((gap.answer ?? gap.framework) && gap.evidenceIds.length > 0);
+  const derived: DialogueThreadPlan["function"] = grounded
+    ? "verification"
+    : gap.required ? "next_step" : "clarify";
+  return counterexampleAvailable && derived === "clarify" ? "counterexample" : derived;
+}
+
+/**
+ * P3-17: per-thread nextStep derived from the gap card, replacing the old binary
+ * constant. Three branches: grounded answer + evidence → verify against the
+ * sources; no answer but a verifiable subject (question/label, optionally a
+ * boundary) → a concrete "verify X with the accountable channel" step phrased in
+ * natural language (never raw field names); no usable information at all → the
+ * conservative "supply sources first" fallback.
+ */
+function deriveThreadNextStep(gap: InformationGapPlanningCard): string {
+  const grounded = Boolean((gap.answer ?? gap.framework) && gap.evidenceIds.length > 0);
+  if (grounded) return "按证据来源核验自己的适用条件";
+  const subject = (gap.question || gap.label).trim();
+  if (subject) {
+    const base = `向项目方可追责渠道核实“${subject}”`;
+    return gap.boundary?.trim() ? `${base}，尤其确认${gap.boundary.trim()}` : base;
+  }
+  return "先补充可信来源，再形成结论";
+}
+
 function dialoguePlans(
   opportunity: TopicOpportunity,
   gapCards: InformationGapPlanningCard[],
@@ -1079,16 +1131,6 @@ function dialoguePlans(
     hesitating: ["risk_concerned", "skeptical_returning_reader", "comparison_decider"],
     ready: ["local_action_seeker", "comparison_decider", "risk_concerned"],
   };
-  const primaryFunction: DialogueThreadPlan["function"] = strategy.commentMode.includes("counterexample")
-    ? "counterexample"
-    : strategy.commentMode.includes("verification") ? "verification" : "clarify";
-  const functionCycle: DialogueThreadPlan["function"][] = [
-    primaryFunction,
-    primaryFunction === "verification" ? "next_step" : "verification",
-    primaryFunction === "counterexample" ? "clarify" : "counterexample",
-    "surface_gap",
-    "next_step",
-  ];
   const personas = personasByStage[opportunity.audienceStage];
   const method = config.parameters;
   const roleDiversity = method?.commentRoleDiversity ?? 65;
@@ -1139,9 +1181,16 @@ function dialoguePlans(
   ];
   const targetCount = primaryOrdered.length ? Math.max(0, effectiveThreadCount) : 0;
   const visibleLineCapacity = Math.max(0, Math.floor((personaScenePlan.surfaceTargets.visibleCommentLines[1] - targetCount * 2) / 2));
-  const multiTurnCount = config.content.followUpDepth > 0
+  // P2-11: only plan multi-turn threads when the growth pass (stage 2B) is
+  // enabled; otherwise every thread stays a single exchange, matching what the
+  // engine will actually produce (2A followUps are emptied, 2B is skipped).
+  const multiTurnCount = config.content.commentMultiTurnGrowthEnabled === true && config.content.followUpDepth > 0
     ? Math.min(targetCount, visibleLineCapacity, Math.round(targetCount * conversationRate / 100))
     : 0;
+  // P3-15: at most one counterexample thread per plan, and only when the
+  // strategy's commentMode carries one (see deriveThreadFunction).
+  const counterexampleAllowed = strategy.commentMode.includes("counterexample");
+  let counterexampleAssigned = false;
   const multiTurnIndexes = new Set(
     Array.from({ length: targetCount }, (_, index) => index)
       .sort((left, right) => hashUnit(seed, `multi-turn:${left}`) - hashUnit(seed, `multi-turn:${right}`))
@@ -1302,11 +1351,13 @@ function dialoguePlans(
           : "下一人只围绕上句新出现的条件继续问，不得凭空换题",
       ...(extensionGapId ? { extensionGapId } : {}),
     };
+    const threadFunction = deriveThreadFunction(gap, counterexampleAllowed && !counterexampleAssigned);
+    if (threadFunction === "counterexample") counterexampleAssigned = true;
     return {
       id: `${strategy.id}_thread_${index + 1}`,
       gapId: gap.gapId,
       stage: roleStage,
-      function: functionCycle[index % functionCycle.length]!,
+      function: threadFunction,
       questionIntent,
       answerRequirements: [
         `DirectAnswer：${replyPlan.directAnswer}`,
@@ -1316,8 +1367,10 @@ function dialoguePlans(
         `NextQuestion：${replyPlan.nextQuestion}`,
       ],
       followUpIntent: `${strategy.commentMode}；${conversationPlan.extensionMove}`,
-      nextStep: gap.evidenceIds.length ? "按证据来源核验自己的适用条件" : "先补充可信来源，再形成结论",
-      postingIdentity: "author",
+      nextStep: deriveThreadNextStep(gap),
+      // P3-14: the answering side is the publishing account itself (publisher),
+      // not a generic "author"; the question side stays simulated_reader below.
+      postingIdentity: "publisher",
       sourceClusterIds: gap.evidenceIds.map((sourceId) => sourceId.replace(/^evidence_/u, "")),
       evidenceIds: [...gap.evidenceIds],
       boundaryRequired: Boolean(gap.boundary),
@@ -1567,13 +1620,24 @@ export function planTopicOrchestrations(input: PlanTopicOrchestrationsInput): [O
       targetThreadCount: input.config.content.commentThreadMax,
       effectiveThreadCount: dialogueThreads.length,
       ...(capacityWarning ? { capacityWarning } : {}),
+      // P3-16: aC operations plan — static template, strictly separated from the
+      // Cref reference content (F03): these are operating rules for the account,
+      // never text to be published as comments.
       deploymentPlan: {
-        postingIdentity: "author",
+        postingIdentity: "publisher",
         ownedFirstComment: true,
-        pinPriority: strategy.commentMode.includes("verification") ? ["verification", "next_step"] : ["clarify", "boundary"],
-        liveRouting: ["只由可追责的发布者身份答复", "用户真实评论与参考模板分开保存"],
+        // P3-15: pinPriority must only contain legal thread-function values
+        // ("boundary" was never one); stays linked to the strategy commentMode.
+        pinPriority: strategy.commentMode.includes("verification") ? ["verification", "next_step"] : ["verification", "clarify"],
+        sla: "工作日 24h 内答复真实评论；需要个体结论的问题不承诺即时答复",
+        liveRouting: [
+          { route: "项目事实类问题", condition: "知识库已有已批准口径", action: "由发布账号引用已批准口径答复，并保留适用边界" },
+          { route: "个体结论类问题", condition: "需要个人条件或未披露信息才能判断", action: "转专业/人工渠道处理，禁止代填个体结论" },
+          { route: "已批准口径之外的新问题", condition: "知识库无可用口径", action: "记录进入更新队列，未知保持未知，禁止代填" },
+        ],
         updateTriggers: ["知识库证据变化", "适用边界变化"],
-        stopRules: ["无法核验时不代填答案", "不得伪装消费者或第三方口碑"],
+        updatePolicy: ["真实评论中反复出现且当前口径未覆盖的问题进入更新队列，经 draft→approve 补充口径后才可答复"],
+        stopRules: ["无法核验时不代填答案", "不得伪装消费者或第三方口碑", "用户真实评论与参考模板分开保存"],
       },
       rationale: [
         `同一选题采用 ${strategy.label}，并沿独立表达轴做受控交叉编排。`,

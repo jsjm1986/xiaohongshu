@@ -310,9 +310,12 @@ describe("non-vector orchestration planning", () => {
       }
     }
     const dialogueThreads = plans.flatMap((plan) => plan.dialogueThreads);
-    expect(dialogueThreads.every((thread) => thread.simulated && thread.speakerType === "simulated_reader" && thread.postingIdentity !== "reader_question_template")).toBe(true);
+    expect(dialogueThreads.every((thread) => thread.simulated && thread.speakerType === "simulated_reader" && thread.postingIdentity === "publisher")).toBe(true);
     expect(new Set(dialogueThreads.map((thread) => thread.personaRole)).size).toBeGreaterThan(1);
-    expect(new Set(plans[0].dialogueThreads.map((thread) => thread.function)).size).toBeGreaterThan(1);
+    // P3-15: function derives from the gap card content, not positional rotation —
+    // every Cref thread here anchors the required, unanswered "fit" gap → next_step.
+    expect(plans[0].dialogueThreads.length).toBeGreaterThan(0);
+    expect(plans[0].dialogueThreads.every((thread) => thread.function === "next_step")).toBe(true);
     expect(dialogueThreads.every((thread) => thread.replyTo === null && thread.threadDepth === 0 && Boolean(thread.claimStatus))).toBe(true);
     expect(dialogueThreads.every((thread) => thread.stage === thread.roleCard.stage && thread.primaryGapId === thread.gapId)).toBe(true);
     expect(dialogueThreads.every((thread) => thread.densityProxy.primaryGapCount === 1 && thread.densityProxy.expectedReplyComponents === 5)).toBe(true);
@@ -661,6 +664,167 @@ describe("non-vector orchestration planning", () => {
       expect(first.every((plan) => plan.strategy.imageRole === locked.imageRole)).toBe(true);
       expect(first.every((plan) => JSON.stringify(plan.strategy.sequence) === JSON.stringify(locked.sequence))).toBe(true);
       expect(first.every((plan) => JSON.stringify(plan.strategy.targetChannels) === JSON.stringify(locked.targetChannels))).toBe(true);
+    }
+  });
+});
+
+describe("P3 comment orchestration contract", () => {
+  /** One gap per derivation branch: grounded answer / required-unknown / optional-unknown. */
+  const branchGaps: InformationGap[] = [
+    {
+      id: "answered", label: "恢复时间", question: "恢复大概要多久？", category: "process",
+      audienceStages: ["comparing"], importance: 0.9, decisionLeverage: 0.9, proofability: 0.8,
+      answer: "资料中确认的标准恢复口径", evidenceIds: ["evidence_d1"], required: false,
+      preferredChannels: ["Cref"],
+    },
+    {
+      id: "required_unknown", label: "适用条件", question: "哪些条件会改变适用性？", category: "decision",
+      audienceStages: ["comparing"], importance: 0.9, decisionLeverage: 0.9, proofability: 0.7,
+      boundary: "个体适用性需要单独核验", evidenceIds: [], required: true,
+      preferredChannels: ["Cref"],
+    },
+    {
+      id: "optional_unknown", label: "比较维度", question: "应该按哪些维度比较？", category: "comparison",
+      audienceStages: ["comparing"], importance: 0.7, decisionLeverage: 0.6, proofability: 0.6,
+      evidenceIds: [], required: false,
+      preferredChannels: ["Cref"],
+    },
+  ];
+
+  /** A locked neutral strategy: no counterexample in the commentMode, so tests are sampling-independent. */
+  const neutralStrategy = {
+    id: "neutral_qa_strategy", label: "中性问答策略", openingMode: "neutral_opening", narrativeMode: "neutral_narrative",
+    bodyRole: "neutral_body", imageRole: "cover" as const, commentMode: "plain_verification_threads",
+    voice: "neutral_voice", sequence: ["neutral"], targetChannels: ["N.title", "N.body", "Cref"] as const,
+    selectionWeight: 1, enabled: true,
+  };
+  const neutralOptions = { lockedStrategyId: neutralStrategy.id };
+  const neutralStrategies = () => [{ ...neutralStrategy, targetChannels: [...neutralStrategy.targetChannels] }];
+
+  function branchPlans(seeds: [number, number, number] = [7, 8, 9]) {
+    return planTopicOrchestrations({
+      opportunity: { ...opportunity("p3-branch"), gapIds: ["answered", "required_unknown", "optional_unknown"] },
+      gaps: branchGaps,
+      config: config(),
+      seeds,
+      expressionStrategies: neutralStrategies(),
+      options: neutralOptions,
+    });
+  }
+
+  it("derives each thread function from its gap card content instead of rotating by position", () => {
+    for (const plan of branchPlans()) {
+      const byGap = new Map(plan.dialogueThreads.map((thread) => [thread.gapId, thread.function]));
+      // grounded answer + evidence → verification; required without answer → next_step; else clarify.
+      expect(byGap.get("answered")).toBe("verification");
+      expect(byGap.get("required_unknown")).toBe("next_step");
+      expect(byGap.get("optional_unknown")).toBe("clarify");
+      // The locked neutral strategy carries no counterexample mode, so none is assigned.
+      expect(plan.dialogueThreads.every((thread) => thread.function !== "counterexample")).toBe(true);
+    }
+  });
+
+  it("assigns exactly one counterexample thread, and only when the strategy commentMode carries one", () => {
+    const counterexampleStrategy = {
+      id: "cx_strategy", label: "反例策略", openingMode: "cx_opening", narrativeMode: "cx_narrative",
+      bodyRole: "cx_body", imageRole: "cover" as const, commentMode: "identity_route_counterexample",
+      voice: "cx_voice", sequence: ["cx"], targetChannels: ["N.title", "N.body", "Cref"] as const,
+      selectionWeight: 1, enabled: true,
+    };
+    const plans = planTopicOrchestrations({
+      opportunity: { ...opportunity("p3-cx"), gapIds: ["answered", "required_unknown", "optional_unknown"] },
+      gaps: branchGaps,
+      config: config(),
+      seeds: [7, 8, 9],
+      expressionStrategies: [{ ...counterexampleStrategy, targetChannels: [...counterexampleStrategy.targetChannels] }],
+      options: { lockedStrategyId: counterexampleStrategy.id },
+    });
+    for (const plan of plans) {
+      expect(plan.strategy.commentMode).toContain("counterexample");
+      // The single promotion lands on the only clarify slot; grounded/required
+      // semantics are never overridden by the mode.
+      expect(plan.dialogueThreads.filter((thread) => thread.function === "counterexample")).toHaveLength(1);
+      expect(plan.dialogueThreads.find((thread) => thread.gapId === "optional_unknown")?.function).toBe("counterexample");
+      expect(plan.dialogueThreads.find((thread) => thread.gapId === "answered")?.function).toBe("verification");
+      expect(plan.dialogueThreads.find((thread) => thread.gapId === "required_unknown")?.function).toBe("next_step");
+    }
+  });
+
+  it("derives nextStep per thread across the grounded / routed / empty branches", () => {
+    const blankGap: InformationGap = {
+      id: "blank", label: "", question: "", category: "decision",
+      audienceStages: ["comparing"], importance: 0.5, decisionLeverage: 0.5, proofability: 0.5,
+      evidenceIds: [], required: false, preferredChannels: ["Cref"],
+    };
+    const wideConfig = config();
+    // Breadth 85 lifts the per-post gap limit to 4 so every branch gap is selected.
+    wideConfig.parameters!.informationBreadth = 85;
+    const plans = planTopicOrchestrations({
+      opportunity: { ...opportunity("p3-next"), gapIds: ["answered", "required_unknown", "optional_unknown", "blank"] },
+      gaps: [...branchGaps, blankGap],
+      config: wideConfig,
+      seeds: [7, 8, 9],
+      expressionStrategies: neutralStrategies(),
+      options: neutralOptions,
+    });
+    for (const plan of plans) {
+      expect(plan.selectedGapIds).toHaveLength(4);
+      const byGap = new Map(plan.dialogueThreads.map((thread) => [thread.gapId, thread.nextStep]));
+      // Grounded: verify own applicability against the evidence sources.
+      expect(byGap.get("answered")).toBe("按证据来源核验自己的适用条件");
+      // Unanswered but verifiable: a concrete "verify what with whom" sentence in
+      // natural language built from the card — never raw field names.
+      const routed = byGap.get("required_unknown")!;
+      expect(routed).toContain("核实");
+      expect(routed).toContain("哪些条件会改变适用性？");
+      expect(routed).toContain("个体适用性需要单独核验");
+      expect(routed).not.toMatch(/boundary|label|question/iu);
+      // No usable information at all: the conservative fallback.
+      expect(byGap.get("blank")).toBe("先补充可信来源，再形成结论");
+    }
+  });
+
+  it("gates the multi-turn target and per-thread growth plan on the growth switch (P2-11)", () => {
+    const growthOff = config();
+    const growthOn = config();
+    growthOn.content.commentMultiTurnGrowthEnabled = true;
+    const input = { opportunity: opportunity("p3-growth"), gaps, seeds: [11, 22, 33] as [number, number, number] };
+    const offPlans = planTopicOrchestrations({ ...input, config: growthOff });
+    const onPlans = planTopicOrchestrations({ ...input, config: growthOn });
+    for (const plan of offPlans) {
+      // Switch off: the honest target is zero, so comment_network_under_grown
+      // cannot false-positive, and no thread plans follow-ups the engine would skip.
+      expect(plan.personaScenePlan?.commentNetwork.multiTurnTarget).toEqual([0, 0]);
+      expect(plan.dialogueThreads.every((thread) => (thread.conversationPlan?.targetFollowUps ?? 0) === 0)).toBe(true);
+    }
+    for (const plan of onPlans) {
+      expect(plan.personaScenePlan!.commentNetwork.multiTurnTarget[1]).toBeGreaterThan(0);
+      expect(plan.dialogueThreads.some((thread) => (thread.conversationPlan?.targetFollowUps ?? 0) > 0)).toBe(true);
+    }
+  });
+
+  it("emits a publisher-owned deployment plan with legal pinPriority values and structured aC fields", () => {
+    const legalFunctions = new Set(["surface_gap", "answer", "clarify", "counterexample", "verification", "next_step"]);
+    const plans = planTopicOrchestrations({ opportunity: opportunity("p3-ac"), gaps, config: config(), seeds: [11, 22, 33] });
+    for (const plan of plans) {
+      const deployment = plan.deploymentPlan;
+      expect(deployment.postingIdentity).toBe("publisher");
+      // "boundary" was never a legal thread function; every entry must be in the enum.
+      expect(deployment.pinPriority.length).toBeGreaterThan(0);
+      expect(deployment.pinPriority.every((item) => legalFunctions.has(item))).toBe(true);
+      expect(typeof deployment.sla).toBe("string");
+      expect(deployment.sla!.length).toBeGreaterThan(0);
+      // Structured live routing: every rule names route / condition / action.
+      expect(deployment.liveRouting.length).toBeGreaterThan(0);
+      for (const rule of deployment.liveRouting) {
+        if (typeof rule === "string") throw new Error("liveRouting must be structured {route, condition, action} entries");
+        expect(rule.route).toBeTruthy();
+        expect(rule.condition).toBeTruthy();
+        expect(rule.action).toBeTruthy();
+      }
+      expect(deployment.updatePolicy?.every((item) => item.length > 0)).toBe(true);
+      // F03: aC operating rules stay on the deployment plan and never leak into Cref copy.
+      expect(plan.dialogueThreads.every((thread) => !thread.questionIntent.includes("工作日 24h"))).toBe(true);
     }
   });
 });

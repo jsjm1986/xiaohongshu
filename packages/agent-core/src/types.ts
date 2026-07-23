@@ -851,11 +851,28 @@ export interface CommentScenarioMetadata {
   simulationLabel?: string;
 }
 
+/**
+ * Dialogic function of one visible comment node (Cref contract v1.1).
+ * `question` opens a thread, `answer` resolves it, `follow_up` extends it with a
+ * new reader question, `clarification` answers that extension. All kind fields
+ * are optional so historical packages (written before this contract) still
+ * parse; a missing kind means "not recorded", never a defaulted certainty.
+ */
+export type CommentNodeKind = "question" | "answer" | "follow_up" | "clarification";
+
 export interface CommentFollowUp extends CommentScenarioMetadata {
   id?: string;
   question: string;
   answer: string;
   evidenceIds: string[];
+  /**
+   * Dialogic kind of this follow-up node. The node is stored as a question /
+   * answer pair; `kind` tags the extending (question) side — positional default
+   * `follow_up` — while its answer side is positionally a `clarification`.
+   */
+  kind?: CommentNodeKind;
+  /** Optional node-level boundary note (e.g. what this exchange must not assert). */
+  boundary?: string;
 }
 
 export interface CommentReferenceThread extends CommentScenarioMetadata {
@@ -863,9 +880,15 @@ export interface CommentReferenceThread extends CommentScenarioMetadata {
   question: string;
   answer: string;
   followUps: CommentFollowUp[];
-  postingIdentity: "author" | "brand" | "staff" | "expert" | "reader_question_template";
+  postingIdentity: "author" | "brand" | "staff" | "expert" | "reader_question_template" | "publisher";
   sourceClusterIds: string[];
   evidenceIds: string[];
+  /** Dialogic kind of the root question node; positional default `question`. */
+  kind?: CommentNodeKind;
+  /** Dialogic kind of the root answer node; positional default `answer`. */
+  answerKind?: CommentNodeKind;
+  /** Thread-level boundary, sourced from replyPlan.boundary when the model did not state one. */
+  boundary?: string;
   /** New explainable thread fields are optional so historical packages still parse. */
   stage?: string;
   gap?: string;
@@ -893,6 +916,21 @@ export interface ContentPackageContent {
   Cref: {
     disclaimer: string;
     threads: CommentReferenceThread[];
+    /**
+     * Optional publisher-owned first comment (FAQ-style pinned reply) produced
+     * during staged generation. Absent means none was produced; it is never
+     * synthesized after the fact.
+     */
+    ownedFirstComment?: string;
+    /**
+     * Plan-level projection of selected gaps that no dialogue thread covers
+     * (primary or auxiliary) and that are not planned for N.body. Derived
+     * deterministically by the engine at bind time; absent on historical
+     * packages means "not computed", not "nothing uncovered". Distinct from
+     * CommentGapCoverageLedger.uncoveredGapIds, which grades the final draft's
+     * realization quality after generation.
+     */
+    uncoveredGaps?: string[];
   };
 }
 
@@ -1488,13 +1526,33 @@ export interface CommentGapCoverageLedger {
   capacityWarning?: string;
 }
 
+/**
+ * One structured routing rule for real incoming comments (aC operations,
+ * strictly separate from Cref reference content — F03).
+ */
+export interface DeploymentLiveRoutingRule {
+  /** Which kind of real comment this rule covers. */
+  route: string;
+  /** When the rule applies. */
+  condition: string;
+  /** What the operator does; individual conclusions are never auto-filled. */
+  action: string;
+}
+
 export interface DeploymentPlan {
   postingIdentity: DialogueThreadPlan["postingIdentity"];
   ownedFirstComment: boolean;
-  pinPriority: string[];
+  /** Legal thread-function values only; historical snapshots may contain other strings. */
+  pinPriority: Array<NonNullable<CommentReferenceThread["function"]>>;
+  /** Response-time tier for the operating account (static template text). */
+  sla?: string;
+  /** @deprecated Historical snapshots stored the SLA here. Kept so they stay readable. */
   responseSla?: string;
-  liveRouting: string[];
+  /** Historical snapshots stored plain strings; both shapes stay readable. */
+  liveRouting: DeploymentLiveRoutingRule[] | string[];
   updateTriggers: string[];
+  /** Rule for feeding new high-frequency real questions back into the update queue. */
+  updatePolicy?: string[];
   stopRules: string[];
 }
 
@@ -1645,7 +1703,14 @@ export interface ContentReasoningEntry {
 }
 
 export interface ContentPackage {
-  schemaVersion: "1.0";
+  /**
+   * "1.1" adds the optional Cref contract fields (thread/followUp kind, thread
+   * answerKind/boundary, Cref ownedFirstComment/uncoveredGaps) and the
+   * "publisher" postingIdentity value. Every addition is optional, so "1.0"
+   * packages parse unchanged: readers must treat the new fields as absent
+   * (unknown), never report an error and never backfill defaults.
+   */
+  schemaVersion: "1.0" | "1.1";
   id: string;
   projectId: string;
   jobId: string;

@@ -9,6 +9,7 @@ import {
   buildKnowledgeLedger,
   createSectionEvidenceReferences,
   estimateTokens,
+  evidenceIdForSection,
   findSupportingSectionEvidenceIds,
   indexKnowledgeSource,
   loadKnowledgeDirectory,
@@ -149,6 +150,99 @@ describe("context budgeting without vectors", () => {
     expect(firstReference).toMatchObject({ documentChecksum: firstDocument.checksum, documentVersion: firstDocument.version });
     expect(findSupportingSectionEvidenceIds(["恢复期为7天"], first)).toEqual([]);
     expect(findSupportingSectionEvidenceIds(["恢复期为7天"], changed)).toEqual([changedReference.id]);
+  });
+});
+
+describe("full mode section disclosure", () => {
+  const ampleBudget = { maxInputTokens: 20_000, systemPromptTokens: 10, formulaPromptTokens: 10, outputReserveTokens: 100, safetyMarginTokens: 0 };
+  const multiSectionDoc = indexKnowledgeSource({
+    projectId: "p",
+    path: "facts/clinic.md",
+    content: [
+      "开篇说明：本资料仅内部使用。",
+      "",
+      "# 价格",
+      "光子嫩肤单次 800 元。",
+      "",
+      "## 套餐",
+      "三次套餐 2000 元。",
+      "",
+      "# 医生",
+      "主治医生为王医生。",
+      "",
+      "# 恢复",
+      "恢复期约 3 天。",
+    ].join("\n"),
+  });
+  const stripSeparators = (value: string) => value.replace(/\s+/gu, "");
+
+  it("selects every split section in document order without scoring or truncation", () => {
+    const selected = selectKnowledgeContext({ documents: [multiSectionDoc], query: "价格", budget: ampleBudget });
+    expect(selected.mode).toBe("full");
+    expect(selected.sections.length).toBeGreaterThan(1);
+    expect(selected.sections.map((section) => section.id)).toEqual([
+      `${multiSectionDoc.id}:intro`,
+      `${multiSectionDoc.id}:h3`,
+      `${multiSectionDoc.id}:h6`,
+      `${multiSectionDoc.id}:h9`,
+      `${multiSectionDoc.id}:h12`,
+    ]);
+    expect(selected.sections.every((section) => section.score === 0 && !section.truncated)).toBe(true);
+    expect(selected.selectedDocumentIds).toEqual([multiSectionDoc.id]);
+    expect(selected.omittedDocumentIds).toEqual([]);
+    expect(selected.warnings).toEqual([]);
+    expect(selected.estimatedTokens).toBe(estimateTokens(selected.content));
+  });
+
+  it("keeps every heading and every non-separator character of the document", () => {
+    const selected = selectKnowledgeContext({ documents: [multiSectionDoc], query: "价格", budget: ampleBudget });
+    for (const heading of ["价格", "套餐", "医生", "恢复"]) {
+      expect(selected.content).toContain(heading);
+    }
+    const disclosed = selected.sections.map((section) => section.content).join("");
+    expect(stripSeparators(disclosed)).toBe(stripSeparators(multiSectionDoc.content));
+  });
+
+  it("creates one section-level evidence reference per section, matching evidenceIdForSection", () => {
+    const selected = selectKnowledgeContext({ documents: [multiSectionDoc], query: "价格", budget: ampleBudget });
+    const references = createSectionEvidenceReferences([multiSectionDoc], selected);
+    expect(references.map((reference) => reference.id)).toEqual(selected.sections.map((section) => evidenceIdForSection(section)));
+    expect(references.map((reference) => reference.section)).toEqual(
+      selected.sections.map((section) => section.heading ?? "document"),
+    );
+    // The price section is now an independently citable evidence source.
+    const priceSection = selected.sections.find((section) => section.heading === "价格")!;
+    expect(findSupportingSectionEvidenceIds(["光子嫩肤单次 800 元"], selected)).toEqual([evidenceIdForSection(priceSection)]);
+    expect(sectionEvidenceText(selected, evidenceIdForSection(priceSection))).toBe(priceSection.content);
+  });
+
+  it("gives the same section the same evidence id in full and progressive modes", () => {
+    const full = selectKnowledgeContext({ documents: [multiSectionDoc], query: "价格", budget: ampleBudget });
+    const progressive = selectKnowledgeContext({ documents: [multiSectionDoc], query: "价格", forceProgressive: true, budget: ampleBudget });
+    expect(full.mode).toBe("full");
+    expect(progressive.mode).toBe("progressive");
+    const progressiveSections = progressive.sections.filter((section) => section.documentId !== "generated");
+    expect(progressiveSections.map((section) => section.id).sort()).toEqual(full.sections.map((section) => section.id).sort());
+    expect(progressiveSections.map((section) => evidenceIdForSection(section)).sort()).toEqual(
+      full.sections.map((section) => evidenceIdForSection(section)).sort(),
+    );
+  });
+
+  it("handles heading-less, plain-text and empty documents without exploding", () => {
+    const plain = indexKnowledgeSource({ projectId: "p", path: "notes.txt", content: "纯文本事实，没有标题。" });
+    const noHeadingMd = indexKnowledgeSource({ projectId: "p", path: "notes.md", content: "只有正文，没有任何标题。" });
+    const emptyDoc = indexKnowledgeSource({ projectId: "p", path: "empty.md", content: "" });
+    const selected = selectKnowledgeContext({ documents: [plain, noHeadingMd, emptyDoc], query: "事实", budget: ampleBudget });
+    expect(selected.mode).toBe("full");
+    expect(selected.sections.map((section) => section.id)).toEqual([
+      `${emptyDoc.id}:all`,
+      `${noHeadingMd.id}:all`,
+      `${plain.id}:all`,
+    ]);
+    expect(selected.sections.find((section) => section.documentId === noHeadingMd.id)?.content).toBe(noHeadingMd.content);
+    expect(selected.selectedDocumentIds).toEqual([emptyDoc.id, noHeadingMd.id, plain.id]);
+    const references = createSectionEvidenceReferences([plain, noHeadingMd, emptyDoc], selected);
+    expect(references.map((reference) => reference.id)).toEqual(selected.sections.map((section) => evidenceIdForSection(section)));
   });
 });
 
