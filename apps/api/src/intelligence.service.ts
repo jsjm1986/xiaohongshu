@@ -17,7 +17,11 @@ import {
   rankTopicOpportunities,
   normalizeOpenAIBaseUrl,
   OpportunityRankHeuristicV1DefaultPolicy,
+  indexKnowledgeSource,
+  selectKnowledgeContext,
+  evidenceIdForSection,
   type CoverageSignature,
+  type KnowledgeKind,
   type OpportunityRankInputSourceKind,
   type OpportunitySelectionAudit,
   type PlanningContext,
@@ -1427,6 +1431,27 @@ export class IntelligenceService implements OnModuleInit {
     );
   }
 
+  // Mirrors generation.service.ts knowledgeKind/evidenceStatus so analysis-time
+  // evidence ids match generation-time section references exactly.
+  private knowledgeKind(value: string): KnowledgeKind {
+    const lower = value.toLowerCase();
+    if (/禁止|prohibit|forbidden/u.test(lower)) return 'prohibited';
+    if (/未知|unknown|不足/u.test(lower)) return 'unknown';
+    if (/猜想|hypothesis/u.test(lower)) return 'hypothesis';
+    if (/推理|inference/u.test(lower)) return 'inference';
+    if (/方法|formula|method|prompt|提示词|evaluation|评分/u.test(lower)) return 'methodology';
+    if (/案例|样本|case|sample|reference|corpus|对标/u.test(lower)) return 'case';
+    if (/用户|观点|user/u.test(lower)) return 'user_view';
+    return 'fact';
+  }
+
+  private evidenceStatus(value: string): 'observed' | 'user_supplied' | 'inferred' | 'unknown' {
+    if (/observed|核验|已知事实/u.test(value)) return 'observed';
+    if (/inferred|推理|猜想/u.test(value)) return 'inferred';
+    if (/unknown|未知|不足/u.test(value)) return 'unknown';
+    return 'user_supplied';
+  }
+
   private async projectAnalysisSource(project: Record<string, unknown>): Promise<{ fingerprint: string; sourceJson: string }> {
     const knowledgeRows = this.database.prepare(
       `WITH ranked AS (
@@ -1442,11 +1467,46 @@ export class IntelligenceService implements OnModuleInit {
     const knowledge: Array<Record<string, unknown>> = [];
     for (const row of knowledgeRows) {
       const path = this.absoluteStoragePath(String(row.storage_path));
+      const content = (await readFile(path, 'utf8')).slice(0, 250_000);
+      // Section-level evidence handles for the analysis model: the SAME indexing
+      // generation.service.ts loadKnowledge uses, so evidenceIds the model cites
+      // in gap answers are exactly the references a later generation will accept.
+      // Style corpora (reference-corpus) stay readable as style evidence but
+      // receive no citable evidence ids (mirrors engine.filterKnowledge).
+      let evidenceSections: Array<Record<string, unknown>> | undefined;
+      if (String(row.category) !== 'reference-corpus') {
+        const metadata = parseJson<Record<string, unknown>>(String(row.metadata_json), {});
+        const document = indexKnowledgeSource({
+          id: String(row.id),
+          projectId: String(project.id),
+          path: String(row.filename),
+          content,
+          version: String(row.version),
+          importedAt: String(row.created_at),
+          metadata: {
+            title: typeof metadata.title === 'string' ? metadata.title : String(row.filename),
+            kind: this.knowledgeKind(String(metadata.kind ?? row.category)),
+            evidenceStatus: this.evidenceStatus(String(row.evidence_status)),
+            keywords: Array.isArray(metadata.keywords) ? metadata.keywords.map(String) : [],
+            scope: Array.isArray(metadata.scope) ? metadata.scope.map(String) : [],
+            caveats: Array.isArray(metadata.caveats) ? metadata.caveats.map(String) : [],
+          },
+        });
+        const selection = selectKnowledgeContext({
+          documents: [document],
+          query: '',
+          budget: { maxInputTokens: 100_000_000, systemPromptTokens: 0, formulaPromptTokens: 0, outputReserveTokens: 0, safetyMarginTokens: 0 },
+        });
+        evidenceSections = selection.sections
+          .filter((section) => section.documentId !== 'generated')
+          .map((section) => ({ evidenceId: evidenceIdForSection(section), heading: section.heading ?? '' }));
+      }
       knowledge.push({
         filename: row.filename,
         category: row.category,
         evidenceStatus: row.evidence_status,
-        content: (await readFile(path, 'utf8')).slice(0, 250_000),
+        content,
+        ...(evidenceSections ? { evidenceSections } : {}),
       });
     }
     const imageRows = this.database.prepare(
@@ -2242,11 +2302,11 @@ function projectBlueprintAnalysisPrompt(sourceJson: string): string {
     'Infer the project noun, industry and domain, then build a reusable project creative blueprint. Do not assume a medical, local-service, SaaS or any other industry unless the supplied source supports it.',
     'For every material statement distinguish supplied_fact, approved_observation, inference, hypothesis and unknown. Reference examples are style-only and never project facts.',
     'Return {"blueprintModules":{exactly seven modules below},"intelligence":{...}}.',
-    'knowledge_map={"entries":[{"id":"","sourceName":"","section":"","purpose":"project_fact|domain_note|dynamic_information|boundary|reference_style|unknown","factEligible":false,"source":{"status":"supplied_fact|approved_observation|inference|hypothesis|unknown","evidenceIds":[],"note":""}}]}.',
+    'knowledge_map={"entries":[{"id":"","sourceName":"","section":"","purpose":"project_fact|domain_note|dynamic_information|boundary|reference_style|unknown","factEligible":false,"source":{"status":"supplied_fact|approved_observation|inference|hypothesis|unknown","evidenceIds":[],"note":""}}]}. When an entry maps to a passage in a knowledge file, cite that passage\'s id from the file\'s `evidenceSections` in source.evidenceIds.',
     'domain_model={"projectNoun":"","industry":"","domain":"","objects":[],"actions":[],"concepts":[],"decisionTasks":[],"vocabulary":[]}.',
     'audience_model={"states":[{"id":"","label":"","stages":["discovering|collecting|comparing|hesitating|ready"],"goals":[],"constraints":[],"knowledgeState":"","hesitationReasons":[],"actionConditions":[],"source":{"status":"inference","evidenceIds":[]}}]}. These are conditional states, not population distributions.',
     'scenario_model={"families":[{"id":"","label":"","prototype":"narrow_request|live_moment|expectation_reversal|process_log|outcome_observation|retrospective_update|relationship_moment|option_comparison","applicableStages":[],"hostIdentityCues":[],"lifeContexts":[],"timeAnchors":[],"settings":[],"triggers":[],"observableActions":[],"frictions":[],"emotionalAftertastes":[],"imageMoments":[],"prohibitedUnsupportedHistories":[],"source":{"status":"hypothesis","evidenceIds":[]}}]}. Produce materially different, project-derived scene families.',
-    'role_model={"hostVoiceTraits":[],"hostSpeechMarkers":[],"roles":[{"id":"","displayRole":"","relationToHost":"","identityCues":[],"situationCues":[],"motives":[],"knowledgePosition":"","speechPatterns":[],"lexicalCues":[],"interactionHooks":[],"permittedContributions":[],"utteranceModes":["direct_question|shared_concern|experience_fragment|counterexample|social_reaction|detail_spotter|knowledge_translation|identity_route|service_answer"],"replyDisplayRoles":[],"targetChars":[4,30],"accountable":false,"source":{"status":"hypothesis","evidenceIds":[]}}]}. Produce diverse social positions and accountable roles only where supported; never fabricate real users.',
+    'role_model={"hostVoiceTraits":[],"hostSpeechMarkers":[],"roles":[{"id":"","displayRole":"","relationToHost":"","identityCues":[],"situationCues":[],"motives":[],"knowledgePosition":"","speechPatterns":[],"lexicalCues":[],"interactionHooks":[],"permittedContributions":[],"utteranceModes":["direct_question|shared_concern|experience_fragment|counterexample|social_reaction|detail_spotter|knowledge_translation|identity_route|service_answer"],"replyDisplayRoles":[],"targetChars":[4,30],"accountable":false,"source":{"status":"hypothesis","evidenceIds":[]}}]}. Produce diverse social positions and accountable roles only where supported; never fabricate real users. Give at least 6 question-side roles covering the decision-stage (discovering/collecting/comparing/hesitating/ready) x social-position matrix (e.g. first-time researcher, cautious comparer, risk worrier, same-city action seeker, lurking follower, dissenting skeptic, pure-reaction empathizer; trim to what the project actually supports), each with at least 3 utteranceModes. Produce exactly 1 accountable=true answerable identity (the publishing account / host, its displayRole named in project language); every other role\'s replyDisplayRoles must point to it. hostVoiceTraits must match the publishing account\'s real identity (an amateur personal account gets an amateur voice, never an institutional tone).',
     'claim_policy={"rules":[{"id":"","label":"","claimType":"price|identity|credential|schedule|outcome|causality|suitability|location|historical_action|other","terms":[],"requiresEvidence":true,"allowedEvidenceStatuses":["supplied_fact"],"dynamic":false,"handling":"block|qualify|verify","source":{"status":"inference","evidenceIds":[]}}],"prohibitedClaims":[],"dynamicInformation":[],"unknownHandling":[]}.',
     'surface_language={"registerDescription":"","preferredTerms":[],"optionalColloquialisms":[],"prohibitedCliches":[],"antiCopyRules":[]}. Observe project language without copying distinctive sample sentences and without making slang mandatory.',
     'intelligence={"industry":"","domain":"","projectSummary":"","verifiedFacts":[],"differentiators":[],"audienceStates":[],"hardBoundaries":[],"prohibitedClaims":[],"dynamicUnknowns":[],"evidenceIds":[],"domainAtlas":{"decisionTasks":[],"concepts":[],"userStates":[],"questionFamilies":[]},"evidenceLedger":[{"statement":"","sourceStatus":"supplied_fact|inference|hypothesis|unknown","evidenceIds":[]}]}.',
@@ -2265,6 +2325,7 @@ function projectPlanningResourcesPrompt(sourceJson: string, blueprint?: Blueprin
   }
   sections.push(
     'Independently enumerate real decision tasks, recurring questions and information gaps in this domain; do not limit discovery to what the knowledge files explicitly answer. Project answers and boundaries must still use only supplied evidence.',
+    'Knowledge entries in the shared source carry `evidenceSections` ([{evidenceId, heading}]) — these are the ONLY citable evidence handles. For EVERY gap the knowledge can answer even partially, you MUST fill `answer` (use the supplied wording and keep its qualifiers such as 以当期确认为准 / 源资料称), fill `boundary`, and cite the matching section ids in `evidenceIds`; set `sourceStatus` to "supplied_fact" for those. When the knowledge file itself offers a standard-answer or FAQ passage, prefer its wording. Leave `answer` empty and `evidenceIds` empty ONLY when nothing supplied supports an answer, and set `sourceStatus` to inference/hypothesis/unknown accordingly. Never invent evidence ids that are not listed in `evidenceSections`.',
     'informationGaps item={"key":"stable_unique_key","title":"","description":"","priority":50,"label":"","question":"","category":"decision","audienceStages":["collecting"],"importance":0.5,"decisionLeverage":0.5,"proofability":0.3,"answer":"","framework":"","boundary":"","evidenceIds":[],"required":false,"preferredChannels":["N.body","Cref"],"sourceStatus":"supplied_fact|inference|hypothesis|unknown"}.',
     'importance, decisionLeverage and proofability are MANDATORY review-priority heuristics: emit a 0..1 number for every gap and NEVER null. They are uncalibrated, non-causal ordering aids for human review, not facts, predictions or population measurements. When evidence is weak still give a conservative estimate (e.g. proofability <= 0.3 when no verifiable source supports an answer) and record the weakness by setting sourceStatus to inference or hypothesis. Do not lower the estimate to null; null blocks human approval.',
     'expressionStrategies item={"name":"","description":"","label":"","prototype":"narrow_request|live_moment|expectation_reversal|process_log|outcome_observation|retrospective_update|relationship_moment|option_comparison","openingMode":"","narrativeMode":"","bodyRole":"","imageRole":"","commentMode":"","voice":"","sequence":[],"targetChannels":["H","N.imageBrief","N.title","N.body","Cref"]}.',

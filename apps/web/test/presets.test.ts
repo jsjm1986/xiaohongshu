@@ -9,6 +9,7 @@ import {
 } from '../src/lib/presets.js';
 import {
   buildSimpleGenerateInput,
+  COMMENT_MULTI_TURN_GROWTH_BY_LEVEL,
   COMMENT_RICHNESS_PROFILES,
   mergeCommentRichnessOverrides,
   resolveSimpleGenerationSettings,
@@ -495,14 +496,17 @@ test('comment richness profiles map all social-network parameters and preserve u
   assert.deepEqual(mergeCommentRichnessOverrides({ evidence_strictness: 95 }, 'restrained'), {
     evidence_strictness: 95,
     ...COMMENT_RICHNESS_PROFILES.restrained.values,
+    comment_multi_turn_growth: false,
   });
   assert.deepEqual(mergeCommentRichnessOverrides({ evidence_strictness: 95 }, 'balanced'), {
     evidence_strictness: 95,
     ...COMMENT_RICHNESS_PROFILES.balanced.values,
+    comment_multi_turn_growth: true,
   });
   assert.deepEqual(mergeCommentRichnessOverrides({ evidence_strictness: 95 }, 'dense'), {
     evidence_strictness: 95,
     ...COMMENT_RICHNESS_PROFILES.dense.values,
+    comment_multi_turn_growth: true,
   });
 
   const settings = resolveSimpleGenerationSettings({ overrides: { commentRichness: 'dense' }, opportunity, project });
@@ -516,8 +520,56 @@ test('comment richness profiles map all social-network parameters and preserve u
     overrides: { evidence_strictness: 95 },
     randomizationDimensions: [],
   });
-  assert.deepEqual(input.overrides, { evidence_strictness: 95, ...COMMENT_RICHNESS_PROFILES.dense.values });
+  assert.deepEqual(input.overrides, { evidence_strictness: 95, ...COMMENT_RICHNESS_PROFILES.dense.values, comment_multi_turn_growth: true });
   assert.equal((input.overrides as Record<string, unknown>).parameterValues, undefined);
+});
+
+test('comment richness levels map the multi-turn growth switch as a boolean override (P2-11)', () => {
+  // 克制→关、均衡→开、高密度→开；开关与数值滑杆共用一条 overrides 通道。
+  assert.deepEqual(COMMENT_MULTI_TURN_GROWTH_BY_LEVEL, { restrained: false, balanced: true, dense: true });
+  // 三档 values 仍保持纯数值，布尔开关不混入滑杆集合。
+  for (const level of ['restrained', 'balanced', 'dense'] as const) {
+    assert.ok(Object.values(COMMENT_RICHNESS_PROFILES[level].values).every((value) => typeof value === 'number'));
+    assert.equal(typeof mergeCommentRichnessOverrides({}, level).comment_multi_turn_growth, 'boolean');
+  }
+  // 预设距离匹配只读数值键，不受布尔开关影响。
+  const preset: ContentPreset = {
+    id: 'comment-balanced',
+    name: '均衡评论',
+    description: '测试',
+    source: 'project',
+    values: { ...COMMENT_RICHNESS_PROFILES.balanced.values },
+  };
+  assert.deepEqual(resolveSimpleGenerationSettings({ preset }).commentRichness, { value: 'balanced', source: 'preset' });
+  // 用户显式选档时开关随 overrides 发出；未选档（默认/预设来源）时不注入，
+  // 与服务端数值参数的既有行为一致（由预设或配置层决定）。
+  const restrainedInput = buildSimpleGenerateInput({
+    projectId: 'p1',
+    opportunity,
+    settings: resolveSimpleGenerationSettings({ overrides: { commentRichness: 'restrained' }, opportunity, project }),
+    imageAssetIds: [],
+    lockedGapIds: [],
+    localFieldsEnabled: false,
+    overrides: {},
+    randomizationDimensions: [],
+  });
+  assert.equal((restrainedInput.overrides as Record<string, unknown>).comment_multi_turn_growth, false);
+  const defaultInput = buildSimpleGenerateInput({
+    projectId: 'p1',
+    opportunity,
+    settings: resolveSimpleGenerationSettings({ opportunity, project }),
+    imageAssetIds: [],
+    lockedGapIds: [],
+    localFieldsEnabled: false,
+    overrides: { evidence_strictness: 95 },
+    randomizationDimensions: [],
+  });
+  assert.deepEqual(defaultInput.overrides, { evidence_strictness: 95 });
+  // 注册表确实接收该参数 id，api 端会编译到 content.commentMultiTurnGrowthEnabled。
+  const definition = GENERATION_PARAMETER_REGISTRY.find((item) => item.id === 'comment_multi_turn_growth');
+  assert.ok(definition);
+  assert.equal(definition.path, 'content.commentMultiTurnGrowthEnabled');
+  assert.equal(definition.control.kind, 'toggle');
 });
 
 test('comment richness source is user, template, or balanced system default', () => {

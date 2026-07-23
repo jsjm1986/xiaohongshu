@@ -366,16 +366,12 @@ export function selectKnowledgeContext(options: SelectKnowledgeOptions): Knowled
     };
   }
 
-  const fullSections = documents.map((document) => ({
-    id: `${document.id}:all`,
-    documentId: document.id,
-    path: document.path,
-    heading: document.metadata.title,
-    content: document.content,
-    estimatedTokens: document.estimatedTokens,
-    score: 0,
-    truncated: false,
-  } satisfies KnowledgeSection));
+  // Full mode still discloses every document completely (no scoring, no
+  // truncation), but splits each document into the same sections progressive
+  // mode would use, so a citation can name the price/doctor/recovery section
+  // instead of the whole file. Same document + same section therefore yields
+  // the same content-addressed evidence id in both modes.
+  const fullSections = documents.flatMap((document) => splitDocument(document));
   const fullContent = fullSections.map(renderSection).join("\n\n");
   const fullTokens = estimateTokens(fullContent);
   if (fullTokens <= availableTokens && !options.forceProgressive) {

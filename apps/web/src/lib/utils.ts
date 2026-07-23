@@ -1,4 +1,11 @@
 import { resolveProductionArtifactView } from './image-production';
+import {
+  commentNodeKindLabel,
+  deploymentSla,
+  liveRoutingLines,
+  postingIdentityText,
+  uncoveredGapLabels,
+} from './comment-cref';
 import type { Candidate } from '../types';
 
 export const formatDate = (value?: string, includeTime = false) => {
@@ -30,24 +37,97 @@ export const downloadText = (filename: string, content: string, type = 'text/pla
 };
 
 export const candidateToMarkdown = (candidate: Candidate) => {
+  // Cref contract v1.1 candidates copy in the two-part executive + audit
+  // appendix layout (same policy as the API export); historical candidates
+  // keep the legacy single-flow markdown byte-for-byte.
+  if (isCrefV11Candidate(candidate)) return candidateToV11TwoPartMarkdown(candidate);
+  return legacyCandidateToMarkdown(candidate);
+};
+
+/**
+ * Two-part layout gate mirroring the API export (Cref contract v1.1). The
+ * Candidate projection carries no schemaVersion, so the layout flips only
+ * when v1.1 Cref data is present: commentOwnedFirstComment /
+ * commentUncoveredGaps, or any thread / followUp kind / answerKind /
+ * boundary / nextStep / evidenceIds.
+ */
+const isCrefV11Candidate = (candidate: Candidate): boolean => {
+  if (candidate.commentOwnedFirstComment) return true;
+  if (candidate.commentUncoveredGaps !== undefined) return true;
+  return candidate.comments.some((item) =>
+    Boolean(item.kind || item.answerKind || item.boundary || item.nextStep)
+    || Boolean(item.evidenceIds?.length)
+    || (item.followUps || []).some((followUp) => Boolean(followUp.kind || followUp.boundary || followUp.evidenceIds?.length)));
+};
+
+/**
+ * Two-part copy markdown for v1.1 candidates: an executive part the operator
+ * can act on directly (publish copy, owned first comment, dialogue scripts,
+ * aC operating rules), then a separated audit appendix with the full metadata
+ * trail. Audit vocabulary (role cards, density proxies, reply plans,
+ * discovery plans, evidence ids) stays out of the executive part.
+ */
+const candidateToV11TwoPartMarkdown = (candidate: Candidate) => {
+  const ownedFirstComment = candidate.commentOwnedFirstComment
+    ? `## 可发布首评参考\n\n> 【可发布首评参考】由发布账号（publisher）身份发布：${candidate.commentOwnedFirstComment}\n\n`
+    : '';
+  const disclaimer = candidate.commentDisclaimer || '以下仅演练潜在读者问题与可追责答复。';
+  const scripts = candidate.comments.map((item, index) => [
+    `### 话术 ${index + 1}\n`,
+    `- 提问：${item.question}`,
+    `- 回复：${item.followUps?.length ? item.answer.split(/\n\n追问：/u)[0] || item.answer : item.answer}`,
+    `- 可追责答复身份：${postingIdentityText(item.postingIdentity) || '可追责发布者'}`,
+    item.boundary ? `- 答复边界：${item.boundary}` : '',
+    item.nextStep ? `- 下一步：${item.nextStep}` : '',
+    ...(item.followUps || []).map((followUp) => `  - 追问：${followUp.question}\n  - 补充：${followUp.answer}`),
+  ].filter(Boolean).join('\n')).join('\n\n');
+  const appendixImagePlan = candidate.imagePlan
+    ? `### 图片计划（规划信息，非最终图片）\n\n${imagePlanMarkdown(candidate)}\n\n`
+    : '';
+  const coverage = coverageLedgerMarkdown(candidate);
+  return `# ${candidate.title}\n\n## 发布内容\n\n### 图片简报（实际 imageBrief，非最终图片）\n\n${candidate.imageBrief || '暂无'}\n\n### 正文\n\n${candidate.body}\n\n### 标签\n\n> 标签只表达主题与入口规划，不证明进入热点榜或热议话题，也不保证曝光、推荐或合格触达。\n\n${candidate.tags.join(' ')}\n\n${ownedFirstComment}## 问答话术（模拟情景演练，非真实评论）\n\n> 【模拟情景，非真实评论】${disclaimer}\n\n${scripts || '_未提供问答话术_'}\n\n## aC · 评论运营规则（运营动作计划，非已执行）\n\n${deploymentExecutionMarkdown(candidate)}\n\n---\n\n# 审计附录（非发布素材）\n\n## 发布规划元数据\n\n${appendixImagePlan}### 图片产物状态账本\n\n${productionLedgerMarkdown(candidate)}\n\n## 评论线程完整元数据\n\n${commentThreadAuditMarkdown(candidate) || '_无评论线程_'}${uncoveredGapProjectionMarkdown(candidate)}\n\n${coverage}${coverage ? '\n' : ''}`;
+};
+
+const legacyCandidateToMarkdown = (candidate: Candidate) => {
+  const image = imagePlanMarkdown(candidate);
+  const productionLedger = productionLedgerMarkdown(candidate);
+  const execution = deploymentExecutionMarkdown(candidate);
+  const coverageSection = coverageLedgerMarkdown(candidate);
+  const comments = commentThreadAuditMarkdown(candidate);
+  const ownedFirstComment = candidate.commentOwnedFirstComment
+    ? `**可发布首评参考（由发布账号身份发布）：${candidate.commentOwnedFirstComment}**\n\n`
+    : '';
+  const uncoveredGaps = uncoveredGapProjectionMarkdown(candidate);
+  return `# ${candidate.title}\n\n## H · 标签入口\n\n> 标签只表达主题与入口规划，不证明进入热点榜或热议话题，也不保证曝光、推荐或合格触达。\n\n${candidate.tags.join(' ')}\n\n## N · 图片计划 / imageBrief（非最终图片）\n\n${image}\n\n### 图片产物状态账本\n\n${productionLedger}\n\n## N · 正文\n\n${candidate.body}\n\n## Cref · 评论区模拟情景参考\n\n> 【模拟情景，非真实评论】${candidate.commentDisclaimer || '以下仅演练潜在读者问题与可追责答复。'}\n\n${ownedFirstComment}${comments}${uncoveredGaps}\n\n${coverageSection}\n## aC · 部署计划（非部署记录）\n\n${execution}\n`;
+};
+
+/** Full per-thread audit metadata, shared by the legacy flow and the v1.1 audit appendix. */
+const commentThreadAuditMarkdown = (candidate: Candidate) => candidate.comments.map((item) => [
+  `> 【${item.simulated ? item.simulationLabel || '模拟潜在读者情景' : '历史内容，模拟字段未标注'}】${item.simulated ? '不代表真实评论、消费经历或第三方口碑。' : ''}`,
+  `**评论：${item.question}**`,
+  `> 角色：${commentPersonaLabel(item.personaRole)}；提问方：${commentSpeakerLabel(item.speakerType)}；声明：${commentClaimLabel(item.claimStatus)}；答复身份：${postingIdentityText(item.postingIdentity) || '可追责发布者'}`,
+  item.kind || item.answerKind ? `> 节点类型：提问=${item.kind ? commentNodeKindLabel(item.kind) : '问题（默认）'}；答复=${item.answerKind ? commentNodeKindLabel(item.answerKind) : '回答（默认）'}` : '',
+  item.boundary ? `> 答复边界：${item.boundary}` : '',
+  item.evidenceIds?.length ? `> 证据引用：${item.evidenceIds.join('、')}` : '',
+  item.surfaceRoleCard ? `> 可见人物：${item.surfaceRoleCard.displayRole}；与楼主关系=${item.surfaceRoleCard.relationToHost}；身份线索=${item.surfaceRoleCard.identityCue}；处境线索=${item.surfaceRoleCard.situationCue}；说话习惯=${item.surfaceRoleCard.speechPattern}；可选语域=${item.surfaceRoleCard.lexicalCues?.join('、') || '普通口语'}；接话钩子=${item.surfaceRoleCard.interactionHook || '按上一句里的具体细节自然接话'}；知识边界=${item.surfaceRoleCard.knowledgePosition}` : '',
+  item.roleCard ? `> 后台决策状态：阶段=${item.roleCard.stage}；已有知识=${item.roleCard.knowledge.join('、') || '未标注'}；现实约束=${item.roleCard.constraints.join('、') || '无'}；决策任务=${item.roleCard.decisionTask}；证据态度=${commentEvidenceStanceLabel(item.roleCard.evidenceStance)}` : '',
+  item.densityProxy ? `> 信息密度代理：1个主缺口＋${item.densityProxy.auxiliaryDimensionCount}个辅助维度；${item.densityProxy.constraintCount}个约束；短问软目标约${item.densityProxy.questionTargetChars}字（非效果分）` : '',
+  `楼主/可追责身份回复：${item.followUps?.length ? item.answer.split(/\n\n追问：/u)[0] || item.answer : item.answer}`,
+  item.replyPlan ? `> 后台答复库存（按人物与关系择需使用，不要求全部写出）：直接回答=${item.replyPlan.directAnswer}；条件=${item.replyPlan.condition}；边界=${item.replyPlan.boundary}；未知=${item.replyPlan.unknown}；下一问=${item.replyPlan.nextQuestion}` : '',
+  item.discoveryPlan ? `> 发现式路径：线索=${item.discoveryPlan.cue}；一步推断=${item.discoveryPlan.inferencePrompt}；同线程揭示=${item.discoveryPlan.reveal}；自检=${item.discoveryPlan.selfCheck}；边界=${item.discoveryPlan.boundary}；难度=${item.discoveryPlan.difficulty === 'low' ? '低' : '中等'}` : '',
+  item.conversationPlan ? `> 对话拓扑：${item.conversationPlan.topology}；目标接话=${item.conversationPlan.targetFollowUps}；延展=${item.conversationPlan.extensionMove}` : '',
+  ...(item.followUps || []).map((followUp) => [
+    `接话：${followUp.question}\n\n回复：${followUp.answer}`,
+    followUp.kind ? `> 接话节点类型：${commentNodeKindLabel(followUp.kind)}` : '',
+    followUp.boundary ? `> 接话边界：${followUp.boundary}` : '',
+    followUp.evidenceIds?.length ? `> 接话证据引用：${followUp.evidenceIds.join('、')}` : '',
+  ].filter(Boolean).join('\n\n')),
+  item.nextStep ? `下一步：${item.nextStep}` : '',
+].filter(Boolean).join('\n\n')).join('\n\n');
+
+const imagePlanMarkdown = (candidate: Candidate) => {
   const imagePlan = candidate.imagePlan;
-  const deployment = candidate.deploymentPlan;
-  const production = resolveProductionArtifactView(candidate);
-  const comments = candidate.comments.map((item) => [
-    `> 【${item.simulated ? item.simulationLabel || '模拟潜在读者情景' : '历史内容，模拟字段未标注'}】${item.simulated ? '不代表真实评论、消费经历或第三方口碑。' : ''}`,
-    `**评论：${item.question}**`,
-    `> 角色：${commentPersonaLabel(item.personaRole)}；提问方：${commentSpeakerLabel(item.speakerType)}；声明：${commentClaimLabel(item.claimStatus)}；答复身份：${item.postingIdentity || '可追责发布者'}`,
-    item.surfaceRoleCard ? `> 可见人物：${item.surfaceRoleCard.displayRole}；与楼主关系=${item.surfaceRoleCard.relationToHost}；身份线索=${item.surfaceRoleCard.identityCue}；处境线索=${item.surfaceRoleCard.situationCue}；说话习惯=${item.surfaceRoleCard.speechPattern}；可选语域=${item.surfaceRoleCard.lexicalCues?.join('、') || '普通口语'}；接话钩子=${item.surfaceRoleCard.interactionHook || '按上一句里的具体细节自然接话'}；知识边界=${item.surfaceRoleCard.knowledgePosition}` : '',
-    item.roleCard ? `> 后台决策状态：阶段=${item.roleCard.stage}；已有知识=${item.roleCard.knowledge.join('、') || '未标注'}；现实约束=${item.roleCard.constraints.join('、') || '无'}；决策任务=${item.roleCard.decisionTask}；证据态度=${commentEvidenceStanceLabel(item.roleCard.evidenceStance)}` : '',
-    item.densityProxy ? `> 信息密度代理：1个主缺口＋${item.densityProxy.auxiliaryDimensionCount}个辅助维度；${item.densityProxy.constraintCount}个约束；短问软目标约${item.densityProxy.questionTargetChars}字（非效果分）` : '',
-    `楼主/可追责身份回复：${item.followUps?.length ? item.answer.split(/\n\n追问：/u)[0] || item.answer : item.answer}`,
-    item.replyPlan ? `> 后台答复库存（按人物与关系择需使用，不要求全部写出）：直接回答=${item.replyPlan.directAnswer}；条件=${item.replyPlan.condition}；边界=${item.replyPlan.boundary}；未知=${item.replyPlan.unknown}；下一问=${item.replyPlan.nextQuestion}` : '',
-    item.discoveryPlan ? `> 发现式路径：线索=${item.discoveryPlan.cue}；一步推断=${item.discoveryPlan.inferencePrompt}；同线程揭示=${item.discoveryPlan.reveal}；自检=${item.discoveryPlan.selfCheck}；边界=${item.discoveryPlan.boundary}；难度=${item.discoveryPlan.difficulty === 'low' ? '低' : '中等'}` : '',
-    item.conversationPlan ? `> 对话拓扑：${item.conversationPlan.topology}；目标接话=${item.conversationPlan.targetFollowUps}；延展=${item.conversationPlan.extensionMove}` : '',
-    ...(item.followUps || []).map((followUp) => `接话：${followUp.question}\n\n回复：${followUp.answer}`),
-    item.nextStep ? `下一步：${item.nextStep}` : '',
-  ].filter(Boolean).join('\n\n')).join('\n\n');
-  const image = [
+  return [
     imagePlan?.role ? `- 图片计划职责：${imagePlan.role}` : '',
     imagePlan?.composition ? `- 构图：${imagePlan.composition}` : '',
     imagePlan?.sourceAssetId || imagePlan?.primaryAssetId ? `- 计划参考源素材：${imagePlan.sourceAssetId || imagePlan.primaryAssetId}` : '',
@@ -56,22 +136,36 @@ export const candidateToMarkdown = (candidate: Candidate) => {
     imagePlan?.boundaries?.length ? `- 图片边界：${imagePlan.boundaries.join('；')}` : '',
     !imagePlan ? candidate.imageBrief || '暂无' : '',
   ].filter(Boolean).join('\n');
-  const productionLedger = [
+};
+
+const productionLedgerMarkdown = (candidate: Candidate) => {
+  const production = resolveProductionArtifactView(candidate);
+  return [
     ...production.stages.map((item) => `- ${item.label}：${item.status}；${item.explanation}`),
     ...production.alignments.map((item) => `- ${item.label}：${item.status}；evaluated=${item.evaluated}`),
   ].join('\n');
-  const execution = deployment ? [
-    `- 发布身份：${deployment.postingIdentity || '可追责发布者'}`,
+};
+
+const deploymentExecutionMarkdown = (candidate: Candidate) => {
+  const deployment = candidate.deploymentPlan;
+  return deployment ? [
+    `- 发布身份：${postingIdentityText(deployment.postingIdentity) || '可追责发布者'}`,
     `- 自有首评：${typeof deployment.ownedFirstComment === 'boolean' ? (deployment.ownedFirstComment ? '需要' : '不需要') : deployment.ownedFirstComment || '按实际情况'}`,
+    deploymentSla(deployment) ? `- 答复时效：${deploymentSla(deployment)}` : '',
     deployment.pinPriority?.length ? `- 置顶优先级：${deployment.pinPriority.join('、')}` : '',
+    ...liveRoutingLines(deployment.liveRouting).map((line) => `- 真实评论路由：${line}`),
+    ...(deployment.updatePolicy || []).map((item) => `- 更新政策：${item}`),
     deployment.stopRules?.length ? `- 停止规则：${deployment.stopRules.join('；')}` : '',
   ].filter(Boolean).join('\n') : '暂无单独执行方案。';
+};
+
+const coverageLedgerMarkdown = (candidate: Candidate) => {
   const coverage = candidate.gapCoverageLedger;
   const ledgerCompleteness = coverage ? coverage.ledgerCompleteness ?? coverage.closureRate : null;
   const realizedResolvedRate = coverage?.realizationStatus === 'evaluated'
     ? coverage.realizedResolvedRate ?? coverage.resolvedRate
     : coverage?.realizedResolvedRate != null ? coverage.realizedResolvedRate : null;
-  const coverageSection = coverage ? [
+  return coverage ? [
     '## 信息闭合台账',
     '',
     `- 台账完整度：${Math.round((ledgerCompleteness ?? 0) * 100)}%（只表示选中缺口均已归档，不代表已经解决）`,
@@ -81,8 +175,11 @@ export const candidateToMarkdown = (candidate: Candidate) => {
     ...coverage.entries.map((entry) => `- ${entry.label}（${entry.gapId}）：${coverageStatusLabel(entry.status)}；${entry.reason}${entry.plannedPlacements?.length ? `；计划位置=${entry.plannedPlacements.join('/')}` : ''}${entry.actualRealizations?.length ? `；实际核验=${entry.actualRealizations.map((item) => `${item.channel}:${item.resolved ? '完整实现' : `缺少${item.missing.map(realizationMissingLabel).join('、')}`}`).join('；')}` : ''}${entry.requiredInput ? `；待补输入=${entry.requiredInput}` : ''}${entry.verificationPath ? `；核验路径=${entry.verificationPath}` : ''}`),
     '',
   ].filter(Boolean).join('\n') : '';
-  return `# ${candidate.title}\n\n## H · 标签入口\n\n> 标签只表达主题与入口规划，不证明进入热点榜或热议话题，也不保证曝光、推荐或合格触达。\n\n${candidate.tags.join(' ')}\n\n## N · 图片计划 / imageBrief（非最终图片）\n\n${image}\n\n### 图片产物状态账本\n\n${productionLedger}\n\n## N · 正文\n\n${candidate.body}\n\n## Cref · 评论区模拟情景参考\n\n> 【模拟情景，非真实评论】${candidate.commentDisclaimer || '以下仅演练潜在读者问题与可追责答复。'}\n\n${comments}\n\n${coverageSection}\n## aC · 部署计划（非部署记录）\n\n${execution}\n`;
 };
+
+const uncoveredGapProjectionMarkdown = (candidate: Candidate) => candidate.commentUncoveredGaps
+  ? `\n\n> 本篇未展开缺口（规划期投影，非遗漏错误）：${uncoveredGapLabels(candidate.commentUncoveredGaps, candidate.orchestrationSnapshot?.gapPlanningCards).join('、') || '无；所有选中缺口已由评论线程或正文承担。'}`
+  : '';
 
 const coverageStatusLabel = (value: string) => ({
   planned_for_body: '计划由正文回答', planned_for_thread: '计划由评论回答',

@@ -12,6 +12,8 @@ import type {
   GenerationJob,
   ImageAsset,
   InformationGap,
+  KnowledgeEvidenceDocument,
+  KnowledgeEvidenceSection,
   KnowledgeFile,
   OpportunityBatch,
   Project,
@@ -57,12 +59,12 @@ let csrfToken =
   sessionStorage.getItem("content-agent-csrf") ||
   decodeURIComponent(cookieValue("ca_csrf"));
 
-const unwrap = <T>(value: T | { data: T }): T => {
-  if (value && typeof value === "object" && "data" in value) {
-    return (value as { data: T }).data;
-  }
-  return value as T;
-};
+// The API never wraps responses in a { data: T } envelope — endpoints return the
+// business object or array directly. The old unwrap unconditionally stripped any
+// top-level `data` key, which silently corrupted business objects that legitimately
+// carry one (e.g. topic-opportunity / strategy mappers return `data: storedData`),
+// returning the inner payload without an `id`. Pass the body through unchanged.
+const unwrap = <T>(value: T | { data: T }): T => value as T;
 
 const normalizeList = <T>(value: T[] | ApiList<T>): ApiList<T> => {
   if (Array.isArray(value)) return { items: value, total: value.length };
@@ -164,6 +166,28 @@ const normalizeKnowledge = (raw: JsonRecord): KnowledgeFile => ({
     return "用户观点";
   })() as KnowledgeFile["kind"],
   status: (raw.status || "ready") as KnowledgeFile["status"],
+});
+
+const normalizeEvidenceSection = (raw: JsonRecord): KnowledgeEvidenceSection => ({
+  evidenceId: String(raw.evidenceId || ""),
+  sectionId: String(raw.sectionId || ""),
+  heading: String(raw.heading || ""),
+  excerpt: String(raw.excerpt || ""),
+  charLength: Number(raw.charLength ?? 0),
+  kind: String(raw.kind || ""),
+  evidenceStatus: String(raw.evidenceStatus || ""),
+  caveats: stringList(raw.caveats),
+});
+
+const normalizeEvidenceDocument = (raw: JsonRecord): KnowledgeEvidenceDocument => ({
+  id: String(raw.id || ""),
+  path: String(raw.path || ""),
+  title: String(raw.title || raw.path || ""),
+  kind: String(raw.kind || ""),
+  evidenceStatus: String(raw.evidenceStatus || ""),
+  sections: Array.isArray(raw.sections)
+    ? raw.sections.map((item) => normalizeEvidenceSection(recordValue(item)))
+    : [],
 });
 
 const normalizePreset = (raw: JsonRecord): ContentPreset => ({
@@ -278,6 +302,8 @@ const normalizeGap = (raw: JsonRecord): InformationGap => {
     evidenceIds: stringList(raw.evidenceIds || data.evidenceIds),
     frameworks: stringList(data.frameworks),
     boundaries: stringList(data.boundaries).length ? stringList(data.boundaries) : raw.boundary ? [String(raw.boundary)] : [],
+    // Singular boundary (Cref v1.1, data_json top level); falls back to the legacy array form.
+    boundary: [raw.boundary, data.boundary].find((value): value is string => typeof value === "string" && Boolean(value)) || stringList(data.boundaries)[0] || undefined,
     priority: Number(raw.priority ?? data.priority ?? 50),
     enabled: raw.enabled !== false && data.enabled !== false,
     locked: raw.locked === true || data.locked === true,
@@ -795,6 +821,15 @@ export const api = {
     get: async (id: string) => {
       const raw = await request<JsonRecord>(`/api/knowledge/${encodeURIComponent(id)}`);
       return { ...normalizeKnowledge(raw), content: typeof raw.content === "string" ? raw.content : "" };
+    },
+    evidenceSections: async (projectId: string) => {
+      const raw = await request<JsonRecord>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/evidence-sections`);
+      return {
+        documents: Array.isArray(raw.documents)
+          ? raw.documents.map((item) => normalizeEvidenceDocument(recordValue(item)))
+          : [],
+        warnings: stringList(raw.warnings),
+      };
     },
   },
   intelligence: {

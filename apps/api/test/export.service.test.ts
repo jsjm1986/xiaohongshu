@@ -149,6 +149,114 @@ const contentPackage = {
   revisions: [],
 };
 
+test('renders the Cref v1.1 structure and aC operating rules, and passes new fields through the API projection', async () => {
+  const v11 = structuredClone(contentPackage) as any;
+  v11.content.Cref.ownedFirstComment = '置顶说明：价格与排期以当期确认为准。';
+  v11.content.Cref.uncoveredGaps = ['gap_aftercare'];
+  const thread = v11.content.Cref.threads[0];
+  thread.postingIdentity = 'publisher';
+  thread.kind = 'question';
+  thread.answerKind = 'answer';
+  thread.boundary = '恢复时间以当期确认与个体条件为准';
+  thread.evidenceIds = ['evidence-1'];
+  thread.nextStep = '面诊时向医生核验个人恢复窗口';
+  thread.followUps = [{
+    question: '每个人都一样吗？',
+    answer: '不一样，需要结合个体情况。',
+    kind: 'follow_up',
+    boundary: '不承诺统一恢复天数',
+    evidenceIds: ['evidence-1'],
+  }];
+  v11.deploymentPlan = {
+    postingIdentity: 'publisher',
+    ownedFirstComment: true,
+    pinPriority: ['verification', 'clarify'],
+    sla: '工作日 24h 内答复真实评论',
+    liveRouting: [
+      { route: '项目事实类问题', condition: '知识库已有已批准口径', action: '由发布账号引用已批准口径答复，并保留适用边界' },
+      { route: '个体结论类问题', condition: '需要个人条件或未披露信息', action: '转专业/人工渠道处理，禁止代填个体结论' },
+    ],
+    updateTriggers: ['知识库证据变化'],
+    updatePolicy: ['真实评论中反复出现且当前口径未覆盖的问题进入更新队列'],
+    stopRules: ['无法核验时不代填答案', '不得伪装消费者或第三方口碑'],
+  };
+
+  const service = new ExportService();
+  const markdown = (await service.exportPackage(v11, 'markdown')).toString('utf8');
+  assert.match(markdown, /可发布首评参考】由发布账号（publisher）身份发布：置顶说明/u);
+  assert.match(markdown, /可追责答复身份：发布账号（publisher）/u);
+  assert.match(markdown, /节点类型：提问=问题；答复=回答/u);
+  assert.match(markdown, /答复边界：恢复时间以当期确认与个体条件为准/u);
+  assert.match(markdown, /证据引用：evidence-1/u);
+  assert.match(markdown, /下一步：面诊时向医生核验个人恢复窗口/u);
+  assert.match(markdown, /追问节点类型：追问/u);
+  assert.match(markdown, /追问边界：不承诺统一恢复天数/u);
+  assert.match(markdown, /追问证据引用：evidence-1/u);
+  assert.match(markdown, /本篇未展开缺口（规划期投影，非遗漏错误）：gap_aftercare/u);
+  assert.match(markdown, /## aC · 评论运营规则（运营动作计划，非 Cref 内容，非已执行）/u);
+  assert.match(markdown, /答复时效（SLA）：工作日 24h 内答复真实评论/u);
+  assert.match(markdown, /路由 项目事实类问题：知识库已有已批准口径 → 由发布账号引用已批准口径答复，并保留适用边界/u);
+  assert.match(markdown, /更新政策：真实评论中反复出现且当前口径未覆盖的问题进入更新队列/u);
+  assert.match(markdown, /更新触发：知识库证据变化/u);
+  assert.match(markdown, /停止规则：无法核验时不代填答案/u);
+  assert.ok(!markdown.includes('undefined'));
+
+  // API projection (normalizeContentPackageForApi) must not strip the new fields.
+  const json = JSON.parse((await service.exportPackage(v11, 'json')).toString('utf8'));
+  assert.equal(json.content.Cref.ownedFirstComment, v11.content.Cref.ownedFirstComment);
+  assert.deepEqual(json.content.Cref.uncoveredGaps, ['gap_aftercare']);
+  assert.equal(json.content.Cref.threads[0].kind, 'question');
+  assert.equal(json.content.Cref.threads[0].answerKind, 'answer');
+  assert.equal(json.content.Cref.threads[0].boundary, thread.boundary);
+  assert.equal(json.content.Cref.threads[0].postingIdentity, 'publisher');
+  assert.equal(json.content.Cref.threads[0].followUps[0].kind, 'follow_up');
+  assert.deepEqual(json.deploymentPlan.liveRouting, v11.deploymentPlan.liveRouting);
+  assert.equal(json.deploymentPlan.sla, v11.deploymentPlan.sla);
+  assert.deepEqual(json.deploymentPlan.updatePolicy, v11.deploymentPlan.updatePolicy);
+
+  // DOCX/PDF render from the same markdown and must not break on the new structure.
+  const docx = await service.exportPackage(v11, 'docx');
+  assert.equal(docx.subarray(0, 2).toString('ascii'), 'PK');
+  const pdf = await service.exportPackage(v11, 'pdf');
+  assert.equal(pdf.subarray(0, 5).toString('ascii'), '%PDF-');
+});
+
+test('keeps historical packages (no v1.1 fields) byte-compatible with the previous Cref output', async () => {
+  const service = new ExportService();
+  const markdown = (await service.exportPackage(contentPackage, 'markdown')).toString('utf8');
+  // The base fixture has no v1.1 fields: none of the new blocks may render.
+  assert.doesNotMatch(markdown, /可发布首评参考/u);
+  assert.doesNotMatch(markdown, /节点类型/u);
+  assert.doesNotMatch(markdown, /答复边界/u);
+  assert.doesNotMatch(markdown, /本篇未展开缺口/u);
+  assert.doesNotMatch(markdown, /aC · 评论运营规则/u);
+  assert.doesNotMatch(markdown, /更新政策/u);
+  assert.match(markdown, /可追责答复身份：staff/u);
+  assert.ok(!markdown.includes('undefined'));
+
+  // A legacy static deployment plan (string routing, deprecated responseSla) must not open the aC section.
+  const legacy = structuredClone(contentPackage) as any;
+  legacy.deploymentPlan = {
+    postingIdentity: 'staff',
+    ownedFirstComment: false,
+    pinPriority: ['clarify'],
+    responseSla: '历史时效',
+    liveRouting: ['历史字符串路由'],
+    updateTriggers: ['知识库证据变化'],
+    stopRules: ['不得伪装消费者'],
+  };
+  const legacyMarkdown = (await service.exportPackage(legacy, 'markdown')).toString('utf8');
+  assert.doesNotMatch(legacyMarkdown, /aC · 评论运营规则/u);
+  assert.doesNotMatch(legacyMarkdown, /答复时效/u);
+  assert.doesNotMatch(legacyMarkdown, /路由/u);
+
+  // An empty computed uncovered-gap projection is honest output, not a missing field.
+  const emptyProjection = structuredClone(contentPackage) as any;
+  emptyProjection.content.Cref.uncoveredGaps = [];
+  const emptyMarkdown = (await service.exportPackage(emptyProjection, 'markdown')).toString('utf8');
+  assert.match(emptyMarkdown, /本篇未展开缺口（规划期投影）：无；所有选中缺口已由评论线程或正文承担。/u);
+});
+
 test('exports a complete package as Markdown and deterministic JSON', async () => {
   const service = new ExportService();
   const markdown = await service.exportPackage(contentPackage, 'markdown');
@@ -438,4 +546,125 @@ test('rejects malformed packages and unsupported formats', async () => {
     service.exportPackage(contentPackage, 'xml' as never),
     BadRequestException,
   );
+});
+
+test('renders v1.1 packages in the two-part executive + audit appendix layout', async () => {
+  const v11 = structuredClone(contentPackage) as any;
+  v11.schemaVersion = '1.1';
+  v11.content.Cref.ownedFirstComment = '置顶说明：价格与排期以当期确认为准。';
+  v11.content.Cref.uncoveredGaps = ['gap_aftercare'];
+  const thread = v11.content.Cref.threads[0];
+  thread.postingIdentity = 'publisher';
+  thread.kind = 'question';
+  thread.answerKind = 'answer';
+  thread.boundary = '恢复时间以当期确认与个体条件为准';
+  thread.evidenceIds = ['evidence-1'];
+  thread.nextStep = '面诊时向医生核验个人恢复窗口';
+  thread.followUps = [{
+    question: '每个人都一样吗？',
+    answer: '不一样，需要结合个体情况。',
+    kind: 'follow_up',
+    boundary: '不承诺统一恢复天数',
+    evidenceIds: ['evidence-1'],
+  }];
+  v11.deploymentPlan = {
+    postingIdentity: 'publisher',
+    ownedFirstComment: true,
+    sla: '工作日 24h 内答复真实评论',
+    liveRouting: [
+      { route: '项目事实类问题', condition: '知识库已有已批准口径', action: '由发布账号引用已批准口径答复，并保留适用边界' },
+    ],
+    updatePolicy: ['真实评论中反复出现且当前口径未覆盖的问题进入更新队列'],
+    stopRules: ['无法核验时不代填答案'],
+  };
+
+  const service = new ExportService();
+  const markdown = (await service.exportPackage(v11, 'markdown')).toString('utf8');
+
+  // Two-part structure: executive part first, audit appendix after the separator.
+  const appendixIndex = markdown.indexOf('---\n\n# 审计附录（非发布素材）');
+  assert.ok(appendixIndex > 0, 'audit appendix separator must be present');
+  const executive = markdown.slice(0, appendixIndex);
+  const appendix = markdown.slice(appendixIndex);
+
+  // Executive order: 发布内容 → 可发布首评参考 → 问答话术 → aC 运营规则.
+  assert.ok(executive.indexOf('## 发布内容') >= 0);
+  assert.ok(executive.indexOf('## 发布内容') < executive.indexOf('## 可发布首评参考'));
+  assert.ok(executive.indexOf('## 可发布首评参考') < executive.indexOf('## 问答话术（模拟情景演练，非真实评论）'));
+  assert.ok(executive.indexOf('## 问答话术（模拟情景演练，非真实评论）') < executive.indexOf('## aC · 评论运营规则'));
+
+  // First comment is labelled as published by the publisher account.
+  assert.match(executive, /可发布首评参考】由发布账号（publisher）身份发布：置顶说明/u);
+
+  // Dialogue script keeps the four operator elements plus identity and follow-up pair.
+  assert.match(executive, /- 提问：大概多久恢复？/u);
+  assert.match(executive, /- 回复：恢复因人而异，项目资料中的观察窗口约为一周。/u);
+  assert.match(executive, /- 答复边界：恢复时间以当期确认与个体条件为准/u);
+  assert.match(executive, /- 下一步：面诊时向医生核验个人恢复窗口/u);
+  assert.match(executive, /- 可追责答复身份：发布账号（publisher）/u);
+  assert.match(executive, /- 追问：每个人都一样吗？/u);
+  assert.match(executive, /- 补充：不一样，需要结合个体情况。/u);
+
+  // The executive part must be free of audit vocabulary / field names.
+  for (const banned of [
+    '密度代理', 'discoveryPlan', '发现式路径', '隐藏答复计划', 'replyPlan',
+    '动态角色卡', '证据引用', 'evidenceIds', '节点类型', '信息闭合台账',
+    '校验结果', '生成追溯', 'F32/F33', '图片生产事实台账', '机会选择与排序审计',
+  ]) {
+    assert.ok(!executive.includes(banned), `executive part must not contain audit term: ${banned}`);
+  }
+
+  // aC operating rules stay in the executive part.
+  assert.match(executive, /答复时效（SLA）：工作日 24h 内答复真实评论/u);
+  assert.match(executive, /更新政策：真实评论中反复出现/u);
+  assert.match(executive, /停止规则：无法核验时不代填答案/u);
+
+  // The audit appendix keeps the full metadata trail.
+  assert.match(appendix, /## 评论线程完整元数据/u);
+  assert.match(appendix, /动态角色卡：阶段=collecting/u);
+  assert.match(appendix, /信息密度代理：角色维度=5/u);
+  assert.match(appendix, /隐藏答复计划：直接回答=恢复存在个体差异/u);
+  assert.match(appendix, /发现式路径：线索=资料只给出观察窗口/u);
+  assert.match(appendix, /证据引用：evidence-1/u);
+  assert.match(appendix, /本篇未展开缺口（规划期投影，非遗漏错误）：gap_aftercare/u);
+  assert.match(appendix, /## 信息闭合台账/u);
+  assert.match(appendix, /## 证据来源/u);
+  assert.match(appendix, /## 校验结果/u);
+  assert.match(appendix, /## 生成追溯/u);
+  assert.ok(!markdown.includes('undefined'));
+
+  // DOCX/PDF render from the same two-part markdown and must not break.
+  const docx = await service.exportPackage(v11, 'docx');
+  assert.equal(docx.subarray(0, 2).toString('ascii'), 'PK');
+  const pdf = await service.exportPackage(v11, 'pdf');
+  assert.equal(pdf.subarray(0, 5).toString('ascii'), '%PDF-');
+});
+
+test('flips to the two-part layout on schemaVersion or any Cref v1.1 field alone', async () => {
+  const service = new ExportService();
+
+  // schemaVersion "1.1" alone is enough, even without new Cref fields.
+  const byVersion = structuredClone(contentPackage) as any;
+  byVersion.schemaVersion = '1.1';
+  const versionMarkdown = (await service.exportPackage(byVersion, 'markdown')).toString('utf8');
+  assert.match(versionMarkdown, /# 审计附录（非发布素材）/u);
+  assert.match(versionMarkdown, /## 问答话术（模拟情景演练，非真实评论）/u);
+  assert.match(versionMarkdown, /- 提问：大概多久恢复？/u);
+  assert.doesNotMatch(versionMarkdown, /## 可发布首评参考/u);
+
+  // A single thread-level v1.1 field (boundary) flips the layout too.
+  const byField = structuredClone(contentPackage) as any;
+  byField.content.Cref.threads[0].boundary = '以面诊为准';
+  const fieldMarkdown = (await service.exportPackage(byField, 'markdown')).toString('utf8');
+  assert.match(fieldMarkdown, /# 审计附录（非发布素材）/u);
+
+  // Deployment-plan v1.1 markers alone keep the legacy single-flow layout.
+  const deploymentOnly = structuredClone(contentPackage) as any;
+  deploymentOnly.deploymentPlan = {
+    sla: '工作日 24h 内答复真实评论',
+    updatePolicy: ['新高频问题进入更新队列'],
+  };
+  const deploymentMarkdown = (await service.exportPackage(deploymentOnly, 'markdown')).toString('utf8');
+  assert.doesNotMatch(deploymentMarkdown, /# 审计附录（非发布素材）/u);
+  assert.match(deploymentMarkdown, /## aC · 评论运营规则/u);
 });

@@ -8,6 +8,15 @@ import {
   NotFoundException,
   PayloadTooLargeException,
 } from '@nestjs/common';
+import {
+  evidenceIdForSection,
+  indexKnowledgeSource,
+  selectKnowledgeContext,
+  type EvidenceStatus,
+  type KnowledgeDocument,
+  type KnowledgeKind,
+  type KnowledgeSection,
+} from '@content-agent/agent-core';
 import { AuditService } from './audit.service.js';
 import { DatabaseService } from './database.service.js';
 import { IntelligenceService } from './intelligence.service.js';
@@ -17,6 +26,10 @@ import { nowIso, parseJson } from './utils.js';
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const EXTENSIONS = new Set(['.md', '.txt']);
+// Generous budget so selectKnowledgeContext always takes its "full" mode, whose
+// sections are exactly the per-document canonical splits (never truncated), i.e.
+// the same section identity generation-time evidence binding uses.
+const EVIDENCE_SECTION_TOKEN_BUDGET = 100_000_000;
 
 @Injectable()
 export class KnowledgeService {
@@ -163,6 +176,109 @@ export class KnowledgeService {
     return lines.join('\n');
   }
 
+  /**
+   * Section-level evidence catalogue for the gap editor's evidence picker
+   * (Cref v1.1). Indexes every latest-version knowledge file exactly like
+   * generation.service.ts loadKnowledge does, splits each document into its
+   * canonical sections and computes the content-addressed evidence id a later
+   * generation will accept. Style corpora (scope style-analysis-only, i.e.
+   * category reference-corpus) are excluded: they calibrate validators, they
+   * are never citable evidence (see engine.filterKnowledge).
+   */
+  async evidenceSections(projectId: string): Promise<Record<string, unknown>> {
+    this.resources.projectRow(projectId);
+    const rows = this.database
+      .prepare(
+        `WITH ranked AS (
+           SELECT *, ROW_NUMBER() OVER (
+             PARTITION BY filename
+             ORDER BY version DESC, created_at DESC, id DESC
+           ) AS version_rank
+           FROM knowledge_files
+           WHERE project_id=? AND deleted_at IS NULL
+         )
+         SELECT * FROM ranked WHERE version_rank=1 ORDER BY filename`,
+      )
+      .all(projectId) as unknown as Record<string, unknown>[];
+    const warnings: string[] = [];
+    const documents: KnowledgeDocument[] = [];
+    for (const row of rows) {
+      if (Number(row.bytes) > MAX_FILE_BYTES) {
+        warnings.push(`知识文件 ${String(row.filename)} 超过 2 MiB，已跳过分节索引`);
+        continue;
+      }
+      let content: string;
+      try {
+        content = await readFile(this.absoluteStoragePath(String(row.storage_path)), 'utf8');
+      } catch {
+        warnings.push(`知识文件 ${String(row.filename)} 磁盘读取失败，已跳过分节索引`);
+        continue;
+      }
+      const metadata = parseJson<Record<string, unknown>>(String(row.metadata_json), {});
+      documents.push(indexKnowledgeSource({
+        id: String(row.id),
+        projectId,
+        path: String(row.filename),
+        content,
+        version: String(row.version),
+        importedAt: String(row.created_at),
+        metadata: {
+          title: typeof metadata.title === 'string' ? metadata.title : String(row.filename),
+          kind: this.knowledgeKind(String(metadata.kind ?? row.category)),
+          evidenceStatus: this.evidenceStatus(String(row.evidence_status)),
+          keywords: Array.isArray(metadata.keywords) ? metadata.keywords.map(String) : [],
+          scope: [
+            ...(Array.isArray(metadata.scope) ? metadata.scope.map(String) : []),
+            ...(String(row.category) === 'reference-corpus' ? ['style-analysis-only'] : []),
+          ].filter((value, index, all) => all.indexOf(value) === index),
+          caveats: Array.isArray(metadata.caveats) ? metadata.caveats.map(String) : [],
+        },
+      }));
+    }
+    const evidenceDocuments = documents.filter((document) => !document.metadata.scope.includes('style-analysis-only'));
+    if (!evidenceDocuments.length) return { documents: [], warnings };
+    const selection = selectKnowledgeContext({
+      documents: evidenceDocuments,
+      query: '',
+      budget: {
+        maxInputTokens: EVIDENCE_SECTION_TOKEN_BUDGET,
+        systemPromptTokens: 0,
+        formulaPromptTokens: 0,
+        outputReserveTokens: 0,
+        safetyMarginTokens: 0,
+      },
+    });
+    const sectionsByDocument = new Map<string, KnowledgeSection[]>();
+    for (const section of selection.sections) {
+      if (section.documentId === 'generated') continue;
+      const list = sectionsByDocument.get(section.documentId) ?? [];
+      list.push(section);
+      sectionsByDocument.set(section.documentId, list);
+    }
+    return {
+      documents: [...evidenceDocuments]
+        .sort((left, right) => left.path.localeCompare(right.path, 'zh-CN'))
+        .map((document) => ({
+          id: document.id,
+          path: document.path,
+          title: document.metadata.title,
+          kind: document.metadata.kind,
+          evidenceStatus: document.metadata.evidenceStatus,
+          sections: (sectionsByDocument.get(document.id) ?? []).map((section) => ({
+            evidenceId: evidenceIdForSection(section),
+            sectionId: section.id,
+            heading: section.heading ?? '',
+            excerpt: section.content.replace(/\s+/gu, ' ').trim().slice(0, 120),
+            charLength: section.content.length,
+            kind: document.metadata.kind,
+            evidenceStatus: document.metadata.evidenceStatus,
+            caveats: document.metadata.caveats,
+          })),
+        })),
+      warnings,
+    };
+  }
+
   map(row: Record<string, unknown>): Record<string, unknown> {
     return {
       id: row.id,
@@ -202,5 +318,26 @@ export class KnowledgeService {
       throw new BadRequestException('无效的存储路径');
     }
     return target;
+  }
+
+  // Mirrors generation.service.ts: the same kind/evidenceStatus mapping must
+  // back both generation-time indexing and this read model.
+  private knowledgeKind(value: string): KnowledgeKind {
+    const lower = value.toLowerCase();
+    if (/禁止|prohibit|forbidden/u.test(lower)) return 'prohibited';
+    if (/未知|unknown|不足/u.test(lower)) return 'unknown';
+    if (/猜想|hypothesis/u.test(lower)) return 'hypothesis';
+    if (/推理|inference/u.test(lower)) return 'inference';
+    if (/方法|formula|method|prompt|提示词|evaluation|评分/u.test(lower)) return 'methodology';
+    if (/案例|样本|case|sample|reference|corpus|对标/u.test(lower)) return 'case';
+    if (/用户|观点|user/u.test(lower)) return 'user_view';
+    return 'fact';
+  }
+
+  private evidenceStatus(value: string): EvidenceStatus {
+    if (/observed|核验|已知事实/u.test(value)) return 'observed';
+    if (/inferred|推理|猜想/u.test(value)) return 'inferred';
+    if (/unknown|未知|不足/u.test(value)) return 'unknown';
+    return 'user_supplied';
   }
 }

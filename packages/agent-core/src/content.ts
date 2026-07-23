@@ -2,6 +2,7 @@ import type {
   ContentChannel,
   ContentDiagnostic,
   CommentGapCoverageLedger,
+  CommentNodeKind,
   ContentPackageContent,
   ContentValidationIssue,
   ContentReasoningEntry,
@@ -31,6 +32,29 @@ const speakerTypes = new Set(["simulated_reader", "accountable_responder"]);
 const claimStatuses = new Set(["verified", "bounded", "unknown", "hypothetical"]);
 const evidenceStances = new Set(["evidence_first", "verification_seeking", "boundary_sensitive", "unknown_aware"]);
 const reasoningLocations = new Set(["H", "N.imageBrief", "N.title", "N.body", "Cref.thread", "Cref.followUp"]);
+const commentNodeKinds = new Set(["question", "answer", "follow_up", "clarification"]);
+const commentThreadFunctions = new Set(["surface_gap", "answer", "clarify", "counterexample", "verification", "next_step"]);
+
+/** Lenient optional-field read: an unrecognised kind means "not recorded", never an error. */
+function commentNodeKind(value: unknown): CommentNodeKind | undefined {
+  return commentNodeKinds.has(String(value)) ? value as CommentNodeKind : undefined;
+}
+
+/**
+ * Lenient optional-field read: a legal thread function, otherwise absent.
+ * Used by the staged parser and by the engine's bind step, where an illegal
+ * model-stated value silently falls back to the planning derivation (P3-15).
+ */
+export function commentThreadFunction(value: unknown): ContentPackageContent["Cref"]["threads"][number]["function"] {
+  return commentThreadFunctions.has(String(value))
+    ? value as NonNullable<ContentPackageContent["Cref"]["threads"][number]["function"]>
+    : undefined;
+}
+
+/** Lenient optional-field read: trim a non-empty string, otherwise treat it as absent. */
+function optionalTrimmedText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
 
 function roleCard(value: unknown): ContentPackageContent["Cref"]["threads"][number]["roleCard"] {
   if (!isRecord(value) || typeof value.stage !== "string" || typeof value.decisionTask !== "string"
@@ -202,12 +226,23 @@ export function parseStagedCoreCopy(text: string): Pick<ContentPackageContent, "
 
 export interface StagedCommentCopy {
   disclaimer: string;
+  /** Optional publisher-owned first comment; carried only when the model produced one. */
+  ownedFirstComment?: string;
   threads: Array<{
     id: string;
     roleIndex?: number;
     question: string;
     answer: string;
-    followUps: Array<{ question: string; answer: string }>;
+    /** Optional Cref contract v1.1 fields; the engine derives positional defaults when absent. */
+    kind?: CommentNodeKind;
+    answerKind?: CommentNodeKind;
+    boundary?: string;
+    /**
+     * Optional model-stated thread function (P3-15). When present and legal it
+     * wins over the planning fallback; illegal values parse as absent.
+     */
+    function?: NonNullable<ContentPackageContent["Cref"]["threads"][number]["function"]>;
+    followUps: Array<{ question: string; answer: string; kind?: CommentNodeKind; boundary?: string }>;
   }>;
 }
 
@@ -235,17 +270,33 @@ export function parseStagedCommentCopy(text: string): StagedCommentCopy {
       if (typeof followQuestion !== "string" || typeof followAnswer !== "string") {
         throw new Error(`Invalid staged follow-up ${followUpIndex} in thread ${thread.id}.`);
       }
-      return { question: followQuestion.trim(), answer: followAnswer.trim() };
+      return {
+        question: followQuestion.trim(),
+        answer: followAnswer.trim(),
+        kind: commentNodeKind(followUp.kind),
+        boundary: optionalTrimmedText(followUp.boundary),
+      };
     });
     const roleIndex = typeof thread.roleIndex === "number" && Number.isInteger(thread.roleIndex) && thread.roleIndex >= 0
       ? thread.roleIndex
       : undefined;
-    return { id: thread.id, roleIndex, question: question.trim(), answer: answer.trim(), followUps };
+    return {
+      id: thread.id,
+      roleIndex,
+      question: question.trim(),
+      answer: answer.trim(),
+      kind: commentNodeKind(thread.kind),
+      answerKind: commentNodeKind(thread.answerKind),
+      boundary: optionalTrimmedText(thread.boundary),
+      function: commentThreadFunction(thread.function),
+      followUps,
+    };
   });
   return {
     disclaimer: typeof container.disclaimer === "string"
       ? container.disclaimer.trim()
       : "以下为多角色评论情景演练与发布者答疑参考模板，不代表真实用户发言、亲历口碑或已经发生的互动。",
+    ownedFirstComment: optionalTrimmedText(container.ownedFirstComment),
     threads,
   };
 }
@@ -292,10 +343,12 @@ function parseContent(value: unknown): ContentPackageContent {
         question: followQuestion,
         answer: followAnswer,
         evidenceIds: stringArray(followUp.evidenceIds) ?? [],
+        kind: commentNodeKind(followUp.kind),
+        boundary: optionalTrimmedText(followUp.boundary),
         ...scenarioMetadata(followUp),
       };
     });
-    const postingIdentity = ["author", "brand", "staff", "expert", "reader_question_template"].includes(String(thread.postingIdentity))
+    const postingIdentity = ["author", "brand", "staff", "expert", "reader_question_template", "publisher"].includes(String(thread.postingIdentity))
       ? thread.postingIdentity as ContentPackageContent["Cref"]["threads"][number]["postingIdentity"]
       : "reader_question_template";
     return {
@@ -306,11 +359,12 @@ function parseContent(value: unknown): ContentPackageContent {
       postingIdentity,
       sourceClusterIds,
       evidenceIds,
+      kind: commentNodeKind(thread.kind),
+      answerKind: commentNodeKind(thread.answerKind),
+      boundary: optionalTrimmedText(thread.boundary),
       stage: typeof thread.stage === "string" ? thread.stage : undefined,
       gap: typeof thread.gap === "string" ? thread.gap : undefined,
-      function: ["surface_gap", "answer", "clarify", "counterexample", "verification", "next_step"].includes(String(thread.function))
-        ? thread.function as ContentPackageContent["Cref"]["threads"][number]["function"]
-        : undefined,
+      function: commentThreadFunction(thread.function),
       nextStep: typeof thread.nextStep === "string" ? thread.nextStep : undefined,
       roleCard: roleCard(thread.roleCard),
       primaryGapId: typeof thread.primaryGapId === "string" ? thread.primaryGapId : undefined,
@@ -324,7 +378,10 @@ function parseContent(value: unknown): ContentPackageContent {
   return {
     H: { hashtags: [...new Set(hashtags.map((tag) => tag.trim().replace(/^#+/u, "")).filter(Boolean))] },
     N: { imageBrief: imageBrief.trim(), title: value.N.title.trim(), body: value.N.body.trim() },
-    Cref: { disclaimer: disclaimer.trim(), threads },
+    // ownedFirstComment is model-visible copy, so it round-trips here.
+    // uncoveredGaps is deliberately NOT parsed: it is engine-derived plan
+    // provenance and must never be sourced from model text.
+    Cref: { disclaimer: disclaimer.trim(), threads, ownedFirstComment: optionalTrimmedText(value.Cref.ownedFirstComment) },
   };
 }
 
@@ -603,6 +660,66 @@ function meaningfulTextOverlap(left: string, right: string, threshold = 0.32): b
   return overlap / Math.max(1, Math.min(leftPairs.size, rightPairs.size)) >= threshold;
 }
 
+/**
+ * Domain-neutral first-person intent vocabulary (generic language patterns
+ * only — no industry terms). A body containing one of these marks the host as
+ * still intending/undecided rather than reporting a completed experience.
+ */
+const hostIntentPattern = /(?:打算|准备|想要|想去|纠结|考虑|还没|没有去|刷到|心动)/u;
+
+/**
+ * Domain-neutral first-person completed-action heuristic. A match means the
+ * speaker asserts a finished first-person action ("我已经…", "我之前…过").
+ * Negated, quoted or forward-looking uses ("我还没…了", "等…了再…", "跟我说…")
+ * do not count as completion claims; without those guards every cautious
+ * "not yet" reply would look like a completed experience.
+ *
+ * Cognitive/perceptual verbs ("刚注意到", "看过了", "明白了") report awareness,
+ * not an operational history, and never count — otherwise a harmless
+ * "我也只是刚注意到" is misread as a completed project action.
+ */
+const firstPersonPerceptionWords = /(?:注意|看到|看见|听到|听说|想到|知道|觉得|感觉|明白|意识|发现|记得|想起|懂)/u;
+
+function claimsFirstPersonCompletion(text: string): boolean {
+  for (const match of text.matchAll(/我(.{0,28}?)(已经|刚|上周|昨天|之前|过|完|了)/gu)) {
+    const middle = match[1] ?? "";
+    if (/[没未不等说问想怕]/u.test(middle)) continue;
+    const marker = match[2] ?? "";
+    const afterIndex = match.index + match[0].length;
+    const after = text.slice(afterIndex, afterIndex + 1);
+    if (/[再就来才]/u.test(after)) continue;
+    if (marker === "了" || marker === "过" || marker === "完") {
+      // Aspect markers attach to the preceding verb: skip when that verb is
+      // cognitive/perceptual ("看过了", "我明白了"); action verbs still fire
+      // ("做过了", "用完了", "我第二天肿了").
+      const before = text.slice(Math.max(0, match.index + 1 + middle.length - 4), match.index + 1 + middle.length);
+      if (firstPersonPerceptionWords.test(before)) continue;
+    } else {
+      // Temporal adverbs modify what follows: skip when the following action is
+      // cognitive/perceptual ("刚注意到", "之前听说过").
+      const following = text.slice(afterIndex, afterIndex + 8);
+      if (firstPersonPerceptionWords.test(following)) continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * True when the visible text shares any contiguous fragment of at least
+ * `minLength` characters with the needle (both already normalized). Lets a
+ * gap be named by a natural partial phrase instead of its exact full label.
+ */
+function sharesContiguousFragment(haystack: string, needle: string, minLength = 4): boolean {
+  if (needle.length <= minLength) return haystack.includes(needle);
+  for (let start = 0; start + minLength <= needle.length; start += 1) {
+    for (let end = needle.length; end - start >= minLength; end -= 1) {
+      if (haystack.includes(needle.slice(start, end))) return true;
+    }
+  }
+  return false;
+}
+
 function normalizedExpectationParts(value: string): string[] {
   return value
     .split(/[。；;！？!?\n]/u)
@@ -627,11 +744,14 @@ function realizesVisibleUnknownPath(
 ): boolean {
   if (!card || !visible.trim()) return false;
   const comparable = normalizedComparable(visible);
+  // P4-20: a gap counts as named when the visible text carries ANY contiguous
+  // 4+ character fragment of its label/question, so natural paraphrases pass;
+  // the unknown-preservation and verification-action requirements are unchanged.
   const namesGap = [card.label, card.question]
     .map(normalizedComparable)
     .filter((item) => item.length >= 2)
-    .some((item) => comparable.includes(item));
-  const preservesUnknown = /(?:未知|待核实|不能确定|无法确定|资料不足|缺少|未覆盖|不代填|还需|仍需|还没弄清|还没问明白|没问清|拿不准)/u.test(visible);
+    .some((item) => comparable.includes(item) || sharesContiguousFragment(comparable, item));
+  const preservesUnknown = /(?:未知|待核实|未确认|没确认|不能确定|无法确定|不确定|资料不足|缺少|未覆盖|不代填|还需|仍需|还没弄清|还没问明白|没问清|没弄明白|没说清|还没定|没定|拿不准|不敢定|别.{0,6}自己定|得看情况|看具体情况|因人而异)/u.test(visible);
   const hasAction = status === "awaiting_user_input"
     ? /(?:补充|提供|说明|确认|记录|核实|问清|问明白).{0,24}(?:条件|情况|信息|输入|目标|风险)/u.test(visible)
     : /(?:核实|查证|查看|回到|补充|提供|确认|问清|问明白).{0,24}(?:来源|证据|资料|条件|范围|信息|情况)/u.test(visible);
@@ -883,9 +1003,17 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     } else if (visibleAuditTerms >= 4) {
       add("audit_language_surface_drift", "warning", "package", `Visible copy uses audit/formula language ${visibleAuditTerms} times; rewrite it into role-specific everyday speech before publishing.`, false);
     }
-    const visibleRoles = new Set(draft.content.Cref.threads.map((thread) => thread.surfaceRoleCard?.displayRole).filter(Boolean));
-    if (threadCount >= 3 && visibleRoles.size < 3) {
-      add("comment_surface_roles_flat", "warning", "Cref", "Fewer than three distinct visible social positions were realized; the comments may still sound like one FAQ author.", false);
+    // P4-20: coverage check instead of a flat "at least three roles" floor —
+    // the cast should cover min(4, threadCount) distinct visible positions and
+    // the same position should not repeat on adjacent threads. Warning level
+    // until the blueprint role-spectrum data catches up.
+    const displayRoles = draft.content.Cref.threads
+      .map((thread) => thread.surfaceRoleCard?.displayRole)
+      .filter((role): role is string => Boolean(role));
+    const distinctRoles = new Set(displayRoles).size;
+    const adjacentRoleRepeat = displayRoles.some((role, index) => index > 0 && role === displayRoles[index - 1]);
+    if (threadCount >= 2 && (distinctRoles < Math.min(4, threadCount) || adjacentRoleRepeat)) {
+      add("comment_surface_roles_flat", "warning", "Cref", `Only ${distinctRoles} distinct visible social position(s) across ${threadCount} threads${adjacentRoleRepeat ? ", with the same position repeating on adjacent threads" : ""}; the comments may still sound like one FAQ author.`, false);
     }
     const metaQuestionPattern = /(?:你最想问什么|你最关心(?:哪一点|什么)|还有什么想了解(?:的)?|有什么问题(?:都)?可以问|欢迎(?:留言|评论|私信)(?:咨询|提问)?)/u;
     const metaQuestion = visibleCommentNodes.find((node) => metaQuestionPattern.test(node));
@@ -893,11 +1021,20 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
       add("comment_host_meta_question", "error", "Cref", `A visible comment uses host/interviewer wording instead of speaking from a real social position: ${metaQuestion}`);
     }
     const [targetGrowingMin, targetGrowingMax] = surfacePlan.commentNetwork.multiTurnTarget;
-    const effectiveGrowingMin = Math.min(threadCount, targetGrowingMin);
+    // The engine caps follow-up lines at the sample-shape surface capacity
+    // (planning.ts visibleLineCapacity), so a target minimum above that
+    // capacity is unsatisfiable; the honest expectation floor is the
+    // capacity-clamped target, matching what the planner itself scheduled.
+    const followUpLineCapacity = Math.max(0, Math.floor((surfacePlan.surfaceTargets.visibleCommentLines[1] - threadCount * 2) / 2));
+    const effectiveGrowingMin = Math.min(threadCount, targetGrowingMin, followUpLineCapacity);
     const effectiveGrowingMax = Math.min(threadCount, Math.max(effectiveGrowingMin, targetGrowingMax));
     const actualGrowingThreads = draft.content.Cref.threads.filter((thread) => thread.followUps.length > 0).length;
     if (actualGrowingThreads < effectiveGrowingMin) {
-      add("comment_network_under_grown", "warning", "Cref", `The comment-network distribution expected ${effectiveGrowingMin}-${effectiveGrowingMax} naturally growing roots, but only ${actualGrowingThreads} grew. Do not fill a quota mechanically; review whether useful triggers were missed.`, false);
+      // P4-20: with the growth switch on and a non-zero multi-turn target the
+      // shortfall is a hard failure (repairable); with the switch off the
+      // target is [0,0] and this never fires.
+      const escalated = config.content.commentMultiTurnGrowthEnabled === true && targetGrowingMin > 0;
+      add("comment_network_under_grown", escalated ? "error" : "warning", "Cref", `The comment-network distribution expected ${effectiveGrowingMin}-${effectiveGrowingMax} naturally growing roots, but only ${actualGrowingThreads} grew. Do not fill a quota mechanically; review whether useful triggers were missed.`, escalated);
     } else if (actualGrowingThreads > effectiveGrowingMax) {
       add("comment_network_over_grown", "warning", "Cref", `The comment-network distribution expected ${effectiveGrowingMin}-${effectiveGrowingMax} naturally growing roots, but ${actualGrowingThreads} grew. Review whether every continuation is actually triggered by the previous line.`, false);
     }
@@ -909,18 +1046,28 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
       add("comment_platform_register_overloaded", "warning", "Cref", `One comment stacks too many platform-register markers and may sound performed: ${overloadedRegisterNode}`, false);
     }
     const rootQuestions = draft.content.Cref.threads.map((thread) => thread.question.trim()).filter(Boolean);
-    if (rootQuestions.length >= 3 && rootQuestions.every((question) => /[？?]$/u.test(question))) {
+    // P4-20: a network with any follow-up depth is exempt — the FAQ look only
+    // matters when every thread is also a flat single exchange.
+    const networkHasDepth = draft.content.Cref.threads.some((thread) => thread.followUps.length > 0);
+    if (rootQuestions.length >= 3 && rootQuestions.every((question) => /[？?]$/u.test(question)) && !networkHasDepth) {
       add("comment_network_all_questions", "warning", "Cref", "Every root node is formatted as a question; add a reaction, experience fragment, observation or disagreement so the section does not read as an FAQ.", false);
     }
     const answerOpenings = draft.content.Cref.threads.map((thread) => [...thread.answer.replace(/^[，。！？\s]+/u, "")].slice(0, 4).join(""));
     const repeatedAnswerOpening = answerOpenings.find((opening) => opening && answerOpenings.filter((item) => item === opening).length >= 3);
     if (repeatedAnswerOpening) {
-      add("comment_reply_voice_repetition", "warning", "Cref", `At least three replies begin with “${repeatedAnswerOpening}”; the characters may still share one model voice.`, false);
+      // P4-20: three or more identical openings across four or more threads is
+      // a heavy single-voice signal and escalates to an error.
+      const severe = threadCount >= 4;
+      add("comment_reply_voice_repetition", severe ? "error" : "warning", "Cref", `At least three replies begin with “${repeatedAnswerOpening}”; the characters may still share one model voice.`, severe);
     }
     const rootLengths = draft.content.Cref.threads.map((thread) => [...thread.question.replace(/\s/gu, "")].length);
     const answerLengths = draft.content.Cref.threads.map((thread) => [...thread.answer.replace(/\s/gu, "")].length);
-    const narrowSpread = (values: number[]) => values.length >= 4 && Math.max(...values) - Math.min(...values) <= 4;
-    if (narrowSpread(rootLengths) && narrowSpread(answerLengths)) {
+    const narrowSpread = (values: number[], tolerance: number) => values.length >= 4 && Math.max(...values) - Math.min(...values) <= tolerance;
+    if (narrowSpread(rootLengths, 2) && narrowSpread(answerLengths, 2)) {
+      // P4-20: a length spread of two characters or less on BOTH sides is
+      // slot-filling, not a warning-level drift.
+      add("comment_network_symmetric_shape", "error", "Cref", "Root comments and replies are nearly identical in length (spread <= 2) across the whole section; this indicates slot-filling rather than independent social voices.");
+    } else if (narrowSpread(rootLengths, 4) && narrowSpread(answerLengths, 4)) {
       add("comment_network_symmetric_shape", "warning", "Cref", "Root comments and replies are nearly identical in length across the whole section; this often indicates slot-filling rather than independent social voices.", false);
     }
     if (/信息卡|判断框架|适用边界|核心问题.{0,8}判断框架/u.test(draft.content.N.imageBrief)
@@ -1061,6 +1208,17 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
   if ((config.parameters?.commentInferenceEffort ?? 35) > 70) {
     add("comment_inference_effort_high", "warning", "Cref", "Comment inference effort is above 70; keep difficulty moderate and reduce every discovery to one easy inference step.");
   }
+  // P4-19: accountable publisher-side identities. Historical values "author"
+  // and "reader_question_template" are not accountable; new packages must use
+  // the publisher identity the contract now produces.
+  const accountablePostingIdentities = new Set(["publisher", "brand", "staff", "expert"]);
+  // P4-19: derive the host's declared state from the body (domain-neutral
+  // generic-language patterns only). The host is in an intent/undecided state
+  // when the body voices first-person intent without claiming any completed
+  // first-person action; a body that itself reports completion (e.g. a
+  // long-term follow-up prototype) leaves this check inactive.
+  const hostDeclaresIntent = hostIntentPattern.test(draft.content.N.body)
+    && !claimsFirstPersonCompletion(draft.content.N.body);
   for (const thread of draft.content.Cref.threads) {
     const missingThreadFields = [
       !thread.stage ? "Stage" : "",
@@ -1091,6 +1249,23 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     }
     if (thread.postingIdentity === "reader_question_template") {
       add("unaccountable_answer_identity", "error", "Cref", `Thread ${thread.id} must use an accountable answer identity.`);
+    }
+    // P4-19: the answer side must carry an accountable publisher-side identity.
+    if (!accountablePostingIdentities.has(thread.postingIdentity)) {
+      add("comment_identity_violation", "error", "Cref", `Thread ${thread.id} posting identity "${thread.postingIdentity}" is not an accountable publisher-side identity (publisher/brand/staff/expert).`);
+    }
+    // P4-19: while the body only declares host intent, the publisher answer
+    // side must not claim a completed first-person action. The question side
+    // of simulated readers is covered by fabricated_operational_experience
+    // (same host-state signal, question-side nodes only). Scoped to the
+    // publisher identity: brand/staff/expert answers speak for the
+    // organization, where first-person completion is a different claim class.
+    if (hostDeclaresIntent && thread.postingIdentity === "publisher") {
+      const completionAnswer = [thread.answer, ...thread.followUps.map((followUp) => followUp.answer)]
+        .find((answerText) => claimsFirstPersonCompletion(answerText));
+      if (completionAnswer) {
+        add("comment_host_state_inconsistency", "error", "Cref", `Thread ${thread.id} answer claims a completed first-person action while the body only declares intent; the host persona must stay consistent: ${completionAnswer}`);
+      }
     }
     if (thread.claimStatus === "verified" && thread.evidenceIds.length === 0) {
       add("verified_claim_without_evidence", "error", "Cref", `Thread ${thread.id} marks its answer verified without evidence.`);
@@ -1237,10 +1412,17 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
         .filter((rule) => rule.claimType === "historical_action")
         .flatMap((rule) => rule.terms) ?? []),
     ].filter(Boolean);
+    const questionSideNodes = new Set([thread.question, ...thread.followUps.map((item) => item.question)]);
     const fabricatedAction = visibleNodes.find((node) => {
       if (/(?:老用户|回购|亲测|亲身经历|我朋友|我同事|朋友说|同事说)/u.test(node)) return true;
       const firstPersonCompleted = /(?:^|[，。！？!?\s])我.{0,28}(?:已经|刚|上周|昨天|之前|过|完|了)/u.test(node);
-      return firstPersonCompleted && prohibitedHistories.some((term) => node.includes(term));
+      if (!firstPersonCompleted) return false;
+      if (prohibitedHistories.some((term) => node.includes(term))) return true;
+      // P4-19: when the body only declares host intent, a simulated reader's
+      // first-person completion claim is unsupported by construction. Scoped
+      // to the question side; the publisher answer side is covered by
+      // comment_host_state_inconsistency, so the two never double-fire.
+      return hostDeclaresIntent && questionSideNodes.has(node) && claimsFirstPersonCompletion(node);
     });
     if (fabricatedAction) {
       add("fabricated_operational_experience", "error", "Cref", `A simulated role claims an unsupported completed project action or testimonial: ${fabricatedAction}`);
@@ -1248,6 +1430,37 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     const auditLeak = visibleNodes.find((node) => /(?:源资料|资料参考|参考资料|可用证据|知识库里|项目资料里)/u.test(node));
     if (auditLeak) {
       add("comment_source_language_surface_leak", "error", "Cref", `A visible comment exposes source/audit language instead of speaking naturally: ${auditLeak}`);
+    }
+  }
+  // P4-21: an answer that substantially overlaps disclosed knowledge but has
+  // no fact ledger entry is a bookkeeping gap, not a content violation — warn
+  // so the claim gets recorded as fact with source spans (or stays visibly
+  // bounded). Question-side nodes are not claims and are not scanned.
+  const knowledgeQuotes = (input.evidenceReferences ?? [])
+    .flatMap((reference) => [reference.quote, ...(reference.quotedSpans ?? [])])
+    .filter((quote): quote is string => typeof quote === "string" && quote.trim().length >= 4);
+  if (knowledgeQuotes.length) {
+    const answerSurfaces = draft.content.Cref.threads.flatMap((thread) => [
+      { threadId: thread.id, text: thread.answer },
+      ...thread.followUps.map((followUp) => ({ threadId: thread.id, text: followUp.answer })),
+    ]);
+    const warnedSegments = new Set<string>();
+    for (const surface of answerSurfaces) {
+      const segments = surface.text
+        .split(/(?<=[。！？!?；;\n])/u)
+        .map((item) => item.trim())
+        .filter((item) => item.length >= 4);
+      for (const segment of segments) {
+        if (/[？?]$/u.test(segment) || /(?:未知|待核实|不能确定|无法确定)/u.test(segment)) continue;
+        if (warnedSegments.has(segment)) continue;
+        const hitsKnowledge = knowledgeQuotes.some((quote) => meaningfulTextOverlap(segment, quote, 0.4));
+        if (!hitsKnowledge) continue;
+        const recordedAsFact = draft.reasoning.some((item) =>
+          item.status === "fact" && conservativeEvidenceSupport(segment, item.statement));
+        if (recordedAsFact) continue;
+        warnedSegments.add(segment);
+        add("knowledge_backed_claim_unrecorded", "warning", "Cref", `Thread ${surface.threadId} answer overlaps disclosed knowledge but has no fact ledger entry; record it as fact with source spans or keep it visibly bounded: ${segment}`, false);
+      }
     }
   }
   const plannedCoverage = input.orchestrationPlan?.gapCoverageLedger;
@@ -1400,8 +1613,89 @@ export interface GenerationDraftPatch {
   unknowns?: UnknownItem[];
 }
 
+/**
+ * P4-22: normalize full-width punctuation that models emit in JSON structural
+ * positions (“ ” as string delimiters, ，：between tokens) without corrupting
+ * the same characters inside string values. A small state machine tracks
+ * whether each character sits inside a string literal and which delimiter
+ * opened it. Implemented inside agent-core; the generation parse path stays
+ * strict — only repair patches get this tolerance.
+ */
+function normalizePatchJsonDelimiters(input: string): string {
+  const openQuotes = new Set(["“", "„", "‟"]);
+  const closeQuotes = new Set(["”", "″", "‶"]);
+  let out = "";
+  let inString = false;
+  let delimiter: "ascii" | "cjk" = "ascii";
+  for (let index = 0; index < input.length; index += 1) {
+    const character = input[index]!;
+    if (inString) {
+      if (delimiter === "ascii") {
+        if (character === "\\") {
+          out += character + (input[index + 1] ?? "");
+          index += 1;
+          continue;
+        }
+        if (character === "\"") {
+          out += "\"";
+          inString = false;
+          continue;
+        }
+        out += character;
+        continue;
+      }
+      // Full-width delimited string: close only on a full-width close quote;
+      // an ASCII quote inside is content and must be escaped.
+      if (closeQuotes.has(character)) {
+        out += "\"";
+        inString = false;
+        continue;
+      }
+      if (character === "\"") {
+        out += "\\\"";
+        continue;
+      }
+      out += character;
+      continue;
+    }
+    if (character === "\"") {
+      out += "\"";
+      inString = true;
+      delimiter = "ascii";
+      continue;
+    }
+    if (openQuotes.has(character)) {
+      out += "\"";
+      inString = true;
+      delimiter = "cjk";
+      continue;
+    }
+    if (character === "，") {
+      out += ",";
+      continue;
+    }
+    if (character === "：") {
+      out += ":";
+      continue;
+    }
+    out += character;
+  }
+  return out;
+}
+
+/** Lenient patch-object read: strict first, full-width-normalized fallback. */
+function parsePatchJsonObject(text: string): Record<string, unknown> {
+  try {
+    return parseJsonObject(text);
+  } catch (strictError) {
+    const normalized = normalizePatchJsonDelimiters(text);
+    if (normalized === text) throw strictError;
+    return parseJsonObject(normalized);
+  }
+}
+
 export function parseGenerationPatch(text: string): GenerationDraftPatch {
-  const value = parseJsonObject(text);
+  const value = parsePatchJsonObject(text);
   const patch: GenerationDraftPatch = {};
   if (isRecord(value.H)) {
     const hashtags = stringArray(value.H.hashtags);
@@ -1418,6 +1712,11 @@ export function parseGenerationPatch(text: string): GenerationDraftPatch {
     }
   }
   if (isRecord(value.Cref)) {
+    // P4-22: a Cref patch must restate the simulation disclaimer; silently
+    // defaulting it hid malformed repair output behind a canned sentence.
+    if (typeof value.Cref.disclaimer !== "string" || !value.Cref.disclaimer.trim()) {
+      throw new Error("Repair patch Cref.disclaimer must be a non-empty string.");
+    }
     patch.Cref = parseContent({ H: { hashtags: [] }, N: { imageBrief: "", title: "", body: "" }, Cref: value.Cref }).Cref;
   }
   if (value.evidenceIds !== undefined) {
@@ -1438,6 +1737,56 @@ export function parseGenerationPatch(text: string): GenerationDraftPatch {
   }
   if (!Object.keys(patch).length) throw new Error("Repair patch did not contain a recognized field.");
   return patch;
+}
+
+/**
+ * P4-22: merge a visible-copy Cref patch into the current Cref keyed by
+ * thread id. Out-of-order and partial patches are accepted — threads the
+ * patch omits keep their current prose; a patch thread with no follow-ups
+ * keeps the current follow-ups. Only genuinely unplanned thread ids fail
+ * (caller converts that into a retryable repair issue). Cref-level contract
+ * fields (ownedFirstComment/uncoveredGaps) always survive a prose patch.
+ */
+export function mergeCrefPatchById(
+  current: ContentPackageContent["Cref"],
+  patch: ContentPackageContent["Cref"],
+): ContentPackageContent["Cref"] {
+  const currentIds = new Set(current.threads.map((thread) => thread.id));
+  const unplanned = patch.threads.find((thread) => !currentIds.has(thread.id));
+  if (unplanned) {
+    throw new Error(`Comment repair returned an unplanned thread id: ${unplanned.id}`);
+  }
+  const patchedById = new Map(patch.threads.map((thread) => [thread.id, thread]));
+  return {
+    ...current,
+    disclaimer: patch.disclaimer,
+    threads: current.threads.map((currentThread) => {
+      const visibleThread = patchedById.get(currentThread.id);
+      if (!visibleThread) return currentThread;
+      return {
+        ...currentThread,
+        question: visibleThread.question,
+        answer: visibleThread.answer,
+        followUps: visibleThread.followUps.length
+          ? visibleThread.followUps.map((visibleFollowUp, followUpIndex) => ({
+            ...(currentThread.followUps[followUpIndex] ?? {
+              personaRole: currentThread.personaRole,
+              speakerType: "simulated_reader" as const,
+              claimStatus: "hypothetical" as const,
+              replyTo: currentThread.id,
+              threadDepth: followUpIndex + 1,
+              simulated: true,
+              simulationLabel: "模拟潜在读者接话",
+              evidenceIds: [],
+            }),
+            question: visibleFollowUp.question,
+            answer: visibleFollowUp.answer,
+            evidenceIds: [],
+          }))
+          : currentThread.followUps,
+      };
+    }),
+  };
 }
 
 export function applyGenerationPatch(current: GenerationDraft, patch: GenerationDraftPatch): GenerationDraft {

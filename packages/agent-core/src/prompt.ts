@@ -221,6 +221,7 @@ export const STAGED_COMMENTS_JSON_SCHEMA: Record<string, unknown> = {
   required: ["disclaimer", "threads"],
   properties: {
     disclaimer: { type: "string" },
+    ownedFirstComment: { type: "string" },
     threads: {
       type: "array",
       items: {
@@ -232,6 +233,10 @@ export const STAGED_COMMENTS_JSON_SCHEMA: Record<string, unknown> = {
           roleIndex: { type: "integer", minimum: 0 },
           question: { type: "string" },
           answer: { type: "string" },
+          kind: { enum: ["question", "answer", "follow_up", "clarification"] },
+          answerKind: { enum: ["question", "answer", "follow_up", "clarification"] },
+          boundary: { type: "string" },
+          function: { enum: ["surface_gap", "answer", "clarify", "counterexample", "verification", "next_step"] },
           followUps: {
             type: "array",
             items: {
@@ -241,6 +246,8 @@ export const STAGED_COMMENTS_JSON_SCHEMA: Record<string, unknown> = {
               properties: {
                 question: { type: "string" },
                 answer: { type: "string" },
+                kind: { enum: ["question", "answer", "follow_up", "clarification"] },
+                boundary: { type: "string" },
               },
             },
           },
@@ -280,6 +287,7 @@ const REPAIR_VISIBLE_CREF_SCHEMA: Record<string, unknown> = {
   required: ["disclaimer", "threads"],
   properties: {
     disclaimer: { type: "string" },
+    ownedFirstComment: { type: "string" },
     threads: {
       type: "array",
       items: {
@@ -290,13 +298,21 @@ const REPAIR_VISIBLE_CREF_SCHEMA: Record<string, unknown> = {
           id: { type: "string" },
           question: { type: "string" },
           answer: { type: "string" },
+          kind: { enum: ["question", "answer", "follow_up", "clarification"] },
+          answerKind: { enum: ["question", "answer", "follow_up", "clarification"] },
+          boundary: { type: "string" },
           followUps: {
             type: "array",
             items: {
               type: "object",
               additionalProperties: false,
               required: ["question", "answer"],
-              properties: { question: { type: "string" }, answer: { type: "string" } },
+              properties: {
+                question: { type: "string" },
+                answer: { type: "string" },
+                kind: { enum: ["question", "answer", "follow_up", "clarification"] },
+                boundary: { type: "string" },
+              },
             },
           },
         },
@@ -325,7 +341,11 @@ const STAGED_SYSTEM_PROMPT = `你正在分阶段完成同一个中文内容包�
 4. orchestrationPlan和compiledParameters是本次生产合同。公开文字不得出现evidenceId、sourceClusterId、reasoning、replyPlan、discoveryPlan、“本线程”等内部词。
 5. 保持自然中文和短句；正文与评论分工互补，不用重复句子堆满信息量。`;
 
-export const PROMPT_CONTRACT_VERSION = "2.0.0";
+// 2.1.0: staged-comments and repair-Cref schemas accept the optional Cref
+// contract v1.1 fields (kind/answerKind/boundary, ownedFirstComment). The
+// digest below covers stagedCommentsSchema, so the version must move with it;
+// existing active releases fail-closed and need re-activation (planned).
+export const PROMPT_CONTRACT_VERSION = "2.1.0";
 export const PROMPT_CONTRACT_DIGEST = createHash("sha256")
   .update(JSON.stringify({
     version: PROMPT_CONTRACT_VERSION,
@@ -660,29 +680,38 @@ export function buildStagedCommentsPrompt(
 
 整体目标：做出一个像样本的评论关系网，而不是多份FAQ。评论者不是“完成信息任务的角色”，而是带着自己的处境插一句；短问、短答、准备动作、反例、看图反应、人物追问和专业翻译长短不齐，让信息在互动中被读者自己拼出来。
 
+身份与答复契约：
+- 提问侧是显式标注的模拟读者代理：他们承载常见问题和真实处境，但不冒充真实独立用户，不伪造第三方口碑。
+- 答复侧是发布账号（publisher，即楼主本人）：answer延续personaScenePlan.host的声音、阶段和刚发生的那件事，像发布者在自己帖子下回评论，不用第三方、路人或客服口吻。
+- 答复声音绑定所选角色的replyDisplayRole：指向“楼主/发布者/发布账号”时用host的声音。只有项目角色模块中accountable=true的公开可追责身份可以回答已获证据支持的项目事实，且以公开身份作答、不伪装成普通用户；普通模拟读者禁止用未经提供的过去式经历借真人口碑。
+- 答复按三条路径取当前最高可用的一条：①该问题有知识口径（usableEvidenceReferences直接支持，或缺口卡已给出答案）→用host的人话引用口径并带限定语，价格、档期、恢复、地址等动态信息必须带“以当期确认为准”式限定；②没有口径但有核验路径→给路由式回答：指名向谁核实什么、带上自己的什么情况（如“这个得问给你做评估的人，带上你的时间安排”），禁止空泛的“问客服/问专业人员”；③完全未知→保留未知：直说自己也还不清楚、打算怎么弄清楚。禁止机械重复“需要核实、不能下结论、资料未覆盖”这一套词。
+- 有揭示义务的回答必须在同一线程内把当前可说的结论说完，禁止故意留悬念吊胃口；受控声明没有证据时仍走②或③，不能用传闻绕过。
+
 语言质感：
 - 先按人物说话，再考虑网感。用称呼、行动短语、迟疑语气或省略暴露身份即可；不要为了证明“像平台”而复用固定热词。一人最多一处明显语域标记。
 - 允许短问、半句话、迟疑、轻微反对和不完整反应。禁止全员同款称呼、堆emoji、堆热词，以及为躲审核故意造错字。
 - 信息密度来自“几个词同时暴露身份＋阶段＋现实限制”，不是把专业结论压缩成黑话。专业解答者也要像人在聊天：一句人话结论，最多再补一个条件。
 
 每条线程必须：
-- id严格沿用计划ID。先从personaScenePlan.commentCast里选择此刻最可能开口的人，把对应roleIndex写入隐藏字段；角色由缺口、正文话头和现实处境共同决定，不按角色池顺序轮流填空。
+- id严格沿用计划ID。先从personaScenePlan.commentCast里选择此刻最可能开口的人，把对应roleIndex写入隐藏字段；角色由缺口、正文话头和现实处境共同决定，不按角色池顺序轮流填空；可用角色达到6个或以上时，同一个displayRole不得重复选用。
 - question字段表示一条可见评论，不要求每条都是问句：可以是提问、同款担心、正在做的准备、不同意见或几个字的反应。长度优先服从所选角色的targetChars。
-- answer表示紧接其后的自然回复，通常一小句或两小句；只有事实答疑线程才需要直接答案和必要条件。禁止每条都写“直接回答＋条件＋边界＋未知＋下一步”。
+- answer是发布账号紧接其后的自然回复，通常一小句或两小句；只有事实答疑线程才需要直接答案和必要条件。禁止每条都写“直接回答＋条件＋边界＋未知＋下一步”。
+- 按内容为线程标注隐藏字段：function六选一——补充或核实项目事实标verification，校准风险或过高期待标clarify，给谨慎反例标counterexample，分条件回答标answer，给核验路由标next_step，正文已覆盖信息的再次浮出标surface_gap；kind标根评论节点类型，常规为question（即使它实为经验片段或纯反应也仍标question），answerKind常规为answer；该线程有明确边界时写出boundary，没有就省略该字段。
 - 本轮每条followUps必须为空数组。下一轮会看到这些根评论，再决定哪些话头真的值得继续。
 - 评论总可见行数优先落在personaScenePlan.surfaceTargets.visibleCommentLines；典型单行长度落在typicalCommentChars附近，但允许少量长经验和极短反应。
 - 至少包含三种不同社会位置；至少一条人物/地点/行动路由；至少一条经验差异或谨慎反例；允许一条纯共鸣或未完全闭合的评论。
 - 整体执行personaScenePlan.commentNetwork.multiTurnTarget和antiScriptRules。允许局部同意、反驳、看图才发现、同城插话或轻微岔开；禁止所有线程同向夸赞，禁止按“提问→过来人背书→报名字→服务号催约”的整齐漏斗排序。
-- 信息要相对正文新增，但单个角色只说自己位置能知道的部分。服务账号回答动态信息时保留公开身份；生成的经验角色属于创作参考，不能在证据台账中算作真实口碑。
+- 信息要相对正文新增，但单个角色只说自己位置能知道的部分。生成的经验角色属于创作参考，不能在证据台账中算作真实口碑。
 - 不得机械重复“需要核实、不能下结论、资料未覆盖、个体差异”；相关边界在最需要的一条回复中自然出现一次即可。
 - 先像真人聊天，再检查事实。不要出现“AI不便公开推测、有效报价单、判断口径、项目说明、核验路径、只回应、不承担答题”等客服/审计/提示词口吻。
-- 同一知识按人物换说法：楼主说自己的现实麻烦，路人只补一个片段，反例只说哪里不一样，同城人直接问谁/哪儿，服务账号只给当天可执行的下一步。不要让五个人共用“核实、边界、资料”这一套词。
+- 同一知识按人物换说法：楼主说自己的现实麻烦，路人只补一个片段，反例只说哪里不一样，同城人直接问谁/哪儿。不要让五个人共用“核实、边界、资料”这一套词。
 - contentAnchor只提供可用意思，不是要求照抄的句子；必要限制应藏进自然条件句，例如“我第二天要见人，所以会把时间多留一点”，不要写成合规声明。
-- 模拟人物可以承载生活动作、犹豫和不同反应，但不得凭空给出 projectBlueprint.claimPolicy 中受控的价格、地点、身份、资质、时间、结果、适用性或因果信息。受控声明只有 usableEvidenceReferences 直接支持时才能写；否则改成疑问、有限处境或核验动作，不能用传闻绕过。
+- 模拟人物可以承载生活动作、犹豫和不同反应，但不得凭空给出 projectBlueprint.claimPolicy 中受控的价格、地点、身份、资质、时间、结果、适用性或因果信息；受控声明只有 usableEvidenceReferences 直接支持时才按路径①写出。
 - 模拟人物不得声称自己完成过 projectBlueprint.scenarioModel.prohibitedUnsupportedHistories 所列动作；除非这些动作由用户明确提供。人物可以说当前限制、打算怎么问或为什么犹豫，不把创作情景伪装成历史经历。
-- 普通模拟读者禁止用未经提供的过去式经历借真人口碑。只有项目角色模块中 accountable=true 的公开可追责身份可以回答已获证据支持的项目事实，而且不能伪装成普通用户。
 - answer字段只放当前回复；追问必须只放followUps数组，禁止在answer里再嵌入“追问：/答：”。
 - 根question和followUps.question中禁止出现“你最想问什么、你最关心什么、还有什么想了解、欢迎留言咨询”等元问题；角色必须直接开口，提出由项目角色和缺口共同决定的具体问题，或直接说自己的顾虑。
+
+首评（可选）：如果线程已经覆盖了足够多可回答的常见问题，再写一段ownedFirstComment——发布账号本人口吻的“常见问题整理”首评文本，作为可发布参考；它是楼主在整理自己帖子下的高频问题，不伪装成他人，不含内部词；可答内容不足时省略整个字段。
 
 计划线程ID与写作依据：
 ${safeJson(plannedThreads.map((thread) => ({
@@ -697,7 +726,7 @@ ${safeJson(plannedThreads.map((thread) => ({
     },
   })))}
 
-严格输出 ${plannedThreads.length} 个根线程。只返回：{"disclaimer":"以下为完整评论区创作参考，不代表已经发生的真实互动或观测口碑。","threads":[{"id":"计划ID","roleIndex":0,"question":"一条自然评论","answer":"紧接的自然回复","followUps":[]}]}`;
+严格输出 ${plannedThreads.length} 个根线程。只返回：{"disclaimer":"以下为完整评论区创作参考，不代表已经发生的真实互动或观测口碑。","ownedFirstComment":"可选，可答内容不足时整字段省略","threads":[{"id":"计划ID","roleIndex":0,"question":"一条自然评论","answer":"发布账号的自然回复","kind":"question","answerKind":"answer","function":"verification","boundary":"有明确边界时写出，否则省略","followUps":[]}]}`;
   const commonContent: PromptMessage["content"] = common.imageParts.length
     ? [{ type: "text", text: common.text }, ...common.imageParts]
     : common.text;
@@ -769,6 +798,8 @@ export function buildStagedLedgerPrompt(
 - fact只能使用usableEvidenceReferences中的证据。每个sourceSpans.quote必须是对应证据quote中的逐字连续原文；不得用常识或相似意思代替原文。
 - inference、hypothesis、sample和unknown不能伪装成fact，sourceSpans留空；公开文字把未知写成确定事实时，不得靠台账洗白。
 - personaScenePlan 中的楼主人设、生活事件、即时处境和模拟评论人物统一按 hypothesis 或 sample 记账；只有知识库直接支持的项目声明才可能是 fact。创作场景连贯不等于已经真实发生。
+- 命中知识口径的项目事实声明（价格区间、人员姓名、恢复周期、地址、技术路径、保障说法等）必须记为 fact，并在 sourceSpans 挂载 usableEvidenceReferences 中对应小节的逐字原文；词组要记账，句子级声明同样要记账，不得因定位麻烦而降级为 inference 或干脆不记。
+- 只有 personaScenePlan 的创作内容（楼主人设、生活事件、模拟读者言行）按 hypothesis 或 sample 记账；拿不准一条声明的身份时按 hypothesis 记，不得伪装成 fact。
 - 根evidenceIds必须等于全部reasoning.sourceSpans使用的证据ID去重集合。
 - unknowns保留会影响判断但资料没有覆盖的输入；不得编造答案。
 

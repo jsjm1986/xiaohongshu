@@ -772,6 +772,10 @@ export class GenerationService implements OnModuleInit {
           id: thread.id,
           gap: thread.gap,
           function: thread.function,
+          // Cref contract v1.1 node metadata; absent on historical packages.
+          kind: thread.kind,
+          answerKind: thread.answerKind,
+          boundary: thread.boundary,
           postingIdentity: thread.postingIdentity,
           sourceClusterIds: thread.sourceClusterIds,
           evidenceIds: thread.evidenceIds,
@@ -799,6 +803,9 @@ export class GenerationService implements OnModuleInit {
         };
       }),
       commentDisclaimer: content.content.Cref.disclaimer,
+      // Cref contract v1.1 package-level fields; absent on historical packages.
+      commentOwnedFirstComment: content.content.Cref.ownedFirstComment,
+      commentUncoveredGaps: content.content.Cref.uncoveredGaps,
       imageBrief: content.content.N.imageBrief,
       imageBriefKind: classifyImageBriefKind(content.content.N.imageBrief, productionArtifacts?.imageBrief.status),
       imagePlan: content.imagePlan,

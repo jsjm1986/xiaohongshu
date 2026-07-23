@@ -335,6 +335,14 @@ const EXTRA_PARAMETERS: GenerationParameterDefinition[] = [
     formulaIds: ["F07", "F19", "F32"], channels: ["N.imageBrief"], evidenceStatus: "architecture_definition", evidenceNote: "图片方向是计划对象，不是已观察图片。",
   },
   {
+    id: "comment_multi_turn_growth", path: "content.commentMultiTurnGrowthEnabled", label: "评论多轮接龙生长", group: "channel",
+    control: { kind: "toggle", simpleMode: false, advanced: true }, defaultValue: false,
+    noviceExplanation: "这是一个额外的多轮接龙生成步骤：先写根评论，再让被上一句具体词真正触发的少数线程长出追问；关闭时根评论直接成稿，同样是有效输出。",
+    increaseEffect: "开启后评论区可出现有触发原因的多轮接话；仍受追问深度与总行数约束。", decreaseEffect: "关闭后所有线程停在一问一答，多轮目标按零计算，不会再产生欠生长提示。",
+    formulaIds: ["F09", "F10", "F33"], channels: ["Cref"], evidenceStatus: "operational_default",
+    evidenceNote: "M7 决策：多轮生长无效果证据，作为保守默认可选步骤保留，默认开启与否由运营选择；形态动机是描述性结构（真实评论区同时存在单轮与多轮），不是效果承诺。",
+  },
+  {
     id: "knowledge_mode", path: "knowledge.mode", label: "知识披露模式", group: "operation",
     control: { kind: "select", options: [
       { value: "auto", label: "自动", description: "能放下则全量，否则渐进披露" },
@@ -723,6 +731,9 @@ function explicitBehavior(id: string, value: ParameterValue, config: ResolvedGen
     case "comment_thread_min":
     case "comment_thread_max": return [`评论可读性目标为 ${config.content.commentThreadMin}—${config.content.commentThreadMax} 条；若独立PrimaryGap覆盖需要更多线程，按gapCoverageLedger扩容并给出capacityWarning，禁止截断缺口。`];
     case "follow_up_depth": return [`每条线程最多按目标深度 ${config.content.followUpDepth} 展开；只有残余缺口或新条件才追问。`];
+    case "comment_multi_turn_growth": return [config.content.commentMultiTurnGrowthEnabled === true
+      ? "允许被上一句具体词触发的线程生长追问；无自然话头不续。"
+      : "根评论直接成稿。"];
     case "information_breadth": return [numeric! >= 70 ? "先广泛列出跨类别缺口，再只保留重要、可证、可回答的项；更多不是更好。" : numeric! <= 35 ? "集中解决最高优先级缺口，另列未覆盖项，不假装已经完整。" : "覆盖主缺口和少量长尾缺口，并按决策相关性筛选。"]; 
     case "decision_information_depth": return [numeric! >= 70 ? "重要答案同时给出依据、用户可复用的判断方法和适用边界。" : "优先给直接答案与最低必要依据，复杂分支放到条件问答。"]; 
     case "state_information_strength": return [numeric! >= 70 ? "用personaScenePlan的人物身份、阶段、关系和现实限制让读者一眼知道‘谁在什么处境’，不要把这些维度列成说明。" : "只露出一个最能解释当前行为的身份或阶段线索。"]; 
