@@ -34,7 +34,7 @@ const navigation = [
 function ShellContent() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
-  const { user, logout, isDemo } = useAuth();
+  const { user, logout } = useAuth();
   const { projects, projectId, setProjectId, loading } = useProjects();
   const location = useLocation();
   const navigate = useNavigate();
@@ -161,7 +161,6 @@ function ShellContent() {
             </div>
           </div>
           <div className="topbar__right">
-            {isDemo && <span className="demo-pill">演示数据</span>}
             <button
               className="icon-button topbar__notification"
               aria-label="通知"

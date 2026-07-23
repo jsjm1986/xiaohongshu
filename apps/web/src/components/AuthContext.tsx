@@ -1,13 +1,11 @@
 import { createContext, type FormEvent, type ReactNode, useContext, useEffect, useState } from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
-import { api, ApiError } from '../lib/api';
-import { demoUser } from '../lib/fixtures';
+import { api } from '../lib/api';
 import type { User } from '../types';
 
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
-  isDemo: boolean;
   login: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   setUser: (user: User | null) => void;
@@ -15,49 +13,28 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-const canUseDemoFallback = (error: unknown) =>
-  !(error instanceof ApiError) || error.status === 404 || error.status >= 500;
-
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  const [isDemo, setIsDemo] = useState(false);
 
   useEffect(() => {
     api.auth
       .me()
       .then(setUser)
-      .catch(() => {
-        const storedDemo = sessionStorage.getItem('content-agent-demo-session');
-        if (storedDemo) {
-          setUser(demoUser);
-          setIsDemo(true);
-        }
-      })
+      .catch(() => undefined)
       .finally(() => setLoading(false));
   }, []);
 
   const login = async (username: string, password: string) => {
-    try {
-      setUser(await api.auth.login(username, password));
-      setIsDemo(false);
-    } catch (error) {
-      if (!canUseDemoFallback(error)) throw error;
-      if (!username.trim() || !password.trim()) throw error;
-      sessionStorage.setItem('content-agent-demo-session', '1');
-      setUser({ ...demoUser, username, displayName: username === 'admin' ? demoUser.displayName : username });
-      setIsDemo(true);
-    }
+    setUser(await api.auth.login(username, password));
   };
 
   const logout = async () => {
-    if (!isDemo) await api.auth.logout().catch(() => undefined);
-    sessionStorage.removeItem('content-agent-demo-session');
+    await api.auth.logout().catch(() => undefined);
     setUser(null);
-    setIsDemo(false);
   };
 
-  return <AuthContext.Provider value={{ user, loading, isDemo, login, logout, setUser }}>{children}</AuthContext.Provider>;
+  return <AuthContext.Provider value={{ user, loading, login, logout, setUser }}>{children}</AuthContext.Provider>;
 }
 
 export function useAuth() {
