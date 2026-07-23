@@ -1,7 +1,6 @@
 import {
   AlertTriangle,
   ArrowDown,
-  ArrowLeft,
   ArrowRight,
   ArrowUp,
   BookOpenText,
@@ -135,17 +134,9 @@ const defaultForm: GenerationFormState = {
   forbidden: "",
 };
 
-const simpleSteps = [
-  { number: 1, title: "选择项目", description: "确定知识边界" },
-  { number: 2, title: "描述主题", description: "说清要解决的问题" },
-  { number: 3, title: "选择读者", description: "确定阶段与入口" },
-  { number: 4, title: "补充约束", description: "可选地域、人物与边界" },
-];
-
 export function GeneratorPage() {
   const { projects, projectId, setProjectId, currentProject } = useProjects();
   const [mode, setMode] = useState<"simple" | "advanced">("simple");
-  const [step, setStep] = useState(1);
   const [form, setForm] = useState<GenerationFormState>(defaultForm);
   const [advanced, setAdvanced] = useState<AdvancedGenerationConfig>(defaultAdvanced);
   const [parameterOverrides, setParameterOverrides] = useState<Record<string, unknown>>({});
@@ -197,16 +188,6 @@ export function GeneratorPage() {
       alive = false;
     };
   }, [projectId]);
-
-  const canContinue = useMemo(
-    () =>
-      step === 1
-        ? Boolean(projectId)
-        : step === 2
-          ? form.topic.trim().length >= 4 && Boolean(form.goal)
-          : true,
-    [step, projectId, form.topic, form.goal],
-  );
 
   const selectedPreset = presets.find((item) => item.id === selectedPresetId);
   const effectiveBodyLength = Number(parameterOverrides.body_max_chars ?? advanced.bodyLength);
@@ -730,58 +711,6 @@ function PresetShelf({ presets, selectedId, loading, compact, onApply, onCopy, o
       </article>)}
     </div>}
   </section>;
-}
-
-function SimpleWizard({ projects, projectId, currentProject, step, form, canContinue, submitting, selectedPreset, onProject, onStep, onForm, onPreview }: {
-  projects: ReturnType<typeof useProjects>["projects"];
-  projectId: string;
-  currentProject: ReturnType<typeof useProjects>["currentProject"];
-  step: number;
-  form: GenerationFormState;
-  canContinue: boolean;
-  submitting: boolean;
-  selectedPreset?: ContentPreset;
-  onProject: (id: string) => void;
-  onStep: (step: number) => void;
-  onForm: (form: GenerationFormState) => void;
-  onPreview: (event?: FormEvent) => void;
-}) {
-  return <div className="wizard-layout">
-    <aside className="wizard-steps">
-      <div className="wizard-steps__intro"><span>生成向导</span><strong>{step} / 4</strong></div>
-      {simpleSteps.map((item) => <button key={item.number} type="button" className={`${step === item.number ? "active" : ""} ${step > item.number ? "complete" : ""}`} onClick={() => item.number <= step && onStep(item.number)}><span>{step > item.number ? <Check size={15} /> : item.number}</span><div><strong>{item.title}</strong><small>{item.description}</small></div></button>)}
-      <div className="wizard-note"><Sparkles size={17} /><p><strong>{selectedPreset ? `已应用：${selectedPreset.name}` : "其余会自动完成"}</strong><br />隐藏参数来自预设、当前项目和已启用公式。</p></div>
-    </aside>
-    <form className="wizard-card" onSubmit={onPreview}>
-      {step === 1 && <section className="wizard-section">
-        <WizardHeading step="第 1 步" title="这篇内容属于哪个项目？" description="项目决定本次可使用的知识、事实边界和公式版本。" />
-        <div className="choice-list choice-list--projects">{projects.map((project) => <button type="button" key={project.id} className={project.id === projectId ? "selected" : ""} onClick={() => onProject(project.id)}><span className="choice-list__icon"><BookOpenText size={20} /></span><span><strong>{project.name}</strong><small>{project.knowledgeCount || 0} 份知识 · 公式 {project.activeFormulaVersion || "项目当前版本"}</small></span>{project.id === projectId && <Check size={18} />}</button>)}</div>
-        {currentProject && <div className="context-preview"><div><span>将使用</span><strong>{currentProject.knowledgeCount || 0} 份项目知识</strong></div><div><span>公式版本</span><strong>{currentProject.activeFormulaVersion || "项目当前版本"}</strong></div><div><span>注入方式</span><strong>优先全量</strong></div></div>}
-      </section>}
-      {step === 2 && <section className="wizard-section">
-        <WizardHeading step="第 2 步" title="这次想写什么？" description="不用写提示词，用日常语言说清主题和读者应得到的帮助。" />
-        <Field label="内容主题" required hint="建议写具体问题，不要只写品类名"><textarea className="textarea-large" value={form.topic} onChange={(event) => onForm({ ...form, topic: event.target.value })} rows={4} placeholder="例如：第一次了解这个项目，做决定前最应该问清哪些信息？" /></Field>
-        <Field label="内容目标" required><div className="goal-options">{["帮助用户建立判断标准", "补全用户容易忽略的信息", "降低犹豫与不确定性", "引导用户进入具体选择"].map((goal) => <button type="button" key={goal} className={form.goal === goal ? "selected" : ""} onClick={() => onForm({ ...form, goal })}>{form.goal === goal && <Check size={15} />}{goal}</button>)}</div></Field>
-      </section>}
-      {step === 3 && <section className="wizard-section">
-        <WizardHeading step="第 3 步" title="谁会看到这篇内容？" description="读者所处阶段决定他最需要补全哪类信息。" />
-        <Field label="读者阶段" required><div className="stage-grid">{stages.map(({ id, title, text, icon: Icon }) => <button type="button" key={id} className={form.audienceStage === id ? "selected" : ""} onClick={() => onForm({ ...form, audienceStage: id })}><Icon size={20} /><strong>{title}</strong><small>{text}</small>{form.audienceStage === id && <span><Check size={13} /></span>}</button>)}</div></Field>
-        <Field label="内容入口" required hint="入口会影响标题、关键词和首段信息密度"><div className="entry-options">{entryPoints.map((entry) => <button type="button" key={entry.id} className={form.entryPoint === entry.id ? "selected" : ""} onClick={() => onForm({ ...form, entryPoint: entry.id })}><span>{form.entryPoint === entry.id && <Check size={14} />}</span><div><strong>{entry.title}</strong><small>{entry.text}</small></div></button>)}</div></Field>
-      </section>}
-      {step === 4 && <section className="wizard-section">
-        <WizardHeading step="第 4 步 · 可选" title="有没有必须遵守的信息？" description="留空也可以生成，项目已有约束仍会自动生效。" />
-        <div className="field-grid field-grid--two"><Field label="地点"><input value={form.city} onChange={(event) => onForm({ ...form, city: event.target.value })} placeholder="例如：北京 / 线上" /></Field><Field label="关键人物 / 对象"><input value={form.doctor} onChange={(event) => onForm({ ...form, doctor: event.target.value })} placeholder="选填，不会自动虚构" /></Field></div>
-        <Field label="必须提及" hint="每行一项，只填写知识库能够支持的信息"><textarea value={form.mustInclude} onChange={(event) => onForm({ ...form, mustInclude: event.target.value })} rows={3} /></Field>
-        <Field label="禁止出现"><textarea value={form.forbidden} onChange={(event) => onForm({ ...form, forbidden: event.target.value })} rows={3} /></Field>
-        <div className="generation-summary"><Sparkles size={20} /><div><strong>下一步先预览配置，再生成 3 个完整候选</strong><p>预览会说明知识、公式和隐藏参数如何影响标题、正文与评论区。</p></div></div>
-      </section>}
-      <footer className="wizard-card__footer"><Button type="button" variant="ghost" disabled={step === 1} icon={<ArrowLeft size={17} />} onClick={() => onStep(step - 1)}>上一步</Button><span>生成前会检查冲突和知识边界</span>{step < 4 ? <Button type="button" disabled={!canContinue} onClick={() => onStep(step + 1)}>继续 <ArrowRight size={17} /></Button> : <Button type="submit" loading={submitting} icon={<Eye size={17} />}>预览配置</Button>}</footer>
-    </form>
-  </div>;
-}
-
-function WizardHeading({ step, title, description }: { step: string; title: string; description: string }) {
-  return <div className="wizard-section__heading"><span>{step}</span><h2>{title}</h2><p>{description}</p></div>;
 }
 
 function TaskPanel({ projects, projectId, form, onProject, onForm }: {
