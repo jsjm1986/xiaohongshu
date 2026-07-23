@@ -118,3 +118,10 @@ test('reject stores note and allows re-apply with same username', async () => {
   await reg.submit(validInput()); // 拒绝后可重申,不抛错
   assert.equal(reg.loginHintFor('clinicA')?.status, 'pending');
 });
+
+test('rate limit blocks after threshold per key', async () => {
+  const db = makeDb();
+  const reg = makeReg(db, makeAuth(db));
+  for (let i = 0; i < 5; i++) reg.recordSubmit('1.2.3.4');
+  assert.throws(() => reg.assertSubmitAllowed('1.2.3.4'), /频繁|too many/i);
+});

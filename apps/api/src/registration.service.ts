@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, HttpException, HttpStatus, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { AuditService } from './audit.service.js';
 import { AuthService } from './auth.service.js';
 import { DatabaseService } from './database.service.js';
@@ -25,6 +25,23 @@ export class RegistrationService {
     @Inject(AuthService) private readonly auth: AuthService,
     @Inject(AuditService) private readonly audit: AuditService,
   ) {}
+
+  private readonly submitFailures = new Map<string, { count: number; resetAt: number }>();
+
+  assertSubmitAllowed(key: string): void {
+    const current = this.submitFailures.get(key);
+    if (!current) return;
+    if (current.resetAt <= Date.now()) { this.submitFailures.delete(key); return; }
+    if (current.count >= 5) throw new HttpException('申请过于频繁,请稍后再试', HttpStatus.TOO_MANY_REQUESTS);
+  }
+
+  recordSubmit(key: string): void {
+    const now = Date.now();
+    const current = this.submitFailures.get(key);
+    this.submitFailures.set(key, current && current.resetAt > now
+      ? { count: current.count + 1, resetAt: current.resetAt }
+      : { count: 1, resetAt: now + 15 * 60_000 });
+  }
 
   async submit(input: { username: unknown; password: unknown; organizationName: unknown; phone: unknown }): Promise<{ ok: true }> {
     const username = requireString(input.username, '用户名', { min: 3, max: 64, pattern: /^[^\s/\\]+$/u });
