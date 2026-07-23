@@ -152,15 +152,16 @@ export async function autoApproveAndGenerate(args: {
       .map((s) => d.api.expressionStrategies.approve(projectId, s.id)),
   ]);
 
-  // 4. 审批机会
-  await d.api.opportunities.approve(projectId, opportunity.id);
-
-  // 5. 审批 intelligence（放在最后，与现有 preview 顺序一致：依赖先就绪）。
+  // 4. 审批 intelligence（必须在机会之前：selectOpportunity 会校验
+  // project_intelligence 及其蓝图模块已审批，否则拒绝选中机会）。
   // 注：ProjectIntelligence 的审批态记录在 approvalStatus（status 联合类型不含 'approved'）。
   const intelligence = await d.api.intelligence.get(projectId);
   if (intelligence?.id && intelligence.approvalStatus !== 'approved') {
     await d.api.intelligence.approve(projectId, intelligence.id);
   }
+
+  // 5. 审批机会（依赖 intelligence 已审批）
+  await d.api.opportunities.approve(projectId, opportunity.id);
 
   // 6. 解析预设 + 构建输入
   let preset;

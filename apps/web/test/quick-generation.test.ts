@@ -149,6 +149,18 @@ test('autoApproveAndGenerate approves deps then creates and polls to completion'
   assert.ok(calls.filter((c) => c === 'gen.get').length >= 2);
 });
 
+test('autoApproveAndGenerate approves intelligence before opportunity', async () => {
+  // 默认 makeDeps 的 intelligence.get 返回 { id: 'i1', status: 'draft' }，
+  // 其 approvalStatus 为 undefined（≠ 'approved'），因此 intelligence.approve 一定会触发。
+  const { deps, calls } = makeDeps();
+  const project = { id: 'proj1', name: 'p' } as any;
+  const job = await autoApproveAndGenerate({ project, opportunityId: 'o1', pollIntervalMs: 1, maxPolls: 5, deps: deps as any });
+  assert.equal(job.status, 'completed');
+  assert.ok(calls.includes('intel.approve:i1'), 'intelligence was approved');
+  assert.ok(calls.includes('opp.approve:o1'), 'opportunity was approved');
+  assert.ok(calls.indexOf('intel.approve:i1') < calls.indexOf('opp.approve:o1'), 'intelligence approved before opportunity');
+});
+
 test('autoApproveAndGenerate throws when job fails', async () => {
   const { deps } = makeDeps({
     api: { ...makeDeps().deps.api, generations: {
