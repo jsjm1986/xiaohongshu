@@ -850,8 +850,51 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
 
   if (loading) return <section className="intelligence-flow"><Skeleton lines={10} /></section>;
 
-  return <div className="intelligence-flow">
-    <section className="intelligence-project panel">
+  const stepStates = [
+    {
+      id: "step-1", number: "01", title: "项目内容地图",
+      state: analyzing || intelligence?.status === "analyzing" ? "分析中…" : intelligence?.status === "ready" && blueprintReady ? "已确认" : intelligence?.id ? "待确认" : "未分析",
+      done: intelligence?.status === "ready" && blueprintReady,
+    },
+    {
+      id: "step-2", number: "02", title: "选择信息缺口",
+      state: selectedOpportunity ? "已选 1 张选题" : `${opportunities.length ? `${visibleOpportunities.length} 张候选` : "待生成"}`,
+      done: Boolean(selectedOpportunity),
+    },
+    {
+      id: "step-3", number: "03", title: "关键设置",
+      state: Object.keys(settingOverrides).length ? `已修改 ${Object.keys(settingOverrides).length} 项` : "智能推荐",
+      done: Object.keys(settingOverrides).length > 0,
+    },
+    {
+      id: "step-4", number: "04", title: "源素材与生成",
+      state: selectedAssetIds.length ? `已选 ${selectedAssetIds.length} 张素材` : "可跳过",
+      done: false,
+    },
+  ];
+
+  return <div className="intelligence-flow v2-protocol">
+    <aside className="protocol-rail">
+      <div className="protocol-rail__inner">
+        <span className="v2-sec-label">PROTOCOL</span>
+        <ol>
+          {stepStates.map((stepItem) => (
+            <li key={stepItem.id} className={stepItem.done ? "is-done" : ""}>
+              <button type="button" onClick={() => document.getElementById(stepItem.id)?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+                <i>{stepItem.done ? <Check size={13} /> : stepItem.number}</i>
+                <span><strong>{stepItem.title}</strong><small>{stepItem.state}</small></span>
+              </button>
+            </li>
+          ))}
+        </ol>
+        <div className="protocol-rail__note">
+          <Sparkles size={14} />
+          <p>{selectedOpportunity ? "选题已就绪，确认关键设置后即可预览生成。" : "按步骤完成项目分析与选题，生成按钮在第 4 步。"}</p>
+        </div>
+      </div>
+    </aside>
+    <div className="protocol-main">
+    <section className="intelligence-project panel" id="step-1">
       <header><div><span>第 1 步</span><h2>选择项目，让 AI 建立内容地图</h2><p>行业知识负责发现问题，项目知识负责特色答案与事实边界。</p></div><Badge tone={intelligence?.status === "ready" && blueprintReady ? "positive" : "warning"}>{intelligence?.status === "ready" && !blueprintReady ? "项目模型待确认" : intelligence ? intelligenceLabel[intelligence.status] : "尚未分析"}</Badge></header>
       <div className="intelligence-project__body">
         <Field label="当前项目"><select value={projectId} onChange={(event) => onProject(event.target.value)}>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></Field>
@@ -871,7 +914,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
       </div>
     </section>
 
-    <section className="opportunity-panel panel">
+    <section className="opportunity-panel panel" id="step-2">
       <header>
         <div><span>第 2 步</span><h2>选择一个值得写的信息缺口</h2><p>选题来自行业问题与项目可回答空间的交集，不要求你先写提示词。卡片顺序如有排序，仅采用“机会排序启发式 V1”。</p><p className="opportunity-refresh-note">“换一批”会基于现有蓝图和已确认信息缺口<strong>重新生成一批新选题并追加保留</strong>（约几十秒，消耗一次模型额度）；本批会自动提高随机性并避开已生成过的标题，也可填写方向引导词控制生成重点。<strong>旧选题不会被删除</strong>，可在下方按“未处理 / 已收藏 / 已归档”筛选。</p>{(collectionCounts.collected > 0 || collectionCounts.archived > 0) && (
           <p className="opportunity-collection-summary">
@@ -933,7 +976,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
       {selectedOpportunity && <OpportunityRankDisclosure opportunity={selectedOpportunity} />}
     </section>
 
-    <section className="simple-key-settings panel">
+    <section className="simple-key-settings panel" id="step-3">
       <header>
         <div><span>第 3 步 · 本次生成关键设置</span><h2>重要信息在这里确认，简单模式可以直接生成</h2><p>只保留真正影响写给谁、从哪里进入和必须遵守什么的设置；数值权重等复杂参数继续由模板管理。</p></div>
         <Button variant="ghost" disabled={!Object.keys(settingOverrides).length} icon={<RotateCcw size={15} />} onClick={() => setSettingOverrides({})}>恢复智能推荐</Button>
@@ -942,7 +985,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
       <div className="simple-key-settings__body">
         <div className="simple-editable-settings">
           <div className="simple-preset-context">
-            <div><small>当前模板 <SettingSourceBadge source={selectedPreset ? "preset" : "project"} /></small><strong>{selectedPreset?.name || "项目默认模板"}</strong><p>{selectedPreset?.description || "未手动选择模板，将按项目与系统默认配置生成。"}</p></div>
+            <div><small>生效模板 <SettingSourceBadge source={selectedPreset ? "preset" : "project"} /></small><strong>{selectedPreset?.name || "项目默认模板"}</strong><p>{selectedPreset?.description || "未手动选择模板，将按项目与系统默认配置生成。"}</p></div>
             <Button variant="ghost" onClick={() => document.querySelector(".preset-shelf")?.scrollIntoView({ behavior: "smooth", block: "start" })}>到上方更换模板</Button>
           </div>
 
@@ -982,7 +1025,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
       </div>
     </section>
 
-    <section className="image-library panel">
+    <section className="image-library panel" id="step-4">
       <header><div><span>第 4 步 · 可选</span><h2>选择源素材，让多模态模型观察并参与规划</h2><p>可跳过：不上传也能生成（仅出图片计划与文字简报）。上传原图则让多模态模型观察真实素材、参与图片规划；正式生成时会再次发送原图。</p></div><Button loading={uploading} disabled={!selectedOpportunity} icon={<ImagePlus size={16} />} onClick={() => fileInput.current?.click()}>上传源素材</Button><input ref={fileInput} hidden multiple type="file" accept="image/jpeg,image/png,image/webp" onChange={uploadImages} /></header>
       <div className="image-library-boundary"><Images size={17} /><div><strong>这里的状态上限：源素材观察 / 计划参考</strong><p>批准观察只表示“原图中可见什么”已确认；选中只表示“图片计划可以参考它”。这里不会生成最终图片，也不会产生真实入口截图或实际部署记录。</p></div><Badge tone="warning">不是最终图片资产</Badge></div>
       {assets.length ? <div className="asset-grid">{assets.map((asset) => { const selected = selectedAssetIds.includes(asset.id); return <article className={`asset-card ${selected ? "selected" : ""}`} key={asset.id}><button type="button" className="asset-card__image" onClick={() => setSelectedAssetIds((current) => selected ? current.filter((id) => id !== asset.id) : current.length < 9 ? [...current, asset.id] : current)}><img src={asset.previewUrl || api.imageAssets.contentUrl(projectId, asset.id)} alt={asset.filename} /><span>{selected && <Check size={16} />}</span></button><div><strong>{asset.filename}</strong><small>{asset.analysis?.imageType || "等待源素材分析"} · {asset.approved ? "源素材观察已确认" : asset.status === "ready" ? "AI 源素材观察待确认" : asset.status}</small>{asset.analysis && <p title={asset.analysis.visibleFacts.join("；")}>{asset.analysis.scene || asset.analysis.visibleFacts.slice(0, 2).join("；") || "模型未提取到可见事实"}</p>}<div>{selected && <Badge tone="blue">计划参考源素材</Badge>}{asset.approved ? <Badge tone="positive">批准的源素材可见观察</Badge> : asset.status === "ready" ? <button type="button" onClick={() => void approveAsset(asset)}>确认上述源素材观察</button> : null}{asset.analysis && asset.latestAnalysisId ? <button type="button" onClick={() => openQualityEditor(asset)}><Pencil size={13} /> 编辑质量评估</button> : null}</div></div></article>; })}</div> : <EmptyState icon={<Images size={24} />} title="源素材图库还是空的" description="可不选源素材，只生成结构化图片计划和文字简报；上传原图也不会在这里生成最终图片资产。" />}
@@ -1088,5 +1131,6 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
         <Field label="评论线程职责"><textarea rows={2} value={editingStrategy?.commentPolicy || ""} onChange={(event) => setEditingStrategy((current) => ({ ...current, commentPolicy: event.target.value }))} /></Field>
       </div>
     </Modal>
+    </div>
   </div>;
 }
