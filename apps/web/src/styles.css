@@ -2423,3 +2423,164 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .resolved-config summary:hover, .simple-constraints > summary:hover {
   color: var(--ink); background: rgb(30 41 36 / 4%); border-radius: 6px;
 }
+
+/* ==========================================================================
+   v2 全站结构语言：mono 分区标 + 发丝线页眉 + booktabs 表格 + 读数带
+   把仪表盘验证过的骨架提升到共享组件，让所有页面获得同一套设计骨架。
+   ========================================================================== */
+
+/* ---- 页眉：mono 分区标 + 发丝下线 + 更大的自信标题 ---- */
+.v2 .page-header { position: relative; padding-bottom: 22px; margin-bottom: 30px; }
+.v2 .page-header::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; border-bottom: 1px solid var(--v2-line); }
+.v2 .page-header .eyebrow {
+  display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px;
+  font-family: var(--v2-mono); font-size: 10px; font-weight: 500;
+  letter-spacing: 0.18em; color: var(--v2-muted-2); text-transform: uppercase;
+}
+.v2 .page-header .eyebrow::after { content: ""; width: 32px; border-top: 1px solid var(--v2-line-dark); transform: translateY(-3px); }
+.v2 .page-header h1 { font-size: 30px; font-weight: 750; letter-spacing: -0.025em; }
+.v2 .page-header p { font-size: var(--v2-fs-md); color: var(--v2-muted); }
+
+/* ---- 数据表：booktabs 版式（墨线顶/底 + mono 表头 + 发丝行线） ---- */
+.v2 .data-table__head {
+  min-height: 40px; background: transparent;
+  border-top: 1.5px solid var(--v2-ink); border-bottom: 1px solid var(--v2-line-dark);
+  font-family: var(--v2-mono); font-size: 10px; font-weight: 500;
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--v2-muted-2);
+}
+.v2 .data-table__row { min-height: 64px; border-top: 0; border-bottom: 1px solid var(--v2-line); font-size: 12.5px; }
+.v2 .data-table__row:last-child { border-bottom: 1.5px solid var(--v2-ink); }
+.v2 .data-table__row:hover { background: var(--v2-unknown-soft); }
+.v2 .data-table__row strong { font-size: 13px; font-weight: 650; }
+.v2 .data-table__row small { color: var(--v2-muted-2); }
+.v2 .data-table .version-cell strong { font-family: var(--v2-mono); font-size: 12.5px; font-weight: 600; }
+.v2 .data-table .file-cell strong { font-size: 13px; font-weight: 650; color: var(--v2-ink); }
+.v2 .table-toolbar { border-bottom: 1px solid var(--v2-line); }
+.v2 .table-toolbar__count { font-family: var(--v2-mono); font-size: 11px; color: var(--v2-muted-2); }
+
+/* ---- 历史页读数带：发丝分隔 + tabular 大数字 + 幽灵图标（保留语义色 glyph） ---- */
+.v2 .history-summary { gap: 0; padding: 6px 0; border-radius: var(--v2-radius); }
+.v2 .history-summary > div:not(.history-summary__scope) { padding: 12px 22px; gap: 12px; }
+.v2 .history-summary > div:not(.history-summary__scope) + div:not(.history-summary__scope) { border-left: 1px solid var(--v2-line); }
+.v2 .history-summary__icon { width: auto; height: auto; background: transparent; border-radius: 0; }
+.v2 .history-summary p strong { font-size: 24px; font-weight: 750; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.v2 .history-summary p small { font-size: 11px; color: var(--v2-muted); }
+.v2 .history-summary__scope { padding-right: 14px; }
+
+/* ---- 知识库横幅：mono 标 + tabular 统计数字 ---- */
+.v2 .knowledge-overview { padding: 18px 22px; gap: 16px; }
+.v2 .knowledge-overview > div:nth-child(2) > span { font-family: var(--v2-mono); font-size: 10px; font-weight: 500; letter-spacing: 0.14em; }
+.v2 .knowledge-overview h2 { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
+.v2 .knowledge-overview p { font-size: 12.5px; color: var(--v2-muted); }
+.v2 .knowledge-overview__stats strong { font-size: 22px; font-weight: 750; font-variant-numeric: tabular-nums; }
+.v2 .knowledge-overview__stats > span { font-size: 11px; gap: 2px; }
+.v2 .page-header .eyebrow::before { content: none; }
+
+/* ---- 结果页候选对照矩阵：booktabs ---- */
+.v2 .candidate-matrix { border-top: 1.5px solid var(--v2-ink); border-bottom: 1.5px solid var(--v2-ink); }
+.v2 .candidate-matrix__row { min-height: 36px; border-top: 0; border-bottom: 1px solid var(--v2-line); }
+.v2 .candidate-matrix__row:last-child { border-bottom: 0; }
+.v2 .candidate-matrix__head { border-bottom: 1px solid var(--v2-line-dark); }
+.v2 .candidate-matrix__head span, .v2 .candidate-matrix__head strong {
+  font-family: var(--v2-mono); font-size: 10px; font-weight: 500;
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--v2-muted-2);
+}
+.v2 .candidate-matrix__row > span { color: var(--v2-muted); font-size: 11px; }
+.v2 .candidate-matrix__row > b { font-variant-numeric: tabular-nums; }
+
+/* ---- 共享 Modal：更安静的底、书版头、收脚 ---- */
+.v2 .modal-backdrop { background: rgb(24 35 31 / 42%); backdrop-filter: blur(5px); }
+.v2 .modal { border-radius: var(--v2-radius-lg); box-shadow: 0 24px 70px rgb(24 35 31 / 24%); }
+.v2 .modal__header { padding: 22px 24px 16px; border-bottom: 1px solid var(--v2-line); }
+.v2 .modal__header h2 { font-size: 19px; font-weight: 750; letter-spacing: -0.015em; color: var(--v2-ink); }
+.v2 .modal__header p { font-size: 12.5px; color: var(--v2-muted); line-height: 1.6; }
+.v2 .modal__body { padding: 22px 24px; }
+.v2 .modal__footer { padding: 14px 24px; border-top: 1px solid var(--v2-line); background: var(--v2-unknown-soft); border-radius: 0 0 var(--v2-radius-lg) var(--v2-radius-lg); }
+.v2 .modal .field__label { font-size: 12px; font-weight: 650; color: var(--v2-ink-2); }
+.v2 .modal .field small { color: var(--v2-muted-2); font-size: 11.5px; line-height: 1.55; }
+
+/* ---- 项目卡：悬浮书版卡 ---- */
+.v2 .project-card { padding: 22px; border-radius: var(--v2-radius); transition: box-shadow .16s, transform .16s, border-color .16s; }
+.v2 .project-card:not(.project-card--new):hover { box-shadow: var(--v2-shadow-md); transform: translateY(-2px); border-color: var(--v2-line-dark); }
+.v2 .project-card > header { margin-bottom: 18px; }
+.v2 .project-card h2 { font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
+.v2 .project-card > p { font-size: 12.5px; color: var(--v2-muted); }
+.v2 .project-card__stats { padding: 13px 0; border-top: 1px solid var(--v2-line); font-size: 12px; color: var(--v2-muted); }
+.v2 .project-card__stats strong { font-weight: 700; font-variant-numeric: tabular-nums; }
+.v2 .project-card__stats svg { color: var(--v2-muted-2); }
+.v2 .project-card__formula { border-radius: var(--v2-radius-sm); background: var(--v2-unknown-soft); font-family: var(--v2-mono); font-size: 11px; }
+.v2 .project-card__formula strong { font-family: var(--v2-mono); font-weight: 600; }
+.v2 .project-card > footer { margin-top: 16px; padding-top: 13px; border-top: 1px solid var(--v2-line); }
+.v2 .project-card > footer small { font-size: 11px; }
+.v2 .project-card > footer button { padding: 5px 9px; border-radius: 7px; font-size: 12px; }
+
+/* ---- 公式页：mono 版本记录 + 紫色 AI 语义 ---- */
+.v2 .version-list h2 { font-size: 13px; font-weight: 700; }
+.v2 .version-list > button { border-bottom: 1px solid var(--v2-line); }
+.v2 .version-list > button strong { font-family: var(--v2-mono); font-size: 12.5px; font-weight: 600; }
+.v2 .version-list > button small { font-size: 11.5px; color: var(--v2-muted); }
+.v2 .version-list > button i { font-size: 10.5px; }
+.v2 .version-list > button.selected { background: var(--v2-ai-soft); box-shadow: inset 3px 0 0 var(--v2-ai); }
+.v2 .formula-detail__header > div:nth-child(2) > span { font-family: var(--v2-mono); font-size: 10px; font-weight: 500; letter-spacing: 0.14em; text-transform: uppercase; }
+.v2 .formula-detail__header h2 { font-size: 19px; font-weight: 750; letter-spacing: -0.015em; }
+.v2 .formula-detail__header p { font-size: 12px; }
+.v2 .formula-meta { padding: 16px 22px; background: var(--v2-surface); border-bottom: 1px solid var(--v2-line); }
+.v2 .formula-meta > span { border-right: 1px solid var(--v2-line); }
+.v2 .formula-meta small { font-family: var(--v2-mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--v2-muted-2); }
+.v2 .formula-meta strong { font-size: 13px; font-weight: 650; }
+.v2 .formula-meta svg { color: var(--v2-muted-2); }
+.v2 .formula-id { font-family: var(--v2-mono); font-size: 10.5px; font-weight: 600; }
+.v2 .formula-equation { background: var(--v2-ai-soft); border-top: 1px solid #e3dcf7; }
+.v2 .formula-equation > span { font-family: var(--v2-mono); font-size: 10px; font-weight: 500; }
+.v2 .formula-equation p { font-size: 11.5px; }
+
+/* ---- 生成向导：面板头收边 + 字级 ---- */
+.v2 .intelligence-flow > .panel > header { padding-bottom: 16px; border-bottom: 1px solid var(--v2-line); }
+.v2 .intelligence-flow > .panel > header > div:first-child > span { letter-spacing: 0.14em; }
+.v2 .intelligence-flow > .panel > header h2 { font-size: 18px; font-weight: 750; letter-spacing: -0.015em; }
+.v2 .intelligence-flow > .panel > header p { font-size: 12.5px; line-height: 1.6; }
+.v2 .simple-current-info { background: var(--v2-unknown-soft); border-color: var(--v2-line); }
+.v2 .simple-local-fields { background: var(--v2-unknown-soft); }
+.v2 .simple-constraints__body { background: var(--v2-unknown-soft); }
+.v2 .intelligence-run { background: var(--v2-unknown-soft); }
+.v2 .intelligence-status { background: var(--v2-unknown-soft); }
+
+/* ---- 设置模式工作台：面板字级 + 视图条 mono 标 ---- */
+.v2 .settings-panel > header { padding: 16px 20px 14px; border-bottom: 1px solid var(--v2-line); }
+.v2 .settings-panel > header h2 { font-size: 15px; font-weight: 700; letter-spacing: -0.01em; }
+.v2 .settings-panel > header p { font-size: 12px; }
+.v2 .settings-panel__body { padding: 20px; }
+.v2 .advanced-viewbar > div:first-child > span { font-family: var(--v2-mono); font-size: 10px; font-weight: 500; letter-spacing: 0.14em; text-transform: uppercase; }
+.v2 .advanced-viewbar > div:first-child p { font-size: 12px; }
+
+/* ---- 结果页：包区块 mono 编号标 + 右栏字级 ---- */
+.v2 .package-section { border-bottom: 1px solid var(--v2-line); }
+.v2 .package-section__label > span { font-family: var(--v2-mono); font-size: 10px; font-weight: 500; letter-spacing: 0.1em; }
+.v2 .package-section__label > strong { font-size: 13px; font-weight: 700; letter-spacing: -0.005em; }
+.v2 .package-section--title h2 { font-size: 22px; letter-spacing: -0.02em; }
+.v2 .revision-box p { font-size: 11.5px; }
+.v2 .revision-box textarea { font-size: 12.5px; }
+.v2 .revision-box > small { font-size: 10.5px; }
+
+/* ---- 设置/团队：导航刻度 + booktabs 行 + 字级 ---- */
+.v2 .settings-nav button.active { background: var(--v2-unknown-soft); box-shadow: inset 3px 0 0 var(--v2-brand); }
+.v2 .settings-nav strong { font-size: 12.5px; font-weight: 650; color: var(--v2-ink-2); }
+.v2 .settings-nav button.active strong { color: var(--v2-ink); }
+.v2 .settings-nav small { font-size: 11px; }
+.v2 .team-row { min-height: 64px; border-top: 0; border-bottom: 1px solid var(--v2-line); font-size: 12px; }
+.v2 .team-row--head { min-height: 38px; background: transparent; border-bottom: 1px solid var(--v2-line-dark); font-family: var(--v2-mono); font-size: 10px; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: var(--v2-muted-2); }
+.v2 .team-row select { font-size: 12px; }
+.v2 .permission-grid code { font-family: var(--v2-mono); font-size: 11px; }
+.v2 .permission-grid label { font-size: 11px; }
+.v2 .api-key-list > div { border-top: 0; border-bottom: 1px solid var(--v2-line); font-size: 12px; }
+.v2 .api-key-list code { font-size: 11px; }
+.v2 .api-key-list button { font-size: 11px; }
+.v2 .provider-options strong { font-size: 13px; font-weight: 650; }
+.v2 .provider-options p { font-size: 11.5px; }
+
+/* ---- 研究页：tab 计数 mono 化 ---- */
+.v2 .research-tabs { border-radius: var(--v2-radius); }
+.v2 .research-tabs button { font-size: 12px; }
+.v2 .research-tabs button i { font-family: var(--v2-mono); font-size: 9.5px; font-variant-numeric: tabular-nums; }
+.v2 .research-boundary-grid strong { font-size: 12.5px; }
+.v2 .research-boundary-grid p { font-size: 11.5px; }
