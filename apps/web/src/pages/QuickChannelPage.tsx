@@ -6,6 +6,7 @@ import { ProjectKnowledgeTab } from '../components/quick/ProjectKnowledgeTab';
 import { TopicTab } from '../components/quick/TopicTab';
 import { ConfigTab } from '../components/quick/ConfigTab';
 import { ResultTab } from '../components/quick/ResultTab';
+import { HistoryTab } from '../components/quick/HistoryTab';
 import { type QuickCandidateView } from '../lib/quick-generation';
 import { tabReachable, clearDownstreamOfProject, clearResults, type QuickTab } from '../lib/quick-channel-state';
 import type { ContentPreset, GenerationJob, Project, TopicOpportunity } from '../types';
@@ -133,7 +134,11 @@ export function QuickChannelPage() {
             results={results} setBusy={setBusy} fail={fail} onGenerated={onGenerated} goTo={goTo}
           />
         )}
-        {activeTab === 'history' && <div>[历史]</div>}
+        {activeTab === 'history' && (
+          <HistoryTab
+            project={project} history={history} busy={busy} setBusy={setBusy} fail={fail} setHistory={setHistory}
+          />
+        )}
       </div>
     </div>
   );

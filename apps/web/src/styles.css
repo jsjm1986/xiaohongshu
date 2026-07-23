@@ -2878,3 +2878,4 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .qc-topic.selected { border-color: var(--coral); }
 .qc-history-list { display: flex; flex-direction: column; gap: 10px; }
 .qc-history-item { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+.qc-history-candidate { border-top: 1px dashed var(--border); margin-top: 10px; padding-top: 10px; }
