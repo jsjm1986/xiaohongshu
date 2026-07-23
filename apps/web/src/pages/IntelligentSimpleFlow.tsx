@@ -3,11 +3,11 @@ import {
   BrainCircuit,
   Check,
   ChevronDown,
-  ChevronRight,
   ImagePlus,
   Images,
   Info,
   Layers3,
+  ListChecks,
   Lock,
   Pencil,
   Plus,
@@ -211,12 +211,6 @@ const intelligenceLabel: Record<ProjectIntelligence["status"], string> = {
   rejected: "本版分析已退回",
 };
 
-// Backend analyzeProject runs three sequential model stages (blueprint →
-// planning gaps/strategies → opportunities). The request blocks until all
-// finish, so there is no server-side per-stage signal to poll; we advance
-// these labels on a timer purely to show the user work is progressing.
-const analysisStages = ["正在生成行业与项目蓝图…", "正在梳理信息缺口与表达策略…", "正在发现选题机会…"];
-
 const simpleRandomizationDimensions: PlanningRandomizationDimension[] = [
   "strategy",
   "opening",
@@ -255,6 +249,16 @@ const settingSourceLabel: Record<SimpleSettingSource, string> = {
 
 function SettingSourceBadge({ source }: { source: SimpleSettingSource }) {
   return <Badge tone={source === "user" ? "blue" : source === "opportunity" ? "purple" : source === "preset" ? "positive" : "neutral"}>{settingSourceLabel[source]}</Badge>;
+}
+
+function TaskProgressRow({ text, task }: { text: string; task: AnalysisTask | null }) {
+  const active = task !== null && (task.status === "running" || task.status === "queued");
+  return <div className="task-progress" role="status">
+    <RefreshCw size={15} className="spin" />
+    <span>{text}</span>
+    <small>{active ? `后台进行中 · 第 ${task.attemptCount} 次尝试` : "后台进行中"}</small>
+    <i className="task-progress__track"><b /></i>
+  </div>;
 }
 
 function OpportunityRankDisclosure({ opportunity }: { opportunity: TopicOpportunity }) {
@@ -296,9 +300,12 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
-  const [analyzeStage, setAnalyzeStage] = useState(0);
   const [modulesExpanded, setModulesExpanded] = useState(false);
   const [reanalyzeOpen, setReanalyzeOpen] = useState(false);
+  const [batchMode, setBatchMode] = useState(false);
+  const [batchSelected, setBatchSelected] = useState<Set<string>>(new Set());
+  const [batchWorking, setBatchWorking] = useState(false);
+  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [approving, setApproving] = useState(false);
@@ -341,7 +348,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     if (!projectId) return Promise.resolve();
     return api.intelligence.tasks.list(projectId).then((tasks) => {
       const sorted = [...tasks].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-      setLatestTask(sorted[0] ?? null);
+      setLatestTask(sorted.find((task) => task.kind === "project") ?? null);
     }).catch(() => { /* non-fatal */ });
   };
 
@@ -376,8 +383,23 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     setSettingOverrides({});
     setShowAllOpportunities(false);
     setModulesExpanded(false);
+    setBatchMode(false);
+    setBatchSelected(new Set());
     void load();
   }, [projectId]);
+
+  // 批量管理模式:Esc 退出并清空选择集
+  useEffect(() => {
+    if (!batchMode) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setBatchMode(false);
+        setBatchSelected(new Set());
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [batchMode]);
 
   useEffect(() => {
     if (!intelligence || !["queued", "analyzing"].includes(intelligence.status)) return;
@@ -393,6 +415,13 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     }, 1800);
     return () => window.clearInterval(timer);
   }, [intelligence?.status, projectId]);
+
+  // 真实后台进度：分析/换一批进行中轮询任务状态(状态与尝试次数均来自 analysis_tasks)
+  useEffect(() => {
+    if (!refreshing && !analyzing) return;
+    const timer = window.setInterval(() => { void refreshLatestTask(); }, 1800);
+    return () => window.clearInterval(timer);
+  }, [refreshing, analyzing, projectId]);
 
   // Load the pickable knowledge sections once per project when the gap editor
   // opens; cached so reopening the modal does not refetch.
@@ -444,15 +473,17 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     }),
     [opportunities, collectionFilter],
   );
-  const collectionCounts = useMemo(() => {
+  const filterCounts = useMemo(() => {
+    let active = 0;
     let collected = 0;
     let archived = 0;
     for (const item of opportunities) {
       const status = item.collectionStatus ?? "active";
       if (status === "collected") collected += 1;
       else if (status === "archived") archived += 1;
+      else active += 1;
     }
-    return { collected, archived };
+    return { all: active + collected, active, collected, archived };
   }, [opportunities]);
   const blueprintReady = blueprintModules.length === Object.keys(blueprintModuleMeta).length
     && blueprintModules.every((module) => module.status === "approved");
@@ -495,10 +526,6 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
 
   const analyzeProject = async () => {
     setAnalyzing(true);
-    setAnalyzeStage(0);
-    const stageTimer = window.setInterval(() => {
-      setAnalyzeStage((current) => Math.min(current + 1, analysisStages.length - 1));
-    }, 6000);
     try {
       const result = await api.intelligence.analyze(projectId, true);
       setIntelligence(result.intelligence);
@@ -512,21 +539,22 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     } catch (error) {
       toast.push(error instanceof Error ? error.message : "项目分析失败", "error");
     } finally {
-      window.clearInterval(stageTimer);
       setAnalyzing(false);
-      setAnalyzeStage(0);
     }
   };
 
   const runRefresh = async (guidanceArg?: string) => {
+    // 弹窗即关:进度移到第 2 步面板内联真实任务状态,不做假百分比
+    setRefreshOpen(false);
+    setGuidance("");
     setRefreshing(true);
     try {
       const result = await api.opportunities.refresh(projectId, guidanceArg?.trim() || undefined);
       setOpportunities(result.items);
       setSelectedOpportunityId("");
       api.promptTemplates.list(projectId).then(setTemplates).catch(() => undefined);
-      setRefreshOpen(false);
       toast.push(`已追加一批新选题（${result.items.length} 个），旧选题已保留`, "info");
+      void refreshLatestTask();
     } catch (error) {
       toast.push(error instanceof Error ? error.message : "选题刷新失败", "error");
     } finally {
@@ -548,6 +576,48 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
       toast.push(feedback[next].text, feedback[next].kind);
     } catch (error) {
       toast.push(error instanceof Error ? error.message : "操作失败", "error");
+    }
+  };
+
+  const toggleBatch = (id: string) => {
+    setBatchSelected((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const batchSetCollection = async (status: "active" | "collected" | "archived") => {
+    if (!batchSelected.size || batchWorking) return;
+    setBatchWorking(true);
+    const label = status === "collected" ? "收藏" : status === "archived" ? "归档" : "恢复为未处理";
+    try {
+      await Promise.all([...batchSelected].map((id) => api.opportunities.setCollection(projectId, id, status)));
+      setOpportunities((current) => current.map((opp) => batchSelected.has(opp.id) ? { ...opp, collectionStatus: status } : opp));
+      toast.push(`已${label} ${batchSelected.size} 张选题`);
+      setBatchSelected(new Set());
+    } catch (error) {
+      toast.push(error instanceof Error ? error.message : "批量操作失败", "error");
+    } finally {
+      setBatchWorking(false);
+    }
+  };
+
+  const batchDelete = async () => {
+    if (!batchSelected.size || batchWorking) return;
+    setBatchWorking(true);
+    try {
+      await Promise.all([...batchSelected].map((id) => api.opportunities.remove(projectId, id)));
+      setOpportunities((current) => current.filter((opp) => !batchSelected.has(opp.id)));
+      if (selectedOpportunityId && batchSelected.has(selectedOpportunityId)) setSelectedOpportunityId("");
+      toast.push(`已删除 ${batchSelected.size} 张选题`);
+      setBatchSelected(new Set());
+      setBatchDeleteOpen(false);
+    } catch (error) {
+      toast.push(error instanceof Error ? error.message : "批量删除失败", "error");
+    } finally {
+      setBatchWorking(false);
     }
   };
 
@@ -916,9 +986,8 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
         <Field label="当前项目"><select value={projectId} onChange={(event) => onProject(event.target.value)}>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></Field>
         <div className="intelligence-status"><BrainCircuit size={22} /><div><strong>{intelligence?.entity || "等待识别项目核心名词"}</strong><p>{intelligence?.industry || "分析后形成行业概念树、决策任务和信息缺口池。"}</p>{!analysisReady && staleReasons.length ? <small>需要更新：{staleReasons.join("；")}</small> : null}{intelligence?.status === "draft" ? <small>AI 生成的是待审核规划，不会自动升级为项目事实。</small> : null}{analysisReady ? <small className="intelligence-ready-note">{blueprintModules.length}/{Object.keys(blueprintModuleMeta).length} 创作模型已确认</small> : null}</div><div className="panel-actions">{isAnalyzed && !analysisReady && <Button loading={approving} icon={<Check size={15} />} onClick={approvePlanningResources}>逐项确认本批模型</Button>}{analysisReady && <Button variant="ghost" icon={<ChevronDown size={15} className={modulesExpanded ? "flip" : ""} />} onClick={() => setModulesExpanded((value) => !value)}>{modulesExpanded ? "收起模型" : "查看模型"}</Button>}<Button variant={isAnalyzed ? "ghost" : "primary"} loading={analyzing || intelligence?.status === "analyzing"} icon={<RefreshCw size={15} />} onClick={requestAnalyze}>{isAnalyzed ? "重新分析" : "分析项目"}</Button></div></div>
         {analysisReady && staleReasons.length > 0 && <div className="intelligence-stale-note"><TriangleAlert size={15} /><span>知识库或公式有更新：{staleReasons.join("；")}。建议重新分析后再正式生成。</span><button type="button" onClick={requestAnalyze}>重新分析</button></div>}
-        {analyzing && <div className="analysis-progress"><div className="analysis-progress__head"><RefreshCw size={16} className="spin" /><span>{analysisStages[analyzeStage]}</span><small>{analyzeStage + 1}/{analysisStages.length}</small></div><div className="analysis-progress__track"><span style={{ width: `${((analyzeStage + 1) / analysisStages.length) * 100}%` }} /></div></div>}
+        {(analyzing || (!refreshing && latestTask && (latestTask.status === "running" || latestTask.status === "queued"))) && <TaskProgressRow text={analyzing ? "三段模型串联运行：蓝图 → 缺口与策略 → 选题" : "后台分析进行中，完成前请勿离开或重复触发"} task={latestTask} />}
         {latestTask && latestTask.status === "failed" && <div className="blueprint-missing"><TriangleAlert size={16} /><span>后台分析失败（已尝试 {latestTask.attemptCount} 次）：{latestTask.error || "未知错误"}。请重新分析，或检查项目知识后再试。</span></div>}
-        {latestTask && (latestTask.status === "running" || latestTask.status === "queued") && <div className="blueprint-missing"><RefreshCw size={16} /><span>后台分析进行中…（第 {latestTask.attemptCount} 次尝试）完成前请勿离开或重复触发。</span></div>}
         {showCardWall ? <>
           <p className="blueprint-grid-note">这些模型的内容会作为项目参数进入生成；静态提示词不会替你补行业角色和场景。</p>
           <div className="blueprint-module-grid">
@@ -946,64 +1015,64 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
         <div className="panel-actions">
           <Button variant="ghost" onClick={() => { setPoolTab("gaps"); setPoolOpen(true); }} icon={<Layers3 size={15} />}>信息缺口池</Button>
           <Button variant="ghost" onClick={() => { setPoolTab("strategies"); setPoolOpen(true); }} icon={<Sparkles size={15} />}>表达策略池</Button>
-          <Button loading={refreshing} disabled={intelligence?.status !== "ready" || !blueprintReady} onClick={() => setRefreshOpen(true)} icon={<RefreshCw size={15} />}>换一批</Button>
+          <Button loading={refreshing} disabled={intelligence?.status !== "ready" || !blueprintReady} title="重新生成一批新选题并追加保留；旧选题不会被删除" onClick={() => setRefreshOpen(true)} icon={<RefreshCw size={15} />}>换一批</Button>
         </div>
       </header>
-      <div className="opportunity-notes">
-        <p className="opportunity-refresh-note">“换一批”会基于现有蓝图和已确认信息缺口<strong>重新生成一批新选题并追加保留</strong>（约几十秒，消耗一次模型额度）；本批会自动提高随机性并避开已生成过的标题，也可填写方向引导词控制生成重点。<strong>旧选题不会被删除</strong>，可在下方按“未处理 / 已收藏 / 已归档”筛选。</p>
-        {(collectionCounts.collected > 0 || collectionCounts.archived > 0) && (
-          <p className="opportunity-collection-summary">
-            {collectionCounts.collected > 0 && <button type="button" onClick={() => setCollectionFilter("collected")}>★ 已收藏 {collectionCounts.collected}</button>}
-            {collectionCounts.collected > 0 && collectionCounts.archived > 0 && <span aria-hidden="true">·</span>}
-            {collectionCounts.archived > 0 && <button type="button" onClick={() => setCollectionFilter("archived")}>已归档 {collectionCounts.archived}</button>}
-          </p>
-        )}
-      </div>
-      <div className="opportunity-ranking-boundary"><Info size={16} /><div><strong>排序只帮助比较当前候选，不证明平台效果</strong><p>OpportunityRankHeuristicV1 使用固定但未标定的内部权重；它不是 F28 的机会公式，不是需求、竞品、阅读量或转化因果预测。输入 unknown 的卡片保持待复核，不会显示成 0 分。</p></div></div>
       {opportunities.length > 0 && (
         <div className="opportunity-filter">
           {(["all", "active", "collected", "archived"] as const).map((filter) => (
             <button type="button" key={filter} className={collectionFilter === filter ? "chip chip--active" : "chip"} onClick={() => setCollectionFilter(filter)}>
-              {{ all: "未归档", active: "未处理", collected: "已收藏", archived: "已归档" }[filter]}
+              {{ all: "未归档", active: "未处理", collected: "已收藏", archived: "已归档" }[filter]} <b>{filterCounts[filter]}</b>
             </button>
           ))}
+          <button type="button" className={`batch-toggle ${batchMode ? "is-active" : ""}`} onClick={() => { setBatchMode((value) => !value); setBatchSelected(new Set()); }}><ListChecks size={14} />{batchMode ? "退出批量" : "批量管理"}</button>
+          <span className="opportunity-ranking-note" title="OpportunityRankHeuristicV1 使用固定但未标定的内部权重；输入 unknown 的卡片保持待复核，不会显示成 0 分；选中卡片后，下方显示完整排序审计与输入来源。">排序只帮助比较当前候选，不证明平台效果</span>
         </div>
       )}
+      {refreshing && <TaskProgressRow text="正在基于已确认的信息缺口生成新选题，约几十秒" task={latestTask} />}
       {visibleOpportunities.length ? (
         <div className="opportunity-grid">
           {(showAllOpportunities ? visibleOpportunities : visibleOpportunities.slice(0, 12)).map((item) => { const rankView = resolveOpportunityRankView(item); const collectionStatus = item.collectionStatus ?? "active"; return (
-            <button type="button" key={item.id} className={`opportunity-card ${selectedOpportunityId === item.id ? "selected" : ""} ${collectionStatus === "collected" ? "is-collected" : ""} ${collectionStatus === "archived" ? "is-archived" : ""}`} onClick={() => { setSelectedOpportunityId(item.id); setSelectedAssetIds(item.suggestedImageAssetIds || []); }}>
-              <div>
-                <Badge tone={item.answerability === "approved" ? "positive" : item.answerability === "verifiable" ? "warning" : "neutral"}>{item.answerability === "approved" ? "有批准答案" : item.answerability === "verifiable" ? "可给核验方法" : "保留未知"}</Badge>
-                <Badge tone={item.status === "approved" ? "positive" : "neutral"}>{item.status === "approved" ? "选题已确认" : "AI 草案"}</Badge>
-                {item.coverageStatus && <Badge>{item.coverageStatus === "new" ? "近期未写" : "近期覆盖"}</Badge>}
-              </div>
-              <div className={`opportunity-card__rank ${rankView.sortable ? "is-sortable" : "needs-review"}`}>
-                <div className="opportunity-card__rank-info">
-                  <strong>{rankView.title}</strong>
-                  <Badge tone={rankView.sortable ? "positive" : "warning"}>{rankView.valueLabel}</Badge>
-                  {collectionStatus === "collected" && <span className="opportunity-card__state opportunity-card__state--collected"><Star size={11} className="filled" /> 已收藏</span>}
-                  {collectionStatus === "archived" && <span className="opportunity-card__state opportunity-card__state--archived"><Archive size={11} /> 已归档</span>}
-                  {rankView.unknownMetrics.length > 0 && <small>unknown：{rankView.unknownMetrics.map((metric) => metric).join("、")}</small>}
-                </div>
-                <div className="opportunity-card__rank-actions">
-                  <span className="opportunity-card__edit" role="button" tabIndex={0} title={collectionStatus === "collected" ? "取消收藏" : "收藏"} onClick={(event) => { event.stopPropagation(); void toggleCollection(item, "collected"); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); void toggleCollection(item, "collected"); } }}><Star size={13} className={collectionStatus === "collected" ? "filled" : ""} /> {collectionStatus === "collected" ? "取消收藏" : "收藏"}</span>
-                  <span className="opportunity-card__edit" role="button" tabIndex={0} title={collectionStatus === "archived" ? "取消归档" : "归档"} onClick={(event) => { event.stopPropagation(); void toggleCollection(item, "archived"); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); void toggleCollection(item, "archived"); } }}><Archive size={13} /> {collectionStatus === "archived" ? "取消归档" : "归档"}</span>
-                  <span className="opportunity-card__edit" role="button" tabIndex={0} onClick={(event) => { event.stopPropagation(); setEditingOpportunity(item); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); setEditingOpportunity(item); } }}><Pencil size={13} /> 编辑度量</span>
-                  <span className="opportunity-card__edit opportunity-card__edit--danger" role="button" tabIndex={0} onClick={(event) => { event.stopPropagation(); void deleteOpportunity(item); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); void deleteOpportunity(item); } }}><Trash2 size={13} /> 删除</span>
-                </div>
-              </div>
+            <button type="button" key={item.id} className={`opportunity-card ${batchMode ? "is-batch" : ""} ${batchSelected.has(item.id) ? "is-batch-selected" : ""} ${selectedOpportunityId === item.id ? "selected" : ""} ${collectionStatus === "collected" ? "is-collected" : ""} ${collectionStatus === "archived" ? "is-archived" : ""}`} onClick={() => { if (batchMode) { toggleBatch(item.id); return; } setSelectedOpportunityId(item.id); setSelectedAssetIds(item.suggestedImageAssetIds || []); }}>
+              {batchMode && <span className={`opportunity-card__check ${batchSelected.has(item.id) ? "is-checked" : ""}`} aria-hidden="true">{batchSelected.has(item.id) && <Check size={13} />}</span>}
+              <span className={`opportunity-card__star ${collectionStatus === "collected" ? "is-on" : ""}`} role="button" tabIndex={0} title={collectionStatus === "collected" ? "取消收藏" : "收藏"} onClick={(event) => { event.stopPropagation(); void toggleCollection(item, "collected"); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); void toggleCollection(item, "collected"); } }}><Star size={15} className={collectionStatus === "collected" ? "filled" : ""} /></span>
               <h3>{item.title}</h3>
               <p>{item.summary || item.coreQuestion}</p>
-              <small><strong>为什么值得写：</strong>{item.whyValuable}</small>
-              {item.projectAngle && <small><strong>项目特色：</strong>{item.projectAngle}</small>}
-              <span>{selectedOpportunityId === item.id ? <Check size={15} /> : <ChevronRight size={15} />}</span>
+              <div className="opportunity-card__basis">
+                <div className="basis-row"><small>为什么值得写</small><span>{item.whyValuable}</span></div>
+                {item.projectAngle && <div className="basis-row"><small>项目特色</small><span>{item.projectAngle}</span></div>}
+              </div>
+              <div className={`opportunity-card__meta ${rankView.sortable ? "is-sortable" : "needs-review"}`}>
+                <span className="opportunity-card__dots">
+                  <span className="opportunity-card__dot"><i className={`dot dot--${item.answerability === "approved" ? "ok" : item.answerability === "verifiable" ? "warn" : "unknown"}`} />{item.answerability === "approved" ? "有批准答案" : item.answerability === "verifiable" ? "可给核验方法" : "保留未知"}</span>
+                  <span className="opportunity-card__dot"><i className={`dot dot--${item.status === "approved" ? "ok" : "unknown"}`} />{item.status === "approved" ? "选题已确认" : "AI 草案"}</span>
+                  {item.coverageStatus && <span className="opportunity-card__dot"><i className="dot dot--unknown" />{item.coverageStatus === "new" ? "近期未写" : "近期覆盖"}</span>}
+                </span>
+                <span className="opportunity-card__score" title={`${rankView.title} · 排序只帮助比较当前候选，不证明平台效果${rankView.unknownMetrics.length ? `；unknown：${rankView.unknownMetrics.join("、")}` : ""}`}>{rankView.sortable ? `${rankView.valueLabel}${rankView.rankLabel ? ` · ${rankView.rankLabel}` : ""}` : rankView.stateLabel}</span>
+                <span className="opportunity-card__tools">
+                  <span className="opportunity-card__edit" role="button" tabIndex={0} title={collectionStatus === "archived" ? "取消归档" : "归档"} onClick={(event) => { event.stopPropagation(); void toggleCollection(item, "archived"); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); void toggleCollection(item, "archived"); } }}><Archive size={13} /></span>
+                  <span className="opportunity-card__edit" role="button" tabIndex={0} title="编辑度量" onClick={(event) => { event.stopPropagation(); setEditingOpportunity(item); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); setEditingOpportunity(item); } }}><Pencil size={13} /></span>
+                  <span className="opportunity-card__edit opportunity-card__edit--danger" role="button" tabIndex={0} title="删除" onClick={(event) => { event.stopPropagation(); void deleteOpportunity(item); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); void deleteOpportunity(item); } }}><Trash2 size={13} /></span>
+                </span>
+              </div>
             </button>
           ); })}
         </div>
       ) : <EmptyState icon={<BrainCircuit size={24} />} title={opportunities.length ? "该筛选下暂无选题" : "还没有选题卡"} description={opportunities.length ? "切换上方筛选查看其他状态的选题。" : intelligence?.status === "ready" ? "点击“换一批”从信息缺口池生成选题。" : "先完成项目分析，再从行业和项目知识中发现选题。"} />}
       {visibleOpportunities.length > 12 && <div className="opportunity-more"><Button variant="ghost" onClick={() => setShowAllOpportunities((value) => !value)}>{showAllOpportunities ? "收起" : `展开全部 ${visibleOpportunities.length} 个选题`}</Button></div>}
-      {selectedOpportunity && <OpportunityRankDisclosure opportunity={selectedOpportunity} />}
+      {batchMode && <div className="opportunity-batch-bar"><div className="opportunity-batch-bar__inner">
+        <span className="batch-count">已选 <b>{batchSelected.size}</b> 张</span>
+        <i className="batch-divider" />
+        <button type="button" disabled={!batchSelected.size || batchWorking} onClick={() => void batchSetCollection("collected")}><Star size={13} /> 收藏</button>
+        <button type="button" disabled={!batchSelected.size || batchWorking} onClick={() => void batchSetCollection("archived")}><Archive size={13} /> 归档</button>
+        {(collectionFilter === "collected" || collectionFilter === "archived") && <button type="button" disabled={!batchSelected.size || batchWorking} onClick={() => void batchSetCollection("active")}><RotateCcw size={13} /> 恢复为未处理</button>}
+        <button type="button" className="batch-danger" disabled={!batchSelected.size || batchWorking} onClick={() => setBatchDeleteOpen(true)}><Trash2 size={13} /> 删除</button>
+        <i className="batch-divider" />
+        <button type="button" disabled={batchWorking || !visibleOpportunities.length} onClick={() => setBatchSelected(new Set(visibleOpportunities.map((opportunity) => opportunity.id)))}>全选当前筛选</button>
+        <button type="button" disabled={batchWorking || !batchSelected.size} onClick={() => setBatchSelected(new Set())}>清空</button>
+        <button type="button" onClick={() => { setBatchMode(false); setBatchSelected(new Set()); }}>退出</button>
+      </div></div>}
+      {selectedOpportunity && !batchMode && <OpportunityRankDisclosure opportunity={selectedOpportunity} />}
     </section>
 
     <section className="simple-key-settings panel" id="step-3">
@@ -1061,6 +1130,13 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
       {assets.length ? <div className="asset-grid">{assets.map((asset) => { const selected = selectedAssetIds.includes(asset.id); return <article className={`asset-card ${selected ? "selected" : ""}`} key={asset.id}><button type="button" className="asset-card__image" onClick={() => setSelectedAssetIds((current) => selected ? current.filter((id) => id !== asset.id) : current.length < 9 ? [...current, asset.id] : current)}><img src={asset.previewUrl || api.imageAssets.contentUrl(projectId, asset.id)} alt={asset.filename} /><span>{selected && <Check size={16} />}</span></button><div><strong>{asset.filename}</strong><small>{asset.analysis?.imageType || "等待源素材分析"} · {asset.approved ? "源素材观察已确认" : asset.status === "ready" ? "AI 源素材观察待确认" : asset.status}</small>{asset.analysis && <p title={asset.analysis.visibleFacts.join("；")}>{asset.analysis.scene || asset.analysis.visibleFacts.slice(0, 2).join("；") || "模型未提取到可见事实"}</p>}<div>{selected && <Badge tone="blue">计划参考源素材</Badge>}{asset.approved ? <Badge tone="positive">批准的源素材可见观察</Badge> : asset.status === "ready" ? <button type="button" onClick={() => void approveAsset(asset)}>确认上述源素材观察</button> : null}{asset.analysis && asset.latestAnalysisId ? <button type="button" onClick={() => openQualityEditor(asset)}><Pencil size={13} /> 编辑质量评估</button> : null}</div></div></article>; })}</div> : <EmptyState icon={<Images size={24} />} title="源素材图库还是空的" description="可不选源素材，只生成结构化图片计划和文字简报；上传原图也不会在这里生成最终图片资产。" />}
       <footer className="intelligence-run"><div><strong>{selectedOpportunity ? `已选择：${selectedOpportunity.title}` : "请先选择一张选题卡"}</strong><p>{selectedAssetIds.length} 张源素材已选 · 只作为三套图片计划与 imageBrief 的参考输入</p>{!blueprintReady ? <small>七项项目创作模型尚未全部确认，正式生成已锁定。</small> : selectedOpportunity && missingDependencyCount > 0 ? <small>引用资源缺失：请换一批，或在资源池修复引用。</small> : selectedOpportunity && pendingDependencyCount > 0 ? <small>将先独立确认 {opportunityDependencies.unapprovedGaps.length} 个信息缺口和 {opportunityDependencies.unapprovedStrategies.length} 个表达策略，再确认选题；不会隐式级联。</small> : selectedOpportunity?.status !== "approved" && selectedOpportunity ? <small>继续后会明确确认这张选题卡；AI 草案不会在未确认时进入生成。</small> : selectedOpportunity ? <small>选题及其引用依赖均已独立确认。</small> : null}</div><Button disabled={!selectedOpportunity || intelligence?.status !== "ready" || !blueprintReady} loading={submitting || preparing} icon={<Sparkles size={17} />} onClick={() => void preview()}>{selectedOpportunity && pendingDependencyCount > 0 ? `先确认 ${pendingDependencyCount} 项依赖并预览` : selectedOpportunity?.status === "approved" ? "预览并生成 3 套内容方案" : "确认选题并预览"}</Button></footer>
     </section>
+
+    <Modal open={batchDeleteOpen} onClose={() => setBatchDeleteOpen(false)} title={`删除 ${batchSelected.size} 张选题卡？`} description="已收藏或已归档的卡片也会一并删除，且没有恢复入口；只想清理建议改用「归档」。" footer={<><Button variant="ghost" onClick={() => setBatchDeleteOpen(false)}>取消</Button><Button variant="danger" loading={batchWorking} icon={<Trash2 size={15} />} onClick={() => void batchDelete()}>确认删除</Button></>}>
+      <ul className="batch-delete-list">
+        {[...batchSelected].slice(0, 4).map((id) => <li key={id}>{opportunities.find((opportunity) => opportunity.id === id)?.title || id}</li>)}
+        {batchSelected.size > 4 && <li>… 等 {batchSelected.size} 张</li>}
+      </ul>
+    </Modal>
 
     <Modal open={reanalyzeOpen} onClose={() => setReanalyzeOpen(false)} title="重新分析项目？" description="将基于当前项目知识重新运行三段模型，生成一批新的草稿版内容地图；不会删除任何已确认的历史版本。" footer={<><Button variant="ghost" onClick={() => setReanalyzeOpen(false)}>取消</Button><Button icon={<RefreshCw size={15} />} onClick={() => { setReanalyzeOpen(false); void analyzeProject(); }}>确认重新分析</Button></>}>
       <div className="reanalyze-impact">

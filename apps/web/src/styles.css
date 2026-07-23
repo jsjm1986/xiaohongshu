@@ -499,24 +499,6 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .preview-facts small { color: var(--muted); font-size: 7px; }
 .preview-facts strong { overflow: hidden; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .preview-conflicts h3, .preview-impacts h3 { margin: 0 0 8px; display: flex; align-items: center; gap: 6px; font-size: 10px; }
-.preview-conflict { margin-top: 6px; padding: 10px; display: flex; align-items: flex-start; gap: 8px; border-radius: 8px; background: var(--blue-soft); color: var(--blue); }
-.preview-conflict--warning { background: var(--amber-soft); color: var(--amber); }
-.preview-conflict--error { background: var(--red-soft); color: var(--red); }
-.preview-conflict > span { display: flex; flex-direction: column; gap: 2px; }
-.preview-conflict strong { font-size: 9px; }
-.preview-conflict p { margin: 0; color: var(--ink-2); font-size: 8px; line-height: 1.5; }
-.preview-conflict small { font-size: 7px; }
-.preview-clear { padding: 11px; display: flex; align-items: center; gap: 8px; border-radius: 8px; background: var(--green-soft); color: var(--green); }
-.preview-clear span { display: flex; flex-direction: column; }
-.preview-clear strong { font-size: 9px; }
-.preview-clear small { font-size: 7px; }
-.preview-impacts > div { max-height: 260px; overflow: auto; display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
-.preview-impacts article { padding: 9px; display: flex; align-items: flex-start; gap: 7px; border: 1px solid var(--line); border-radius: 8px; }
-.preview-impacts article > span:last-child { min-width: 0; flex: 1; }
-.preview-impacts article strong { display: flex; align-items: center; justify-content: space-between; gap: 5px; font-size: 8px; }
-.preview-impacts article b { color: var(--purple); font-size: 8px; }
-.preview-impacts article p { margin: 3px 0; color: var(--muted); font-size: 7px; line-height: 1.45; }
-.preview-impacts article small { color: var(--blue); font-size: 7px; }
 .impact-direction { width: 22px; height: 22px; flex: 0 0 auto; display: flex; align-items: center; justify-content: center; border-radius: 6px; background: var(--purple-soft); color: var(--purple); }
 .impact-direction--higher { background: var(--green-soft); color: var(--green); }
 .impact-direction--lower { background: var(--blue-soft); color: var(--blue); }
@@ -950,11 +932,6 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .upload-form { display: flex; flex-direction: column; gap: 19px; }
 .upload-note { margin: 0; padding: 11px 13px; border-radius: 9px; background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.18); color: var(--text-secondary, #4b5563); font-size: 12.5px; line-height: 1.6; }
 .upload-note strong { color: var(--text-primary, #111827); font-weight: 600; }
-.opportunity-refresh-note { margin: 8px 0 0; padding: 9px 12px; border-radius: 9px; background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.18); color: var(--text-secondary, #4b5563); font-size: 12.5px; line-height: 1.6; }
-.opportunity-refresh-note strong { color: var(--text-primary, #111827); font-weight: 600; }
-.opportunity-collection-summary { display: flex; align-items: center; gap: 8px; margin: 8px 0 0; font-size: var(--font-xs); color: var(--muted); }
-.opportunity-collection-summary button { padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--ink-2); font-size: var(--font-2xs); cursor: pointer; }
-.opportunity-collection-summary button:hover { border-color: color-mix(in srgb, var(--brand) 45%, var(--line)); }
 .dropzone { min-height: 165px; padding: 25px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; border: 1.5px dashed #bdc8c1; border-radius: 11px; background: #fafbf9; color: var(--muted); cursor: pointer; }
 .dropzone:hover { border-color: var(--green); background: #f8fcfa; }
 .dropzone > svg { color: var(--green); }
@@ -1433,11 +1410,6 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .blueprint-module-grid article footer button { display: inline-flex; align-items: center; gap: 4px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); color: var(--text); font-size: 10px; }
 .blueprint-missing, .blueprint-editor-boundary { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--line)); border-radius: 10px; background: color-mix(in srgb, var(--warning) 8%, var(--surface)); color: var(--muted); font-size: 12px; }
 .blueprint-missing { grid-column: 1 / -1; }
-.analysis-progress { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--coral) 35%, var(--line)); border-radius: 10px; background: color-mix(in srgb, var(--coral) 6%, var(--surface)); }
-.analysis-progress__head { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); }
-.analysis-progress__head small { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
-.analysis-progress__track { height: 6px; border-radius: 999px; background: color-mix(in srgb, var(--line) 70%, transparent); overflow: hidden; }
-.analysis-progress__track span { display: block; height: 100%; border-radius: 999px; background: var(--coral); transition: width .5s ease; }
 .opportunity-more { display: flex; justify-content: center; padding: 0 var(--panel-inset) var(--panel-inset); }
 .blueprint-json-editor { width: 100%; min-height: 420px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; line-height: 1.5; }
 .panel-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
@@ -1448,29 +1420,11 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .opportunity-card.is-archived { opacity: .62; }
 .opportunity-card.is-archived:hover { opacity: 1; }
 .opportunity-card.selected { border-color: var(--brand); box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand) 15%, transparent); background: color-mix(in srgb, var(--brand) 4%, var(--surface)); }
-.opportunity-card > div { display: flex; gap: 5px; flex-wrap: wrap; }
 .opportunity-card h3 { margin: 3px 25px 0 0; font-size: 16px; line-height: 1.45; }
 .opportunity-card p { margin: 0; color: var(--text); font-size: 12px; line-height: 1.65; }
-.opportunity-card small { color: var(--muted); line-height: 1.55; }
-.opportunity-card small strong { color: var(--text); }
-.opportunity-card > span { position: absolute; right: 14px; top: 16px; display: grid; width: 24px; height: 24px; place-items: center; border-radius: 50%; background: var(--surface-soft); color: var(--brand); }
-.opportunity-ranking-boundary { display: flex; align-items: flex-start; gap: 10px; margin: 14px var(--panel-inset) 0; padding: 12px 14px; border: 1px solid #d9e1f2; border-radius: 12px; background: #f7f9ff; color: #53627b; }
-.opportunity-ranking-boundary svg { flex: 0 0 auto; margin-top: 2px; color: #5871a9; }
-.opportunity-ranking-boundary strong { color: var(--text); font-size: 12px; }
-.opportunity-ranking-boundary p { margin: 3px 0 0; font-size: var(--font-xs); line-height: 1.6; }
-.opportunity-card > .opportunity-card__rank { display: flex; flex-direction: column; gap: 6px; width: 100%; padding: 8px 10px; border-radius: 8px; background: var(--surface-soft); }
-.opportunity-card__rank-info { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-.opportunity-card__rank-info strong { font-size: var(--font-sm); color: var(--muted); }
-.opportunity-card__rank.is-sortable .opportunity-card__rank-info strong { color: var(--green); }
-.opportunity-card__rank-info small { flex-basis: 100%; color: var(--amber); font-size: var(--font-2xs); }
-.opportunity-card__rank-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding-top: 6px; border-top: 1px solid var(--line); }
 .opportunity-card__edit { display: inline-flex; align-items: center; gap: 3px; font-size: var(--font-2xs); color: var(--muted); cursor: pointer; }
 .opportunity-card__edit:hover { color: var(--ink-2); }
 .opportunity-card__edit--danger:hover { color: var(--red); }
-.opportunity-card__state { display: inline-flex; align-items: center; gap: 3px; padding: 1px 7px; border-radius: 999px; font-size: var(--font-2xs); }
-.opportunity-card__state--collected { color: var(--green); background: var(--green-soft); }
-.opportunity-card__state--collected .filled { fill: currentColor; }
-.opportunity-card__state--archived { color: var(--muted); background: var(--surface-soft); border: 1px solid var(--line); }
 .opportunity-rank-disclosure { margin: 0 var(--panel-inset) var(--panel-inset); padding: 15px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
 .opportunity-rank-disclosure > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; }
 .opportunity-rank-disclosure > header p { margin: 4px 0 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
@@ -1729,7 +1683,6 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .chip--active { background: var(--accent-soft, rgba(59, 130, 246, 0.1)); border-color: var(--accent, #3b82f6); color: var(--accent, #3b82f6); }
 .chip-remove { margin-left: 2px; padding: 0 6px; border: none; background: none; color: var(--muted, #9ca3af); font-size: 14px; line-height: 1; cursor: pointer; }
 .chip-remove:hover { color: #ef4444; }
-.opportunity-card__edit .filled { fill: currentColor; color: #f59e0b; }
 
 /* 缺口编辑器的证据点选器（Cref v1.1）：从知识库分节点选，失效引用显式警示。 */
 .evidence-picker { display: flex; flex-direction: column; gap: 10px; }
@@ -2564,31 +2517,24 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 }
 
 /* ---- 生成频道：边界声明降权（quiet note） ---- */
-.v2 .opportunity-ranking-boundary, .v2 .trendfit-simple-boundary, .v2 .image-library-boundary {
+.v2 .trendfit-simple-boundary, .v2 .image-library-boundary {
   border: 0; border-left: 2px solid var(--v2-line-dark); border-radius: 0;
   background: transparent; padding: 2px 0 2px 12px;
 }
-.v2 .opportunity-ranking-boundary strong, .v2 .trendfit-simple-boundary strong, .v2 .image-library-boundary strong { font-size: 12px; color: var(--v2-ink-2); }
-.v2 .opportunity-ranking-boundary p, .v2 .trendfit-simple-boundary p, .v2 .image-library-boundary p { font-size: 11px; color: var(--v2-muted-2); line-height: 1.6; }
+.v2 .trendfit-simple-boundary strong, .v2 .image-library-boundary strong { font-size: 12px; color: var(--v2-ink-2); }
+.v2 .trendfit-simple-boundary p, .v2 .image-library-boundary p { font-size: 11px; color: var(--v2-muted-2); line-height: 1.6; }
 
 /* ---- 选题卡减重 ---- */
 .v2 .opportunity-card { min-height: 0; padding: 16px; gap: 9px; border-radius: var(--v2-radius); }
 .v2 .opportunity-card h3 { font-size: 14.5px; font-weight: 650; letter-spacing: -0.005em; line-height: 1.5; }
 .v2 .opportunity-card > p { font-size: 12px; color: var(--v2-muted); line-height: 1.6; }
 .v2 .opportunity-card > small { font-size: 11.5px; color: var(--v2-muted-2); line-height: 1.55; }
-.v2 .opportunity-card__rank { flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 0 0; border-radius: 0; border-top: 1px solid var(--v2-line); background: transparent; }
-.v2 .opportunity-card__rank-info { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.v2 .opportunity-card__rank-info > strong { font-size: 11px; font-weight: 500; color: var(--v2-muted); }
-.v2 .opportunity-card__rank-info > small { font-size: 10px; color: var(--v2-warn); }
-.v2 .opportunity-card__rank-actions { display: flex; align-items: center; gap: 11px; opacity: 0; transition: opacity 0.15s; }
-.v2 .opportunity-card:hover .opportunity-card__rank-actions, .v2 .opportunity-card__rank-actions:focus-within { opacity: 1; }
 .v2 .opportunity-card__edit { font-size: 0; color: var(--v2-muted-2); }
 .v2 .opportunity-card__edit:hover { color: var(--v2-ink); }
 .v2 .opportunity-card__edit svg { width: 15px; height: 15px; }
 .v2 .opportunity-card__edit--danger:hover { color: var(--v2-error); }
 .v2 .opportunity-card.selected { border-color: var(--v2-brand); box-shadow: 0 0 0 2px rgb(240 93 82 / 9%); background: var(--v2-surface); }
 .v2 .opportunity-card.selected::before { content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 3px; border-radius: 0 2px 2px 0; background: var(--v2-brand); }
-.v2 .opportunity-card > span:last-child { background: transparent; }
 
 /* ---- 关键设置：仪表标签 + 采用信息读数轨 ---- */
 .v2 .simple-setting-field > span strong { font-family: var(--v2-mono); font-size: 10.5px; font-weight: 500; letter-spacing: 0.1em; color: var(--v2-muted-2); }
@@ -2606,7 +2552,6 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .v2 .simple-info-grid p { font-size: 11px; color: var(--v2-muted); }
 
 /* ---- 换一批说明降权 ---- */
-.v2 .opportunity-refresh-note { border: 0; border-left: 2px solid var(--v2-line-dark); border-radius: 0; background: transparent; padding: 2px 0 2px 12px; font-size: 11px; color: var(--v2-muted-2); line-height: 1.6; }
 
 /* ---- 第 1 步：模块卡收紧 + mono 版本 ---- */
 .v2 .blueprint-module-grid { gap: 10px; }
@@ -2676,11 +2621,6 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 
 /* 第 2 步：头部只留标题与操作，说明与汇总移入正文；操作不堆叠 */
 .v2 .opportunity-panel > header .panel-actions { flex-wrap: nowrap; align-items: flex-start; }
-.v2 .opportunity-notes { margin: 14px var(--panel-inset) 0; display: grid; gap: 8px; }
-.v2 .opportunity-notes .opportunity-refresh-note { margin: 0; }
-.v2 .opportunity-collection-summary { margin: 0; display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--v2-muted); }
-.v2 .opportunity-collection-summary button { padding: 0; border: 0; background: transparent; color: var(--v2-ai-ink); font-size: 11px; cursor: pointer; }
-.v2 .opportunity-collection-summary button:hover { text-decoration: underline; }
 
 /* 步骤轨：当前待办步骤获得珊瑚刻度 */
 .v2 .protocol-rail li.is-current i { border-color: var(--v2-brand); background: var(--v2-brand-soft); color: var(--v2-brand-ink); }
@@ -2749,15 +2689,6 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .v2 .generate-page .preview-facts small { font-family: var(--v2-mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
 .v2 .generate-page .preview-facts strong { font-size: 12.5px; font-weight: 650; }
 .v2 .generate-page .preview-conflicts h3, .v2 .generate-page .preview-impacts h3 { font-size: 13px; font-weight: 650; }
-.v2 .generate-page .preview-conflict strong { font-size: 12.5px; }
-.v2 .generate-page .preview-conflict p { font-size: 11.5px; line-height: 1.6; }
-.v2 .generate-page .preview-conflict small { font-size: 11px; }
-.v2 .generate-page .preview-clear strong { font-size: 12.5px; }
-.v2 .generate-page .preview-clear small { font-size: 11px; }
-.v2 .generate-page .preview-impacts article strong { font-size: 12px; font-weight: 650; }
-.v2 .generate-page .preview-impacts article b { font-family: var(--v2-mono); font-size: 11px; }
-.v2 .generate-page .preview-impacts article p { font-size: 11px; line-height: 1.55; }
-.v2 .generate-page .preview-impacts article small { font-size: 10.5px; }
 
 /* 筛选 chips：激活色归一到品牌珊瑚 */
 .v2 .generate-page .chip--active { background: var(--v2-brand-soft); border-color: var(--v2-brand); color: var(--v2-brand-ink); }
@@ -2881,3 +2812,162 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .v2 .reanalyze-impact strong { display: block; font-size: 12px; font-weight: 650; color: var(--v2-ink); }
 .v2 .reanalyze-impact p { margin: 2px 0 0; font-size: 11.5px; line-height: 1.6; color: var(--v2-muted); }
 .v2 .reanalyze-stale { margin: 10px 0 0; padding: 2px 0 2px 12px; border-left: 2px solid var(--v2-warn); font-size: 11px; line-height: 1.6; color: var(--v2-warn); }
+
+/* ==========================================================================
+   生成频道 R7：选题卡内容优先重排
+   标题第一视觉 / 摘要两行 / 底部 chrome 行(紧凑徽章+mono 读数+hover 工具)
+   收藏星标常驻右上 / 筛选 chips 带计数
+   ========================================================================== */
+
+.v2 .opportunity-card { gap: 7px; padding: 15px 16px 11px; }
+.v2 .opportunity-card h3 { margin: 0 26px 0 0; display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font-size: 15px; font-weight: 650; letter-spacing: -0.005em; line-height: 1.5; }
+.v2 .opportunity-card > p { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+
+/* 收藏星标:常驻右上,收藏=琥珀点亮 */
+.v2 .opportunity-card__star { position: absolute; top: 11px; right: 11px; z-index: 1; display: grid; width: 26px; height: 26px; place-items: center; border-radius: 7px; color: var(--v2-muted-2); cursor: pointer; }
+.v2 .opportunity-card__star:hover { background: var(--v2-unknown-soft); color: var(--v2-warn); }
+.v2 .opportunity-card__star.is-on { color: var(--v2-warn); }
+.v2 .opportunity-card__star.is-on svg { fill: currentColor; }
+
+/* 底部 chrome 行:发丝顶线 + 紧凑徽章 + mono 读数 + hover 工具 */
+.v2 .opportunity-card__meta { margin-top: auto; width: 100%; display: flex; align-items: center; flex-wrap: nowrap; gap: 8px; padding-top: 9px; border-top: 1px solid var(--v2-line); }
+.v2 .opportunity-card__score { flex: 0 0 auto; font-family: var(--v2-mono); font-size: 10.5px; color: var(--v2-muted); font-variant-numeric: tabular-nums; }
+.v2 .opportunity-card__meta.needs-review .opportunity-card__score { color: var(--v2-warn); font-family: inherit; font-size: 10px; }
+.v2 .opportunity-card__tools { display: flex; flex: 0 0 auto; align-items: center; gap: 9px; opacity: 0; transition: opacity 0.15s; }
+.v2 .opportunity-card:hover .opportunity-card__tools, .v2 .opportunity-card__tools:focus-within { opacity: 1; }
+
+/* 筛选 chips 带计数 */
+.v2 .opportunity-filter .chip b { margin-left: 3px; font-family: var(--v2-mono); font-size: 10px; font-weight: 500; color: var(--v2-muted-2); }
+.v2 .opportunity-filter .chip--active b { color: var(--v2-brand-ink); }
+
+/* R7b：底行徽章与读数占位修复——工具改悬浮,不占布局 */
+.v2 .opportunity-card__tools { position: absolute; right: 12px; bottom: 7px; padding-left: 10px; background: linear-gradient(to right, transparent, var(--v2-surface) 28%); }
+.v2 .opportunity-card__meta { padding-right: 0; }
+
+/* R7c:hover 时读数淡出,工具干净接管底行右侧 */
+.v2 .opportunity-card__score { transition: opacity 0.15s; }
+.v2 .opportunity-card:hover .opportunity-card__score, .v2 .opportunity-card:focus-within .opportunity-card__score { opacity: 0; }
+
+/* ==========================================================================
+   生成频道 R8：选题卡信息分区(依据台账双列 + 状态点)
+   ========================================================================== */
+
+/* 依据区:mono 小标固定列 + 内容列,每段角色一眼可辨 */
+.v2 .opportunity-card__basis { display: grid; gap: 4px; margin-top: 2px; }
+.v2 .basis-row { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 8px; align-items: start; }
+.v2 .basis-row > small { padding-top: 2px; font-family: var(--v2-mono); font-size: 9px; letter-spacing: 0.05em; line-height: 1.5; color: var(--v2-muted-2); }
+.v2 .basis-row > span { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font-size: 11.5px; line-height: 1.55; color: var(--v2-ink-2); }
+
+/* 底行:状态点 + 文字,替代大徽章 */
+.v2 .opportunity-card__dots { display: flex; flex: 1 1 auto; align-items: center; flex-wrap: wrap; gap: 10px; min-width: 0; font-size: 10.5px; color: var(--v2-muted); }
+.v2 .opportunity-card__dot { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.v2 .opportunity-card__dot .dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; }
+.v2 .dot--ok { background: var(--v2-ok); }
+.v2 .dot--warn { background: var(--v2-warn); }
+.v2 .dot--unknown { background: var(--v2-muted-2); }
+
+/* R8b:底行状态点与读数收小,一行放下 */
+.v2 .opportunity-card__dots { gap: 9px; font-size: 10px; }
+.v2 .opportunity-card__score { font-size: 10px; }
+
+/* R8c:选中态去装饰——只留一道珊瑚细边,去掉发光环与左刻度条 */
+.v2 .opportunity-card.selected { border-color: var(--v2-brand); box-shadow: none; background: var(--v2-surface); }
+.v2 .opportunity-card.selected::before { content: none; }
+
+/* R8d:排序声明收进筛选行右侧 */
+.v2 .opportunity-filter { align-items: center; }
+.v2 .opportunity-ranking-note { margin-left: auto; padding-left: 12px; font-size: 10.5px; color: var(--v2-muted-2); cursor: help; }
+
+/* R8e:选中改为轻量底色,不再用边框判断 */
+.v2 .opportunity-card.selected { border-color: var(--v2-line); background: var(--v2-brand-soft); }
+
+/* ==========================================================================
+   生成频道 R9：选题批量管理模式
+   ========================================================================== */
+
+/* 入口按钮(筛选行) */
+.v2 .batch-toggle { display: inline-flex; align-items: center; gap: 5px; padding: 4px 11px; border: 1px solid var(--v2-line); border-radius: 999px; background: var(--v2-surface); color: var(--v2-muted); font-size: 12px; cursor: pointer; }
+.v2 .batch-toggle:hover { border-color: var(--v2-line-dark); color: var(--v2-ink); }
+.v2 .batch-toggle.is-active { border-color: var(--v2-brand); background: var(--v2-brand-soft); color: var(--v2-brand-ink); }
+
+/* 卡片复选框 + 批量选中底 */
+.v2 .opportunity-card__check { position: absolute; top: 13px; left: 13px; z-index: 1; display: grid; width: 20px; height: 20px; place-items: center; border: 1.5px solid var(--v2-line-dark); border-radius: 6px; background: var(--v2-surface); color: #fff; }
+.v2 .opportunity-card__check.is-checked { border-color: var(--v2-brand); background: var(--v2-brand); }
+.v2 .opportunity-card.is-batch h3 { margin-left: 27px; }
+.v2 .opportunity-card.is-batch-selected { background: var(--v2-unknown-soft); }
+
+/* 悬浮批量条 */
+.v2 .opportunity-batch-bar { position: sticky; bottom: 14px; z-index: 6; display: flex; justify-content: center; padding: 4px 0 10px; pointer-events: none; }
+.v2 .opportunity-batch-bar__inner { pointer-events: auto; display: flex; align-items: center; gap: 3px; padding: 7px 12px; border: 1px solid var(--v2-line); border-radius: 999px; background: var(--v2-surface); box-shadow: var(--v2-shadow-md); }
+.v2 .opportunity-batch-bar__inner button { display: inline-flex; align-items: center; gap: 4px; padding: 5px 9px; border: 0; border-radius: 999px; background: transparent; color: var(--v2-ink-2); font-size: 12px; cursor: pointer; white-space: nowrap; }
+.v2 .opportunity-batch-bar__inner button:hover:not(:disabled) { background: var(--v2-unknown-soft); }
+.v2 .opportunity-batch-bar__inner button:disabled { color: var(--v2-muted-2); cursor: not-allowed; opacity: 0.6; }
+.v2 .opportunity-batch-bar__inner .batch-danger { color: var(--v2-error); }
+.v2 .batch-count { padding: 0 5px; font-size: 12px; color: var(--v2-muted); white-space: nowrap; }
+.v2 .batch-count b { font-family: var(--v2-mono); font-size: 12px; font-weight: 600; color: var(--v2-ink); }
+.v2 .batch-divider { width: 1px; height: 16px; margin: 0 5px; background: var(--v2-line); }
+.v2 .batch-delete-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.v2 .batch-delete-list li { font-size: 12px; line-height: 1.5; color: var(--v2-ink-2); }
+
+/* ==========================================================================
+   生成频道 R10：真实后台进度行(替代假定时器进度条)
+   状态与尝试次数来自 analysis_tasks;轨道为不确定态呼吸,不是假百分比
+   ========================================================================== */
+.v2 .task-progress { grid-column: 1 / -1; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 var(--panel-inset); padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--coral) 32%, var(--v2-line)); border-radius: var(--v2-radius); background: color-mix(in srgb, var(--coral) 4%, var(--v2-surface)); }
+.v2 .opportunity-panel .task-progress { margin: 0 var(--panel-inset) 12px; }
+.v2 .task-progress > svg { flex: 0 0 auto; color: var(--v2-brand); }
+.v2 .task-progress > span { font-size: 12px; font-weight: 650; color: var(--v2-ink-2); }
+.v2 .task-progress > small { margin-left: auto; font-family: var(--v2-mono); font-size: 10px; color: var(--v2-muted); font-variant-numeric: tabular-nums; }
+.v2 .task-progress__track { flex-basis: 100%; height: 3px; border-radius: 999px; background: color-mix(in srgb, var(--v2-line) 70%, transparent); overflow: hidden; }
+.v2 .task-progress__track b { display: block; width: 38%; height: 100%; border-radius: 999px; background: var(--v2-brand); animation: task-progress-slide 1.4s ease-in-out infinite; }
+@keyframes task-progress-slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(280%); } }
+
+/* R10b:进度行与上方边框拉开固定间距 */
+.v2 .opportunity-panel .task-progress { margin: 10px var(--panel-inset) 12px; }
+.v2 .intelligence-project .task-progress { margin-top: 4px; }
+
+/* ==========================================================================
+   生成频道 R11：配置预览弹窗重排(冲突分级 quiet 行 + 影响分组台账)
+   ========================================================================== */
+
+/* 冲突与提示:发丝分隔行,severity 三色图标 */
+.v2 .generate-page .preview-conflict-row { display: flex; align-items: flex-start; gap: 9px; padding: 9px 2px; border-bottom: 1px solid var(--v2-line); }
+.v2 .generate-page .preview-conflict-row:last-child { border-bottom: 0; }
+.v2 .generate-page .preview-conflict-row > svg { flex: 0 0 auto; margin-top: 2px; }
+.v2 .generate-page .preview-conflict-row--error > svg { color: var(--v2-error); }
+.v2 .generate-page .preview-conflict-row--warning > svg { color: var(--v2-warn); }
+.v2 .generate-page .preview-conflict-row--info > svg { color: var(--v2-muted-2); }
+.v2 .generate-page .preview-conflict-row strong { display: block; font-size: 12.5px; font-weight: 650; color: var(--v2-ink); }
+.v2 .generate-page .preview-conflict-row p { margin: 2px 0 0; font-size: 11.5px; line-height: 1.6; color: var(--v2-muted); }
+.v2 .generate-page .preview-conflict-row small { display: block; margin-top: 2px; font-size: 11px; color: var(--v2-muted-2); }
+.v2 .generate-page .preview-info-toggle { margin-top: 6px; border-top: 1px solid var(--v2-line); }
+.v2 .generate-page .preview-info-toggle > summary { display: flex; align-items: center; justify-content: space-between; padding: 8px 2px 0; font-size: 11.5px; color: var(--v2-muted); cursor: pointer; list-style: none; }
+.v2 .generate-page .preview-info-toggle > summary::-webkit-details-marker { display: none; }
+.v2 .generate-page .preview-info-toggle[open] > summary svg { transform: rotate(180deg); }
+
+/* 无冲突:绿勾 quiet 行 */
+.v2 .generate-page .preview-clear { display: flex; align-items: flex-start; gap: 8px; padding: 4px 2px; }
+.v2 .generate-page .preview-clear > svg { flex: 0 0 auto; margin-top: 2px; color: var(--v2-ok); }
+.v2 .generate-page .preview-clear strong { display: block; font-size: 12.5px; font-weight: 650; color: var(--v2-ink); }
+.v2 .generate-page .preview-clear small { display: block; margin-top: 1px; font-size: 11px; color: var(--v2-muted); }
+
+/* 影响预览:分组台账 */
+.v2 .generate-page .preview-impact-group { margin-top: 10px; }
+.v2 .generate-page .preview-impact-group > header { display: flex; align-items: center; gap: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--v2-line); }
+.v2 .generate-page .preview-impact-group > header span { font-family: var(--v2-mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--v2-muted-2); }
+.v2 .generate-page .preview-impact-group > header b { font-family: var(--v2-mono); font-size: 10px; font-weight: 600; color: var(--v2-muted); }
+.v2 .generate-page .preview-impact-row { display: flex; align-items: flex-start; gap: 9px; padding: 8px 2px; border-bottom: 1px solid var(--v2-line); }
+.v2 .generate-page .preview-impact-row:last-child { border-bottom: 0; }
+.v2 .generate-page .preview-impact-row__main { min-width: 0; flex: 1; }
+.v2 .generate-page .preview-impact-row__main strong { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 12px; font-weight: 650; color: var(--v2-ink); }
+.v2 .generate-page .preview-impact-row__main strong b { flex: 0 0 auto; font-family: var(--v2-mono); font-size: 11px; font-weight: 600; color: var(--v2-ai-ink); }
+.v2 .generate-page .preview-impact-row__main p { margin: 2px 0 0; font-size: 11px; line-height: 1.55; color: var(--v2-muted); }
+.v2 .generate-page .preview-impact-row__main small { display: block; margin-top: 2px; font-family: var(--v2-mono); font-size: 9.5px; color: var(--v2-muted-2); }
+.v2 .generate-page .impact-direction { width: 20px; height: 20px; border-radius: 6px; }
+.v2 .generate-page .impact-direction svg { width: 12px; height: 12px; }
+
+/* R11b:冲突区弱化——仅错误保红,警告/信息降灰,文字收小 */
+.v2 .generate-page .preview-conflict-row { padding: 7px 2px; }
+.v2 .generate-page .preview-conflict-row--warning > svg, .v2 .generate-page .preview-conflict-row--info > svg { color: var(--v2-muted-2); }
+.v2 .generate-page .preview-conflict-row strong { font-size: 12px; font-weight: 600; color: var(--v2-ink-2); }
+.v2 .generate-page .preview-conflict-row p { font-size: 11px; color: var(--v2-muted-2); }
