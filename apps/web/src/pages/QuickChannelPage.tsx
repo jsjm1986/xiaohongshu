@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { useProjects } from '../components/ProjectContext';
 import { useToast } from '../components/Ui';
 import { V2Hero } from '../components/V2';
+import { ProjectKnowledgeTab } from '../components/quick/ProjectKnowledgeTab';
 import { type QuickCandidateView } from '../lib/quick-generation';
 import { tabReachable, clearDownstreamOfProject, clearResults, type QuickTab } from '../lib/quick-channel-state';
 import type { ContentPreset, GenerationJob, Project, TopicOpportunity } from '../types';
@@ -104,7 +105,12 @@ export function QuickChannelPage() {
       </nav>
 
       <div className="qc-panel">
-        {activeTab === 'project' && <div>[项目 &amp; 知识]</div>}
+        {activeTab === 'project' && (
+          <ProjectKnowledgeTab
+            project={project} projects={projects} busy={busy} setBusy={setBusy} fail={fail}
+            onProjectChosen={onProjectChosen} onAnalyzed={onAnalyzed}
+          />
+        )}
         {activeTab === 'topic' && <div>[选题]</div>}
         {activeTab === 'config' && <div>[配置]</div>}
         {activeTab === 'result' && <div>[结果]</div>}
