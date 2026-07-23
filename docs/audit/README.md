@@ -13,6 +13,7 @@ This directory contains the strict audit and its controlled implementation recor
 - `r11-implementation-report.md` records the non-causal opportunity-ranking heuristic, provenance and selection-audit contract.
 - `r12-implementation-report.md` records the F30 manual TrendFit scenario, source-identity boundary, non-consumption contract and separate qualified-incremental-reach protocol.
 - `r13-implementation-report.md` records the F32/F33 display/manual-review ordering contract, unknown/null components, prompt isolation, fail-closed history handling and non-quality-score UI.
+- `cref-contract-v1-1-implementation-report.md` records the comment-reference (Cref) v1.1 contract: publisher answer identity, node kinds/boundary/function, multi-turn growth switch, section-level knowledge evidence, validator recalibration, plus the release re-activation and P0 data-confirmation runbook.
 
 Validate the catalog from `content-agent/`:
 
