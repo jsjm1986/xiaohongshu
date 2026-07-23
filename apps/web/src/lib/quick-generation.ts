@@ -1,4 +1,12 @@
-import type { Candidate, CommentThread } from '../types';
+import type { Candidate, CommentThread, GenerateInput, GenerationJob, Project } from '../types';
+import { buildSimpleGenerateInput, resolveSimpleGenerationSettings } from './simple-generation';
+
+// `./api` reads document.cookie / sessionStorage at module load, so it is
+// browser-only and must not be imported eagerly (it crashes under the Node test
+// runner). We reference its type via `typeof import(...)` and load the real
+// implementation lazily inside defaultDeps, which only runs when no deps are
+// injected. Tests inject deps and therefore never touch the real api module.
+type ApiClient = typeof import('./api')['api'];
 
 export interface QuickComment {
   question: string;
@@ -83,4 +91,107 @@ export function quickCandidateToMarkdown(view: QuickCandidateView): string {
     }
   }
   return parts.join('\n');
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+interface AutoDeps {
+  api: ApiClient;
+  buildInput: typeof buildSimpleGenerateInput;
+  resolveSettings: typeof resolveSimpleGenerationSettings;
+}
+
+const defaultDeps = async (): Promise<AutoDeps> => ({
+  api: (await import('./api')).api,
+  buildInput: buildSimpleGenerateInput,
+  resolveSettings: resolveSimpleGenerationSettings,
+});
+
+export async function autoApproveAndGenerate(args: {
+  project: Project;
+  opportunityId: string;
+  presetId?: string;
+  pollIntervalMs?: number;
+  maxPolls?: number;
+  deps?: AutoDeps;
+}): Promise<GenerationJob> {
+  const { project, opportunityId, presetId } = args;
+  const pollIntervalMs = args.pollIntervalMs ?? 1800;
+  const maxPolls = args.maxPolls ?? 100;
+  const d = args.deps ?? (await defaultDeps());
+  const projectId = project.id;
+
+  // 1. 审批蓝图（仅未审批项）
+  const modules = await d.api.blueprintModules.list(projectId);
+  await Promise.all(
+    modules
+      .filter((m) => m.status !== 'approved')
+      .map((m) => d.api.blueprintModules.approve(projectId, m.id)),
+  );
+
+  // 2. 定位机会及其依赖
+  const opps = await d.api.opportunities.list(projectId);
+  const opportunity = opps.items.find((o) => o.id === opportunityId);
+  if (!opportunity) throw new Error('选题不存在或已过期，请换一个选题');
+
+  // 3. 审批依赖 gaps / strategies
+  const [gaps, strategies] = await Promise.all([
+    d.api.informationGaps.list(projectId),
+    d.api.expressionStrategies.list(projectId),
+  ]);
+  const neededGapIds = new Set(opportunity.gapIds ?? []);
+  const neededStrategyIds = new Set(
+    [opportunity.strategyId, ...(opportunity.compatibleStrategyIds ?? [])].filter(Boolean) as string[],
+  );
+  await Promise.all([
+    ...gaps.items
+      .filter((g) => neededGapIds.has(g.id) && g.status !== 'approved')
+      .map((g) => d.api.informationGaps.approve(projectId, g.id)),
+    ...strategies.items
+      .filter((s) => neededStrategyIds.has(s.id) && s.status !== 'approved')
+      .map((s) => d.api.expressionStrategies.approve(projectId, s.id)),
+  ]);
+
+  // 4. 审批机会
+  await d.api.opportunities.approve(projectId, opportunity.id);
+
+  // 5. 审批 intelligence（放在最后，与现有 preview 顺序一致：依赖先就绪）。
+  // 注：ProjectIntelligence 的审批态记录在 approvalStatus（status 联合类型不含 'approved'）。
+  const intelligence = await d.api.intelligence.get(projectId);
+  if (intelligence?.id && intelligence.approvalStatus !== 'approved') {
+    await d.api.intelligence.approve(projectId, intelligence.id);
+  }
+
+  // 6. 解析预设 + 构建输入
+  let preset;
+  if (presetId) {
+    const presets = await d.api.presets.list(projectId);
+    preset = presets.items.find((p) => p.id === presetId);
+  }
+  const settings = d.resolveSettings({ project, preset, opportunity });
+  const input: GenerateInput = d.buildInput({
+    projectId,
+    opportunity,
+    settings,
+    imageAssetIds: [],
+    lockedGapIds: [],
+    presetId,
+    localFieldsEnabled: false,
+    randomizationDimensions: [],
+  });
+
+  // 7. 发起生成
+  const created = await d.api.generations.create(input);
+
+  // 8. 轮询
+  let job = created;
+  let polls = 0;
+  while (job.status === 'queued' || job.status === 'running') {
+    if (polls >= maxPolls) throw new Error('生成超时，请稍后重试');
+    await sleep(pollIntervalMs);
+    job = await d.api.generations.get(created.id);
+    polls += 1;
+  }
+  if (job.status === 'failed') throw new Error(job.error || '生成失败，请重试');
+  return job;
 }

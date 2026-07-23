@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { quickCandidateFields, quickCandidateToMarkdown } from '../src/lib/quick-generation.js';
+import { autoApproveAndGenerate, quickCandidateFields, quickCandidateToMarkdown } from '../src/lib/quick-generation.js';
 
 const fullCandidate = {
   id: 'c1',
@@ -89,4 +89,73 @@ test('quickCandidateFields preserves label used for result tabs', () => {
   assert.equal(withLabel.label, '版本二');
   const noLabel = quickCandidateFields({ id: 'c4', title: 't', body: 'b', tags: [], comments: [] } as any);
   assert.equal(noLabel.label, undefined);
+});
+
+function makeDeps(overrides = {}) {
+  const calls: string[] = [];
+  const deps = {
+    api: {
+      blueprintModules: {
+        list: async () => { calls.push('bp.list'); return [{ id: 'b1', status: 'draft' }, { id: 'b2', status: 'approved' }]; },
+        approve: async (_p: string, id: string) => { calls.push(`bp.approve:${id}`); return { id, status: 'approved' }; },
+      },
+      intelligence: {
+        get: async () => { calls.push('intel.get'); return { id: 'i1', status: 'draft' }; },
+        approve: async (_p: string, id: string) => { calls.push(`intel.approve:${id}`); return { id, status: 'approved' }; },
+      },
+      informationGaps: {
+        list: async () => { calls.push('gap.list'); return { items: [{ id: 'g1', status: 'draft' }], total: 1 }; },
+        approve: async (_p: string, id: string) => { calls.push(`gap.approve:${id}`); return { id, status: 'approved' }; },
+      },
+      expressionStrategies: {
+        list: async () => { calls.push('strat.list'); return { items: [{ id: 's1', status: 'draft' }], total: 1 }; },
+        approve: async (_p: string, id: string) => { calls.push(`strat.approve:${id}`); return { id, status: 'approved' }; },
+      },
+      opportunities: {
+        list: async () => { calls.push('opp.list'); return { items: [{ id: 'o1', title: 't', whyValuable: 'w', gapIds: ['g1'], strategyId: 's1', compatibleStrategyIds: [] }], total: 1 }; },
+        approve: async (_p: string, id: string) => { calls.push(`opp.approve:${id}`); return { id }; },
+      },
+      presets: { list: async () => ({ items: [{ id: 'p1', name: 'x', isDefault: true, values: {} }], total: 1 }) },
+      generations: {
+        create: async () => { calls.push('gen.create'); return { id: 'job1', status: 'queued', projectId: 'proj1', topic: 't', mode: 'simple' }; },
+        get: (() => {
+          let n = 0;
+          return async () => { calls.push('gen.get'); n += 1; return { id: 'job1', projectId: 'proj1', topic: 't', mode: 'simple', status: n >= 2 ? 'completed' : 'running', candidates: n >= 2 ? [{ id: 'c1', title: 't', body: 'b', tags: [], comments: [], validation: { valid: true, repairAttempts: 0, issues: [] } }] : [] }; };
+        })(),
+      },
+    },
+    buildInput: () => ({ projectId: 'proj1', mode: 'simple', opportunityId: 'o1', topic: 't', goal: 'w', audienceStage: 'hesitation', entryPoint: 'x' }),
+    resolveSettings: () => ({}),
+    ...overrides,
+  };
+  return { deps, calls };
+}
+
+test('autoApproveAndGenerate approves deps then creates and polls to completion', async () => {
+  const { deps, calls } = makeDeps();
+  const project = { id: 'proj1', name: 'p' } as any;
+  const job = await autoApproveAndGenerate({ project, opportunityId: 'o1', pollIntervalMs: 1, maxPolls: 5, deps: deps as any });
+  assert.equal(job.status, 'completed');
+  assert.equal(job.candidates?.length, 1);
+  // 审批发生在 create 之前
+  const createIdx = calls.indexOf('gen.create');
+  assert.ok(calls.indexOf('bp.approve:b1') < createIdx, 'blueprint approved before create');
+  assert.ok(calls.indexOf('gap.approve:g1') < createIdx, 'gap approved before create');
+  assert.ok(calls.indexOf('strat.approve:s1') < createIdx, 'strategy approved before create');
+  assert.ok(calls.indexOf('opp.approve:o1') < createIdx, 'opportunity approved before create');
+  // 已 approved 的 blueprint b2 不应被再次 approve
+  assert.equal(calls.includes('bp.approve:b2'), false);
+  // 轮询直到 completed
+  assert.ok(calls.filter((c) => c === 'gen.get').length >= 2);
+});
+
+test('autoApproveAndGenerate throws when job fails', async () => {
+  const { deps } = makeDeps({
+    api: { ...makeDeps().deps.api, generations: {
+      create: async () => ({ id: 'job1', status: 'queued', projectId: 'proj1', topic: 't', mode: 'simple' }),
+      get: async () => ({ id: 'job1', projectId: 'proj1', topic: 't', mode: 'simple', status: 'failed', error: '生成失败' }),
+    } },
+  });
+  const project = { id: 'proj1', name: 'p' } as any;
+  await assert.rejects(() => autoApproveAndGenerate({ project, opportunityId: 'o1', pollIntervalMs: 1, maxPolls: 5, deps: deps as any }), /生成失败|失败/);
 });
