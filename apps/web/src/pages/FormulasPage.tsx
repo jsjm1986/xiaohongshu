@@ -22,10 +22,10 @@ import {
   Button,
   Field,
   Modal,
-  PageHeader,
   Skeleton,
   useToast,
 } from "../components/Ui";
+import { V2Hero } from "../components/V2";
 import { api } from "../lib/api";
 import {
   CANONICAL_DIAGNOSTIC_FINGERPRINTS,
@@ -233,8 +233,9 @@ export function FormulasPage() {
 
   return (
     <div className="page formulas-page">
-      <PageHeader
-        eyebrow="FORMULA REGISTRY"
+      <V2Hero
+        index="05"
+        status={<>{currentProject?.name || "当前项目"} · 当前启用 {versions.find((version) => version.status === "active")?.version || "无"}</>}
         title="公式版本"
         description={`「${currentProject?.name || "当前项目"}」的生产定义、规范边界、待验证推理与行为参数映射。`}
         actions={<><Button variant="secondary" icon={<GitBranch size={17} />} onClick={() => setSyncOpen(true)} disabled={!projectId}>同步已复核默认公式</Button><Button icon={<Plus size={17} />} onClick={() => setNewOpen(true)} disabled={!selected}>创建新版本</Button></>}

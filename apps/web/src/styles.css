@@ -2584,3 +2584,37 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .v2 .research-tabs button i { font-family: var(--v2-mono); font-size: 9.5px; font-variant-numeric: tabular-nums; }
 .v2 .research-boundary-grid strong { font-size: 12.5px; }
 .v2 .research-boundary-grid p { font-size: 11.5px; }
+
+/* ---- v2 页面构图：知识库台账 / 仪器带变体 ---- */
+.v2-instrument--3 { grid-template-columns: repeat(3, 1fr); }
+.v2-instrument--2 { grid-template-columns: repeat(2, 1fr); }
+.v2-instrument__chip--error { color: var(--v2-error) !important; }
+.knowledge-table .data-table__head, .knowledge-table .data-table__row { grid-template-columns: 64px minmax(260px, 1.7fr) 130px 110px 110px 64px; gap: 12px; }
+.knowledge-table .v2-lab-id { font-family: var(--v2-mono); font-size: 11px; color: var(--v2-muted-2); white-space: nowrap; }
+
+/* ---- 历史台账：7 列含编号 ---- */
+.history-table .data-table__head, .history-table .data-table__row { grid-template-columns: 72px minmax(240px, 1.5fr) minmax(120px, .7fr) 100px minmax(120px, .8fr) 110px 64px; gap: 12px; }
+.history-table .v2-lab-id { font-family: var(--v2-mono); font-size: 11px; color: var(--v2-muted-2); white-space: nowrap; }
+.table-toolbar .history-summary__scope { margin-left: auto; padding-right: 0; }
+
+/* ---- 项目档案卡：mono 编号 ---- */
+.v2 .project-grid { counter-reset: prj; }
+.v2 article.project-card { counter-increment: prj; position: relative; }
+.v2 article.project-card::before {
+  content: "PRJ-" counter(prj, decimal-leading-zero);
+  position: absolute; top: 26px; right: 52px;
+  font-family: var(--v2-mono); font-size: 10px; letter-spacing: 0.1em; color: var(--v2-muted-2);
+}
+
+/* ---- 生成页：模式拨杆 + hero ---- */
+.v2 .mode-switch { background: var(--v2-unknown-soft); border-color: var(--v2-line); border-radius: var(--v2-radius); }
+.v2 .mode-switch strong { font-size: 13px; font-weight: 650; }
+.v2 .mode-switch small { font-size: 11px; }
+
+/* ---- 详情页返回链 + hero 微调 ---- */
+.v2-back-link { display: inline-flex; align-items: center; gap: 5px; margin-bottom: 4px; color: var(--v2-muted); font-size: 12.5px; text-decoration: none; }
+.v2-back-link:hover { color: var(--v2-brand-ink); }
+.result-page .v2-hero h1 { font-size: 30px; max-width: 760px; }
+
+/* ---- 登录页：公式条 mono 小标 ---- */
+.login-formula small { font-family: "SF Mono", ui-monospace, Consolas, monospace; font-size: 9.5px; letter-spacing: 0.08em; }

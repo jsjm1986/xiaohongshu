@@ -13,10 +13,10 @@ import {
   EmptyState,
   Field,
   Modal,
-  PageHeader,
   Skeleton,
   useToast,
 } from "../components/Ui";
+import { V2Hero } from "../components/V2";
 import { api } from "../lib/api";
 import type {
   AuditEntry,
@@ -202,8 +202,9 @@ export function TeamPage() {
 
   return (
     <div className="page team-page">
-      <PageHeader
-        eyebrow="ACCESS CONTROL"
+      <V2Hero
+        index="09"
+        status={<>工作区 · 角色与权限</>}
         title="团队与权限"
         description="管理员创建账号；工作区角色提供默认权限，允许用授权和拒绝项精确覆盖。"
         actions={<div className="team-header-actions">
