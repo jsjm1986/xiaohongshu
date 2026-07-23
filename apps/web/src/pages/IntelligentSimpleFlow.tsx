@@ -326,7 +326,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const [settingOverrides, setSettingOverrides] = useState<SimpleSettingOverrides>({});
   const [showAllOpportunities, setShowAllOpportunities] = useState(false);
   const [guidance, setGuidance] = useState("");
-  const [showGuidance, setShowGuidance] = useState(false);
+  const [refreshOpen, setRefreshOpen] = useState(false);
   const [templates, setTemplates] = useState<PromptTemplate[]>([]);
   const [collectionFilter, setCollectionFilter] = useState<"all" | "active" | "collected" | "archived">("all");
   const fileInput = useRef<HTMLInputElement>(null);
@@ -383,7 +383,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
         setIntelligence(next);
         if (next.status === "ready") {
           window.clearInterval(timer);
-          void refreshOpportunities();
+          void runRefresh();
         }
       }).catch(() => undefined);
       refreshLatestTask();
@@ -504,13 +504,14 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     }
   };
 
-  const refreshOpportunities = async () => {
+  const runRefresh = async (guidanceArg?: string) => {
     setRefreshing(true);
     try {
-      const result = await api.opportunities.refresh(projectId, guidance.trim() || undefined);
+      const result = await api.opportunities.refresh(projectId, guidanceArg?.trim() || undefined);
       setOpportunities(result.items);
       setSelectedOpportunityId("");
       api.promptTemplates.list(projectId).then(setTemplates).catch(() => undefined);
+      setRefreshOpen(false);
       toast.push(`已追加一批新选题（${result.items.length} 个），旧选题已保留`, "info");
     } catch (error) {
       toast.push(error instanceof Error ? error.message : "选题刷新失败", "error");
@@ -522,8 +523,9 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const toggleCollection = async (item: TopicOpportunity, target: "collected" | "archived") => {
     const next = (item.collectionStatus ?? "active") === target ? "active" : target;
     try {
-      const updated = await api.opportunities.setCollection(projectId, item.id, next);
-      setOpportunities((current) => current.map((opp) => opp.id === updated.id ? updated : opp));
+      await api.opportunities.setCollection(projectId, item.id, next);
+      setOpportunities((current) =>
+        current.map((opp) => (opp.id === item.id ? { ...opp, collectionStatus: next } : opp)));
       const feedback: Record<"collected" | "archived" | "active", { text: string; kind: "success" | "info" }> = {
         collected: { text: "已收藏", kind: "success" },
         archived: { text: "已归档", kind: "success" },
@@ -881,30 +883,9 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
         <div className="panel-actions">
           <Button variant="ghost" onClick={() => { setPoolTab("gaps"); setPoolOpen(true); }} icon={<Layers3 size={15} />}>信息缺口池</Button>
           <Button variant="ghost" onClick={() => { setPoolTab("strategies"); setPoolOpen(true); }} icon={<Sparkles size={15} />}>表达策略池</Button>
-          <Button loading={refreshing} disabled={intelligence?.status !== "ready" || !blueprintReady} onClick={refreshOpportunities} icon={<RefreshCw size={15} />}>换一批</Button>
+          <Button loading={refreshing} disabled={intelligence?.status !== "ready" || !blueprintReady} onClick={() => setRefreshOpen(true)} icon={<RefreshCw size={15} />}>换一批</Button>
         </div>
       </header>
-      <div className="opportunity-guidance">
-        <button type="button" className="link-button" onClick={() => setShowGuidance((value) => !value)}>{showGuidance ? "收起方向引导" : "＋ 添加方向引导（可选）"}</button>
-        {showGuidance && (
-          <div className="guidance-panel">
-            <textarea value={guidance} rows={2} maxLength={600} placeholder="用一句话引导本批选题方向，例如：多聚焦术后恢复期的真实顾虑；可临时放宽到相邻话题。" onChange={(event) => setGuidance(event.target.value)} />
-            {templates.length > 0 && (
-              <div className="guidance-templates">
-                {templates.map((template) => (
-                  <span key={template.id} className="chip-group">
-                    <button type="button" className="chip" onClick={() => setGuidance(template.guidance)}>{template.label}</button>
-                    <button type="button" className="chip-remove" title="删除模板" onClick={async () => { try { await api.promptTemplates.remove(projectId, template.id); setTemplates((current) => current.filter((item) => item.id !== template.id)); } catch (error) { toast.push(error instanceof Error ? error.message : "删除失败", "error"); } }}>×</button>
-                  </span>
-                ))}
-              </div>
-            )}
-            <div className="guidance-actions">
-              <button type="button" className="link-button" disabled={!guidance.trim()} onClick={() => void saveGuidanceTemplate()}>保存为模板</button>
-            </div>
-          </div>
-        )}
-      </div>
       <div className="opportunity-ranking-boundary"><Info size={16} /><div><strong>排序只帮助比较当前候选，不证明平台效果</strong><p>OpportunityRankHeuristicV1 使用固定但未标定的内部权重；它不是 F28 的机会公式，不是需求、竞品、阅读量或转化因果预测。输入 unknown 的卡片保持待复核，不会显示成 0 分。</p></div></div>
       {opportunities.length > 0 && (
         <div className="opportunity-filter">
@@ -1008,9 +989,28 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
       <footer className="intelligence-run"><div><strong>{selectedOpportunity ? `已选择：${selectedOpportunity.title}` : "请先选择一张选题卡"}</strong><p>{selectedAssetIds.length} 张源素材已选 · 只作为三套图片计划与 imageBrief 的参考输入</p>{!blueprintReady ? <small>七项项目创作模型尚未全部确认，正式生成已锁定。</small> : selectedOpportunity && missingDependencyCount > 0 ? <small>引用资源缺失：请换一批，或在资源池修复引用。</small> : selectedOpportunity && pendingDependencyCount > 0 ? <small>将先独立确认 {opportunityDependencies.unapprovedGaps.length} 个信息缺口和 {opportunityDependencies.unapprovedStrategies.length} 个表达策略，再确认选题；不会隐式级联。</small> : selectedOpportunity?.status !== "approved" && selectedOpportunity ? <small>继续后会明确确认这张选题卡；AI 草案不会在未确认时进入生成。</small> : selectedOpportunity ? <small>选题及其引用依赖均已独立确认。</small> : null}</div><Button disabled={!selectedOpportunity || intelligence?.status !== "ready" || !blueprintReady} loading={submitting || preparing} icon={<Sparkles size={17} />} onClick={() => void preview()}>{selectedOpportunity && pendingDependencyCount > 0 ? `先确认 ${pendingDependencyCount} 项依赖并预览` : selectedOpportunity?.status === "approved" ? "预览并生成 3 套内容方案" : "确认选题并预览"}</Button></footer>
     </section>
 
+    <Modal open={refreshOpen} onClose={() => setRefreshOpen(false)} title="换一批新选题" description="基于现有蓝图与已确认信息缺口重新生成一批并追加保留；旧选题不会被删除。约几十秒，消耗一次模型额度。" footer={<><Button variant="secondary" loading={refreshing} onClick={() => void runRefresh(undefined)}>直接生成</Button><Button loading={refreshing} disabled={!guidance.trim()} onClick={() => void runRefresh(guidance.trim())}>按引导生成</Button></>}>
+      <div className="guidance-panel">
+        <textarea value={guidance} rows={3} maxLength={600} placeholder="可留空直接生成；或用一句话引导本批选题方向，例如：多聚焦术后恢复期的真实顾虑；可临时放宽到相邻话题。" onChange={(event) => setGuidance(event.target.value)} />
+        {templates.length > 0 && (
+          <div className="guidance-templates">
+            {templates.map((template) => (
+              <span key={template.id} className="chip-group">
+                <button type="button" className="chip" onClick={() => setGuidance(template.guidance)}>{template.label}</button>
+                <button type="button" className="chip-remove" title="删除模板" onClick={async () => { if (!window.confirm(`确定删除模板「${template.label}」吗？`)) return; try { await api.promptTemplates.remove(projectId, template.id); setTemplates((current) => current.filter((item) => item.id !== template.id)); } catch (error) { toast.push(error instanceof Error ? error.message : "删除失败", "error"); } }}>×</button>
+              </span>
+            ))}
+          </div>
+        )}
+        <div className="guidance-actions">
+          <button type="button" className="link-button" disabled={!guidance.trim()} onClick={() => void saveGuidanceTemplate()}>保存为模板</button>
+        </div>
+      </div>
+    </Modal>
+
     <Modal open={poolOpen} onClose={() => setPoolOpen(false)} title="内容智能资源池" description="信息缺口决定写什么，完整表达策略决定标签、图文与评论怎样协同。" size="wide">
       <div className="pool-manager"><div className="pool-tabs"><button className={poolTab === "gaps" ? "active" : ""} onClick={() => setPoolTab("gaps")}>信息缺口池 <b>{gaps.length}</b></button><button className={poolTab === "strategies" ? "active" : ""} onClick={() => setPoolTab("strategies")}>完整表达策略池 <b>{strategies.length}</b></button></div><div className="pool-toolbar"><label><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索资源" /></label><Button icon={<Plus size={15} />} onClick={() => { if (poolTab === "gaps") { setEditingGap({}); } else { setEditingStrategy({}); } }}>新增</Button></div>
-        {poolTab === "gaps" ? <div className="pool-list">{filteredGaps.map((gap) => <article key={gap.id} className={!gap.enabled ? "disabled" : ""}><div><Badge>{gap.category}</Badge><Badge tone={gap.status === "approved" ? "positive" : "warning"}>{gap.status === "approved" ? "已确认" : "待确认"}</Badge></div><h3>{gap.label}</h3><p>{gap.question}</p><small>{gap.sourceType} · 优先级 {gap.priority}</small><footer>{gap.status !== "approved" && <button onClick={() => void api.informationGaps.approve(projectId, gap.id).then((saved) => setGaps((current) => current.map((item) => item.id === saved.id ? saved : item)))}>确认使用</button>}<button onClick={() => void api.informationGaps.update(projectId, gap.id, { ...gap, enabled: !gap.enabled }).then((saved) => setGaps((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{gap.enabled ? "已启用" : "已停用"}</button><button onClick={() => void api.informationGaps.update(projectId, gap.id, { ...gap, locked: !gap.locked }).then((saved) => setGaps((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{gap.locked ? <Lock size={13} /> : <Unlock size={13} />}</button><button onClick={() => setEditingGap(gap)}><Pencil size={13} /></button><button onClick={() => void api.informationGaps.remove(projectId, gap.id).then(() => setGaps((current) => current.filter((item) => item.id !== gap.id)))}><Trash2 size={13} /></button></footer></article>)}</div> : <div className="pool-list">{filteredStrategies.map((strategy) => <article key={strategy.id} className={!strategy.enabled ? "disabled" : ""}><div><Badge>{strategy.source}</Badge><Badge tone={strategy.status === "approved" ? "positive" : "warning"}>{strategy.status === "approved" ? "已确认" : "待确认"}</Badge></div><h3>{strategy.name}</h3><p>{strategy.description}</p><small>{strategy.imagePolicy}</small><footer>{strategy.status !== "approved" && <button onClick={() => void api.expressionStrategies.approve(projectId, strategy.id).then((saved) => setStrategies((current) => current.map((item) => item.id === saved.id ? saved : item)))}>确认使用</button>}<button onClick={() => void api.expressionStrategies.update(projectId, strategy.id, { ...strategy, enabled: !strategy.enabled }).then((saved) => setStrategies((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{strategy.enabled ? "已启用" : "已停用"}</button><button onClick={() => void api.expressionStrategies.update(projectId, strategy.id, { ...strategy, locked: !strategy.locked }).then((saved) => setStrategies((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{strategy.locked ? <Lock size={13} /> : <Unlock size={13} />}</button><button onClick={() => setEditingStrategy(strategy)}><Pencil size={13} /></button>{strategy.source !== "builtin" && <button onClick={() => void api.expressionStrategies.remove(projectId, strategy.id).then(() => setStrategies((current) => current.filter((item) => item.id !== strategy.id)))}><Trash2 size={13} /></button>}</footer></article>)}</div>}
+        {poolTab === "gaps" ? <div className="pool-list">{filteredGaps.map((gap) => <article key={gap.id} className={!gap.enabled ? "disabled" : ""}><div><Badge>{gap.category}</Badge><Badge tone={gap.status === "approved" ? "positive" : "warning"}>{gap.status === "approved" ? "已确认" : "待确认"}</Badge></div><h3>{gap.label}</h3><p>{gap.question}</p><small>{gap.sourceType} · 优先级 {gap.priority}</small><footer>{gap.status !== "approved" && <button onClick={() => void api.informationGaps.approve(projectId, gap.id).then((saved) => setGaps((current) => current.map((item) => item.id === saved.id ? saved : item)))}>确认使用</button>}<button onClick={() => void api.informationGaps.update(projectId, gap.id, { ...gap, enabled: !gap.enabled }).then((saved) => setGaps((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{gap.enabled ? "已启用" : "已停用"}</button><button onClick={() => void api.informationGaps.update(projectId, gap.id, { ...gap, locked: !gap.locked }).then((saved) => setGaps((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{gap.locked ? <Lock size={13} /> : <Unlock size={13} />}</button><button onClick={() => setEditingGap(gap)}><Pencil size={13} /></button><button onClick={() => { if (!window.confirm(`确定删除信息缺口「${gap.label}」吗？`)) return; void api.informationGaps.remove(projectId, gap.id).then(() => setGaps((current) => current.filter((item) => item.id !== gap.id))).catch((error) => toast.push(error instanceof Error ? error.message : "删除失败", "error")); }}><Trash2 size={13} /></button></footer></article>)}</div> : <div className="pool-list">{filteredStrategies.map((strategy) => <article key={strategy.id} className={!strategy.enabled ? "disabled" : ""}><div><Badge>{strategy.source}</Badge><Badge tone={strategy.status === "approved" ? "positive" : "warning"}>{strategy.status === "approved" ? "已确认" : "待确认"}</Badge></div><h3>{strategy.name}</h3><p>{strategy.description}</p><small>{strategy.imagePolicy}</small><footer>{strategy.status !== "approved" && <button onClick={() => void api.expressionStrategies.approve(projectId, strategy.id).then((saved) => setStrategies((current) => current.map((item) => item.id === saved.id ? saved : item)))}>确认使用</button>}<button onClick={() => void api.expressionStrategies.update(projectId, strategy.id, { ...strategy, enabled: !strategy.enabled }).then((saved) => setStrategies((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{strategy.enabled ? "已启用" : "已停用"}</button><button onClick={() => void api.expressionStrategies.update(projectId, strategy.id, { ...strategy, locked: !strategy.locked }).then((saved) => setStrategies((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{strategy.locked ? <Lock size={13} /> : <Unlock size={13} />}</button><button onClick={() => setEditingStrategy(strategy)}><Pencil size={13} /></button>{strategy.source !== "builtin" && <button onClick={() => { if (!window.confirm(`确定删除表达策略「${strategy.name}」吗？`)) return; void api.expressionStrategies.remove(projectId, strategy.id).then(() => setStrategies((current) => current.filter((item) => item.id !== strategy.id))).catch((error) => toast.push(error instanceof Error ? error.message : "删除失败", "error")); }}><Trash2 size={13} /></button>}</footer></article>)}</div>}
       </div>
     </Modal>
 

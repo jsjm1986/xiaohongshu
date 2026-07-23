@@ -59,12 +59,12 @@ let csrfToken =
   sessionStorage.getItem("content-agent-csrf") ||
   decodeURIComponent(cookieValue("ca_csrf"));
 
-const unwrap = <T>(value: T | { data: T }): T => {
-  if (value && typeof value === "object" && "data" in value) {
-    return (value as { data: T }).data;
-  }
-  return value as T;
-};
+// The API never wraps responses in a { data: T } envelope — endpoints return the
+// business object or array directly. The old unwrap unconditionally stripped any
+// top-level `data` key, which silently corrupted business objects that legitimately
+// carry one (e.g. topic-opportunity / strategy mappers return `data: storedData`),
+// returning the inner payload without an `id`. Pass the body through unchanged.
+const unwrap = <T>(value: T | { data: T }): T => value as T;
 
 const normalizeList = <T>(value: T[] | ApiList<T>): ApiList<T> => {
   if (Array.isArray(value)) return { items: value, total: value.length };
