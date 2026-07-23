@@ -2835,3 +2835,26 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .v2 .intelligence-status strong { font-size: 13.5px; line-height: 1.4; }
 .v2 .intelligence-status p { margin: 2px 0 0; }
 .v2 .intelligence-status .panel-actions { margin-top: 0; align-items: flex-start; }
+
+/* 极简创作频道 */
+.quick-page .quick-step { max-width: 640px; display: flex; flex-direction: column; gap: 16px; margin-top: 24px; }
+.quick-loading { align-items: center; text-align: center; gap: 12px; }
+.quick-hint { color: var(--muted); font-size: 13px; }
+.quick-topic-list { display: flex; flex-direction: column; gap: 10px; }
+.quick-topic { text-align: left; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: #fff; cursor: pointer; font-size: 15px; transition: border-color .15s, transform .15s; }
+.quick-topic:hover { border-color: var(--coral); transform: translateY(-1px); }
+.quick-result { display: flex; flex-direction: column; gap: 14px; margin-top: 20px; }
+.quick-tabs { display: flex; gap: 8px; }
+.quick-tabs button { padding: 8px 14px; border: 1px solid var(--border); border-radius: 8px; background: #fff; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.quick-tabs button.active { border-color: var(--coral); color: var(--coral); font-weight: 600; }
+.quick-tab-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--amber, #e0a100); display: inline-block; }
+.quick-card { border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; background: #fff; }
+.quick-card header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.quick-card header h3 { font-size: 13px; color: var(--muted); margin: 0; }
+.quick-body { white-space: pre-wrap; }
+.quick-tag-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.quick-tag { background: var(--panel-inset, #f5f5f4); padding: 3px 8px; border-radius: 6px; font-size: 13px; }
+.quick-qa { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.quick-qa small { display: block; color: var(--muted); }
+.quick-followup { display: flex; flex-direction: column; padding-left: 12px; border-left: 2px solid var(--border); margin-top: 4px; font-size: 13px; }
+.quick-result__actions { display: flex; gap: 10px; margin-top: 8px; }

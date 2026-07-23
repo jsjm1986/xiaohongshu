@@ -14,6 +14,7 @@ import {
   Sparkles,
   UsersRound,
   X,
+  Zap,
 } from "lucide-react";
 import { useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
@@ -23,6 +24,7 @@ import { ProjectProvider, useProjects } from "./ProjectContext";
 const navigation = [
   { to: "/", label: "概览", icon: LayoutDashboard, end: true },
   { to: "/generate", label: "内容生成", icon: Sparkles },
+  { to: "/quick", label: "极简创作", icon: Zap },
   { to: "/projects", label: "项目管理", icon: Boxes },
   { to: "/knowledge", label: "知识库", icon: BookOpenText },
   { to: "/formulas", label: "公式版本", icon: FlaskConical },
