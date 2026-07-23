@@ -60,7 +60,7 @@ function ShellContent() {
   };
 
   return (
-    <div className="app-shell">
+    <div className="app-shell v2">
       <aside className={`sidebar ${sidebarOpen ? "sidebar--open" : ""}`}>
         <div className="brand">
           <div className="brand__mark">
@@ -78,7 +78,7 @@ function ShellContent() {
           </button>
         </div>
 
-        <div className="sidebar__section-label">工作台</div>
+        <div className="sidebar__section-label">01 · 工作台</div>
         <nav className="sidebar__nav">
           {visibleNavigation.slice(0, 2).map(({ to, label, icon: Icon, end }) => (
             <NavLink
@@ -94,7 +94,7 @@ function ShellContent() {
           ))}
         </nav>
 
-        <div className="sidebar__section-label">资产与规则</div>
+        <div className="sidebar__section-label">02 · 资产与规则</div>
         <nav className="sidebar__nav">
           {visibleNavigation.slice(2).map(({ to, label, icon: Icon }) => (
             <NavLink key={to} to={to} onClick={() => setSidebarOpen(false)}>
@@ -111,10 +111,10 @@ function ShellContent() {
             <span>轻量运行</span>
             <strong>SQLite</strong>
           </div>
-          <div className="quota-mini__bar">
-            <span style={{ width: "100%" }} />
-          </div>
-          <small>知识优先全量注入 · 无向量服务</small>
+          <span className="v2-console">
+            CORE <b>v1.6.0</b> · POLICY <b>3.6.0</b><br />
+            <i>●</i> 系统正常 · 无向量服务
+          </span>
         </div>
         <nav className="sidebar__nav sidebar__nav--bottom">
           <NavLink to="/settings" onClick={() => setSidebarOpen(false)}>

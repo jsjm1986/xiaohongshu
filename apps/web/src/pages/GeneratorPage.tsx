@@ -580,12 +580,12 @@ export function GeneratorPage() {
       />
 
       <div className="mode-switch" role="tablist">
-        <button className={mode === "simple" ? "active" : ""} onClick={() => setMode("simple")}>
+        <button type="button" className={mode === "simple" ? "active" : ""} onClick={() => setMode("simple")}>
           <Sparkles size={18} />
           <span><strong>简单模式</strong><small>一键预设 + 4 步必要信息</small></span>
           {mode === "simple" && <Check size={16} />}
         </button>
-        <button className={mode === "advanced" ? "active" : ""} onClick={() => setMode("advanced")}>
+        <button type="button" className={mode === "advanced" ? "active" : ""} onClick={() => setMode("advanced")}>
           <SlidersHorizontal size={18} />
           <span><strong>设置模式</strong><small>目标 / 公式双视图，共享参数</small></span>
           {mode === "advanced" && <Check size={16} />}
@@ -724,7 +724,7 @@ function PresetShelf({ presets, selectedId, loading, compact, onApply, onCopy, o
           {selectedId === preset.id && <b><Check size={13} /></b>}
         </button>
         <div className="preset-card__actions">
-          {preset.source === "built-in" ? <button type="button" title="复制为项目预设" onClick={() => onCopy(preset)}><Copy size={13} />复制</button> : <><button type="button" title="用当前参数更新" onClick={() => onUpdate(preset)}><RotateCcw size={13} />更新</button><button type="button" title="设为项目默认" onClick={() => onDefault(preset)}><Star size={13} />默认</button><button type="button" title="删除项目预设" onClick={() => onDelete(preset)}><Trash2 size={13} /></button></>}
+          {preset.source === "built-in" ? <button type="button" title="复制为项目预设" onClick={() => onCopy(preset)}><Copy size={13} />复制</button> : <><button type="button" title="用当前参数更新" onClick={() => onUpdate(preset)}><RotateCcw size={13} />更新</button><button type="button" title="设为项目默认" onClick={() => onDefault(preset)}><Star size={13} />默认</button><button type="button" title="删除项目预设" aria-label="删除项目预设" onClick={() => onDelete(preset)}><Trash2 size={13} /></button></>}
         </div>
       </article>)}
     </div>}

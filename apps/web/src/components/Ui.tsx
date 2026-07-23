@@ -12,6 +12,7 @@ import {
   type ReactNode,
   useContext,
   useEffect,
+  useRef,
   useState,
 } from 'react';
 
@@ -37,7 +38,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           <div className={`toast toast--${item.kind}`} key={item.id}>
             {item.kind === 'success' ? <CheckCircle2 size={18} /> : item.kind === 'error' ? <XCircle size={18} /> : <Info size={18} />}
             <span>{item.message}</span>
-            <button onClick={() => setItems((current) => current.filter((currentItem) => currentItem.id !== item.id))} aria-label="关闭提示"><X size={15} /></button>
+            <button type="button" onClick={() => setItems((current) => current.filter((currentItem) => currentItem.id !== item.id))} aria-label="关闭提示"><X size={15} /></button>
           </div>
         ))}
       </div>
@@ -84,20 +85,26 @@ export function PageHeader({ eyebrow, title, description, actions }: { eyebrow?:
 }
 
 export function Modal({ open, title, description, children, onClose, footer, size }: { open: boolean; title: string; description?: string; children: ReactNode; onClose: () => void; footer?: ReactNode; size?: "wide" }) {
+  const dialogRef = useRef<HTMLElement>(null);
   useEffect(() => {
     if (!open) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const handleKey = (event: KeyboardEvent) => event.key === 'Escape' && onClose();
     document.addEventListener('keydown', handleKey);
-    return () => document.removeEventListener('keydown', handleKey);
+    dialogRef.current?.focus();
+    return () => {
+      document.removeEventListener('keydown', handleKey);
+      previous?.focus();
+    };
   }, [open, onClose]);
 
   if (!open) return null;
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className={size === "wide" ? "modal modal--wide" : "modal"} role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <section ref={dialogRef} tabIndex={-1} className={size === "wide" ? "modal modal--wide" : "modal"} role="dialog" aria-modal="true" aria-labelledby="modal-title">
         <header className="modal__header">
           <div><h2 id="modal-title">{title}</h2>{description && <p>{description}</p>}</div>
-          <button className="icon-button" onClick={onClose} aria-label="关闭"><X size={20} /></button>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭"><X size={20} /></button>
         </header>
         <div className="modal__body">{children}</div>
         {footer && <footer className="modal__footer">{footer}</footer>}

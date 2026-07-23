@@ -277,6 +277,7 @@ export function TeamPage() {
                 </span>
                 <span className="team-actions">
                   <button
+                    type="button"
                     onClick={() => setPermissionMember(structuredClone(member))}
                   >
                     <UserCog size={15} />
@@ -284,7 +285,9 @@ export function TeamPage() {
                   </button>
                   {member.role !== "Owner" && (
                     <button
+                      type="button"
                       className="danger"
+                      aria-label="移除成员"
                       onClick={async () => {
                         await api.workspaces.removeMember(
                           workspaceId,
@@ -340,7 +343,7 @@ export function TeamPage() {
               <div key={item.id}>
                 <span><strong>{item.name}</strong><code>{item.prefix}••••</code></span>
                 <small>{item.lastUsedAt ? `最后使用 ${new Date(item.lastUsedAt).toLocaleString("zh-CN")}` : "尚未使用"}</small>
-                <button onClick={async () => { await api.workspaces.revokeApiKey(workspaceId, item.id); await load(); }}><Trash2 size={14} />撤销</button>
+                <button type="button" onClick={async () => { await api.workspaces.revokeApiKey(workspaceId, item.id); await load(); }}><Trash2 size={14} />撤销</button>
               </div>
             ))}
             {apiKeys.every((item) => item.revokedAt) && <p className="api-key-empty">尚未创建有效密钥</p>}
