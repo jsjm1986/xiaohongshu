@@ -8,7 +8,7 @@ async function copyText(text: string, toast: ReturnType<typeof useToast>) {
     await navigator.clipboard.writeText(text);
     toast.push('已复制');
   } catch {
-    /* 静默降级 */
+    toast.push('复制失败，请手动选择文本', 'error');
   }
 }
 
@@ -68,13 +68,13 @@ export function QuickResult({ candidates, onRegenerate, onPickAnotherTopic }: {
         <CopyCard title="问答话术" text={view.comments.map((c) => `Q: ${c.question}\nA: ${c.answer}${c.boundary ? `\n边界: ${c.boundary}` : ''}${c.nextStep ? `\n下一步: ${c.nextStep}` : ''}`).join('\n\n')}>
           <ul className="quick-qa">
             {view.comments.map((c, i) => (
-              <li key={i}>
+              <li key={`${c.question}-${i}`}>
                 <strong>Q: {c.question}</strong>
                 <p>A: {c.answer}</p>
                 {c.boundary && <small>边界：{c.boundary}</small>}
                 {c.nextStep && <small>下一步：{c.nextStep}</small>}
                 {(c.followUps ?? []).map((f, j) => (
-                  <div key={j} className="quick-followup"><span>追问：{f.question}</span><span>回应：{f.answer}</span></div>
+                  <div key={`${f.question}-${j}`} className="quick-followup"><span>追问：{f.question}</span><span>回应：{f.answer}</span></div>
                 ))}
               </li>
             ))}
