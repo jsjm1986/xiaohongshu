@@ -873,13 +873,15 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     },
   ];
 
+  const currentStepIndex = stepStates.findIndex((stepItem) => !stepItem.done);
+
   return <div className="intelligence-flow v2-protocol">
     <aside className="protocol-rail">
       <div className="protocol-rail__inner">
         <span className="v2-sec-label">PROTOCOL</span>
         <ol>
-          {stepStates.map((stepItem) => (
-            <li key={stepItem.id} className={stepItem.done ? "is-done" : ""}>
+          {stepStates.map((stepItem, stepIndex) => (
+            <li key={stepItem.id} className={`${stepItem.done ? "is-done" : ""} ${stepIndex === currentStepIndex ? "is-current" : ""}`.trim()}>
               <button type="button" onClick={() => document.getElementById(stepItem.id)?.scrollIntoView({ behavior: "smooth", block: "start" })}>
                 <i>{stepItem.done ? <Check size={13} /> : stepItem.number}</i>
                 <span><strong>{stepItem.title}</strong><small>{stepItem.state}</small></span>
@@ -916,19 +918,23 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
 
     <section className="opportunity-panel panel" id="step-2">
       <header>
-        <div><span>第 2 步</span><h2>选择一个值得写的信息缺口</h2><p>选题来自行业问题与项目可回答空间的交集，不要求你先写提示词。卡片顺序如有排序，仅采用“机会排序启发式 V1”。</p><p className="opportunity-refresh-note">“换一批”会基于现有蓝图和已确认信息缺口<strong>重新生成一批新选题并追加保留</strong>（约几十秒，消耗一次模型额度）；本批会自动提高随机性并避开已生成过的标题，也可填写方向引导词控制生成重点。<strong>旧选题不会被删除</strong>，可在下方按“未处理 / 已收藏 / 已归档”筛选。</p>{(collectionCounts.collected > 0 || collectionCounts.archived > 0) && (
-          <p className="opportunity-collection-summary">
-            {collectionCounts.collected > 0 && <button type="button" onClick={() => setCollectionFilter("collected")}>★ 已收藏 {collectionCounts.collected}</button>}
-            {collectionCounts.collected > 0 && collectionCounts.archived > 0 && <span aria-hidden="true">·</span>}
-            {collectionCounts.archived > 0 && <button type="button" onClick={() => setCollectionFilter("archived")}>已归档 {collectionCounts.archived}</button>}
-          </p>
-        )}</div>
+        <div><span>第 2 步</span><h2>选择一个值得写的信息缺口</h2><p>选题来自行业问题与项目可回答空间的交集，不要求你先写提示词。卡片顺序如有排序，仅采用“机会排序启发式 V1”。</p></div>
         <div className="panel-actions">
           <Button variant="ghost" onClick={() => { setPoolTab("gaps"); setPoolOpen(true); }} icon={<Layers3 size={15} />}>信息缺口池</Button>
           <Button variant="ghost" onClick={() => { setPoolTab("strategies"); setPoolOpen(true); }} icon={<Sparkles size={15} />}>表达策略池</Button>
           <Button loading={refreshing} disabled={intelligence?.status !== "ready" || !blueprintReady} onClick={() => setRefreshOpen(true)} icon={<RefreshCw size={15} />}>换一批</Button>
         </div>
       </header>
+      <div className="opportunity-notes">
+        <p className="opportunity-refresh-note">“换一批”会基于现有蓝图和已确认信息缺口<strong>重新生成一批新选题并追加保留</strong>（约几十秒，消耗一次模型额度）；本批会自动提高随机性并避开已生成过的标题，也可填写方向引导词控制生成重点。<strong>旧选题不会被删除</strong>，可在下方按“未处理 / 已收藏 / 已归档”筛选。</p>
+        {(collectionCounts.collected > 0 || collectionCounts.archived > 0) && (
+          <p className="opportunity-collection-summary">
+            {collectionCounts.collected > 0 && <button type="button" onClick={() => setCollectionFilter("collected")}>★ 已收藏 {collectionCounts.collected}</button>}
+            {collectionCounts.collected > 0 && collectionCounts.archived > 0 && <span aria-hidden="true">·</span>}
+            {collectionCounts.archived > 0 && <button type="button" onClick={() => setCollectionFilter("archived")}>已归档 {collectionCounts.archived}</button>}
+          </p>
+        )}
+      </div>
       <div className="opportunity-ranking-boundary"><Info size={16} /><div><strong>排序只帮助比较当前候选，不证明平台效果</strong><p>OpportunityRankHeuristicV1 使用固定但未标定的内部权重；它不是 F28 的机会公式，不是需求、竞品、阅读量或转化因果预测。输入 unknown 的卡片保持待复核，不会显示成 0 分。</p></div></div>
       {opportunities.length > 0 && (
         <div className="opportunity-filter">
