@@ -1,5 +1,6 @@
 import type { Candidate, CommentThread, GenerateInput, GenerationJob, Project } from '../types';
 import { buildSimpleGenerateInput, resolveSimpleGenerationSettings } from './simple-generation';
+import type { SimpleSettingOverrides } from './simple-generation';
 
 // `./api` reads document.cookie / sessionStorage at module load, so it is
 // browser-only and must not be imported eagerly (it crashes under the Node test
@@ -111,11 +112,12 @@ export async function autoApproveAndGenerate(args: {
   project: Project;
   opportunityId: string;
   presetId?: string;
+  overrides?: SimpleSettingOverrides;
   pollIntervalMs?: number;
   maxPolls?: number;
   deps?: AutoDeps;
 }): Promise<GenerationJob> {
-  const { project, opportunityId, presetId } = args;
+  const { project, opportunityId, presetId, overrides } = args;
   const pollIntervalMs = args.pollIntervalMs ?? 1800;
   const maxPolls = args.maxPolls ?? 100;
   const d = args.deps ?? (await defaultDeps());
@@ -169,7 +171,7 @@ export async function autoApproveAndGenerate(args: {
     const presets = await d.api.presets.list(projectId);
     preset = presets.items.find((p) => p.id === presetId);
   }
-  const settings = d.resolveSettings({ project, preset, opportunity });
+  const settings = d.resolveSettings({ project, preset, opportunity, overrides });
   const input: GenerateInput = d.buildInput({
     projectId,
     opportunity,
@@ -178,6 +180,7 @@ export async function autoApproveAndGenerate(args: {
     lockedGapIds: [],
     presetId,
     localFieldsEnabled: false,
+    overrides: overrides as Record<string, unknown> | undefined,
     randomizationDimensions: [],
   });
 

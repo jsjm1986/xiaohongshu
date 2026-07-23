@@ -171,3 +171,21 @@ test('autoApproveAndGenerate throws when job fails', async () => {
   const project = { id: 'proj1', name: 'p' } as any;
   await assert.rejects(() => autoApproveAndGenerate({ project, opportunityId: 'o1', pollIntervalMs: 1, maxPolls: 5, deps: deps as any }), /生成失败|失败/);
 });
+
+test('autoApproveAndGenerate forwards overrides into buildInput and resolveSettings', async () => {
+  const seen: { resolveOverrides?: unknown; buildOverrides?: unknown } = {};
+  const base = makeDeps().deps;
+  const deps = {
+    ...base,
+    resolveSettings: (arg: { overrides?: unknown }) => { seen.resolveOverrides = arg.overrides; return {}; },
+    buildInput: (arg: { overrides?: unknown }) => {
+      seen.buildOverrides = arg.overrides;
+      return { projectId: 'proj1', mode: 'simple', opportunityId: 'o1', topic: 't', goal: 'w', audienceStage: 'hesitation', entryPoint: 'x' };
+    },
+  };
+  const project = { id: 'proj1', name: 'p' } as any;
+  const overrides = { city: '上海', commentRichness: 'dense' as const };
+  await autoApproveAndGenerate({ project, opportunityId: 'o1', overrides, pollIntervalMs: 1, maxPolls: 5, deps: deps as any });
+  assert.deepEqual(seen.resolveOverrides, overrides);
+  assert.deepEqual(seen.buildOverrides, overrides);
+});
