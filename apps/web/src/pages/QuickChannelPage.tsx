@@ -5,6 +5,7 @@ import { V2Hero } from '../components/V2';
 import { ProjectKnowledgeTab } from '../components/quick/ProjectKnowledgeTab';
 import { TopicTab } from '../components/quick/TopicTab';
 import { ConfigTab } from '../components/quick/ConfigTab';
+import { ResultTab } from '../components/quick/ResultTab';
 import { type QuickCandidateView } from '../lib/quick-generation';
 import { tabReachable, clearDownstreamOfProject, clearResults, type QuickTab } from '../lib/quick-channel-state';
 import type { ContentPreset, GenerationJob, Project, TopicOpportunity } from '../types';
@@ -126,7 +127,12 @@ export function QuickChannelPage() {
             setPresetId={setPresetId} setOverrides={setOverrides} onGenerated={onGenerated}
           />
         )}
-        {activeTab === 'result' && <div>[结果]</div>}
+        {activeTab === 'result' && (
+          <ResultTab
+            project={project} opportunityId={opportunityId} presetId={presetId} overrides={overrides}
+            results={results} setBusy={setBusy} fail={fail} onGenerated={onGenerated} goTo={goTo}
+          />
+        )}
         {activeTab === 'history' && <div>[历史]</div>}
       </div>
     </div>
