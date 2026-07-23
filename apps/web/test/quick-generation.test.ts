@@ -83,3 +83,10 @@ test('quickCandidateToMarkdown includes usable copy and no audit appendix', () =
   assert.doesNotMatch(md, /审计附录/);
   assert.doesNotMatch(md, /primaryGapId/);
 });
+
+test('quickCandidateFields preserves label used for result tabs', () => {
+  const withLabel = quickCandidateFields({ id: 'c3', label: '版本二', title: 't', body: 'b', tags: [], comments: [] } as any);
+  assert.equal(withLabel.label, '版本二');
+  const noLabel = quickCandidateFields({ id: 'c4', title: 't', body: 'b', tags: [], comments: [] } as any);
+  assert.equal(noLabel.label, undefined);
+});
