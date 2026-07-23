@@ -4,6 +4,7 @@ import { useToast } from '../components/Ui';
 import { V2Hero } from '../components/V2';
 import { ProjectKnowledgeTab } from '../components/quick/ProjectKnowledgeTab';
 import { TopicTab } from '../components/quick/TopicTab';
+import { ConfigTab } from '../components/quick/ConfigTab';
 import { type QuickCandidateView } from '../lib/quick-generation';
 import { tabReachable, clearDownstreamOfProject, clearResults, type QuickTab } from '../lib/quick-channel-state';
 import type { ContentPreset, GenerationJob, Project, TopicOpportunity } from '../types';
@@ -118,7 +119,13 @@ export function QuickChannelPage() {
             busy={busy} setBusy={setBusy} fail={fail} onPickTopic={onPickTopic} onAnalyzed={onAnalyzed}
           />
         )}
-        {activeTab === 'config' && <div>[配置]</div>}
+        {activeTab === 'config' && (
+          <ConfigTab
+            project={project} opportunityId={opportunityId} presets={presets} presetId={presetId}
+            overrides={overrides} busy={busy} setBusy={setBusy} fail={fail}
+            setPresetId={setPresetId} setOverrides={setOverrides} onGenerated={onGenerated}
+          />
+        )}
         {activeTab === 'result' && <div>[结果]</div>}
         {activeTab === 'history' && <div>[历史]</div>}
       </div>
