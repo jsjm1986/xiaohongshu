@@ -27,7 +27,6 @@ import { KnowledgeService } from './knowledge.service.js';
 import { ProjectController } from './project.controller.js';
 import { PresetController } from './preset.controller.js';
 import { RegistrationController } from './registration.controller.js';
-import { RegistrationController } from './registration.controller.js';
 import { RegistrationService } from './registration.service.js';
 import { PresetService } from './preset.service.js';
 import { ResourceService } from './resource.service.js';
