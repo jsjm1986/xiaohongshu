@@ -31,6 +31,15 @@ interface Props {
   setImageAssetIds: (ids: string[]) => void;
   onGenerated: (results: QuickCandidateView[], jobId: string) => void;
   goTo: (tab: QuickTab) => void;
+  /** 批量:左栏勾选 + 右栏批量配置态(壳持有状态,这里只透传) */
+  checkedIds: string[];
+  onToggleCheck: (id: string) => void;
+  onConfigBatch: () => void;
+  batchMode: boolean;
+  batchPresetIds: string[];
+  onToggleBatchPreset: (id: string) => void;
+  onSubmitBatch: () => void;
+  onCancelBatch: () => void;
 }
 
 export function CreateTab(props: Props) {
@@ -39,6 +48,8 @@ export function CreateTab(props: Props) {
     busy, setBusy, fail,
     onPickTopic, onAnalyzed, setOpportunities, onOpportunityGone,
     setPresetId, setPresets, setOverrides, setImageAssetIds, onGenerated, goTo,
+    checkedIds, onToggleCheck, onConfigBatch,
+    batchMode, batchPresetIds, onToggleBatchPreset, onSubmitBatch, onCancelBatch,
   } = props;
 
   return (
@@ -48,6 +59,7 @@ export function CreateTab(props: Props) {
           project={project} opportunities={opportunities} opportunityId={opportunityId}
           busy={busy} setBusy={setBusy} fail={fail} onPickTopic={onPickTopic} onAnalyzed={onAnalyzed}
           setOpportunities={setOpportunities} onOpportunityGone={onOpportunityGone}
+          checkedIds={checkedIds} onToggleCheck={onToggleCheck} onConfigBatch={onConfigBatch}
           onGoKnowledge={() => goTo('knowledge')}
         />
       </div>
@@ -57,8 +69,10 @@ export function CreateTab(props: Props) {
           overrides={overrides} imageAssetIds={imageAssetIds} busy={busy} setBusy={setBusy} fail={fail}
           setPresetId={setPresetId} setPresets={setPresets} setOverrides={setOverrides}
           setImageAssetIds={setImageAssetIds} onGenerated={onGenerated}
+          batchMode={batchMode} batchPresetIds={batchPresetIds} onToggleBatchPreset={onToggleBatchPreset}
+          batchTopicCount={checkedIds.length} onSubmitBatch={onSubmitBatch} onCancelBatch={onCancelBatch}
         />
-        {busy || results.length > 0 ? (
+        {batchMode ? null : busy || results.length > 0 ? (
           <ResultTab
             project={project} opportunityId={opportunityId} presetId={presetId} overrides={overrides}
             imageAssetIds={imageAssetIds} jobId={jobId}

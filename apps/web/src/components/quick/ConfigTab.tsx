@@ -9,6 +9,7 @@ import { writeLocalPresets } from '../../lib/presets';
 import type { CommentRichnessLevel, SimpleSettingOverrides } from '../../lib/simple-generation';
 import type { ContentPreset, Project } from '../../types';
 import { QuickImagePicker } from './QuickImagePicker';
+import { PresetCards } from './PresetCards';
 
 const STAGES: Array<{ id: string; title: string }> = [
   { id: 'discovering', title: '刚开始了解' },
@@ -46,9 +47,16 @@ interface Props {
   setOverrides: (o: SimpleSettingOverrides) => void;
   setImageAssetIds: (ids: string[]) => void;
   onGenerated: (results: QuickCandidateView[], jobId: string) => void;
+  /** 批量态:由选题池「配置批量生成」进入,右栏改为多选预设 + 批量提交 */
+  batchMode: boolean;
+  batchPresetIds: string[];
+  onToggleBatchPreset: (id: string) => void;
+  batchTopicCount: number;
+  onSubmitBatch: () => void;
+  onCancelBatch: () => void;
 }
 
-export function ConfigTab({ project, opportunityId, presets, presetId, overrides, imageAssetIds, busy, setBusy, fail, setPresetId, setPresets, setOverrides, setImageAssetIds, onGenerated }: Props) {
+export function ConfigTab({ project, opportunityId, presets, presetId, overrides, imageAssetIds, busy, setBusy, fail, setPresetId, setPresets, setOverrides, setImageAssetIds, onGenerated, batchMode, batchPresetIds, onToggleBatchPreset, batchTopicCount, onSubmitBatch, onCancelBatch }: Props) {
   const toast = useToast();
   const [progress, setProgress] = useState<number | undefined>(undefined);
   const [presetWorking, setPresetWorking] = useState(false);
@@ -158,18 +166,37 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
 
   return (
     <div className="qc-step">
-      <Field label="内容预设" required>
-        <select value={presetId ?? ''} onChange={(e) => setPresetId(e.target.value || undefined)}>
-          {presets.map((p) => <option key={p.id} value={p.id}>{p.name}{p.isDefault ? '（默认）' : ''}</option>)}
-        </select>
-      </Field>
-      <div className="qc-preset-actions">
-        <Button variant="ghost" disabled={!presetId || currentPreset?.isDefault || busy || presetWorking} onClick={() => void makeDefault()}>设为默认</Button>
-        <Button variant="ghost" disabled={busy || presetWorking} onClick={() => setSaveOpen(true)}>存为预设</Button>
-        {currentPreset?.source === 'project' && (
-          <Button variant="ghost" disabled={busy || presetWorking} onClick={() => setDeleteOpen(true)}>删除</Button>
-        )}
-      </div>
+      {batchMode ? (
+        <>
+          <div className="qc-batch-head">
+            <strong>批量生成 · 已选 {batchTopicCount} 个选题</strong>
+            <Button variant="ghost" disabled={busy} onClick={onCancelBatch}>退出批量</Button>
+          </div>
+          <Field label="选版本（预设可多选）" required>
+            <PresetCards presets={presets} mode="multi" selectedIds={batchPresetIds} onToggle={onToggleBatchPreset} disabled={busy} />
+          </Field>
+          <p className="qc-hint">{batchTopicCount} 选题 × {batchPresetIds.length} 预设 = {batchTopicCount * batchPresetIds.length} 篇；下面的高级设置与源图对整批生效。</p>
+        </>
+      ) : (
+        <>
+          <Field label="内容预设" required>
+            <PresetCards
+              presets={presets}
+              mode="single"
+              selectedId={presetId}
+              onSelect={(id) => setPresetId(id)}
+              onSave={() => setSaveOpen(true)}
+              disabled={busy || presetWorking}
+            />
+          </Field>
+          <div className="qc-preset-actions">
+            <Button variant="ghost" disabled={!presetId || currentPreset?.isDefault || busy || presetWorking} onClick={() => void makeDefault()}>设为默认</Button>
+            {currentPreset?.source === 'project' && (
+              <Button variant="ghost" disabled={busy || presetWorking} onClick={() => setDeleteOpen(true)}>删除</Button>
+            )}
+          </div>
+        </>
+      )}
 
       <details className="qc-advanced">
         <summary>高级设置（可留空，全部有默认值）</summary>
@@ -209,7 +236,7 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
         </details>
       )}
 
-      {!opportunityId && <p className="qc-hint">先在左侧选一个选题</p>}
+      {!batchMode && !opportunityId && <p className="qc-hint">先在左侧选一个选题</p>}
       {busy && (
         <div className="qc-progress" role="status">
           <RefreshCw size={15} className="spin" />
@@ -218,7 +245,13 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
           <i className="qc-progress__track"><b style={{ width: `${progress ?? 0}%`, animation: 'none' }} /></i>
         </div>
       )}
-      <Button loading={busy} disabled={!presetId || busy} onClick={() => void generate()}>生成文案</Button>
+      {batchMode ? (
+        <Button loading={busy} disabled={busy || batchTopicCount === 0 || batchPresetIds.length === 0} onClick={onSubmitBatch}>
+          提交批量生成 · 共 {batchTopicCount * batchPresetIds.length} 篇
+        </Button>
+      ) : (
+        <Button loading={busy} disabled={!presetId || busy} onClick={() => void generate()}>生成文案</Button>
+      )}
 
       <Modal
         open={saveOpen}

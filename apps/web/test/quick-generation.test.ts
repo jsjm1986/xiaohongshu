@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { autoApproveAndGenerate, quickCandidateFields, quickCandidateToMarkdown, reviseCandidate } from '../src/lib/quick-generation.js';
+import { approveOpportunitiesForBatch, autoApproveAndGenerate, quickCandidateFields, quickCandidateToMarkdown, reviseCandidate } from '../src/lib/quick-generation.js';
 
 const fullCandidate = {
   id: 'c1',
@@ -315,5 +315,69 @@ test('reviseCandidate throws fallback message when failed without error', async 
   await assert.rejects(
     () => reviseCandidate({ jobId: 'job1', candidateId: 'c1', instruction: 'x', pollIntervalMs: 1, maxPolls: 5, deps: deps as any }),
     /修改失败，请重试/,
+  );
+});
+
+// ── 批量审批:批量提交前必须逐个选题走完审批链,否则后端 selectOpportunity 会拒绝 ──
+
+test('approveOpportunitiesForBatch approves blueprint/intelligence once and every opportunity', async () => {
+  const calls: string[] = [];
+  const deps = {
+    api: {
+      blueprintModules: {
+        list: async () => { calls.push('bp.list'); return [{ id: 'b1', status: 'draft' }]; },
+        approve: async (_p: string, id: string) => { calls.push(`bp.approve:${id}`); return { id }; },
+      },
+      intelligence: {
+        get: async () => { calls.push('intel.get'); return { id: 'i1', approvalStatus: 'draft' }; },
+        approve: async (_p: string, id: string) => { calls.push(`intel.approve:${id}`); return { id }; },
+      },
+      informationGaps: {
+        list: async () => ({ items: [{ id: 'g1', status: 'draft' }, { id: 'g2', status: 'draft' }], total: 2 }),
+        approve: async (_p: string, id: string) => { calls.push(`gap.approve:${id}`); return { id }; },
+      },
+      expressionStrategies: {
+        list: async () => ({ items: [{ id: 's1', status: 'draft' }, { id: 's2', status: 'draft' }], total: 2 }),
+        approve: async (_p: string, id: string) => { calls.push(`strat.approve:${id}`); return { id }; },
+      },
+      opportunities: {
+        list: async () => ({ items: [
+          { id: 'o1', title: 'A', gapIds: ['g1'], strategyId: 's1', compatibleStrategyIds: [] },
+          { id: 'o2', title: 'B', gapIds: ['g2'], strategyId: 's2', compatibleStrategyIds: [] },
+        ], total: 2 }),
+        approve: async (_p: string, id: string) => { calls.push(`opp.approve:${id}`); return { id }; },
+      },
+    },
+  };
+  const project = { id: 'proj1', name: 'p' } as any;
+  const approved = await approveOpportunitiesForBatch({ project, opportunityIds: ['o1', 'o2'], deps: deps as any });
+
+  assert.deepEqual(approved.map((o) => o.id), ['o1', 'o2']);
+  // 蓝图与 intelligence 只审批一次(不按选题数重复)
+  assert.equal(calls.filter((c) => c === 'bp.approve:b1').length, 1);
+  assert.equal(calls.filter((c) => c === 'intel.approve:i1').length, 1);
+  // 每个选题的依赖与自身都审批了
+  assert.ok(calls.includes('gap.approve:g1') && calls.includes('gap.approve:g2'));
+  assert.ok(calls.includes('strat.approve:s1') && calls.includes('strat.approve:s2'));
+  assert.ok(calls.includes('opp.approve:o1') && calls.includes('opp.approve:o2'));
+  // intelligence 必须在任一选题审批之前
+  assert.ok(calls.indexOf('intel.approve:i1') < calls.indexOf('opp.approve:o1'));
+  assert.ok(calls.indexOf('intel.approve:i1') < calls.indexOf('opp.approve:o2'));
+});
+
+test('approveOpportunitiesForBatch rejects when an opportunity disappeared', async () => {
+  const deps = {
+    api: {
+      blueprintModules: { list: async () => [], approve: async () => ({}) },
+      intelligence: { get: async () => ({ id: 'i1', approvalStatus: 'approved' }), approve: async () => ({}) },
+      informationGaps: { list: async () => ({ items: [], total: 0 }), approve: async () => ({}) },
+      expressionStrategies: { list: async () => ({ items: [], total: 0 }), approve: async () => ({}) },
+      opportunities: { list: async () => ({ items: [{ id: 'o1', title: 'A' }], total: 1 }), approve: async () => ({}) },
+    },
+  };
+  const project = { id: 'proj1', name: 'p' } as any;
+  await assert.rejects(
+    () => approveOpportunitiesForBatch({ project, opportunityIds: ['o1', 'oX'], deps: deps as any }),
+    /选题/,
   );
 });
