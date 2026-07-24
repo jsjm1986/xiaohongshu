@@ -277,8 +277,8 @@ export function GenerationResultPage() {
         <ArrowLeft size={15} /> 返回历史
       </Link>
       <V2Hero
-        status={<>{job.projectName} · {job.mode === "simple" ? "简单模式" : "设置模式"} · {formatDate(job.completedAt, true)}</>}
-        title={job.topic}
+        status={<>{job.projectName} · {job.mode === "simple" ? "简单模式" : "设置模式"} · {formatDate(job.completedAt, true)} · 选题方向:{job.topic}</>}
+        title={selected.title}
         actions={
           <>
             {job.qualityStatus === "needs_review" && (
@@ -325,6 +325,10 @@ export function GenerationResultPage() {
           </>
         }
       />
+
+      {!publishable && selected.validation && (
+        <ValidationSummaryCard candidate={selected} />
+      )}
 
       {job.qualityStatus === "needs_review" && (
         <div className="generation-fallback-notice" role="status">
@@ -398,39 +402,20 @@ export function GenerationResultPage() {
             </button>;
           })}
         </div>
+        <details className="candidate-matrix-fold">
+          <summary>对比 3 个候选 <ChevronDown size={14} /></summary>
         <div className="candidate-matrix">
           <div className="candidate-matrix__row candidate-matrix__head"><span>对照维度</span>{job.candidates?.map((candidate, index) => <strong key={candidate.id}>候选 0{index + 1}</strong>)}</div>
           <div className="candidate-matrix__row"><span>完整表达结构</span>{job.candidates?.map((candidate) => <b key={candidate.id}>{candidate.orchestrationSnapshot?.strategy?.label || candidate.orchestrationSnapshot?.strategyName || candidate.label || "基础结构"}</b>)}</div>
-          <div className="candidate-matrix__row"><span>图片计划职责</span>{job.candidates?.map((candidate) => <b key={candidate.id}>{candidate.imagePlan?.role || candidate.orchestrationSnapshot?.strategy?.imageRole || "未生成图片计划"}</b>)}</div>
+          <div className="candidate-matrix__row"><span>图片计划职责</span>{job.candidates?.map((candidate) => <b key={candidate.id}>{candidate.imagePlan?.role ? `${imageRoleLabel(candidate.imagePlan.role)}(${candidate.imagePlan.role})` : candidate.orchestrationSnapshot?.strategy?.imageRole || "未生成图片计划"}</b>)}</div>
           <div className="candidate-matrix__row"><span>标题长度</span>{job.candidates?.map((candidate) => <b key={candidate.id}>{candidate.title.length} 字</b>)}</div>
           <div className="candidate-matrix__row"><span>正文长度</span>{job.candidates?.map((candidate) => <b key={candidate.id}>{candidate.body.length} 字</b>)}</div>
           <div className="candidate-matrix__row"><span>信息补全</span>{job.candidates?.map((candidate) => <b key={candidate.id}>{candidate.comments.length} 组问答</b>)}</div>
           <div className="candidate-matrix__row"><span>标签数量</span>{job.candidates?.map((candidate) => <b key={candidate.id}>{candidate.tags.length} 个</b>)}</div>
           <div className="candidate-matrix__row"><span>校验问题启发式（非质量分）</span>{job.candidates?.map((candidate) => { const readiness = resolveValidationReadinessHeuristic(candidate.validationHeuristic, candidate.score); return <b key={candidate.id} className="candidate-matrix__score">{readiness.value ?? "unknown"}</b>; })}</div>
         </div>
+        </details>
       </section>
-
-      <section className={`result-opportunity-audit result-opportunity-audit--${opportunitySelectionView.state}`} aria-label="选题选择审计">
-        <header><div><span className="impact-report__icon"><Target size={19} /></span><span><h2>选题选择依据</h2><p>{opportunitySelectionView.detail}</p></span></div><Badge tone={opportunitySelectionView.rankApplied ? "purple" : "warning"}>{opportunitySelectionView.label}</Badge></header>
-        {opportunitySelectionView.rankView ? <div className="result-opportunity-rank">
-          <div className="result-opportunity-rank__summary"><span><strong>{opportunitySelectionView.rankView.title}</strong><small>固定权重 · 未标定 · 非因果 · 不是 F28</small></span><b>{opportunitySelectionView.rankView.valueLabel}</b><Badge tone={opportunitySelectionView.rankView.sortable ? "positive" : "warning"}>{opportunitySelectionView.rankView.stateLabel}</Badge></div>
-          <div className="result-opportunity-rank__components">{opportunitySelectionView.rankView.components.map((component) => <article className={component.unknown ? "is-unknown" : ""} key={component.metric}><span><strong>{component.label}</strong><b>{component.unknown ? "unknown" : component.value}</b></span><small>变换 {component.transformedValue} · 权重 {component.weight} · 贡献 {component.contribution}</small><p>来源：{component.source}</p></article>)}</div>
-          {(opportunitySelectionView.rankView.inputSources.length > 0 || opportunitySelectionView.rankView.policy?.length) && <div className="result-opportunity-rank__provenance"><span><strong>输入来源</strong>{opportunitySelectionView.rankView.inputSources.map((item) => <small key={item.label}>{item.label}：{item.source}</small>)}</span><span><strong>本次阈值策略</strong>{opportunitySelectionView.rankView.policy?.map((item) => <small key={item.label}>{item.label}：{item.value}</small>)}</span></div>}
-          <footer><span><strong>历史覆盖</strong>{opportunitySelectionView.rankView.recentCoverage.value} · {opportunitySelectionView.rankView.recentCoverage.source}</span><span><strong>unknown</strong>{opportunitySelectionView.rankView.unknownMetrics.join("、") || "无"}</span><span><strong>复核原因</strong>{opportunitySelectionView.rankView.reviewReasons.join("；") || "无"}</span></footer>
-        </div> : <div className="result-opportunity-rank__not-applied"><Info size={15} /><span>{opportunitySelectionView.state === "explicit_locked" ? "没有启发式排序分项，因为本次选题由用户显式锁定；缺少分数不是 0 分。" : opportunitySelectionView.state === "default_policy" ? "没有候选集合可供排序；默认策略不是一条隐藏的机会得分。" : opportunitySelectionView.state === "revision_inherited" ? "本次只沿用原选题，没有重新排序；不会复制原排序值冒充本次结果。" : opportunitySelectionView.state === "not_applied" ? "服务端只确认本次未排序，未提供可进一步归因的选择方式。" : "没有可核验的服务端排序快照；历史状态保持 unknown。"}</span></div>}
-      </section>
-
-      {hasImpactReport && <section className="impact-report">
-        <header><div><span className="impact-report__icon"><Settings2 size={19} /></span><span><h2>参数影响报告</h2><p>说明本次非默认参数实际改变了哪些内容环节；这是配置解释，不是平台效果预测。</p></span></div><Badge tone="purple">{impacts.length ? `${impacts.length} 项参数变化` : "审计快照"}</Badge></header>
-        <div className="impact-report__grid">{impacts.map((impact) => <article key={impact.parameterId}><span className={`impact-direction impact-direction--${impact.direction || "changed"}`}>{impact.direction === "higher" ? <ArrowUp size={14} /> : impact.direction === "lower" ? <ArrowDown size={14} /> : <Settings2 size={14} />}</span><div><h3>{impact.label}<b>{isDiagnosticEmphasisParameterId(impact.parameterId) ? `${formatImpactValue(impact.value)}（显示/人工顺序刻度）` : formatImpactValue(impact.value)}</b></h3><p>{impact.summary}</p>{impact.affects?.length ? <small>影响环节：{impact.affects.join(" · ")}</small> : null}{impact.risk && <details><summary>查看边界与风险</summary><p>{impact.risk}</p></details>}</div></article>)}</div>
-        {(impactDetails.behaviorInstructions.length > 0 || impactDetails.formulaResults.length > 0 || impactDetails.diagnosticProxies.length > 0 || impactDetails.channels.length > 0 || impactDetails.warnings.length > 0) && <div className="impact-report__details">
-          {impactDetails.behaviorInstructions.length > 0 && <details><summary><Sparkles size={14} />最终行为指令 <Badge>{impactDetails.behaviorInstructions.length}</Badge><ChevronDown size={13} /></summary><ul>{impactDetails.behaviorInstructions.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul></details>}
-          {impactDetails.formulaResults.length > 0 && <details><summary><FileJson size={14} />公式计算结果 <Badge>{impactDetails.formulaResults.length}</Badge><ChevronDown size={13} /></summary><div className="impact-formula-results">{impactDetails.formulaResults.map((formula) => <FormulaImpactResult formula={formula} key={formula.formulaId} />)}</div></details>}
-          {impactDetails.diagnosticProxies.length > 0 && <details open><summary><Info size={14} />分项显示 / 人工复核排序 <Badge tone="warning">{impactDetails.diagnosticProxies.length}</Badge><ChevronDown size={13} /></summary><div className="impact-diagnostic-proxies">{impactDetails.diagnosticProxies.map((proxy, index) => <DiagnosticProxyCard view={resolveDiagnosticProxyView(proxy)} key={`${String((proxy as { formulaId?: unknown }).formulaId || "unknown")}-${index}`} compact />)}</div></details>}
-          {impactDetails.channels.length > 0 && <details><summary><Tags size={14} />参数侧通道预览（诊断） <Badge>{impactDetails.channels.length}</Badge><ChevronDown size={13} /></summary><div className="impact-channel-note"><Info size={14} /><span>这里只解释参数对通道的倾向，不是最终分配。最终位置以当前候选的编排快照与“最终缺口位置”为准。</span></div><div className="impact-channel-list">{impactDetails.channels.map((channel) => <article key={channel.id}><strong>{channelLabel(channel.id)}</strong><span>{channel.purpose || "参数建议"}</span><b>{channel.count} 项预览</b>{channel.constraints.length > 0 && <small>{channel.constraints.join(" · ")}</small>}</article>)}</div></details>}
-          {impactDetails.warnings.length > 0 && <details className="impact-warning-details" open><summary><TriangleAlert size={14} />边界与警告 <Badge tone="warning">{impactDetails.warnings.length}</Badge><ChevronDown size={13} /></summary><ul>{impactDetails.warnings.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul></details>}
-        </div>}
-      </section>}
 
       <section className="package-formula-banner" aria-label="完整内容包公式">
         <div><span>H</span><strong>标签入口</strong><small>主题与语义标记 · 非触达证明</small></div>
@@ -577,16 +562,17 @@ export function GenerationResultPage() {
                   <div className="comment-question">
                     <span className="comment-avatar">评</span>
                     <div>
-                      <div className="comment-meta">{comment.displayName && <Badge tone="blue">{comment.displayName}</Badge>}{comment.threadKind && <Badge tone="purple">{commentThreadKindLabel(comment.threadKind)}</Badge>}{comment.simulated && <Badge tone="warning">{comment.simulationLabel || "模拟潜在读者"}</Badge>}{comment.kind && <Badge>{commentNodeKindLabel(comment.kind)}</Badge>}{comment.personaRole && <Badge>{personaRoleLabel(comment.personaRole)}</Badge>}{comment.speakerType && <Badge>{speakerTypeLabel(comment.speakerType)}</Badge>}{comment.stage && <Badge>{comment.stage}</Badge>}{comment.function && <Badge tone="purple">{commentFunctionLabel(comment.function)}</Badge>}{comment.claimStatus && <Badge tone={comment.claimStatus === "verified" ? "positive" : comment.claimStatus === "unknown" ? "warning" : "blue"}>{claimStatusLabel(comment.claimStatus)}</Badge>}{comment.postingIdentity && threadKind === "org_answer" && <Badge tone={comment.postingIdentity === "staff" ? "blue" : "positive"}>{comment.postingIdentity === "staff" ? "机构助理 · 营销承接" : dualIdentity ? "机构 IP · 专业解答" : `${identityLabel(comment.postingIdentity)}可追责答复`}</Badge>}</div>
+                      <div className="comment-meta">{comment.displayName && <Badge tone="blue">{comment.displayName}</Badge>}{comment.simulated && <Badge tone="warning">{comment.simulationLabel || "模拟潜在读者"}</Badge>}{comment.postingIdentity && threadKind === "org_answer" && <Badge tone={comment.postingIdentity === "staff" ? "blue" : "positive"}>{comment.postingIdentity === "staff" ? "机构助理 · 营销承接" : dualIdentity ? "机构 IP · 专业解答" : `${identityLabel(comment.postingIdentity)}可追责答复`}</Badge>}</div>
                       <strong>{comment.question}</strong>
                       {comment.purpose && (
-                        <small>信息任务：{comment.purpose}</small>
+                        <small className="comment-purpose">信息任务：{comment.purpose}</small>
                       )}
                     </div>
                   </div>
-                  {(comment.surfaceRoleCard || comment.roleCard || comment.densityProxy || comment.replyPlan || comment.discoveryPlan) && <details className="comment-density-details">
-                    <summary>查看这句话的人物与隐含信息 <ChevronDown size={13} /></summary>
+                  {(comment.surfaceRoleCard || comment.roleCard || comment.densityProxy || comment.replyPlan || comment.discoveryPlan || comment.conversationPlan || comment.threadKind || comment.kind || comment.personaRole || comment.speakerType || comment.stage || comment.function || comment.claimStatus || comment.answerKind) && <details className="comment-density-details">
+                    <summary>读者设定与生成依据（审计用） <ChevronDown size={13} /></summary>
                     <div>
+                      <div className="comment-meta comment-meta--audit">{comment.threadKind && <Badge tone="purple">{commentThreadKindLabel(comment.threadKind)}</Badge>}{comment.kind && <Badge>{commentNodeKindLabel(comment.kind)}</Badge>}{comment.personaRole && <Badge>{personaRoleLabel(comment.personaRole)}</Badge>}{comment.speakerType && <Badge>{speakerTypeLabel(comment.speakerType)}</Badge>}{comment.stage && <Badge>{comment.stage}</Badge>}{comment.function && <Badge tone="purple">{commentFunctionLabel(comment.function)}</Badge>}{comment.claimStatus && <Badge tone={comment.claimStatus === "verified" ? "positive" : comment.claimStatus === "unknown" ? "warning" : "blue"}>{claimStatusLabel(comment.claimStatus)}</Badge>}{comment.answerKind && <><small className="comment-meta__label">答复类型</small><Badge tone="positive">{commentNodeKindLabel(comment.answerKind)}</Badge></>}</div>
                       {comment.surfaceRoleCard && <>
                         <p><strong>可见人物</strong>：{comment.surfaceRoleCard.displayRole} · {comment.surfaceRoleCard.relationToHost}</p>
                         <p><strong>身份与处境线索</strong>：{comment.surfaceRoleCard.identityCue}；{comment.surfaceRoleCard.situationCue}</p>
@@ -625,9 +611,9 @@ export function GenerationResultPage() {
                     </span>
                     <div>
                       {threadKind === "reader_exchange" ? (
-                        <div className="comment-meta">{comment.replyDisplayName && <Badge tone="blue">{comment.replyDisplayName}</Badge>}<Badge tone="purple">读者互聊{comment.displayName && comment.replyDisplayName ? ` · ${comment.displayName} → ${comment.replyDisplayName}` : ""}</Badge>{comment.answerKind && <Badge>{commentNodeKindLabel(comment.answerKind)}</Badge>}</div>
+                        <div className="comment-meta">{comment.replyDisplayName && <Badge tone="blue">{comment.replyDisplayName}</Badge>}<Badge tone="purple">读者互聊{comment.displayName && comment.replyDisplayName ? ` · ${comment.displayName} → ${comment.replyDisplayName}` : ""}</Badge></div>
                       ) : (
-                        (comment.answerKind || replyOrgDisplayName(comment)) && <div className="comment-meta">{replyOrgDisplayName(comment) && <Badge tone="positive">{replyOrgDisplayName(comment)}</Badge>}{comment.answerKind && <Badge tone="positive">{commentNodeKindLabel(comment.answerKind)}</Badge>}</div>
+                        replyOrgDisplayName(comment) && <div className="comment-meta"><Badge tone="positive">{replyOrgDisplayName(comment)}</Badge></div>
                       )}
                       <p>{primaryCommentAnswer(comment)}</p>
                     </div>
@@ -636,11 +622,12 @@ export function GenerationResultPage() {
                   {threadKind !== "organic_reaction" && comment.evidenceIds?.length ? <div className="comment-next-step"><Info size={14} /><span>证据引用：{comment.evidenceIds.join("、")}</span></div> : null}
                   {comment.followUps?.map((followUp, followUpIndex) => (
                     <div className="comment-follow-up" key={`${followUp.question}-${followUpIndex}`}>
-                      {(followUp.kind || followUp.personaRole || followUp.claimStatus || followUp.threadDepth !== undefined) && <div className="comment-meta">{followUp.kind && <Badge>{commentNodeKindLabel(followUp.kind)}</Badge>}{followUp.personaRole && <Badge>{personaRoleLabel(followUp.personaRole)}</Badge>}{followUp.claimStatus && <Badge tone="blue">{claimStatusLabel(followUp.claimStatus)}</Badge>}{followUp.threadDepth !== undefined && <Badge>第 {followUp.threadDepth} 层</Badge>}</div>}
+                      {followUp.threadDepth !== undefined && <div className="comment-meta"><Badge>第 {followUp.threadDepth} 层</Badge></div>}
                       <strong>{followUp.displayName ? `${followUp.displayName} · 接话：` : "接话："}{followUp.question}</strong>
                       <p>{followUp.answer}</p>
                       {followUp.boundary && <p>边界：{followUp.boundary}</p>}
                       {followUp.evidenceIds?.length ? <p>证据引用：{followUp.evidenceIds.join("、")}</p> : null}
+                      {(followUp.kind || followUp.personaRole || followUp.claimStatus) && <div className="comment-meta comment-meta--audit">{followUp.kind && <Badge>{commentNodeKindLabel(followUp.kind)}</Badge>}{followUp.personaRole && <Badge>{personaRoleLabel(followUp.personaRole)}</Badge>}{followUp.claimStatus && <Badge tone="blue">{claimStatusLabel(followUp.claimStatus)}</Badge>}</div>}
                     </div>
                   ))}
                   {threadKind !== "organic_reaction" && comment.nextStep && <div className="comment-next-step"><ChevronDown size={14} /><span>下一步：{comment.nextStep}</span></div>}
@@ -648,7 +635,7 @@ export function GenerationResultPage() {
                 );
               })}
             </div>
-            {coverageLedger && <details className="comment-coverage-ledger" open={Boolean(coverageLedger.capacityWarning || selected.capacityWarning)}>
+            {coverageLedger && <details className="comment-coverage-ledger">
               <summary>查看正文＋评论的信息闭合台账 <Badge>{Math.round((ledgerCompleteness ?? 0) * 100)}% 台账完整</Badge><ChevronDown size={14} /></summary>
               <div className="comment-coverage-summary">
                 <article><small>台账完整度</small><strong>{Math.round((ledgerCompleteness ?? 0) * 100)}%</strong><p>只表示每个选中缺口都有归档行，不代表内容已经解决。</p></article>
@@ -700,11 +687,14 @@ export function GenerationResultPage() {
             {selected.imagePlan?.frames?.length ? <ol className="image-frame-list">{selected.imagePlan.frames.map((frame, index) => <li key={`${frame}-${index}`}><span>{index + 1}</span>{frame}</li>)}</ol> : null}
             {selected.imagePlan?.items?.length ? <div className="image-storyboard">{selected.imagePlan.items.map((item, index) => <article key={`${item.assetId || item.role}-${index}`}><span>{item.position}</span><div><strong>{imageRoleLabel(item.role)}</strong><p>{item.informationTask}</p>{item.overlayText && <small>画面文字：{item.overlayText}</small>}</div></article>)}</div> : null}
             {selected.imagePlan?.boundaries?.length ? <div className="image-boundaries"><TriangleAlert size={15} /><span>图片边界：{selected.imagePlan.boundaries.join("；")}</span></div> : null}
-            {productionView && <div className="production-artifact-ledger">
+            {productionView && <details className="production-fold">
+              <summary>产物状态账本 <Badge tone={productionView.recorded ? "positive" : "warning"}>{productionView.recorded ? "productionArtifacts 已记录" : "历史包 · 保守回退"}</Badge><ChevronDown size={14} /></summary>
+              <div className="production-artifact-ledger">
               <header><div><strong>产物状态账本</strong><p>观察、计划、文字简报、最终资产、入口截图和部署是六个不同阶段；前一阶段存在不代表后一阶段完成。</p></div><Badge tone={productionView.recorded ? "positive" : "warning"}>{productionView.recorded ? "productionArtifacts 已记录" : "历史包 · 保守回退"}</Badge></header>
               <div className="production-stage-grid">{productionView.stages.map((stage) => <article key={stage.id} className={`production-stage production-stage--${stage.tone}`}><div><strong>{stage.label}</strong><Badge tone={stage.tone}>{stage.status}</Badge></div><p>{stage.explanation}</p><small>{stage.note}</small>{stage.id === "imagePlan" && productionView.sourceAssetId ? <code>source: {productionView.sourceAssetId}</code> : null}{stage.id === "finalImageAsset" && productionView.finalAssetId ? <code>asset: {productionView.finalAssetId}</code> : null}{stage.id === "entrySnapshot" && productionView.snapshotId ? <code>snapshot: {productionView.snapshotId}</code> : null}</article>)}</div>
               <div className="production-alignment-grid">{productionView.alignments.map((alignment) => <article key={alignment.id}><header><strong>{alignment.label}</strong><Badge tone={alignment.tone}>{alignment.status}</Badge></header><small>{alignment.evaluated ? "evaluated=true · 只评价可用产物之间的语义关系" : "evaluated=false · not_evaluated，不得补写结论"}</small><p>{alignment.reasons.join("；") || "没有返回理由。"}</p>{alignment.checks.length ? <details><summary>查看 {alignment.checks.length} 项检查 <ChevronDown size={13} /></summary><ul>{alignment.checks.map((check) => <li key={check.id}><strong>{check.id} · {check.status}</strong><span>{check.reason}</span>{check.anchors.length ? <small>锚点：{check.anchors.join(" / ")}</small> : null}</li>)}</ul></details> : null}</article>)}</div>
-            </div>}
+              </div>
+            </details>}
           </div>
           {selected.deploymentPlan && (
             <div className="package-section deployment-section">
@@ -721,13 +711,42 @@ export function GenerationResultPage() {
         </article>
 
         <aside className="result-sidebar">
+          <section className="revision-box">
+            <div>
+              <span>
+                <Sparkles size={17} />
+              </span>
+              <div>
+                <h3>继续调整当前候选</h3>
+                <p>只会重新生成受影响的环节</p>
+              </div>
+            </div>
+            <textarea
+              value={revision}
+              onChange={(event) => setRevision(event.target.value)}
+              rows={4}
+              placeholder="例如：保留标题，让正文更像一个人在分享自己的功课笔记…"
+            />
+            <Button
+              onClick={handleRevise}
+              disabled={!revision.trim()}
+              loading={revising}
+              icon={<Send size={15} />}
+            >
+              发送修改要求
+            </Button>
+            <small>修改记录会与新版本一起保存</small>
+          </section>
           <section className="result-insight">
             <header>
               <h3>校验与分项检查</h3>
               <Badge tone={selectedValidationReadiness?.state === "current" ? "neutral" : "warning"}>{selectedValidationReadiness?.value ?? "unknown"}</Badge>
             </header>
             <p className="validation-readiness-copy"><strong>{selectedValidationReadiness?.label}</strong>{selectedValidationReadiness?.detail}</p>
-            {selectedDiagnosticProxyViews.length > 0 && <div className="candidate-diagnostic-proxies">{selectedDiagnosticProxyViews.map((view, index) => <DiagnosticProxyCard view={view} key={`${view.formulaId}-${index}`} />)}</div>}
+            {selectedDiagnosticProxyViews.length > 0 && <details className="sidebar-fold">
+              <summary>分项复核清单 {selectedDiagnosticProxyViews.length} 项 · 总分 unknown <ChevronDown size={14} /></summary>
+              <div className="candidate-diagnostic-proxies">{selectedDiagnosticProxyViews.map((view, index) => <DiagnosticProxyCard view={view} key={`${view.formulaId}-${index}`} />)}</div>
+            </details>}
             {ordinaryDiagnostics.length > 0 && <div className="diagnostic-list">
               {ordinaryDiagnostics.map((item, index) => (
                 <div key={`${item.name}-${index}`}>
@@ -753,8 +772,8 @@ export function GenerationResultPage() {
             {selectedDiagnosticProxyViews.length === 0 && ordinaryDiagnostics.length === 0 && <p className="diagnostic-empty">没有可核验的诊断合同；状态保持 unknown，不补 0 分。</p>}
           </section>
           {(selected.orchestrationSnapshot || selected.coverageSignature) && (
-            <section className="result-insight orchestration-insight">
-              <header><h3>本候选的结构指纹</h3><Badge tone="purple">可解释去重</Badge></header>
+            <details className="result-insight orchestration-insight sidebar-fold">
+              <summary><h3>本候选的结构指纹</h3><Badge tone="purple">可解释去重</Badge><ChevronDown size={15} /></summary>
               {selected.orchestrationSnapshot && <div className="orchestration-summary">
                 <strong>{selected.orchestrationSnapshot.strategy?.label || selected.orchestrationSnapshot.strategyName || "完整表达策略"}</strong>
                 <p>{selected.orchestrationSnapshot.rationale?.join("；") || selected.orchestrationSnapshot.structuralDifferences?.join("；") || "本候选按独立的标签、图文与评论结构生成。"}</p>
@@ -764,7 +783,7 @@ export function GenerationResultPage() {
                   <div><dt>评论模式</dt><dd>{selected.orchestrationSnapshot.strategy?.commentMode || "—"}</dd></div>
                   <div><dt>选中缺口</dt><dd>{selected.orchestrationSnapshot.selectedGapIds?.length || selected.orchestrationSnapshot.gapIds?.length || 0} 个</dd></div>
                 </dl>
-                {selected.orchestrationSnapshot.personaScenePlan && <details className="final-gap-placements" open>
+                {selected.orchestrationSnapshot.personaScenePlan && <details className="final-gap-placements">
                   <summary>人物 × 现场 × 语言合同 <Badge tone="positive">实际用于生成</Badge><ChevronDown size={13} /></summary>
                   <div>
                     <article><strong>楼主人物</strong><span>{selected.orchestrationSnapshot.personaScenePlan.host.identityCue} · {selected.orchestrationSnapshot.personaScenePlan.host.currentStage}</span><small>{selected.orchestrationSnapshot.personaScenePlan.host.lifeContext}；{selected.orchestrationSnapshot.personaScenePlan.host.immediateConstraint}</small></article>
@@ -776,7 +795,7 @@ export function GenerationResultPage() {
                 {selected.orchestrationSnapshot.gapPlanningCards?.length ? <details className="final-gap-placements"><summary>最终缺口位置（编排真值） <Badge tone="positive">{selected.orchestrationSnapshot.gapPlanningCards.length} 项</Badge><ChevronDown size={13} /></summary><div>{selected.orchestrationSnapshot.gapPlanningCards.map((card) => <article key={card.gapId}><strong>{card.label}</strong><span>{card.plannedPlacements.map(channelLabel).join(" / ") || "未分配"}</span><small>{card.required ? "必要缺口" : "可选缺口"} · {card.evidenceIds.length} 条证据引用</small></article>)}</div></details> : selected.orchestrationSnapshot.channelAllocation ? <details className="final-gap-placements"><summary>最终通道位置（历史兼容快照） <ChevronDown size={13} /></summary><div>{Object.entries(selected.orchestrationSnapshot.channelAllocation).map(([channel, items]) => <article key={channel}><strong>{channelLabel(channel)}</strong><span>{items.length} 项</span><small>{items.join("；") || "无"}</small></article>)}</div></details> : null}
               </div>}
               {selected.coverageSignature && <details className="coverage-details"><summary>查看覆盖签名 <ChevronDown size={14} /></summary><code>{selected.coverageSignature.fingerprint || selected.coverageSignature.value || "未生成指纹"}</code><p>{selected.coverageSignature.topicKey || "当前选题"} · {selected.coverageSignature.strategyId || "策略未标注"} · {selected.coverageSignature.imageRole || selected.coverageSignature.imageRoles?.join("/") || "图片角色未标注"}</p><small>该签名用于降低近期内容结构重复，不代表平台流量预测。</small></details>}
-            </section>
+            </details>
           )}
           <section className="result-insight">
             <button
@@ -825,34 +844,39 @@ export function GenerationResultPage() {
               </div>
             )}
           </section>
-          <section className="revision-box">
-            <div>
-              <span>
-                <Sparkles size={17} />
-              </span>
-              <div>
-                <h3>继续调整当前候选</h3>
-                <p>只会重新生成受影响的环节</p>
-              </div>
-            </div>
-            <textarea
-              value={revision}
-              onChange={(event) => setRevision(event.target.value)}
-              rows={4}
-              placeholder="例如：保留标题，让正文更像一个人在分享自己的功课笔记…"
-            />
-            <Button
-              onClick={handleRevise}
-              disabled={!revision.trim()}
-              loading={revising}
-              icon={<Send size={15} />}
-            >
-              发送修改要求
-            </Button>
-            <small>修改记录会与新版本一起保存</small>
-          </section>
         </aside>
       </div>
+
+      <section className="result-diagnostics" aria-label="诊断与设置回放">
+        <h2 className="result-diagnostics__title">诊断与设置回放</h2>
+        <p className="result-diagnostics__hint">以下是本次生成的配置解释与系统诊断,默认收起;展开后内容完整保留。</p>
+        <details className="result-fold">
+          <summary><Target size={16} /> 选题选择依据 <Badge tone={opportunitySelectionView.rankApplied ? "purple" : "warning"}>{opportunitySelectionView.label}</Badge><ChevronDown size={15} /></summary>
+          <div className={`result-opportunity-audit result-opportunity-audit--${opportunitySelectionView.state}`}>
+            <header><div><span className="impact-report__icon"><Target size={19} /></span><span><h2>选题选择依据</h2><p>{opportunitySelectionView.detail}</p></span></div><Badge tone={opportunitySelectionView.rankApplied ? "purple" : "warning"}>{opportunitySelectionView.label}</Badge></header>
+            {opportunitySelectionView.rankView ? <div className="result-opportunity-rank">
+              <div className="result-opportunity-rank__summary"><span><strong>{opportunitySelectionView.rankView.title}</strong><small>固定权重 · 未标定 · 非因果 · 不是 F28</small></span><b>{opportunitySelectionView.rankView.valueLabel}</b><Badge tone={opportunitySelectionView.rankView.sortable ? "positive" : "warning"}>{opportunitySelectionView.rankView.stateLabel}</Badge></div>
+              <div className="result-opportunity-rank__components">{opportunitySelectionView.rankView.components.map((component) => <article className={component.unknown ? "is-unknown" : ""} key={component.metric}><span><strong>{component.label}</strong><b>{component.unknown ? "unknown" : component.value}</b></span><small>变换 {component.transformedValue} · 权重 {component.weight} · 贡献 {component.contribution}</small><p>来源：{component.source}</p></article>)}</div>
+              {(opportunitySelectionView.rankView.inputSources.length > 0 || opportunitySelectionView.rankView.policy?.length) && <div className="result-opportunity-rank__provenance"><span><strong>输入来源</strong>{opportunitySelectionView.rankView.inputSources.map((item) => <small key={item.label}>{item.label}：{item.source}</small>)}</span><span><strong>本次阈值策略</strong>{opportunitySelectionView.rankView.policy?.map((item) => <small key={item.label}>{item.label}：{item.value}</small>)}</span></div>}
+              <footer><span><strong>历史覆盖</strong>{opportunitySelectionView.rankView.recentCoverage.value} · {opportunitySelectionView.rankView.recentCoverage.source}</span><span><strong>unknown</strong>{opportunitySelectionView.rankView.unknownMetrics.join("、") || "无"}</span><span><strong>复核原因</strong>{opportunitySelectionView.rankView.reviewReasons.join("；") || "无"}</span></footer>
+            </div> : <div className="result-opportunity-rank__not-applied"><Info size={15} /><span>{opportunitySelectionView.state === "explicit_locked" ? "没有启发式排序分项，因为本次选题由用户显式锁定；缺少分数不是 0 分。" : opportunitySelectionView.state === "default_policy" ? "没有候选集合可供排序；默认策略不是一条隐藏的机会得分。" : opportunitySelectionView.state === "revision_inherited" ? "本次只沿用原选题，没有重新排序；不会复制原排序值冒充本次结果。" : opportunitySelectionView.state === "not_applied" ? "服务端只确认本次未排序，未提供可进一步归因的选择方式。" : "没有可核验的服务端排序快照；历史状态保持 unknown。"}</span></div>}
+          </div>
+        </details>
+        {hasImpactReport && <details className="result-fold">
+          <summary><Settings2 size={16} /> 参数影响报告 <Badge tone="purple">{impacts.length ? `${impacts.length} 项参数变化` : "审计快照"}</Badge><ChevronDown size={15} /></summary>
+          <div className="impact-report">
+            <header><div><span className="impact-report__icon"><Settings2 size={19} /></span><span><h2>参数影响报告</h2><p>说明本次非默认参数实际改变了哪些内容环节；这是配置解释，不是平台效果预测。</p></span></div><Badge tone="purple">{impacts.length ? `${impacts.length} 项参数变化` : "审计快照"}</Badge></header>
+            <div className="impact-report__grid">{impacts.map((impact) => <article key={impact.parameterId}><span className={`impact-direction impact-direction--${impact.direction || "changed"}`}>{impact.direction === "higher" ? <ArrowUp size={14} /> : impact.direction === "lower" ? <ArrowDown size={14} /> : <Settings2 size={14} />}</span><div><h3>{impact.label}<b>{isDiagnosticEmphasisParameterId(impact.parameterId) ? `${formatImpactValue(impact.value)}（显示/人工顺序刻度）` : formatImpactValue(impact.value)}</b></h3><p>{impact.summary}</p>{impact.affects?.length ? <small>影响环节：{impact.affects.join(" · ")}</small> : null}{impact.risk && <details><summary>查看边界与风险</summary><p>{impact.risk}</p></details>}</div></article>)}</div>
+            {(impactDetails.behaviorInstructions.length > 0 || impactDetails.formulaResults.length > 0 || impactDetails.diagnosticProxies.length > 0 || impactDetails.channels.length > 0 || impactDetails.warnings.length > 0) && <div className="impact-report__details">
+              {impactDetails.behaviorInstructions.length > 0 && <details><summary><Sparkles size={14} />最终行为指令 <Badge>{impactDetails.behaviorInstructions.length}</Badge><ChevronDown size={13} /></summary><ul>{impactDetails.behaviorInstructions.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul></details>}
+              {impactDetails.formulaResults.length > 0 && <details><summary><FileJson size={14} />公式计算结果 <Badge>{impactDetails.formulaResults.length}</Badge><ChevronDown size={13} /></summary><div className="impact-formula-results">{impactDetails.formulaResults.map((formula) => <FormulaImpactResult formula={formula} key={formula.formulaId} />)}</div></details>}
+              {impactDetails.diagnosticProxies.length > 0 && <details><summary><Info size={14} />分项显示 / 人工复核排序 <Badge tone="warning">{impactDetails.diagnosticProxies.length}</Badge><ChevronDown size={13} /></summary><div className="impact-diagnostic-proxies">{impactDetails.diagnosticProxies.map((proxy, index) => <DiagnosticProxyCard view={resolveDiagnosticProxyView(proxy)} key={`${String((proxy as { formulaId?: unknown }).formulaId || "unknown")}-${index}`} compact />)}</div></details>}
+              {impactDetails.channels.length > 0 && <details><summary><Tags size={14} />参数侧通道预览（诊断） <Badge>{impactDetails.channels.length}</Badge><ChevronDown size={13} /></summary><div className="impact-channel-note"><Info size={14} /><span>这里只解释参数对通道的倾向，不是最终分配。最终位置以当前候选的编排快照与“最终缺口位置”为准。</span></div><div className="impact-channel-list">{impactDetails.channels.map((channel) => <article key={channel.id}><strong>{channelLabel(channel.id)}</strong><span>{channel.purpose || "参数建议"}</span><b>{channel.count} 项预览</b>{channel.constraints.length > 0 && <small>{channel.constraints.join(" · ")}</small>}</article>)}</div></details>}
+              {impactDetails.warnings.length > 0 && <details className="impact-warning-details"><summary><TriangleAlert size={14} />边界与警告 <Badge tone="warning">{impactDetails.warnings.length}</Badge><ChevronDown size={13} /></summary><ul>{impactDetails.warnings.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul></details>}
+            </div>}
+          </div>
+        </details>}
+      </section>
     </div>
   );
 }
@@ -998,6 +1022,86 @@ function DeploymentDetails({ plan }: { plan: NonNullable<Candidate["deploymentPl
 
 function diagnosticStatusLabel(status: string) {
   return status === "pass" ? "通过" : status === "warn" ? "警告" : status === "fail" ? "未通过" : "unknown";
+}
+
+/**
+ * 校验结论卡的 code → 中文说明(纯展示映射):
+ * 已知的 code 给出人话概括;未识别的 code 返回 null,界面回落为展示系统原文
+ * message + code,不猜译、不丢原文。
+ */
+function validationIssueLabel(code?: string) {
+  const labels: Record<string, string> = {
+    visible_claim_not_in_ledger: "正文里有说法缺少事实依据登记",
+    evidence_caveat_not_visible: "证据附带的保留说明没有写出来",
+    sample_body_shape_drift: "正文形态偏离样本目标区间",
+    marketing_claim_grounding: "营销向说法缺少依据支撑",
+    fabricated_operational_experience: "疑似编造运营或经历类说法",
+  };
+  return (code && labels[code]) || null;
+}
+
+/**
+ * 未通过校验时的结论卡:把 validation.issues 按 code+message 去重(完全相同
+ * 的重复条目合并并标注 ×N,原文照留),error 优先,给出一句行动建议。
+ */
+function ValidationSummaryCard({ candidate }: { candidate: Candidate }) {
+  type Issue = NonNullable<Candidate["validation"]>["issues"][number];
+  const issues = candidate.validation?.issues || [];
+  const groups = new Map<string, { issue: Issue; count: number }>();
+  for (const issue of issues) {
+    const key = `${issue.severity}|${issue.code || ""}|${issue.message}`;
+    const existing = groups.get(key);
+    if (existing) existing.count += 1;
+    else groups.set(key, { issue, count: 1 });
+  }
+  const sorted = [...groups.values()].sort(
+    (a, b) => (a.issue.severity === "error" ? 0 : 1) - (b.issue.severity === "error" ? 0 : 1),
+  );
+  const errorCount = sorted
+    .filter((group) => group.issue.severity === "error")
+    .reduce((total, group) => total + group.count, 0);
+  const warnCount = issues.length - errorCount;
+  return (
+    <section className="validation-summary" role="alert">
+      <header>
+        <TriangleAlert size={18} />
+        <div>
+          <strong>本候选未通过校验,暂不能复制与导出</strong>
+          <p>
+            {errorCount > 0 ? `${errorCount} 个必须处理的问题` : ""}
+            {errorCount > 0 && warnCount > 0 ? " · " : ""}
+            {warnCount > 0 ? `${warnCount} 个复核提醒` : ""}
+            。事实类问题建议调整知识口径或设置后重新生成;形态提醒可人工复核后酌情使用。
+          </p>
+        </div>
+      </header>
+      <ul>
+        {sorted.map(({ issue, count }, index) => {
+          const label = validationIssueLabel(issue.code);
+          return (
+            <li
+              key={`${issue.code || "issue"}-${index}`}
+              className={`validation-summary__issue validation-summary__issue--${issue.severity === "error" ? "error" : "warning"}`}
+            >
+              <span className="validation-summary__badge">
+                {issue.severity === "error" ? "未通过" : "提醒"}
+              </span>
+              <span className="validation-summary__text">
+                <strong>
+                  {label || "系统校验项"}
+                  {count > 1 ? ` ×${count}` : ""}
+                </strong>
+                <small>
+                  {issue.message}
+                  {!label && issue.code ? `(系统原文 · ${issue.code})` : ""}
+                </small>
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
 }
 
 function DiagnosticProxyCard({ view, compact = false }: { view: DiagnosticProxyView; compact?: boolean }) {
