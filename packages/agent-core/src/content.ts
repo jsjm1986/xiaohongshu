@@ -1171,6 +1171,9 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
   }
   const controlledRules = input.projectBlueprint?.claimPolicy.rules.filter((rule) => rule.requiresEvidence) ?? [];
   const genericMeasuredClaim = /\d+(?:\.\d+)?\s*(?:%|％|k|K|元|万|天|周|月|年|次|个|套|人|毫米|厘米|mm|cm)/iu;
+  // 双号运营:助理(staff)答复中的承诺类营销表述(不一定带数字,敏感声明检查
+  // 不一定覆盖),配合 genericMeasuredClaim 与受控声明 terms 一起做锚定复核。
+  const marketingPromiseClaim = /(?:优惠|折扣|免费|赠送|包干|保证|承诺|退款|名额|套餐|秒杀|团购|立减|满减|到店礼|活动价)/u;
   const sensitiveSurfaces: Array<{ location: NonNullable<GenerationDraft["reasoning"][number]["location"]>; text: string }> = [
     { location: "N.body", text: draft.content.N.body },
     ...draft.content.Cref.threads.map((thread) => ({ location: "Cref.thread" as const, text: thread.answer })),
@@ -1253,6 +1256,32 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     // P4-19: the answer side must carry an accountable publisher-side identity.
     if (!accountablePostingIdentities.has(thread.postingIdentity)) {
       add("comment_identity_violation", "error", "Cref", `Thread ${thread.id} posting identity "${thread.postingIdentity}" is not an accountable publisher-side identity (publisher/brand/staff/expert).`);
+    }
+    // 双号运营:助理(staff)答复话术自由,但价格、数字与承诺类表述必须能锚定
+    // 知识库。锚定判定沿用 sensitive_claim_without_evidence 的证据机制(fact
+    // 台账 + sourceSpans + conservativeEvidenceSupport);不可锚定不阻断生成
+    // (受控声明仍由 error 级 sensitive_claim_without_evidence 拦截),而是
+    // warning 提示人工复核出处。
+    if (thread.postingIdentity === "staff") {
+      const staffSurfaces: Array<{ location: "Cref.thread" | "Cref.followUp"; text: string }> = [
+        { location: "Cref.thread", text: thread.answer },
+        ...thread.followUps.map((followUp) => ({ location: "Cref.followUp" as const, text: followUp.answer })),
+      ];
+      for (const surface of staffSurfaces) {
+        for (const statement of surface.text.split(/(?<=[。！？!?；;])|\n+/u).map((item) => item.trim()).filter(Boolean)) {
+          const marketingClaim = genericMeasuredClaim.test(statement)
+            || marketingPromiseClaim.test(statement)
+            || controlledRules.some((rule) => rule.terms.some((term) => term && statement.includes(term)));
+          if (!marketingClaim || /[？?]$/u.test(statement)) continue;
+          const grounded = draft.reasoning.some((item) => item.status === "fact"
+            && item.location === surface.location
+            && (item.sourceSpans?.length ?? 0) > 0
+            && conservativeEvidenceSupport(statement, item.statement));
+          if (!grounded) {
+            add("marketing_claim_grounding", "warning", "Cref", `Thread ${thread.id} staff answer makes a price/number/promise claim that cannot be anchored to the knowledge base; route to human review: ${statement}`, false);
+          }
+        }
+      }
     }
     // P4-19: while the body only declares host intent, the publisher answer
     // side must not claim a completed first-person action. The question side

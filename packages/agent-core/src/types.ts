@@ -1058,7 +1058,17 @@ export interface ProjectCreativeBlueprint {
     }>;
   };
   scenarioModel: { families: ProjectScenarioFamily[] };
-  roleModel: { hostVoiceTraits: string[]; hostSpeechMarkers: string[]; roles: ProjectRoleDefinition[] };
+  roleModel: {
+    hostVoiceTraits: string[];
+    hostSpeechMarkers: string[];
+    roles: ProjectRoleDefinition[];
+    /**
+     * 双号运营服务模型,蓝图生成时从项目资料判定;历史蓝图没有该字段,故可选。
+     * one_time 一次性服务:营销角色池不含老客复购,重点是转介绍/服务后回访;
+     * recurring 疗程复购:允许老客复购类角色;mixed 混合:按话头裁剪两类角色。
+     */
+    serviceModel?: "one_time" | "recurring" | "mixed";
+  };
   claimPolicy: { rules: ProjectClaimRule[]; prohibitedClaims: string[]; dynamicInformation: string[]; unknownHandling: string[] };
   surfaceLanguage: {
     registerDescription: string;
