@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react';
+import { RefreshCw } from 'lucide-react';
 import { Button, Field } from '../Ui';
 import { autoApproveAndGenerate, quickCandidateFields, type QuickCandidateView } from '../../lib/quick-generation';
 import type { CommentRichnessLevel, SimpleSettingOverrides } from '../../lib/simple-generation';
@@ -38,7 +40,19 @@ interface Props {
   onGenerated: (results: QuickCandidateView[]) => void;
 }
 
+const GEN_STAGES = ['解析选题与已确认信息', '组织内容结构', '生成初稿', '质检与合规校验'];
+
 export function ConfigTab({ project, opportunityId, presets, presetId, overrides, busy, setBusy, fail, setPresetId, setOverrides, onGenerated }: Props) {
+  const [stageIdx, setStageIdx] = useState(0);
+
+  useEffect(() => {
+    if (!busy) { setStageIdx(0); return; }
+    const timer = window.setInterval(() => {
+      setStageIdx((i) => Math.min(i + 1, GEN_STAGES.length - 1));
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [busy]);
+
   const patch = (p: Partial<SimpleSettingOverrides>) => setOverrides({ ...overrides, ...p });
 
   const generate = async () => {
@@ -91,7 +105,15 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
         </div>
       </details>
 
-      <Button loading={busy} disabled={!presetId} onClick={() => void generate()}>生成文案</Button>
+      {busy && (
+        <div className="qc-progress" role="status">
+          <RefreshCw size={15} className="spin" />
+          <span>正在生成:{GEN_STAGES[stageIdx]}…</span>
+          <small>请勿离开或重复点击</small>
+          <i className="qc-progress__track"><b /></i>
+        </div>
+      )}
+      <Button loading={busy} disabled={!presetId || busy} onClick={() => void generate()}>生成文案</Button>
     </div>
   );
 }

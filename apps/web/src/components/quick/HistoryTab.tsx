@@ -13,6 +13,14 @@ interface Props {
   setHistory: (h: GenerationJob[]) => void;
 }
 
+const STATUS_LABEL: Record<string, { text: string; tone: 'ok' | 'warn' | 'error' | 'muted' }> = {
+  ready: { text: '已完成', tone: 'ok' },
+  completed: { text: '已完成', tone: 'ok' },
+  draft: { text: '草稿', tone: 'muted' },
+  pending: { text: '进行中', tone: 'warn' },
+  failed: { text: '失败', tone: 'error' },
+};
+
 export function HistoryTab({ project, history, setBusy, fail, setHistory }: Props) {
   const toast = useToast();
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -54,7 +62,8 @@ export function HistoryTab({ project, history, setBusy, fail, setHistory }: Prop
             <li key={job.id} className="qc-history-item">
               <div className="qc-project-row">
                 <strong>{job.topic || '未命名选题'}</strong>
-                <small className="qc-hint">· {job.status}{job.createdAt ? ` · ${new Date(job.createdAt).toLocaleString()}` : ''}</small>
+                {(() => { const s = STATUS_LABEL[job.status] ?? { text: job.status, tone: 'muted' as const }; return <span className={`qc-badge qc-badge--${s.tone}`}>{s.text}</span>; })()}
+                <small className="qc-hint">{job.createdAt ? new Date(job.createdAt).toLocaleString() : ''}</small>
                 <Button variant="ghost" onClick={() => setExpanded(open ? null : job.id)}>{open ? '收起' : '查看'}</Button>
               </div>
               {open && views.map((v) => (
