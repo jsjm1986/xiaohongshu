@@ -34,6 +34,8 @@ import { V2Hero } from "../components/V2";
 import { api } from "../lib/api";
 import {
   commentNodeKindLabel,
+  commentThreadKindLabel,
+  commentThreadKindOf,
   deploymentSla,
   liveRoutingLines,
   uncoveredGapLabels,
@@ -563,7 +565,11 @@ export function GenerationResultPage() {
               </div>
             )}
             <div className="comment-threads">
-              {selected.comments.map((comment, index) => (
+              {selected.comments.map((comment, index) => {
+                // 读者互动层:T1 机构问答(缺省)/ T2 读者互聊 / T3 漂浮短反应;
+                // 历史包没有 threadKind,归一化为 T1 渲染,不出错。
+                const threadKind = commentThreadKindOf(comment);
+                return (
                 <div
                   className="comment-thread"
                   key={`${comment.question}-${index}`}
@@ -571,7 +577,7 @@ export function GenerationResultPage() {
                   <div className="comment-question">
                     <span className="comment-avatar">评</span>
                     <div>
-                      <div className="comment-meta">{comment.displayName && <Badge tone="blue">{comment.displayName}</Badge>}{comment.simulated && <Badge tone="warning">{comment.simulationLabel || "模拟潜在读者"}</Badge>}{comment.kind && <Badge>{commentNodeKindLabel(comment.kind)}</Badge>}{comment.personaRole && <Badge>{personaRoleLabel(comment.personaRole)}</Badge>}{comment.speakerType && <Badge>{speakerTypeLabel(comment.speakerType)}</Badge>}{comment.stage && <Badge>{comment.stage}</Badge>}{comment.function && <Badge tone="purple">{commentFunctionLabel(comment.function)}</Badge>}{comment.claimStatus && <Badge tone={comment.claimStatus === "verified" ? "positive" : comment.claimStatus === "unknown" ? "warning" : "blue"}>{claimStatusLabel(comment.claimStatus)}</Badge>}{comment.postingIdentity && <Badge tone={comment.postingIdentity === "staff" ? "blue" : "positive"}>{comment.postingIdentity === "staff" ? "机构助理 · 营销承接" : dualIdentity ? "机构 IP · 专业解答" : `${identityLabel(comment.postingIdentity)}可追责答复`}</Badge>}</div>
+                      <div className="comment-meta">{comment.displayName && <Badge tone="blue">{comment.displayName}</Badge>}{comment.threadKind && <Badge tone="purple">{commentThreadKindLabel(comment.threadKind)}</Badge>}{comment.simulated && <Badge tone="warning">{comment.simulationLabel || "模拟潜在读者"}</Badge>}{comment.kind && <Badge>{commentNodeKindLabel(comment.kind)}</Badge>}{comment.personaRole && <Badge>{personaRoleLabel(comment.personaRole)}</Badge>}{comment.speakerType && <Badge>{speakerTypeLabel(comment.speakerType)}</Badge>}{comment.stage && <Badge>{comment.stage}</Badge>}{comment.function && <Badge tone="purple">{commentFunctionLabel(comment.function)}</Badge>}{comment.claimStatus && <Badge tone={comment.claimStatus === "verified" ? "positive" : comment.claimStatus === "unknown" ? "warning" : "blue"}>{claimStatusLabel(comment.claimStatus)}</Badge>}{comment.postingIdentity && threadKind === "org_answer" && <Badge tone={comment.postingIdentity === "staff" ? "blue" : "positive"}>{comment.postingIdentity === "staff" ? "机构助理 · 营销承接" : dualIdentity ? "机构 IP · 专业解答" : `${identityLabel(comment.postingIdentity)}可追责答复`}</Badge>}</div>
                       <strong>{comment.question}</strong>
                       {comment.purpose && (
                         <small>信息任务：{comment.purpose}</small>
@@ -613,17 +619,21 @@ export function GenerationResultPage() {
                       </div>}
                     </div>
                   </details>}
-                  <div className="comment-answer">
+                  {threadKind !== "organic_reaction" && <div className="comment-answer">
                     <span className="comment-avatar comment-avatar--answer">
-                      回
+                      {threadKind === "reader_exchange" ? "聊" : "回"}
                     </span>
                     <div>
-                      {(comment.answerKind || replyOrgDisplayName(comment)) && <div className="comment-meta">{replyOrgDisplayName(comment) && <Badge tone="positive">{replyOrgDisplayName(comment)}</Badge>}{comment.answerKind && <Badge tone="positive">{commentNodeKindLabel(comment.answerKind)}</Badge>}</div>}
+                      {threadKind === "reader_exchange" ? (
+                        <div className="comment-meta">{comment.replyDisplayName && <Badge tone="blue">{comment.replyDisplayName}</Badge>}<Badge tone="purple">读者互聊{comment.displayName && comment.replyDisplayName ? ` · ${comment.displayName} → ${comment.replyDisplayName}` : ""}</Badge>{comment.answerKind && <Badge>{commentNodeKindLabel(comment.answerKind)}</Badge>}</div>
+                      ) : (
+                        (comment.answerKind || replyOrgDisplayName(comment)) && <div className="comment-meta">{replyOrgDisplayName(comment) && <Badge tone="positive">{replyOrgDisplayName(comment)}</Badge>}{comment.answerKind && <Badge tone="positive">{commentNodeKindLabel(comment.answerKind)}</Badge>}</div>
+                      )}
                       <p>{primaryCommentAnswer(comment)}</p>
                     </div>
-                  </div>
-                  {comment.boundary && <div className="comment-next-step"><Info size={14} /><span>答复边界：{comment.boundary}</span></div>}
-                  {comment.evidenceIds?.length ? <div className="comment-next-step"><Info size={14} /><span>证据引用：{comment.evidenceIds.join("、")}</span></div> : null}
+                  </div>}
+                  {threadKind !== "organic_reaction" && comment.boundary && <div className="comment-next-step"><Info size={14} /><span>答复边界：{comment.boundary}</span></div>}
+                  {threadKind !== "organic_reaction" && comment.evidenceIds?.length ? <div className="comment-next-step"><Info size={14} /><span>证据引用：{comment.evidenceIds.join("、")}</span></div> : null}
                   {comment.followUps?.map((followUp, followUpIndex) => (
                     <div className="comment-follow-up" key={`${followUp.question}-${followUpIndex}`}>
                       {(followUp.kind || followUp.personaRole || followUp.claimStatus || followUp.threadDepth !== undefined) && <div className="comment-meta">{followUp.kind && <Badge>{commentNodeKindLabel(followUp.kind)}</Badge>}{followUp.personaRole && <Badge>{personaRoleLabel(followUp.personaRole)}</Badge>}{followUp.claimStatus && <Badge tone="blue">{claimStatusLabel(followUp.claimStatus)}</Badge>}{followUp.threadDepth !== undefined && <Badge>第 {followUp.threadDepth} 层</Badge>}</div>}
@@ -633,9 +643,10 @@ export function GenerationResultPage() {
                       {followUp.evidenceIds?.length ? <p>证据引用：{followUp.evidenceIds.join("、")}</p> : null}
                     </div>
                   ))}
-                  {comment.nextStep && <div className="comment-next-step"><ChevronDown size={14} /><span>下一步：{comment.nextStep}</span></div>}
+                  {threadKind !== "organic_reaction" && comment.nextStep && <div className="comment-next-step"><ChevronDown size={14} /><span>下一步：{comment.nextStep}</span></div>}
                 </div>
-              ))}
+                );
+              })}
             </div>
             {coverageLedger && <details className="comment-coverage-ledger" open={Boolean(coverageLedger.capacityWarning || selected.capacityWarning)}>
               <summary>查看正文＋评论的信息闭合台账 <Badge>{Math.round((ledgerCompleteness ?? 0) * 100)}% 台账完整</Badge><ChevronDown size={14} /></summary>
@@ -1102,6 +1113,8 @@ function conversationTopologyLabel(value: string) {
     two_turn: "两轮接话",
     three_person_branch: "第三人分支",
     reaction_then_reply: "反应后轻回复",
+    reader_exchange: "读者互聊",
+    organic_reaction: "漂浮短反应",
   };
   return labels[value] || value;
 }

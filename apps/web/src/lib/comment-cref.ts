@@ -19,6 +19,26 @@ export const commentNodeKindLabel = (value?: string): string => {
 };
 
 /**
+ * 线程级互动形态(读者互动层)归一化:缺省或不可识别的值一律按
+ * org_answer(T1 机构问答)处理——历史包没有 threadKind 字段,界面与
+ * 复制markdown 都按 T1 渲染,不出错。
+ */
+export const commentThreadKindOf = (thread: { threadKind?: string }): "org_answer" | "reader_exchange" | "organic_reaction" =>
+  thread.threadKind === "reader_exchange" || thread.threadKind === "organic_reaction"
+    ? thread.threadKind
+    : "org_answer";
+
+/** 线程级互动形态 → 中文徽标;未知值原样透传。 */
+export const commentThreadKindLabel = (value?: string): string => {
+  const labels: Record<string, string> = {
+    org_answer: "机构问答",
+    reader_exchange: "读者互聊",
+    organic_reaction: "漂浮短反应",
+  };
+  return value ? labels[value] || value : "机构问答";
+};
+
+/**
  * Accountable posting identity for display. `publisher` (v1.1) is the
  * publishing account itself; historical enum/raw values pass through.
  */

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   commentNodeKindLabel,
+  commentThreadKindLabel,
+  commentThreadKindOf,
   deploymentSla,
   liveRoutingLine,
   liveRoutingLines,
@@ -317,4 +319,64 @@ test("candidate markdown flips to the two-part layout on any single Cref v1.1 fi
 
   const byEmptyProjection = candidateToMarkdown({ ...baseCandidate, commentUncoveredGaps: [] });
   assert.match(byEmptyProjection, /# 审计附录（非发布素材）/u);
+});
+
+test("thread kind helpers default to org_answer and label the three interaction forms", () => {
+  assert.equal(commentThreadKindOf({}), "org_answer");
+  assert.equal(commentThreadKindOf({ threadKind: "未知形态" }), "org_answer");
+  assert.equal(commentThreadKindOf({ threadKind: "org_answer" }), "org_answer");
+  assert.equal(commentThreadKindOf({ threadKind: "reader_exchange" }), "reader_exchange");
+  assert.equal(commentThreadKindOf({ threadKind: "organic_reaction" }), "organic_reaction");
+  assert.equal(commentThreadKindLabel("org_answer"), "机构问答");
+  assert.equal(commentThreadKindLabel("reader_exchange"), "读者互聊");
+  assert.equal(commentThreadKindLabel("organic_reaction"), "漂浮短反应");
+  assert.equal(commentThreadKindLabel("custom_kind"), "custom_kind");
+  assert.equal(commentThreadKindLabel(undefined), "机构问答");
+});
+
+test("candidate markdown formats reader-exchange and organic-reaction threads by kind, legacy threads unchanged", () => {
+  const candidate: Candidate = {
+    ...baseCandidate,
+    commentOwnedFirstComment: "置顶说明：价格以当期确认为准。",
+    comments: [
+      {
+        question: "我也在纠结要不要去面诊",
+        answer: "姐妹我也是，主要怕恢复时间对不上",
+        threadKind: "reader_exchange",
+        displayName: "桃子气泡水",
+        replyDisplayName: "熬夜的猫",
+        simulated: true,
+        simulationLabel: "模拟潜在读者情景",
+        postingIdentity: "publisher",
+      },
+      {
+        question: "蹲一个",
+        answer: "",
+        threadKind: "organic_reaction",
+        displayName: "半糖去冰",
+        simulated: true,
+        simulationLabel: "模拟潜在读者情景",
+        postingIdentity: "publisher",
+      },
+      {
+        question: "大概多少钱？",
+        answer: "以当期确认为准。",
+        simulated: true,
+        simulationLabel: "模拟潜在读者情景",
+        postingIdentity: "staff",
+      },
+    ],
+  };
+  const markdown = candidateToMarkdown(candidate);
+  // T2 读者互聊:读者 B 接话结构,不用机构答复格式。
+  assert.match(markdown, /读者接话：熬夜的猫：姐妹我也是，主要怕恢复时间对不上/u);
+  assert.match(markdown, /互动类型：读者互聊/u);
+  assert.match(markdown, /互动类型：读者互聊（桃子气泡水 → 熬夜的猫）/u);
+  // T3 漂浮短反应:轻量单行,机构不出现。
+  assert.match(markdown, /漂浮反应：半糖去冰：蹲一个/u);
+  assert.match(markdown, /无需机构回复/u);
+  // 缺省 kind 的旧线程保持机构问答格式不变。
+  assert.match(markdown, /- 回复：以当期确认为准。/u);
+  assert.match(markdown, /可追责答复身份：staff/u);
+  assert.ok(!markdown.includes("undefined"));
 });

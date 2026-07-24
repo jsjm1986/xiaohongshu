@@ -688,6 +688,12 @@ export function buildStagedCommentsPrompt(
 - 助理承接营销话头时话术自由，可以自然报价、说预约方式、给地址、讲活动；但价格、数字与承诺类表述必须锚定知识库口径，知识库没有的就明说“这个我让专人跟你确认”式转人工，禁止编具体数字或承诺；动态信息同样带“以当期确认为准”式限定。
 - 有揭示义务的回答必须在同一线程内把当前可说的结论说完，禁止故意留悬念吊胃口；受控声明没有证据时仍走②或③，不能用传闻绕过。
 
+三类线程形态（读者互动层，按计划线程ID的threadKind执行，缺省为org_answer）：
+- threadKind=org_answer（机构问答）：上述双号契约不变——读者开口，answer由IP或助理按postingIdentity承接；涉项目事实（价格、地址、恢复、资质、效果口径等）的问题只允许此型回答。
+- threadKind=reader_exchange（读者互聊）：question是读者A开口，answer是读者B以模拟读者身份接话——B只说自己的处境、感受、疑问或轻反应，范围限计划给出的readerResponder.permittedContribution；B禁讲项目事实、价格数字、效果证词、机构信息，不替机构回答；机构本轮不在answer出现。
+- threadKind=organic_reaction（漂浮短反应）：question是一条4-20字短共鸣（“姐妹我也是”“蹲一个”“码住”这类），无回答需求；answer必须输出空字符串""，机构不出现，不要求闭环。
+- 读者互聊与漂浮短反应同样是显式标注的模拟读者创作参考，不算真实口碑；它们不改变“涉项目事实仍走机构问答”的硬约束。
+
 语言质感：
 - 先按人物说话，再考虑网感。用称呼、行动短语、迟疑语气或省略暴露身份即可；不要为了证明“像平台”而复用固定热词。一人最多一处明显语域标记。
 - 允许短问、半句话、迟疑、轻微反对和不完整反应。禁止全员同款称呼、堆emoji、堆热词，以及为躲审核故意造错字。
@@ -719,10 +725,17 @@ export function buildStagedCommentsPrompt(
 计划线程ID与写作依据：
 ${safeJson(plannedThreads.map((thread) => ({
     id: thread.id,
+    threadKind: thread.threadKind ?? "org_answer",
     primaryGapId: thread.primaryGapId,
     auxiliaryGapIds: thread.auxiliaryGapIds,
     postingIdentity: thread.postingIdentity,
     replyDisplayRole: thread.surfaceRoleCard?.replyDisplayRole,
+    ...(thread.threadKind === "reader_exchange" ? {
+      readerResponder: {
+        displayRole: thread.replySurfaceRoleCard?.displayRole,
+        permittedContribution: thread.replySurfaceRoleCard?.permittedContribution,
+      },
+    } : {}),
     contentAnchor: {
       possibleAnswer: thread.replyPlan?.directAnswer,
       relevantCondition: thread.replyPlan?.condition,
@@ -731,7 +744,7 @@ ${safeJson(plannedThreads.map((thread) => ({
     },
   })))}
 
-严格输出 ${plannedThreads.length} 个根线程。只返回：{"disclaimer":"以下为完整评论区创作参考，不代表已经发生的真实互动或观测口碑。","ownedFirstComment":"可选，可答内容不足时整字段省略","threads":[{"id":"计划ID","roleIndex":0,"question":"一条自然评论","answer":"发布账号的自然回复","kind":"question","answerKind":"answer","function":"verification","boundary":"有明确边界时写出，否则省略","followUps":[]}]}`;
+严格输出 ${plannedThreads.length} 个根线程。只返回：{"disclaimer":"以下为完整评论区创作参考，不代表已经发生的真实互动或观测口碑。","ownedFirstComment":"可选，可答内容不足时整字段省略","threads":[{"id":"计划ID","roleIndex":0,"question":"一条自然评论","answer":"按threadKind决定：机构问答=发布账号的自然回复；读者互聊=读者B的自然接话；漂浮短反应=空字符串\"\"","kind":"question","answerKind":"answer","function":"verification","boundary":"有明确边界时写出，否则省略","followUps":[]}]}`;
   const commonContent: PromptMessage["content"] = common.imageParts.length
     ? [{ type: "text", text: common.text }, ...common.imageParts]
     : common.text;
@@ -763,7 +776,7 @@ export function buildStagedCommentGrowthPrompt(
   // 继续问，字段由此变活。
   const growthIntents = (input.orchestrationPlan?.dialogueThreads ?? [])
     .filter((thread) => (thread.conversationPlan?.targetFollowUps ?? 0) > 0)
-    .map((thread) => ({ id: thread.id, followUpIntent: thread.followUpIntent }));
+    .map((thread) => ({ id: thread.id, threadKind: thread.threadKind ?? "org_answer", followUpIntent: thread.followUpIntent }));
   const phase = `阶段2B：根评论已经写完。现在像真实评论区一样，只让被上一句话实际触发的少数线程继续生长。
 
 要求：
@@ -771,6 +784,7 @@ export function buildStagedCommentGrowthPrompt(
 - 在整片评论区中，让 ${targetMin}—${targetMax} 个根线程出现后续；这是整体分布范围，不是逐条配额。其余线程保持followUps=[]。
 - 每条最多 ${maxDepth} 个followUps。后续发言必须抓住前一句已经出现的一个具体词、生活限制、图像细节、人物或不同意见再开口；没有自然话头就不要续。
 - followUps中的question表示下一位人物接话，不必是问句；answer是紧接回应。可以出现第三人插话、轻微岔开、不同意或新好奇点，但不能突然切换成另一份FAQ。
+- 读者互动层生长规则：threadKind=reader_exchange 的线程，追问可以是读者对读者（A回应B，或第三位读者插话——仍只说自己的处境、感受、疑问或轻反应，不谈项目事实、价格数字、效果证词、机构信息），也可以由机构按 postingIdentity 插话一次；threadKind=organic_reaction 的漂浮短反应线程不生长，必须保持followUps=[]；org_answer 线程按原规则由可追责身份承接。
 - 后续要新增一个相邻信息维度或关系信号，不能只是“同问、是的、我也是”的同义反复；也不能为了信息完整把每条拉长。
 - 角色只说其位置能知道的内容。不得虚构 projectBlueprint.claimPolicy 约束的受控声明或他人口碑；未获证据支持时改成真实疑问或有限处境。
 - 不追求整齐：允许0轮、1轮、2轮并存，长短不齐，结尾不必全部闭合。

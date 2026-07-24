@@ -559,7 +559,7 @@ describe("non-vector orchestration planning", () => {
         targetChars: [expect.any(Number), expect.any(Number)],
       });
       expect(thread.conversationPlan).toMatchObject({
-        topology: expect.stringMatching(/^(single_exchange|two_turn|three_person_branch|reaction_then_reply)$/u),
+        topology: expect.stringMatching(/^(single_exchange|two_turn|three_person_branch|reaction_then_reply|reader_exchange|organic_reaction)$/u),
         targetFollowUps: expect.any(Number),
         openingMove: expect.any(String),
         replyMove: expect.any(String),

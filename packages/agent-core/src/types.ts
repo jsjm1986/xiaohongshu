@@ -860,6 +860,18 @@ export interface CommentScenarioMetadata {
  */
 export type CommentNodeKind = "question" | "answer" | "follow_up" | "clarification";
 
+/**
+ * 评论互动类型(读者互动层),标记整条线程的互动形态:
+ * - `org_answer` 机构问答(T1,缺省值):读者开口 → 可追责身份(IP/助理)答复;
+ *   涉项目事实的问题必须此型。
+ * - `reader_exchange` 读者互聊(T2):读者A开口 → 读者B接话,机构可插话或不出现;
+ *   B 只说自己的处境/感受/疑问/轻反应,禁讲项目事实、价格数字、效果证词、机构信息。
+ * - `organic_reaction` 漂浮短反应(T3):单条 4-20 字短共鸣,无回答需求,机构不出现。
+ * 注意与节点级 `kind`(CommentNodeKind,提问/回答/追问/澄清)区分:threadKind 是
+ * 线程级互动形态。可选,历史包缺省按 `org_answer` 理解与渲染。
+ */
+export type CommentThreadKind = "org_answer" | "reader_exchange" | "organic_reaction";
+
 export interface CommentFollowUp extends CommentScenarioMetadata {
   id?: string;
   question: string;
@@ -916,6 +928,21 @@ export interface CommentReferenceThread extends CommentScenarioMetadata {
    * publisher-side identity. Optional so historical packages still parse.
    */
   displayName?: string;
+  /**
+   * 线程级互动形态(读者互动层)。可选,历史包缺省按 `org_answer` 理解;
+   * 校验、渲染与导出都按缺省 T1 处理,不出错。
+   */
+  threadKind?: CommentThreadKind;
+  /**
+   * T2(reader_exchange)接话读者 B 的展示昵称(纯展示元数据),与开口者 A 的
+   * displayName 必不相同;仅 T2 线程出现,不投给模型。
+   */
+  replyDisplayName?: string;
+  /**
+   * T2(reader_exchange)接话读者 B 的可见角色卡,displayRole 与开口者 A 的
+   * surfaceRoleCard 必不相同;B 的接话范围限其 permittedContribution。
+   */
+  replySurfaceRoleCard?: CommentSurfaceRoleCard;
 }
 
 export interface ContentPackageContent {
@@ -1483,7 +1510,7 @@ export interface DialogueThreadPlan {
   /** M7: downgraded to optional (streamlined-capable); see CommentDiscoveryPlan. */
   discoveryPlan?: CommentDiscoveryPlan;
   conversationPlan?: {
-    topology: "single_exchange" | "two_turn" | "three_person_branch" | "reaction_then_reply";
+    topology: "single_exchange" | "two_turn" | "three_person_branch" | "reaction_then_reply" | "reader_exchange" | "organic_reaction";
     targetFollowUps: 0 | 1 | 2;
     openingMove: string;
     replyMove: string;
@@ -1498,6 +1525,15 @@ export interface DialogueThreadPlan {
    * projected to the model. Optional so historical plan snapshots stay readable.
    */
   displayName?: string;
+  /**
+   * 线程级互动形态(读者互动层),由规划侧按种子确定性分配(不设死比例;营销
+   * 话头 gap 的线程 org_answer 概率自然偏高)。缺省 `org_answer`。
+   */
+  threadKind?: CommentThreadKind;
+  /** T2 接话读者 B 的展示昵称(纯展示元数据),与开口者 A 不同;仅 T2 线程出现。 */
+  replyDisplayName?: string;
+  /** T2 接话读者 B 的可见角色卡,displayRole 与开口者不同;B 接话范围限其 permittedContribution。 */
+  replySurfaceRoleCard?: CommentSurfaceRoleCard;
 }
 
 export type CommentGapCoverageStatus =

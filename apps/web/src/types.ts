@@ -601,6 +601,12 @@ export interface CommentThread extends CommentScenarioMetadata {
   followUps?: Array<CommentScenarioMetadata & { id?: string; question: string; answer: string; evidenceIds?: string[]; kind?: CommentNodeKind | string; boundary?: string; displayName?: string }>;
   /** 提问者展示昵称(纯展示元数据);历史包没有该字段,界面不出空徽标。 */
   displayName?: string;
+  /** 线程级互动形态(读者互动层);历史包缺省按 org_answer(T1 机构问答)渲染。 */
+  threadKind?: "org_answer" | "reader_exchange" | "organic_reaction" | string;
+  /** T2 接话读者 B 的展示昵称(纯展示元数据);仅 T2 线程出现。 */
+  replyDisplayName?: string;
+  /** T2 接话读者 B 的可见角色卡;仅 T2 线程出现。 */
+  replySurfaceRoleCard?: CommentSurfaceRoleCard;
   /** Dialogic kind of the root question node; positional default `question`. */
   kind?: CommentNodeKind | string;
   /** Dialogic kind of the root answer node; positional default `answer`. */
@@ -853,6 +859,12 @@ export interface DialogueThreadPlan extends CommentScenarioMetadata {
     topology: string; targetFollowUps: number; openingMove: string; replyMove: string;
     extensionMove: string; extensionGapId?: string;
   };
+  /** 线程级互动形态(读者互动层);历史包缺省按 org_answer 理解。 */
+  threadKind?: "org_answer" | "reader_exchange" | "organic_reaction" | string;
+  /** T2 接话读者 B 的展示昵称(纯展示元数据);仅 T2 线程出现。 */
+  replyDisplayName?: string;
+  /** T2 接话读者 B 的可见角色卡;仅 T2 线程出现。 */
+  replySurfaceRoleCard?: CommentSurfaceRoleCard;
 }
 
 export interface InformationGapPlanningCard {
