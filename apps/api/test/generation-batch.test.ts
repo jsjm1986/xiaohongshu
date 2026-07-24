@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseService } from '../src/database.service.js';
 import { resolveOptions } from '../src/config.js';
+import { computeBatchStatus } from '../src/generation.service.js';
 
 function freshDb() {
   const dir = mkdtempSync(join(tmpdir(), 'batch-mig-'));
@@ -27,4 +28,14 @@ test('migration v12 creates generation_batches and jobs.batch_id', () => {
   } finally {
     cleanup();
   }
+});
+
+test('computeBatchStatus aggregates job statuses', () => {
+  assert.equal(computeBatchStatus(['queued', 'queued']), 'queued');
+  assert.equal(computeBatchStatus(['running', 'queued']), 'running');
+  assert.equal(computeBatchStatus(['completed', 'running']), 'running');
+  assert.equal(computeBatchStatus(['completed', 'completed']), 'completed');
+  assert.equal(computeBatchStatus(['failed', 'failed']), 'failed');
+  assert.equal(computeBatchStatus(['completed', 'failed']), 'partial');
+  assert.equal(computeBatchStatus([]), 'completed');
 });
