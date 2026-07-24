@@ -2814,6 +2814,7 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .qc-step-chip:disabled { opacity: .45; cursor: not-allowed; }
 .qc-step { display: flex; flex-direction: column; gap: 16px; }
 .qc-hint { color: var(--v2-muted); font-size: var(--v2-fs-sm); }
+.qc-analyzed-line { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: var(--v2-radius-sm); background: var(--v2-ok-soft); color: var(--v2-ok); font-size: var(--v2-fs-sm); }
 .qc-advanced { border-top: 1px solid var(--v2-line); padding-top: 12px; margin-top: 4px; }
 .qc-advanced summary { cursor: pointer; color: var(--v2-brand); font-size: var(--v2-fs-md); }
 .qc-advanced-grid { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
