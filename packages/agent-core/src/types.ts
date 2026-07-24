@@ -1851,11 +1851,28 @@ export interface PromptBundle {
   estimatedTokens: number;
 }
 
+/** AI 判官对敏感声明句的分类:事实断言需要证据;邀约/限定/疑问不需要。 */
+export type ClaimJudgmentClassification = "factual_assertion" | "service_offer" | "hedge" | "question";
+
+/**
+ * AI 判官对单条敏感声明句的裁决(引擎在校验前并入 draft,按句面文本精确匹配
+ * 消费):service_offer/hedge/question 直接放行;factual_assertion 仅当
+ * supported=true 时放行,否则按无证据受控声明报 error。
+ */
+export interface ClaimJudgment {
+  statement: string;
+  classification: ClaimJudgmentClassification;
+  /** 仅 factual_assertion 有意义:给出的证据源是否语义支持该句。 */
+  supported?: boolean;
+}
+
 export interface GenerationDraft {
   content: ContentPackageContent;
   evidenceIds: string[];
   reasoning: ContentPackage["reasoning"];
   unknowns: UnknownItem[];
+  /** AI 判官裁决旁路;无裁决(未调用/调用失败)时缺省,校验层走词面旧逻辑。 */
+  claimJudgments?: ClaimJudgment[];
 }
 
 export interface GenerationInput {

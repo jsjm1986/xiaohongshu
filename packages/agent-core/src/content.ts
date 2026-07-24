@@ -956,6 +956,20 @@ export function evaluateGapCoverageRealization(
   };
 }
 
+/**
+ * 受控声明词面命中规则与敏感面拆句规则。sensitive_claim_without_evidence 校验
+ * 与自动锚定(knowledge-anchor.ts)必须使用同一份判定,避免两侧各自拷贝后漂移。
+ */
+export const genericMeasuredClaim = /\d+(?:\.\d+)?\s*(?:%|％|k|K|元|万|天|周|月|年|次|个|套|人|毫米|厘米|mm|cm)/iu;
+// 双号运营:助理(staff)答复中的承诺类营销表述(不一定带数字,敏感声明检查
+// 不一定覆盖),配合 genericMeasuredClaim 与受控声明 terms 一起做锚定复核。
+export const marketingPromiseClaim = /(?:优惠|折扣|免费|赠送|包干|保证|承诺|退款|名额|套餐|秒杀|团购|立减|满减|到店礼|活动价)/u;
+
+/** 敏感面逐句拆分:句读/换行分段,去空白,弃空段。校验与自动锚定共用。 */
+export function splitSensitiveStatements(text: string): string[] {
+  return text.split(/(?<=[。！？!?；;])|\n+/u).map((item) => item.trim()).filter(Boolean);
+}
+
 export function validateGenerationDraft(input: DraftValidationInput): ContentValidationIssue[] {
   const { draft, config, ledger } = input;
   const issues: ContentValidationIssue[] = [];
@@ -1198,10 +1212,9 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     }
   }
   const controlledRules = input.projectBlueprint?.claimPolicy.rules.filter((rule) => rule.requiresEvidence) ?? [];
-  const genericMeasuredClaim = /\d+(?:\.\d+)?\s*(?:%|％|k|K|元|万|天|周|月|年|次|个|套|人|毫米|厘米|mm|cm)/iu;
-  // 双号运营:助理(staff)答复中的承诺类营销表述(不一定带数字,敏感声明检查
-  // 不一定覆盖),配合 genericMeasuredClaim 与受控声明 terms 一起做锚定复核。
-  const marketingPromiseClaim = /(?:优惠|折扣|免费|赠送|包干|保证|承诺|退款|名额|套餐|秒杀|团购|立减|满减|到店礼|活动价)/u;
+  // AI 判官裁决旁路:词表只负责圈句,判官(带完整知识上下文)已对仍未锚定的
+  // 句子分类裁决;有裁决按裁决执行,无裁决走词面旧逻辑(见循环内 grounded 判定)。
+  const claimJudgmentByStatement = new Map((draft.claimJudgments ?? []).map((judgment) => [judgment.statement, judgment]));
   // 读者互动层:T2 读者互聊/T3 漂浮短反应的 answer 是模拟读者发言(或空串),
   // 不进入 error 级受控声明扫描;T2 读者发言命中受控声明由 warning 级
   // reader_exchange_controlled_claim 承接(见下方逐线程检查)。
@@ -1212,13 +1225,18 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     ...orgAnsweredThreads.flatMap((thread) => thread.followUps.map((followUp) => ({ location: "Cref.followUp" as const, text: followUp.answer }))),
   ];
   for (const surface of sensitiveSurfaces) {
-    for (const statement of surface.text.split(/(?<=[。！？!?；;])|\n+/u).map((item) => item.trim()).filter(Boolean)) {
+    for (const statement of splitSensitiveStatements(surface.text)) {
       const matchedRules = controlledRules.filter((rule) => rule.terms.some((term) => term && statement.includes(term)));
       if ((!genericMeasuredClaim.test(statement) && matchedRules.length === 0) || /[？?]$/u.test(statement)) continue;
-      const grounded = draft.reasoning.some((item) => item.status === "fact"
-        && item.location === surface.location
-        && (item.sourceSpans?.length ?? 0) > 0
-        && conservativeEvidenceSupport(statement, item.statement));
+      const judgment = claimJudgmentByStatement.get(statement);
+      // 判官裁决:邀约/限定/疑问不需要证据,直接放行;事实断言 supported 放行、
+      // unsupported 落到同一 error。无裁决时维持词面旧逻辑(fact 台账锚定判定)。
+      const grounded = judgment
+        ? judgment.classification !== "factual_assertion" || judgment.supported === true
+        : draft.reasoning.some((item) => item.status === "fact"
+          && item.location === surface.location
+          && (item.sourceSpans?.length ?? 0) > 0
+          && conservativeEvidenceSupport(statement, item.statement));
       if (!grounded) {
         const labels = matchedRules.map((rule) => rule.label || rule.claimType).join(", ") || "measured claim";
         add("sensitive_claim_without_evidence", "error", surface.location === "Cref.thread" || surface.location === "Cref.followUp" ? "Cref" : surface.location, `A controlled project claim (${labels}) is visible without factual evidence: ${statement}`);
@@ -1329,7 +1347,7 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
         ...thread.followUps.map((followUp) => ({ location: "Cref.followUp" as const, text: followUp.answer })),
       ];
       for (const surface of staffSurfaces) {
-        for (const statement of surface.text.split(/(?<=[。！？!?；;])|\n+/u).map((item) => item.trim()).filter(Boolean)) {
+        for (const statement of splitSensitiveStatements(surface.text)) {
           const marketingClaim = genericMeasuredClaim.test(statement)
             || marketingPromiseClaim.test(statement)
             || controlledRules.some((rule) => rule.terms.some((term) => term && statement.includes(term)));
@@ -1362,7 +1380,7 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
       }
       if (threadKind === "reader_exchange") {
         for (const node of readerNodes) {
-          for (const statement of node.split(/(?<=[。！？!?；;])|\n+/u).map((item) => item.trim()).filter(Boolean)) {
+          for (const statement of splitSensitiveStatements(node)) {
             const controlledHit = genericMeasuredClaim.test(statement)
               || marketingPromiseClaim.test(statement)
               || controlledRules.some((rule) => rule.terms.some((term) => term && statement.includes(term)));

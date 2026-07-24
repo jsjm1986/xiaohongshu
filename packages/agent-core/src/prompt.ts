@@ -686,11 +686,12 @@ export function buildStagedCommentsPrompt(
 - 每个线程按计划postingIdentity决定由谁答复：专业、风险、适用类问题由IP答；价格、多少钱、地址、在哪、预约、报名、优惠、活动、联系等营销话头由助理答。答复声音绑定所选角色的replyDisplayRole：指向“楼主/发布者/发布账号”时用host的声音，指向助理时用机构助理的声音。只有项目角色模块中accountable=true的公开可追责身份可以回答已获证据支持的项目事实，且以公开身份作答、不伪装成普通用户；普通模拟读者禁止用未经提供的过去式经历借真人口碑。
 - IP答复按三条路径取当前最高可用的一条：①该问题有知识口径（usableEvidenceReferences直接支持，或缺口卡已给出答案）→用host的人话引用口径并带限定语，价格、档期、恢复、地址等动态信息必须带“以当期确认为准”式限定；②没有口径但有核验路径→给路由式回答：指名向谁核实什么、带上自己的什么情况（如“这个得问给你做评估的人，带上你的时间安排”），禁止空泛的“问客服/问专业人员”；③完全未知→保留未知：直说自己也还不清楚、打算怎么弄清楚。禁止机械重复“需要核实、不能下结论、资料未覆盖”这一套词。
 - 助理承接营销话头时话术自由，可以自然报价、说预约方式、给地址、讲活动；但价格、数字与承诺类表述必须锚定知识库口径，知识库没有的就明说“这个我让专人跟你确认”式转人工，禁止编具体数字或承诺；动态信息同样带“以当期确认为准”式限定。
+- 机构侧（IP与助理）涉及价格、数字、承诺类表述时，尽量沿用资料原文口径（数字、单位、限定语照原文写，不四舍五入、不换近义词），便于证据锚定；原文没有的口径按转人工或保留未知处理，不改写编造。
 - 有揭示义务的回答必须在同一线程内把当前可说的结论说完，禁止故意留悬念吊胃口；受控声明没有证据时仍走②或③，不能用传闻绕过。
 
 三类线程形态（读者互动层，按计划线程ID的threadKind执行，缺省为org_answer）：
 - threadKind=org_answer（机构问答）：上述双号契约不变——读者开口，answer由IP或助理按postingIdentity承接；涉项目事实（价格、地址、恢复、资质、效果口径等）的问题只允许此型回答。
-- threadKind=reader_exchange（读者互聊）：question是读者A开口，answer是读者B以模拟读者身份接话——B只说自己的处境、感受、疑问或轻反应，范围限计划给出的readerResponder.permittedContribution；B禁讲项目事实、价格数字、效果证词、机构信息，不替机构回答；机构本轮不在answer出现。
+- threadKind=reader_exchange（读者互聊）：question是读者A开口，answer是读者B以模拟读者身份接话——B只说自己的处境、感受、疑问或轻反应，不虚构亲友的经历与消费，范围限计划给出的readerResponder.permittedContribution；B禁讲项目事实、价格数字、效果证词、机构信息，不替机构回答；机构本轮不在answer出现。
 - threadKind=organic_reaction（漂浮短反应）：question是一条4-20字短共鸣（“姐妹我也是”“蹲一个”“码住”这类），无回答需求；answer必须输出空字符串""，机构不出现，不要求闭环。
 - 读者互聊与漂浮短反应同样是显式标注的模拟读者创作参考，不算真实口碑；它们不改变“涉项目事实仍走机构问答”的硬约束。
 
@@ -851,6 +852,130 @@ ${safeJson(content)}
     messages,
     responseSchema: STAGED_LEDGER_JSON_SCHEMA,
     estimatedTokens: estimateTokens(`${STAGED_SYSTEM_PROMPT}\n${common.text}\n${safeJson(content)}\n${phase}`),
+  };
+}
+
+export const KNOWLEDGE_ANCHOR_REVIEW_JSON_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["selections"],
+  properties: {
+    selections: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["statementIndex", "support", "evidenceId", "quote"],
+        properties: {
+          statementIndex: { type: "integer", minimum: 0 },
+          support: { enum: ["evidence", "none"] },
+          evidenceId: { type: ["string", "null"] },
+          quote: { type: ["string", "null"] },
+        },
+      },
+    },
+  },
+};
+
+/**
+ * 证据锚定复核提示词(混合锚定的 AI 兜底):输入机械锚定未命中的受控声明句
+ * 与锚定池证据源原文,模型只"选"不"判"——为每句选取一个源内逐字连续片段
+ * 或明确 none;系统随后做机械校验(source.includes + conservativeEvidenceSupport
+ * + 角色闸门),校验不过的选择不挂台账。
+ */
+export function buildKnowledgeAnchorReviewPrompt(input: {
+  statements: string[];
+  evidenceSources: Array<{ evidenceId: string; quote: string }>;
+}): PromptBundle {
+  const user = `锚定复核：下列句子是公开文案中的受控声明（价格、数字、承诺或受控词命中），机械锚定没有找到证据。你只能"选"不能"判"：为每个句子从给出的证据源中选取一段能支撑它的原文，或明确无支撑。
+
+硬规则：
+- quote必须是对应证据源（evidenceId）原文中的逐字连续片段：不得改写、缩写、扩写、拼接、翻译或调整标点；系统会机械校验quote是否为源内连续片段、是否足以支撑该句、来源角色是否合规，任一不过即作废。
+- 数字、单位、限定语必须与句子口径一致；意思相近但口径不同（数值不同、来源只是可能/推测、范围不符）一律选none。
+- 每个句子最多选一个证据源；选不出就support="none"、evidenceId与quote为null，不要勉强选择。
+- 不评价句子真假，不修改句子，不新增证据；只输出选择结果。
+
+待锚定句子（statementIndex从0开始）：
+${input.statements.map((statement, index) => `${index}. ${statement}`).join("\n")}
+
+证据源（只允许从中选取）：
+${safeJson(input.evidenceSources)}
+
+只返回：{"selections":[{"statementIndex":0,"support":"evidence","evidenceId":"证据源ID","quote":"该源中的逐字连续片段"},{"statementIndex":1,"support":"none","evidenceId":null,"quote":null}]}`;
+  const messages: PromptMessage[] = [
+    { role: "system", content: STAGED_SYSTEM_PROMPT },
+    { role: "user", content: user },
+  ];
+  return {
+    messages,
+    responseSchema: KNOWLEDGE_ANCHOR_REVIEW_JSON_SCHEMA,
+    estimatedTokens: estimateTokens(`${STAGED_SYSTEM_PROMPT}\n${user}`),
+  };
+}
+
+export const CLAIM_JUDGE_JSON_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["judgments"],
+  properties: {
+    judgments: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["statementIndex", "classification", "supported", "quote"],
+        properties: {
+          statementIndex: { type: "integer", minimum: 0 },
+          classification: { enum: ["factual_assertion", "service_offer", "hedge", "question"] },
+          supported: { type: ["boolean", "null"] },
+          quote: { type: ["string", "null"] },
+        },
+      },
+    },
+  },
+};
+
+/**
+ * AI 判官提示词(敏感声明校验的语义裁决层):词表只负责圈出要看的句子,判官
+ * 带完整证据源上下文对每句分类并只对事实断言判断证据支持。邀约/限定/疑问不
+ * 需要证据;判 supported 必须能从证据源找到语义支撑(允许换说法);附引文则
+ * 必须逐字连续,系统机械校验,不过视同 unsupported。
+ */
+export function buildClaimJudgePrompt(input: {
+  statements: string[];
+  evidenceSources: Array<{ evidenceId: string; quote: string }>;
+}): PromptBundle {
+  const user = `声明裁决：下列句子是公开文案中被词表圈出的敏感声明（价格、数字、承诺或受控词命中）。你掌握机构完整知识上下文，对每句先分类，再只对事实断言判断证据支持。
+
+分类（每句必选其一）：
+- factual_assertion：事实断言——陈述一个可核验的事实（价格、数字、效果、周期、地址、资质、流程口径等），需要证据支持。
+- service_offer：服务邀约——机构/助理向读者发起的行动邀请或提供服务的说法（私聊、预约、安排时间、发资料/定位/联系方式、"我帮你…"、"可以到店…"）。机构自己就是人工通道，邀约不需要知识证据。
+- hedge：限定语——表达不确定、需人工确认、以某条件为准或范围限定（"以人工核验为准""网上没挂全地址""具体看个人情况"）。限定是边界不是声明，不需要证据。
+- question：疑问、反问或搁置结论的说法，不需要证据。
+
+支持判断（仅 factual_assertion）：
+- supported=true 仅当给出的证据源中存在对该句的语义支撑：允许换说法、不要求原文一致；但数字、单位、范围、限定语口径必须一致，口径不同（数值不同、来源只是可能/推测、范围不符）一律 supported=false。
+- 找不到语义支撑就 supported=false，不要勉强。
+- quote 可选：附一则佐证片段时，必须是某一证据源原文中的逐字连续片段（不得改写、缩写、扩写、拼接或调整标点）；系统会机械校验引文，不是逐字连续片段即视同 supported=false。拿不准就不附，quote 填 null。
+- service_offer / hedge / question 的 supported 与 quote 一律填 null。
+
+不评价句子真假之外的任何事，不修改句子，不新增证据。
+
+待裁决句子（statementIndex从0开始）：
+${input.statements.map((statement, index) => `${index}. ${statement}`).join("\n")}
+
+证据源（判断支持的唯一依据）：
+${safeJson(input.evidenceSources)}
+
+只返回：{"judgments":[{"statementIndex":0,"classification":"factual_assertion","supported":true,"quote":"证据源中的逐字连续片段或null"},{"statementIndex":1,"classification":"service_offer","supported":null,"quote":null}]}`;
+  const messages: PromptMessage[] = [
+    { role: "system", content: STAGED_SYSTEM_PROMPT },
+    { role: "user", content: user },
+  ];
+  return {
+    messages,
+    responseSchema: CLAIM_JUDGE_JSON_SCHEMA,
+    estimatedTokens: estimateTokens(`${STAGED_SYSTEM_PROMPT}\n${user}`),
   };
 }
 

@@ -144,6 +144,8 @@ export function extractModelText(payload: unknown): string {
   throw new ModelProviderError("Model response did not contain output text.");
 }
 
+const LENGTH_RETRY_TOKEN_CAP = 32_000;
+
 export class OpenAICompatibleClient implements ModelProvider {
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly baseUrl: string;
@@ -164,56 +166,78 @@ export class OpenAICompatibleClient implements ModelProvider {
   async generate(request: ModelGenerationRequest): Promise<ModelGenerationResponse> {
     const model = request.model ?? this.options.model;
     if (!model) throw new Error("No model was configured for this generation request.");
-    const body = this.transport === "responses"
-      ? this.responsesBody(model, request)
-      : this.chatBody(model, request);
     const endpoint = this.transport === "responses" ? "/responses" : "/chat/completions";
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-    let response: Response;
-    try {
-      response = await this.fetchImpl(`${this.baseUrl}${endpoint}`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${this.options.apiKey}`,
-          ...this.options.headers,
-        },
-        body: stringifyRequestBody(body),
-        signal: controller.signal,
-      });
-    } catch (error) {
-      const message = error instanceof Error && error.name === "AbortError"
-        ? `Model request timed out after ${this.timeoutMs} ms.`
-        : `Model request failed: ${error instanceof Error ? error.message : String(error)}`;
-      throw new ModelProviderError(message);
-    } finally {
-      clearTimeout(timeout);
-    }
+    const attempt = async (maxOutputTokens: number | undefined): Promise<ModelGenerationResponse> => {
+      const effectiveRequest = maxOutputTokens === undefined ? request : { ...request, maxOutputTokens };
+      const body = this.transport === "responses"
+        ? this.responsesBody(model, effectiveRequest)
+        : this.chatBody(model, effectiveRequest);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+      let response: Response;
+      try {
+        response = await this.fetchImpl(`${this.baseUrl}${endpoint}`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${this.options.apiKey}`,
+            ...this.options.headers,
+          },
+          body: stringifyRequestBody(body),
+          signal: controller.signal,
+        });
+      } catch (error) {
+        const message = error instanceof Error && error.name === "AbortError"
+          ? `Model request timed out after ${this.timeoutMs} ms.`
+          : `Model request failed: ${error instanceof Error ? error.message : String(error)}`;
+        throw new ModelProviderError(message);
+      } finally {
+        clearTimeout(timeout);
+      }
 
-    const requestId = response.headers.get("x-request-id") ?? undefined;
-    const rawText = await response.text();
-    let payload: unknown;
-    try {
-      payload = rawText ? JSON.parse(rawText) : {};
-    } catch {
-      if (!response.ok) throw new ModelProviderError(`Model returned HTTP ${response.status} with a non-JSON body.`, response.status, requestId);
-      throw new ModelProviderError("Model returned a non-JSON response.", response.status, requestId);
-    }
-    if (!response.ok) {
-      const providerMessage = isRecord(payload) && isRecord(payload.error) && typeof payload.error.message === "string"
-        ? payload.error.message.slice(0, 500)
-        : `HTTP ${response.status}`;
-      throw new ModelProviderError(`Model provider rejected the request: ${providerMessage}`, response.status, requestId);
-    }
+      const requestId = response.headers.get("x-request-id") ?? undefined;
+      const rawText = await response.text();
+      let payload: unknown;
+      try {
+        payload = rawText ? JSON.parse(rawText) : {};
+      } catch {
+        if (!response.ok) throw new ModelProviderError(`Model returned HTTP ${response.status} with a non-JSON body.`, response.status, requestId);
+        throw new ModelProviderError("Model returned a non-JSON response.", response.status, requestId);
+      }
+      if (!response.ok) {
+        const providerMessage = isRecord(payload) && isRecord(payload.error) && typeof payload.error.message === "string"
+          ? payload.error.message.slice(0, 500)
+          : `HTTP ${response.status}`;
+        throw new ModelProviderError(`Model provider rejected the request: ${providerMessage}`, response.status, requestId);
+      }
 
-    const usage = this.readUsage(payload);
-    const finishReason = isRecord(payload) && Array.isArray(payload.choices) && isRecord(payload.choices[0]) && typeof payload.choices[0].finish_reason === "string"
-      ? payload.choices[0].finish_reason
-      : isRecord(payload) && typeof payload.status === "string"
-        ? payload.status
-        : undefined;
-    return { text: extractModelText(payload), raw: payload, requestId, finishReason, usage };
+      const usage = this.readUsage(payload);
+      const finishReason = isRecord(payload) && Array.isArray(payload.choices) && isRecord(payload.choices[0]) && typeof payload.choices[0].finish_reason === "string"
+        ? payload.choices[0].finish_reason
+        : isRecord(payload) && typeof payload.status === "string"
+          ? payload.status
+          : undefined;
+      return { text: extractModelText(payload), raw: payload, requestId, finishReason, usage };
+    };
+
+    const result = await attempt(request.maxOutputTokens);
+    // 推理模型（reasoning tokens 计入 max_tokens）在复杂结构化任务中会把预算
+    // 全部用于思考,finish_reason=length 时输出被截断甚至为零——上游会误报成
+    // JSON 解析失败。此处自愈:预算翻倍重试一次(封顶 32K);仍截断才给出
+    // 明确的截断错误,而不是让下游面对一段坏 JSON。
+    if (result.finishReason === "length" && typeof request.maxOutputTokens === "number" && request.maxOutputTokens < LENGTH_RETRY_TOKEN_CAP) {
+      const widened = Math.min(request.maxOutputTokens * 2, LENGTH_RETRY_TOKEN_CAP);
+      const retried = await attempt(widened);
+      if (retried.finishReason === "length") {
+        throw new ModelProviderError(
+          `Model output was truncated at ${widened} max tokens (finish_reason=length); increase the output token budget for reasoning-heavy stages.`,
+          undefined,
+          retried.requestId,
+        );
+      }
+      return retried;
+    }
+    return result;
   }
 
   private responsesBody(model: string, request: ModelGenerationRequest): Record<string, unknown> {
