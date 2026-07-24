@@ -3042,3 +3042,6 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .qc-progress__track b { position: absolute; inset: 0; width: 40%; background: var(--v2-ai); border-radius: 2px; animation: qc-progress-slide 1.2s ease-in-out infinite; }
 @keyframes qc-progress-slide { 0% { left: -40%; } 100% { left: 100%; } }
 .qc-progress--failed { background: #fbeaea; color: var(--v2-error); }
+
+.qc-topic { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.qc-topic__hint { color: var(--v2-brand-ink); font-size: var(--v2-fs-micro); white-space: nowrap; }

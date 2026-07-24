@@ -44,7 +44,8 @@ export function TopicTab({ project, opportunities, opportunityId, busy, setBusy,
       <div className="qc-topic-list">
         {opportunities.map((o) => (
           <button key={o.id} type="button" className={`qc-topic${o.id === opportunityId ? ' selected' : ''}`} onClick={() => void pick(o.id)}>
-            {o.title}
+            <span>{o.title}</span>
+            {o.id === opportunityId && <small className="qc-topic__hint">已选 · 进入配置</small>}
           </button>
         ))}
         {opportunities.length === 0 && <p className="qc-hint">没有可用选题，试试换一批。</p>}
