@@ -9,6 +9,7 @@ import { HistoryTab } from '../components/quick/HistoryTab';
 import { approveOpportunitiesForBatch, type QuickCandidateView } from '../lib/quick-generation';
 import { api } from '../lib/api';
 import { buildBatchJobs } from '../lib/quick-batch';
+import { extractRecipe, resolveRecipeTargets } from '../lib/quick-recipe';
 import { clearDownstreamOfProject, clearResults, type QuickTab } from '../lib/quick-channel-state';
 import type { ContentPreset, GenerationJob, Project, TopicOpportunity } from '../types';
 import type { SimpleSettingOverrides } from '../lib/simple-generation';
@@ -178,6 +179,34 @@ export function QuickChannelPage() {
     } catch (e) { fail(e, '批量生成提交失败'); }
   };
 
+  // 「再来一篇同款」:把历史任务的配方回灌创作区(不直接生成,留一步给人改)
+  const onReuseRecipe = async (job: GenerationJob) => {
+    if (!project) return;
+    setBusy(true);
+    try {
+      // 选题池/预设可能还没在本次会话加载过,按需各拉一次再校验失效
+      const [oppList, presetList] = await Promise.all([
+        opportunities.length > 0 ? Promise.resolve({ items: opportunities }) : api.opportunities.list(project.id),
+        api.presets.list(project.id),
+      ]);
+      setOpportunities(oppList.items);
+      setPresets(presetList.items);
+      const targets = resolveRecipeTargets(extractRecipe(job), oppList.items, presetList.items);
+      setOpportunityId(targets.opportunityId);
+      setPresetId(targets.presetId);
+      setOverrides(targets.overrides);
+      setImageAssetIds(targets.imageAssetIds);
+      setResults(clearResults().results);
+      setJobId(undefined);
+      setBatchMode(false);
+      setBatchPresetIds([]);
+      setActiveTab('create');
+      setBusy(false);
+      for (const warning of targets.warnings) toast.push(warning, 'info');
+      if (targets.warnings.length === 0) toast.push('已回填这篇的配置，确认后点「生成文案」');
+    } catch (e) { fail(e, '回填配方失败'); }
+  };
+
   // Home 态:未选项目 → 产品首页(卡墙选项目/内联新建)
   if (!project) {
     return (
@@ -241,7 +270,7 @@ export function QuickChannelPage() {
         {activeTab === 'history' && (
           <HistoryTab
             project={project} history={history} busy={busy} setBusy={setBusy} fail={fail} setHistory={setHistory}
-            activeBatchId={activeBatchId}
+            activeBatchId={activeBatchId} onReuseRecipe={(job) => void onReuseRecipe(job)}
           />
         )}
       </div>

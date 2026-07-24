@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Clock, Copy, SearchX } from 'lucide-react';
+import { Clock, Copy, Repeat, SearchX } from 'lucide-react';
 import { Button, useToast } from '../Ui';
 import { QuickCandidateCards } from '../QuickResult';
 import { api } from '../../lib/api';
@@ -141,6 +141,9 @@ export function HistoryTab({ project, history, setBusy, fail, setHistory, active
                 {(() => { const s = STATUS_LABEL[job.status] ?? { text: job.status, tone: 'muted' as const }; return <span className={`qc-badge qc-badge--${s.tone}`}>{s.text}</span>; })()}
                 <small className="qc-hint">{job.createdAt ? new Date(job.createdAt).toLocaleString() : ''}</small>
                 <Button variant="ghost" onClick={() => void toggle(job)}>{open ? '收起' : '查看'}</Button>
+                {onReuseRecipe && (
+                  <Button variant="ghost" icon={<Repeat size={13} />} onClick={() => onReuseRecipe(job)}>再来一篇同款</Button>
+                )}
               </div>
               {open && loadingId === job.id && <p className="qc-hint">正在加载候选…</p>}
               {open && job.status === 'completed' && loadingId !== job.id && views.length > 0 && (() => {
