@@ -14,6 +14,17 @@ const str = (value: unknown): string | undefined =>
 const record = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 
+// 后端 ResolvedGenerationConfig.task 把必含/禁用词存成 string[]（preset.service 的
+// lines() 按 \n , ， 、 ; ； 拆分），而创作区的 overrides 是单个字符串。回灌时用
+// 顿号拼回可读的一行；历史上若已是字符串则原样返回。
+const words = (value: unknown): string | undefined => {
+  if (Array.isArray(value)) {
+    const joined = value.map(String).map((item) => item.trim()).filter(Boolean).join("、");
+    return joined || undefined;
+  }
+  return str(value);
+};
+
 /** 从历史 job 快照抽出可回灌的配方：选题 + 预设 + 高级参数覆盖 + 源素材图。 */
 export function extractRecipe(job: GenerationJob): QuickRecipe {
   // opportunityId / imageContext 由后端 mapJob 返回，但未声明在 GenerationJob 类型上。
@@ -23,11 +34,12 @@ export function extractRecipe(job: GenerationJob): QuickRecipe {
   const overrides: SimpleSettingOverrides = {};
 
   const audienceStage = str(task.audienceStage);
-  const entryPoint = str(task.entryPoint ?? task.entry);
+  // 后端字段名是 task.entry；entryPoint 只是请求侧的入参名，两者都兜。
+  const entryPoint = str(task.entry ?? task.entryPoint);
   const city = str(task.city);
-  const doctor = str(task.doctor ?? task.person);
-  const mustInclude = str(task.mustMention ?? task.mustInclude);
-  const forbidden = str(task.forbidden);
+  const doctor = str(task.doctor);
+  const mustInclude = words(task.mustMention ?? task.mustInclude);
+  const forbidden = words(task.forbidden);
   const richness = str(task.commentRichness) as CommentRichnessLevel | undefined;
   if (audienceStage) overrides.audienceStage = audienceStage;
   if (entryPoint) overrides.entryPoint = entryPoint;

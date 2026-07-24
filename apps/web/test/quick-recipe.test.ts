@@ -70,3 +70,50 @@ test('resolveRecipeTargets carries overrides and image ids through untouched', (
   assert.equal(r.overrides.commentRichness, 'dense');
   assert.deepEqual(r.imageAssetIds, ['a1', 'a2']);
 });
+
+// ── 回归防线:真实 resolvedConfig.task 形状(来自后端 ResolvedGenerationConfig) ──
+// mustMention/forbidden 是 string[](后端 lines() 按 \n , ， 、 ; ； 拆分),
+// 入口字段名是 entry 而非 entryPoint。若实现只按 string 读,这些覆盖项会静默丢失。
+
+test('extractRecipe reads real backend task shape: string[] words and entry alias', () => {
+  const real = {
+    id: 'j3', projectId: 'p1', topic: 'T', mode: 'simple', status: 'completed',
+    opportunityId: 'o1', presetId: 'pr1',
+    resolvedConfig: {
+      task: {
+        audienceStage: 'comparing',
+        entry: 'recommendation',
+        city: '杭州',
+        doctor: '李医生',
+        mustMention: ['术后随访', '面诊'],
+        forbidden: ['最好', '包治百病'],
+        commentRichness: 'dense',
+      },
+    },
+  } as unknown as GenerationJob;
+  const recipe = extractRecipe(real);
+  assert.equal(recipe.overrides.entryPoint, 'recommendation');
+  assert.equal(recipe.overrides.mustInclude, '术后随访、面诊');
+  assert.equal(recipe.overrides.forbidden, '最好、包治百病');
+  assert.equal(recipe.overrides.city, '杭州');
+  assert.equal(recipe.overrides.doctor, '李医生');
+  assert.equal(recipe.overrides.commentRichness, 'dense');
+});
+
+test('extractRecipe drops empty word arrays instead of writing empty overrides', () => {
+  const empty = {
+    id: 'j4', projectId: 'p1', topic: 'T', mode: 'simple', status: 'completed',
+    resolvedConfig: { task: { mustMention: [], forbidden: ['  '] } },
+  } as unknown as GenerationJob;
+  const recipe = extractRecipe(empty);
+  assert.equal(recipe.overrides.mustInclude, undefined);
+  assert.equal(recipe.overrides.forbidden, undefined);
+});
+
+test('extractRecipe collects source image asset ids from imageContext', () => {
+  const withImages = {
+    id: 'j5', projectId: 'p1', topic: 'T', mode: 'simple', status: 'completed',
+    imageContext: [{ assetId: 'a1' }, { assetId: 'a2' }],
+  } as unknown as GenerationJob;
+  assert.deepEqual(extractRecipe(withImages).imageAssetIds, ['a1', 'a2']);
+});
