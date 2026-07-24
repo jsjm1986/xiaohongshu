@@ -3360,3 +3360,16 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .qc-page .qc-overview-recent li > button:hover strong { color: var(--v2-brand-ink); }
 .qc-page .qc-overview-recent strong { font-size: var(--v2-fs-md); font-weight: 500; color: var(--v2-ink); }
 .qc-page .qc-overview-recent small { flex: none; font-size: var(--v2-fs-xs); color: var(--v2-muted); }
+
+/* 极简创作 · 预设卡片(单选/多选共用) */
+.qc-preset-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+.qc-preset-card { position: relative; text-align: left; padding: 10px 12px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius-sm); background: var(--v2-surface); cursor: pointer; display: flex; flex-direction: column; gap: 4px; transition: border-color .15s, box-shadow .15s; }
+.qc-preset-card:hover:not(:disabled) { border-color: var(--v2-brand); }
+.qc-preset-card.selected { border-color: var(--v2-brand); box-shadow: 0 0 0 1px var(--v2-brand) inset; }
+.qc-preset-card__head { display: flex; align-items: center; gap: 4px; padding-right: 16px; }
+.qc-preset-card__head strong { font-size: var(--v2-fs-sm); font-weight: 600; color: var(--v2-ink); }
+.qc-preset-card__star { color: var(--v2-brand); flex: none; }
+.qc-preset-card__desc { color: var(--v2-muted); font-size: var(--v2-fs-xs); line-height: 1.45; }
+.qc-preset-card__tick { position: absolute; top: 6px; right: 6px; color: var(--v2-brand); display: inline-flex; }
+.qc-preset-card--add { align-items: center; justify-content: center; flex-direction: row; gap: 4px; border-style: dashed; color: var(--v2-brand); font-size: var(--v2-fs-sm); }
+.qc-preset-card:disabled { opacity: .5; cursor: not-allowed; }
