@@ -3045,3 +3045,51 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .qc-badge--warn { background: #fff3e0; color: var(--v2-warn); }
 .qc-badge--error { background: #fbeaea; color: var(--v2-error); }
 .qc-badge--muted { background: var(--v2-line); color: var(--v2-muted); }
+
+/* ===== 生成结果页 · 易用性优化(信息零丢失:诊断默认折叠,内容前置) ===== */
+.validation-summary { margin-bottom: 17px; padding: 14px 16px; border: 1px solid #f0caca; border-radius: 13px; background: #fff; box-shadow: var(--shadow-sm); }
+.validation-summary > header { display: flex; gap: 10px; align-items: flex-start; }
+.validation-summary > header > svg { flex: none; margin-top: 2px; color: var(--red); }
+.validation-summary > header strong { display: block; font-size: 13px; }
+.validation-summary > header p { margin: 3px 0 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
+.validation-summary > ul { list-style: none; margin: 10px 0 0; padding: 10px 0 0; border-top: 1px dashed var(--line); display: grid; gap: 7px; }
+.validation-summary__issue { display: flex; gap: 9px; align-items: flex-start; }
+.validation-summary__badge { flex: none; margin-top: 1px; padding: 1px 8px; border-radius: 999px; font-size: 8px; font-weight: 600; background: var(--amber-soft, #fff6e5); color: var(--amber, #b97f1f); }
+.validation-summary__issue--error .validation-summary__badge { background: var(--red-soft); color: var(--red); }
+.validation-summary__text strong { display: block; font-size: 10px; }
+.validation-summary__text small { display: block; margin-top: 2px; color: var(--muted); font-size: 8px; line-height: 1.5; word-break: break-all; }
+
+.result-diagnostics { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--line); }
+.result-diagnostics__title { margin: 0 0 3px; font-size: 13px; color: var(--ink-2, var(--text)); }
+.result-diagnostics__hint { margin: 0 0 10px; color: var(--muted); font-size: 9px; }
+.result-fold { margin-bottom: 10px; border: 1px solid var(--line); border-radius: 12px; background: #fff; box-shadow: var(--shadow-sm); overflow: hidden; }
+.result-fold > summary { display: flex; align-items: center; gap: 8px; padding: 13px 16px; cursor: pointer; font-size: 12px; font-weight: 600; list-style: none; }
+.result-fold > summary::-webkit-details-marker { display: none; }
+.result-fold > summary > svg:last-child { margin-left: auto; color: var(--muted); transition: transform .15s ease; }
+.result-fold[open] > summary > svg:last-child { transform: rotate(180deg); }
+.result-fold > summary:hover { background: var(--surface-soft, #f7f8f6); }
+.result-fold > .result-opportunity-audit, .result-fold > .impact-report { margin-bottom: 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; box-shadow: none; }
+
+.candidate-matrix-fold { margin-top: 12px; }
+.candidate-matrix-fold > summary { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; color: var(--muted); font-size: 10px; font-weight: 600; list-style: none; }
+.candidate-matrix-fold > summary::-webkit-details-marker { display: none; }
+.candidate-matrix-fold > summary:hover { color: var(--text); }
+.candidate-matrix-fold[open] > summary > svg { transform: rotate(180deg); }
+
+.sidebar-fold { margin-top: 10px; }
+.sidebar-fold > summary { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 10px; font-weight: 600; list-style: none; }
+.sidebar-fold > summary::-webkit-details-marker { display: none; }
+.sidebar-fold > summary > svg:last-child { margin-left: auto; color: var(--muted); transition: transform .15s ease; }
+.sidebar-fold[open] > summary > svg:last-child { transform: rotate(180deg); }
+.sidebar-fold > summary:hover { color: var(--text); }
+details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: inline; }
+
+.production-fold { margin-top: 10px; }
+.production-fold > summary { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 10px; font-weight: 600; list-style: none; }
+.production-fold > summary::-webkit-details-marker { display: none; }
+.production-fold[open] > summary > svg { transform: rotate(180deg); }
+.production-fold > summary:hover { color: var(--text); }
+
+.comment-purpose { display: block; margin-top: 3px; color: var(--muted); font-size: 8px; font-weight: 400; }
+.comment-meta--audit { margin: 2px 0 8px; opacity: .85; }
+.comment-meta__label { color: var(--muted); font-size: 8px; }
