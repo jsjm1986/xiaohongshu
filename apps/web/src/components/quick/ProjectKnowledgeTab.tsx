@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Trash2, Upload, Sparkles, Building2, Lightbulb } from 'lucide-react';
+import { Trash2, Sparkles, Building2, Lightbulb } from 'lucide-react';
 import { useProjects } from '../ProjectContext';
 import { Button, Field, Modal } from '../Ui';
 import { api } from '../../lib/api';
