@@ -21,6 +21,7 @@ export function isSaasApiAllowed(method: string, path: string): boolean {
 
   if (inScope('/api/knowledge')) return true;
   if (inScope('/api/generations')) return true;
+  if (inScope('/api/generation-batches')) return true;
   if (verb === 'GET' && pathname === '/api/generation-parameters/schema') return true;
 
   return false;

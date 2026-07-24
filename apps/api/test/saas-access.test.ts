@@ -28,6 +28,13 @@ const cases: Array<[string, string, boolean]> = [
   ['GET', '/api/knowledge', true],
   ['POST', '/api/generations', true],
   ['POST', '/api/generations/j1/revise', true],
+  // /api/generation-batches 批量生成全放行
+  ['GET', '/api/generation-batches', true],
+  ['POST', '/api/generation-batches', true],
+  ['GET', '/api/generation-batches/b1', true],
+  ['DELETE', '/api/generation-batches/b1', true],
+  // 前缀陷阱:generation-batches 不得被 generations 误命中,且必须按段边界匹配
+  ['GET', '/api/generation-batchesX', false],
   // generation-parameters schema 仅 GET
   ['GET', '/api/generation-parameters/schema', true],
   ['POST', '/api/generation-parameters/schema', false],
