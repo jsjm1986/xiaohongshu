@@ -3052,12 +3052,18 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .validation-summary > header > svg { flex: none; margin-top: 2px; color: var(--red); }
 .validation-summary > header strong { display: block; font-size: 13px; }
 .validation-summary > header p { margin: 3px 0 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
-.validation-summary > ul { list-style: none; margin: 10px 0 0; padding: 10px 0 0; border-top: 1px dashed var(--line); display: grid; gap: 7px; }
-.validation-summary__issue { display: flex; gap: 9px; align-items: flex-start; }
-.validation-summary__badge { flex: none; margin-top: 1px; padding: 1px 8px; border-radius: 999px; font-size: 8px; font-weight: 600; background: var(--amber-soft, #fff6e5); color: var(--amber, #b97f1f); }
-.validation-summary__issue--error .validation-summary__badge { background: var(--red-soft); color: var(--red); }
-.validation-summary__text strong { display: block; font-size: 10px; }
-.validation-summary__text small { display: block; margin-top: 2px; color: var(--muted); font-size: 8px; line-height: 1.5; word-break: break-all; }
+.validation-summary__groups { margin: 10px 0 0; padding: 8px 0 0; border-top: 1px dashed var(--line); display: grid; gap: 4px; }
+.validation-summary__group > summary { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 7px; cursor: pointer; font-size: 10px; list-style: none; }
+.validation-summary__group > summary::-webkit-details-marker { display: none; }
+.validation-summary__group > summary:hover { background: var(--surface-soft, #f7f8f6); }
+.validation-summary__group > summary > strong { font-weight: 600; }
+.validation-summary__group > summary > strong + b { color: var(--muted); font-size: 9px; }
+.validation-summary__group > summary > svg { margin-left: auto; color: var(--muted); transition: transform .15s ease; }
+.validation-summary__group[open] > summary > svg { transform: rotate(180deg); }
+.validation-summary__group > ul { list-style: none; margin: 2px 0 6px; padding: 6px 8px 6px 30px; display: grid; gap: 4px; color: var(--muted); font-size: 8px; line-height: 1.5; word-break: break-all; }
+.validation-summary__group > ul > li { padding-left: 8px; border-left: 2px solid var(--line); }
+.validation-summary__badge { flex: none; padding: 1px 8px; border-radius: 999px; font-size: 8px; font-weight: 600; background: var(--amber-soft, #fff6e5); color: var(--amber, #b97f1f); }
+.validation-summary__group--error .validation-summary__badge { background: var(--red-soft); color: var(--red); }
 
 .result-diagnostics { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--line); }
 .result-diagnostics__title { margin: 0 0 3px; font-size: 13px; color: var(--ink-2, var(--text)); }
