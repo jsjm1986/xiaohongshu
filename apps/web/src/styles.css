@@ -3053,7 +3053,6 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .qc-progress--failed { background: #fbeaea; color: var(--v2-error); }
 
 .qc-topic { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.qc-topic__hint { color: var(--v2-brand-ink); font-size: var(--v2-fs-micro); white-space: nowrap; }
 
 .qc-badge { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 999px; font-size: var(--v2-fs-micro); font-weight: 600; }
 .qc-badge--ok { background: var(--v2-ok-soft); color: var(--v2-ok); }
