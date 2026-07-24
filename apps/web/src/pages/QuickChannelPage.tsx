@@ -8,7 +8,7 @@ import { ConfigTab } from '../components/quick/ConfigTab';
 import { ResultTab } from '../components/quick/ResultTab';
 import { HistoryTab } from '../components/quick/HistoryTab';
 import { type QuickCandidateView } from '../lib/quick-generation';
-import { tabReachable, clearDownstreamOfProject, clearResults, type QuickTab } from '../lib/quick-channel-state';
+import { tabReachable, stepStatus, clearDownstreamOfProject, clearResults, type QuickTab } from '../lib/quick-channel-state';
 import type { ContentPreset, GenerationJob, Project, TopicOpportunity } from '../types';
 import type { SimpleSettingOverrides } from '../lib/simple-generation';
 
@@ -53,6 +53,18 @@ export function QuickChannelPage() {
     }),
     [project, opportunities.length, opportunityId, results.length],
   );
+
+  const steps = useMemo(
+    () => stepStatus({
+      activeTab,
+      hasProject: Boolean(project),
+      opportunityCount: opportunities.length,
+      hasOpportunity: Boolean(opportunityId),
+      resultCount: results.length,
+    }),
+    [activeTab, project, opportunities.length, opportunityId, results.length],
+  );
+  const SEQ: Record<QuickTab, string> = { project: '1', topic: '2', config: '3', result: '4', history: '5' };
 
   const fail = (e: unknown, fallback: string) => {
     toast.push(e instanceof Error ? e.message : fallback, 'error');
@@ -100,15 +112,25 @@ export function QuickChannelPage() {
           <button
             key={tab}
             type="button"
-            className={tab === activeTab ? 'active' : ''}
+            className={`qc-tab qc-tab--${steps[tab]}${tab === activeTab ? ' active' : ''}`}
             disabled={!reachable[tab]}
             title={reachable[tab] ? '' : TAB_HINT[tab]}
             onClick={() => setActiveTab(tab)}
           >
+            <span className="qc-tab__seq">{steps[tab] === 'done' ? '✓' : SEQ[tab]}</span>
             {TAB_LABELS[tab]}
           </button>
         ))}
       </nav>
+
+      {activeTab !== 'history' && (
+        <div className="qc-guide" role="note">
+          {activeTab === 'project' && '下一步:选择或新建项目,上传知识后点「分析知识库」生成选题。'}
+          {activeTab === 'topic' && '下一步:挑一个选题进入配置;不满意可「换一批」。'}
+          {activeTab === 'config' && '下一步:选内容预设(可留默认),点「生成文案」。'}
+          {activeTab === 'result' && '已生成。可复制、重新生成,或「换个选题」再来一篇。'}
+        </div>
+      )}
 
       <div className="qc-panel">
         {activeTab === 'project' && (

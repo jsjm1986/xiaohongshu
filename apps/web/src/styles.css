@@ -2787,6 +2787,22 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .qc-tabs button { padding: 10px 16px; border: none; background: none; cursor: pointer; color: var(--v2-muted); border-bottom: 2px solid transparent; font-size: var(--v2-fs-md); }
 .qc-tabs button.active { color: var(--v2-brand); border-bottom-color: var(--v2-brand); font-weight: 600; }
 .qc-tabs button:disabled { opacity: .4; cursor: not-allowed; }
+.qc-tab { display: inline-flex; align-items: center; gap: 6px; }
+.qc-tab__seq {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%;
+  font-size: var(--v2-fs-micro); font-weight: 700; line-height: 1;
+  background: var(--v2-line); color: var(--v2-muted);
+}
+.qc-tab--current .qc-tab__seq { background: var(--v2-brand); color: #fff; }
+.qc-tab--done .qc-tab__seq { background: var(--v2-ok); color: #fff; }
+.qc-tab--active .qc-tab__seq { background: var(--v2-brand-soft); color: var(--v2-brand-ink); }
+.qc-guide {
+  max-width: 720px; margin: 0 0 16px;
+  padding: 10px 14px; border-radius: var(--v2-radius-sm);
+  background: var(--v2-brand-soft); color: var(--v2-brand-ink);
+  font-size: var(--v2-fs-sm); line-height: 1.5;
+}
 .qc-panel { max-width: 720px; }
 .qc-step { display: flex; flex-direction: column; gap: 16px; }
 .qc-hint { color: var(--v2-muted); font-size: var(--v2-fs-sm); }
