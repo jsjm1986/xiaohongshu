@@ -14,6 +14,7 @@ import type {
   PlanningOptions,
   PlanningRandomizationDimension,
   PersonaScenePlan,
+  ProjectClaimRule,
   ProjectCreativeBlueprint,
   ProjectIntelligence,
   ResolvedGenerationConfig,
@@ -841,6 +842,7 @@ function buildPersonaScenePlan(
       "不能让所有人同向夸赞、使用同一称呼或拥有相同知识水平。",
       "流行词只负责暴露身份和关系，不能代替信息，也不能每句都出现。",
       "专业信息由可追责身份回答；普通角色只能说其位置能知道的部分。",
+      "允许公开助理身份（机构名+助理）直接承接价格、预约、地址、活动类问题；其中价格、数字与承诺类表述必须能锚定知识库，锚定不到就说明需人工确认，不编具体数字。",
     ],
   };
   const fallbackCommentCast: PersonaScenePlan["commentCast"] = [
@@ -1108,6 +1110,31 @@ function deriveThreadNextStep(gap: InformationGapPlanningCard): string {
   return "先补充可信来源，再形成结论";
 }
 
+/** 双号运营:命中这些营销话头词时,答复分流给公开助理身份(staff)。 */
+export const MARKETING_REPLY_TOPIC_TERMS = ["价格", "多少钱", "地址", "在哪", "预约", "报名", "优惠", "活动", "联系", "客服", "私"] as const;
+
+/** 双号运营:话头命中的受控声明规则属于这些 claimType 时,同样分流给助理。 */
+export const MARKETING_REPLY_CLAIM_TYPES: ReadonlySet<ProjectClaimRule["claimType"]> = new Set([
+  "price", "location", "schedule", "credential",
+]);
+
+/**
+ * 双号运营答复分流:营销承接话头(价格/地址/预约/优惠等词,或命中 price/
+ * location/schedule/credential 类受控声明规则)由公开助理身份(staff)回答;
+ * 其余话头由发布账号 IP(publisher)解答。纯函数,供规划与单测共用。
+ */
+export function routeReplyPostingIdentity(
+  gap: Pick<InformationGapPlanningCard, "label" | "question">,
+  claimRules: Pick<ProjectClaimRule, "claimType" | "terms">[] = [],
+): "publisher" | "staff" {
+  const topic = `${gap.label}\n${gap.question}`;
+  if (MARKETING_REPLY_TOPIC_TERMS.some((term) => topic.includes(term))) return "staff";
+  const hitsMarketingClaim = claimRules.some((rule) =>
+    MARKETING_REPLY_CLAIM_TYPES.has(rule.claimType)
+    && rule.terms.some((term) => term && topic.includes(term)));
+  return hitsMarketingClaim ? "staff" : "publisher";
+}
+
 function dialoguePlans(
   opportunity: TopicOpportunity,
   gapCards: InformationGapPlanningCard[],
@@ -1117,6 +1144,7 @@ function dialoguePlans(
   config: ResolvedGenerationConfig,
   seed: number,
   personaScenePlan: PersonaScenePlan,
+  replyRouting: { claimRules: ProjectClaimRule[]; assistantReplyDisplayRole?: string } = { claimRules: [] },
 ): DialogueThreadPlan[] {
   const relevant = gapCards.filter((gap) => opportunity.gapIds.includes(gap.gapId));
   const ordered = [...relevant].sort((left, right) =>
@@ -1276,6 +1304,19 @@ function dialoguePlans(
           ? `有“${cueCore}”，${gap.label}就能定吗？`
           : `只知道“${cueCore}”，判断${gap.label}还缺什么？`;
     const surfaceRoleCard = personaScenePlan.commentCast[roleOrder[index % roleOrder.length]!]!;
+    // 双号运营:营销话头分流给公开助理身份(staff),其余由发布账号 IP
+    // (publisher)解答;staff 线程的 replyDisplayRole 同步指向蓝图里的助理
+    // (accountable + service_answer 角色),没有蓝图助理时退为角色池里的
+    // service_answer 角色,最后兜为通用“项目助理”。
+    const postingIdentity = routeReplyPostingIdentity(gap, replyRouting.claimRules);
+    const assistantReplyRole = postingIdentity === "staff"
+      ? replyRouting.assistantReplyDisplayRole
+        ?? personaScenePlan.commentCast.find((role) => role.utteranceMode === "service_answer")?.displayRole
+        ?? "项目助理"
+      : undefined;
+    const threadSurfaceRoleCard: DialogueThreadPlan["surfaceRoleCard"] = assistantReplyRole
+      ? { ...surfaceRoleCard, replyDisplayRole: assistantReplyRole }
+      : surfaceRoleCard;
     const surfaceIntent: Record<typeof surfaceRoleCard.utteranceMode, string> = {
       direct_question: `像${surfaceRoleCard.displayRole}一样，只问“${gap.question}”里最现实的一点`,
       shared_concern: `先用一句同款担心接住正文，再自然带出“${gap.label}”`,
@@ -1368,9 +1409,9 @@ function dialoguePlans(
       ],
       followUpIntent: `${strategy.commentMode}；${conversationPlan.extensionMove}`,
       nextStep: deriveThreadNextStep(gap),
-      // P3-14: the answering side is the publishing account itself (publisher),
-      // not a generic "author"; the question side stays simulated_reader below.
-      postingIdentity: "publisher",
+      // 双号运营:营销话头由公开助理身份(staff)承接,其余由发布账号 IP
+      // (publisher)解答(见 routeReplyPostingIdentity);提问侧仍是 simulated_reader。
+      postingIdentity,
       sourceClusterIds: gap.evidenceIds.map((sourceId) => sourceId.replace(/^evidence_/u, "")),
       evidenceIds: [...gap.evidenceIds],
       boundaryRequired: Boolean(gap.boundary),
@@ -1409,7 +1450,7 @@ function dialoguePlans(
       replyPlan,
       discoveryPlan,
       conversationPlan,
-      surfaceRoleCard,
+      surfaceRoleCard: threadSurfaceRoleCard,
     };
   });
 }
@@ -1588,6 +1629,11 @@ export function planTopicOrchestrations(input: PlanTopicOrchestrationsInput): [O
       input.config,
       seed,
       personaScenePlan,
+      {
+        claimRules: input.projectBlueprint?.claimPolicy.rules ?? [],
+        assistantReplyDisplayRole: input.projectBlueprint?.roleModel.roles.find((role) =>
+          role.accountable && role.utteranceModes.includes("service_answer"))?.displayRole,
+      },
     );
     const gapCoverageLedger = buildGapCoverageLedger(
       gapPlanningCards,
