@@ -307,18 +307,19 @@ function renderCrefV11TwoPartMarkdown(pkg: JsonObject): string {
     lines.push('_未提供问答话术_', '');
   } else {
     threads.forEach((thread, index) => {
+      const replyOrg = commentReplyOrgName(thread);
       lines.push(
         `### 话术 ${index + 1}`,
         '',
-        `- 提问：${text(thread.question) || '未提供'}`,
-        `- 回复：${text(thread.answer) || '未提供'}`,
+        `- 提问：${commentNicknamePrefix(thread.displayName)}${text(thread.question) || '未提供'}`,
+        `- 回复：${replyOrg ? `${replyOrg}：` : ''}${text(thread.answer) || '未提供'}`,
         `- 可追责答复身份：${postingIdentityText(thread.postingIdentity) || '未标注'}`,
       );
       if (text(thread.boundary)) lines.push(`- 答复边界：${text(thread.boundary)}`);
       if (text(thread.nextStep)) lines.push(`- 下一步：${text(thread.nextStep)}`);
       for (const followUp of objectArray(thread.followUps)) {
         lines.push(
-          `  - 追问：${text(followUp.question) || '未提供'}`,
+          `  - 追问：${commentNicknamePrefix(followUp.displayName)}${text(followUp.question) || '未提供'}`,
           `  - 补充：${text(followUp.answer) || '未提供'}`,
         );
       }
@@ -806,6 +807,24 @@ function postingIdentityText(value: unknown): string {
 
 function objectArray(value: unknown): JsonObject[] {
   return Array.isArray(value) ? value.map(asObject).filter((item) => Object.keys(item).length > 0) : [];
+}
+
+/** 提问侧展示昵称前缀:有 displayName 时输出「昵称：」,历史包(无昵称)保持原格式。 */
+function commentNicknamePrefix(value: unknown): string {
+  const name = text(value).trim();
+  return name ? `${name}：` : '';
+}
+
+/**
+ * 答复侧机构名:surfaceRoleCard.replyDisplayRole 原样显示;assistant_account /
+ * host_account 这类内部 id 形态只显示「机构助理/机构 IP」通用文案,不裸露内部
+ * id;缺失时返回空串,导出保持原格式不加前缀。
+ */
+function commentReplyOrgName(thread: JsonObject): string {
+  const raw = text(asObject(thread.surfaceRoleCard).replyDisplayRole).trim();
+  if (!raw) return '';
+  if (/^[a-z][a-z0-9_]*$/.test(raw)) return text(thread.postingIdentity) === 'staff' ? '机构助理' : '机构 IP';
+  return raw;
 }
 
 function stringArray(value: unknown): string[] {

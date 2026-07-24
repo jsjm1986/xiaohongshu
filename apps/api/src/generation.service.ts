@@ -772,6 +772,8 @@ export class GenerationService implements OnModuleInit {
           id: thread.id,
           gap: thread.gap,
           function: thread.function,
+          // 展示昵称(纯展示元数据);历史包缺失时保持缺省,前端不出空徽标。
+          displayName: thread.displayName ?? planned?.displayName,
           // Cref contract v1.1 node metadata; absent on historical packages.
           kind: thread.kind,
           answerKind: thread.answerKind,

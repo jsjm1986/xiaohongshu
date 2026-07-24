@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildKnowledgeLedger,
   buildRepairPrompt,
+  buildStagedCommentGrowthPrompt,
   buildStagedCommentsPrompt,
   buildStagedLedgerPrompt,
   ContentGenerationAgent,
@@ -11,11 +12,12 @@ import {
   indexKnowledgeSource,
   parseGenerationDraft,
   parseStagedCommentCopy,
+  planTopicOrchestrations,
   PROMPT_CONTRACT_VERSION,
   selectKnowledgeContext,
   STAGED_COMMENTS_JSON_SCHEMA,
 } from "../src/index.js";
-import type { ModelGenerationRequest, ModelProvider } from "../src/index.js";
+import type { InformationGap, ModelGenerationRequest, ModelProvider, TopicOpportunity } from "../src/index.js";
 
 const project = {
   id: "p1",
@@ -456,6 +458,63 @@ describe("Cref contract v1.1 staged prompt text", () => {
     // The no-followUps and same-thread-reveal rules survive the rewrite.
     expect(phase).toContain("followUps必须为空数组");
     expect(phase).toContain("禁止故意留悬念");
+  });
+
+  it("2A requires answer-skeleton and closing-line dedup across threads", () => {
+    const prompt = buildStagedCommentsPrompt(stagedPromptInput(), {
+      H: { hashtags: ["方案选择"] },
+      N: { imageBrief: "", title: "先核实信息", body: "正文。" },
+    });
+    const phase = String(prompt.messages[3]?.content);
+    // Diversity contract: no shared answer skeleton between adjacent threads and
+    // no repeated one-size-fits-all closing line across the comment section.
+    expect(phase).toContain("应答骨架去重");
+    expect(phase).toContain("不得同序同词");
+    expect(phase).toContain("最多出现一次");
+  });
+
+  it("2B injects the planned followUpIntent only for multi-turn threads", () => {
+    const scenario = config();
+    scenario.content.commentThreadMin = 2;
+    scenario.content.commentThreadMax = 2;
+    scenario.content.commentMultiTurnGrowthEnabled = true;
+    scenario.content.followUpDepth = 2;
+    const growthGaps: InformationGap[] = [
+      {
+        id: "fit", label: "适用条件", question: "哪些条件会改变适用性？", category: "decision",
+        audienceStages: ["comparing"], importance: 0.9, decisionLeverage: 0.9, proofability: 0.8,
+        evidenceIds: ["evidence_d1"], required: true,
+      },
+      {
+        id: "cost", label: "成本边界", question: "成本会怎样改变选择？", category: "decision",
+        audienceStages: ["comparing"], importance: 0.7, decisionLeverage: 0.7, proofability: 0.6,
+        evidenceIds: [], required: false,
+      },
+    ];
+    const growthOpportunity: TopicOpportunity = {
+      id: "growth-2b", topic: "方案选择", angle: "先核验再比较", gapIds: ["fit", "cost"],
+      audienceStage: "comparing", entry: "search", relevance: 0.9, importance: 0.8, proofability: 0.8,
+      novelty: 0.6, decisionLeverage: 0.8, cognitiveCost: 0.3, risk: 0.2,
+      evidenceIds: ["evidence_d1"], boundaries: ["个体适用性需要单独核验"], tags: ["比较方法"],
+      imageAssetIds: [], status: "eligible",
+    };
+    const plan = planTopicOrchestrations({ opportunity: growthOpportunity, gaps: growthGaps, config: scenario, seed: 99 })[0]!;
+    const growing = plan.dialogueThreads.filter((thread) => (thread.conversationPlan?.targetFollowUps ?? 0) > 0);
+    const resting = plan.dialogueThreads.filter((thread) => (thread.conversationPlan?.targetFollowUps ?? 0) === 0);
+    expect(growing.length).toBeGreaterThan(0);
+    expect(resting.length).toBeGreaterThan(0);
+    const prompt = buildStagedCommentGrowthPrompt({ ...stagedPromptInput(), config: scenario, orchestrationPlan: plan }, {
+      H: { hashtags: ["方案选择"] },
+      N: { imageBrief: "", title: "先核实信息", body: "正文。" },
+    }, {
+      disclaimer: "以下为完整评论区创作参考，不代表已经发生的真实互动或观测口碑。",
+      threads: plan.dialogueThreads.map((thread) => ({ id: thread.id, question: "根评论", answer: "根回复", followUps: [] })),
+    });
+    const phase = String(prompt.messages[4]?.content);
+    expect(phase).toContain("followUpIntent");
+    // 计划多轮的线程投出接龙方向；单交换线程不投。
+    for (const thread of growing) expect(phase).toContain(thread.followUpIntent);
+    for (const thread of resting) expect(phase).not.toContain(thread.followUpIntent);
   });
 
   it("ledger prompt requires knowledge-backed claims to be recorded as facts", () => {

@@ -598,7 +598,9 @@ export interface CommentThread extends CommentScenarioMetadata {
   readerState?: ReaderStateProxy;
   dialogue?: CommentDialogueTurn[];
   nextStep?: string;
-  followUps?: Array<CommentScenarioMetadata & { id?: string; question: string; answer: string; evidenceIds?: string[]; kind?: CommentNodeKind | string; boundary?: string }>;
+  followUps?: Array<CommentScenarioMetadata & { id?: string; question: string; answer: string; evidenceIds?: string[]; kind?: CommentNodeKind | string; boundary?: string; displayName?: string }>;
+  /** 提问者展示昵称(纯展示元数据);历史包没有该字段,界面不出空徽标。 */
+  displayName?: string;
   /** Dialogic kind of the root question node; positional default `question`. */
   kind?: CommentNodeKind | string;
   /** Dialogic kind of the root answer node; positional default `answer`. */

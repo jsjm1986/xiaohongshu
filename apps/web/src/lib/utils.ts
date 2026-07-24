@@ -68,18 +68,28 @@ const isCrefV11Candidate = (candidate: Candidate): boolean => {
  * discovery plans, evidence ids) stays out of the executive part.
  */
 const candidateToV11TwoPartMarkdown = (candidate: Candidate) => {
+  // 展示昵称前缀(纯展示元数据):提问/接话侧带昵称,答复侧带机构名;
+  // 历史包没有 displayName / surfaceRoleCard 时保持原格式,不加空前缀。
+  const nicknamePrefix = (name?: string) => (name?.trim() ? `${name.trim()}：` : '');
+  const replyOrgName = (item: Candidate['comments'][number]): string => {
+    const raw = item.surfaceRoleCard?.replyDisplayRole?.trim() ?? '';
+    if (!raw) return '';
+    // assistant_account / host_account 这类内部 id 形态只显示通用文案,不裸露内部 id。
+    if (/^[a-z][a-z0-9_]*$/.test(raw)) return item.postingIdentity === 'staff' ? '机构助理' : '机构 IP';
+    return raw;
+  };
   const ownedFirstComment = candidate.commentOwnedFirstComment
     ? `## 可发布首评参考\n\n> 【可发布首评参考】由发布账号（publisher）身份发布：${candidate.commentOwnedFirstComment}\n\n`
     : '';
   const disclaimer = candidate.commentDisclaimer || '以下仅演练潜在读者问题与可追责答复。';
   const scripts = candidate.comments.map((item, index) => [
     `### 话术 ${index + 1}\n`,
-    `- 提问：${item.question}`,
-    `- 回复：${item.followUps?.length ? item.answer.split(/\n\n追问：/u)[0] || item.answer : item.answer}`,
+    `- 提问：${nicknamePrefix(item.displayName)}${item.question}`,
+    `- 回复：${replyOrgName(item) ? `${replyOrgName(item)}：` : ''}${item.followUps?.length ? item.answer.split(/\n\n追问：/u)[0] || item.answer : item.answer}`,
     `- 可追责答复身份：${postingIdentityText(item.postingIdentity) || '可追责发布者'}`,
     item.boundary ? `- 答复边界：${item.boundary}` : '',
     item.nextStep ? `- 下一步：${item.nextStep}` : '',
-    ...(item.followUps || []).map((followUp) => `  - 追问：${followUp.question}\n  - 补充：${followUp.answer}`),
+    ...(item.followUps || []).map((followUp) => `  - 追问：${nicknamePrefix(followUp.displayName)}${followUp.question}\n  - 补充：${followUp.answer}`),
   ].filter(Boolean).join('\n')).join('\n\n');
   const appendixImagePlan = candidate.imagePlan
     ? `### 图片计划（规划信息，非最终图片）\n\n${imagePlanMarkdown(candidate)}\n\n`

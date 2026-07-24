@@ -705,6 +705,7 @@ export function buildStagedCommentsPrompt(
 - 评论区生态允许心动种草、拼单询价、同城行动、服务后回访、转介绍类角色自然开口；营销话头由助理（staff）承接，专业话头由IP（publisher）承接，两类身份各司其职、不互相客串。
 - 信息要相对正文新增，但单个角色只说自己位置能知道的部分。生成的经验角色属于创作参考，不能在证据台账中算作真实口碑。
 - 不得机械重复“需要核实、不能下结论、资料未覆盖、个体差异”；相关边界在最需要的一条回复中自然出现一次即可。
+- 应答骨架去重：相邻线程不得复用同一套应答骨架——“直接回答/条件/未知/下一问”不得同序同词；同一种收尾句式（例如都让对方去“问客服/找助理/私聊”）在全评论区最多出现一次，其余线程用各自处境里的具体动作收尾。
 - 先像真人聊天，再检查事实。不要出现“AI不便公开推测、有效报价单、判断口径、项目说明、核验路径、只回应、不承担答题”等客服/审计/提示词口吻。
 - 同一知识按人物换说法：楼主说自己的现实麻烦，路人只补一个片段，反例只说哪里不一样，同城人直接问谁/哪儿。不要让五个人共用“核实、边界、资料”这一套词。
 - contentAnchor只提供可用意思，不是要求照抄的句子；必要限制应藏进自然条件句，例如“我第二天要见人，所以会把时间多留一点”，不要写成合规声明。
@@ -757,6 +758,12 @@ export function buildStagedCommentGrowthPrompt(
   const targetMin = Math.min(roots.threads.length, target[0]);
   const targetMax = Math.min(roots.threads.length, Math.max(targetMin, target[1]));
   const maxDepth = input.config.content.followUpDepth;
+  // followUpIntent 此前只在规划层生成、从未注入任何提示词（死字段）。这里把
+  // 计划了多轮的线程的接龙方向投给模型，让它知道这条线程下一个人该围绕什么
+  // 继续问，字段由此变活。
+  const growthIntents = (input.orchestrationPlan?.dialogueThreads ?? [])
+    .filter((thread) => (thread.conversationPlan?.targetFollowUps ?? 0) > 0)
+    .map((thread) => ({ id: thread.id, followUpIntent: thread.followUpIntent }));
   const phase = `阶段2B：根评论已经写完。现在像真实评论区一样，只让被上一句话实际触发的少数线程继续生长。
 
 要求：
@@ -767,9 +774,13 @@ export function buildStagedCommentGrowthPrompt(
 - 后续要新增一个相邻信息维度或关系信号，不能只是“同问、是的、我也是”的同义反复；也不能为了信息完整把每条拉长。
 - 角色只说其位置能知道的内容。不得虚构 projectBlueprint.claimPolicy 约束的受控声明或他人口碑；未获证据支持时改成真实疑问或有限处境。
 - 不追求整齐：允许0轮、1轮、2轮并存，长短不齐，结尾不必全部闭合。
+- 下方按id列出的followUpIntent是计划好的接龙方向（隐藏写作依据）：被列出的线程优先按它生长——围绕指定延伸缺口或上句新出现的条件继续问；未列出的线程没有自然话头就保持followUps=[]。followUpIntent不得照抄成可见文字。
 
 已完成根评论：
 ${safeJson(roots)}
+
+各线程接龙方向（id→followUpIntent）：
+${safeJson(growthIntents)}
 
 只返回完整评论区JSON：{"disclaimer":"原免责声明","threads":[{"id":"原ID","roleIndex":0,"question":"原文不变","answer":"原文不变","followUps":[{"question":"被上句触发的接话","answer":"自然回应"}]}]}`;
   const commonContent: PromptMessage["content"] = common.imageParts.length
