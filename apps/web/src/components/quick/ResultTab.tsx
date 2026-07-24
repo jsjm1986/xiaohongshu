@@ -1,7 +1,6 @@
 import { QuickResult } from '../QuickResult';
 import { autoApproveAndGenerate, quickCandidateFields, type QuickCandidateView } from '../../lib/quick-generation';
 import type { SimpleSettingOverrides } from '../../lib/simple-generation';
-import type { QuickTab } from '../../lib/quick-channel-state';
 import type { Project } from '../../types';
 
 interface Props {
@@ -13,10 +12,10 @@ interface Props {
   setBusy: (b: boolean) => void;
   fail: (e: unknown, fallback: string) => void;
   onGenerated: (results: QuickCandidateView[]) => void;
-  goTo: (tab: QuickTab) => void;
+  goToTopic: () => void;
 }
 
-export function ResultTab({ project, opportunityId, presetId, overrides, results, setBusy, fail, onGenerated, goTo }: Props) {
+export function ResultTab({ project, opportunityId, presetId, overrides, results, setBusy, fail, onGenerated, goToTopic }: Props) {
   const regenerate = async () => {
     if (!project || !opportunityId) return;
     setBusy(true);
@@ -32,7 +31,7 @@ export function ResultTab({ project, opportunityId, presetId, overrides, results
       <QuickResult
         candidates={results}
         onRegenerate={() => void regenerate()}
-        onPickAnotherTopic={() => goTo('topic')}
+        onPickAnotherTopic={() => goToTopic()}
       />
     </div>
   );

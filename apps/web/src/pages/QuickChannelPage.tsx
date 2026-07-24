@@ -1,37 +1,29 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useProjects } from '../components/ProjectContext';
 import { useToast } from '../components/Ui';
 import { V2Hero } from '../components/V2';
+import { api } from '../lib/api';
 import { ProjectKnowledgeTab } from '../components/quick/ProjectKnowledgeTab';
 import { TopicTab } from '../components/quick/TopicTab';
 import { ConfigTab } from '../components/quick/ConfigTab';
 import { ResultTab } from '../components/quick/ResultTab';
 import { HistoryTab } from '../components/quick/HistoryTab';
 import { type QuickCandidateView } from '../lib/quick-generation';
-import { tabReachable, stepStatus, clearDownstreamOfProject, clearResults, type QuickTab } from '../lib/quick-channel-state';
+import {
+  initialZone, zoneReachable, createStepReachable, createStepStatus,
+  clearDownstreamOfProject, clearResults,
+  type QuickZone, type CreateStep,
+} from '../lib/quick-channel-state';
 import type { ContentPreset, GenerationJob, Project, TopicOpportunity } from '../types';
 import type { SimpleSettingOverrides } from '../lib/simple-generation';
 
-const TAB_LABELS: Record<QuickTab, string> = {
-  project: '项目 & 知识',
-  topic: '选题',
-  config: '配置',
-  result: '结果',
-  history: '历史',
-};
-
-const TAB_ORDER: QuickTab[] = ['project', 'topic', 'config', 'result', 'history'];
-
-const TAB_HINT: Record<QuickTab, string> = {
-  project: '',
-  topic: '先分析知识库生成选题',
-  config: '先选择一个选题',
-  result: '先生成文案',
-  history: '先选择或新建项目',
-};
+const ZONE_LABELS: Record<QuickZone, string> = { prepare: '准备', create: '创作', history: '历史' };
+const ZONE_ORDER: QuickZone[] = ['prepare', 'create', 'history'];
+const STEP_LABELS: Record<CreateStep, string> = { topic: '选题', config: '配置', result: '结果' };
+const STEP_ORDER: CreateStep[] = ['topic', 'config', 'result'];
 
 export function QuickChannelPage() {
-  const { projects } = useProjects();
+  const { projects, currentProject, setProjectId } = useProjects();
   const toast = useToast();
   const [project, setProject] = useState<Project | null>(null);
   const [opportunities, setOpportunities] = useState<TopicOpportunity[]>([]);
@@ -41,39 +33,29 @@ export function QuickChannelPage() {
   const [overrides, setOverrides] = useState<SimpleSettingOverrides>({});
   const [results, setResults] = useState<QuickCandidateView[]>([]);
   const [history, setHistory] = useState<GenerationJob[]>([]);
-  const [activeTab, setActiveTab] = useState<QuickTab>('project');
+  const [zone, setZone] = useState<QuickZone>('prepare');
+  const [step, setStep] = useState<CreateStep>('topic');
   const [busy, setBusy] = useState(false);
 
-  const reachable = useMemo(
-    () => tabReachable({
-      hasProject: Boolean(project),
-      opportunityCount: opportunities.length,
-      hasOpportunity: Boolean(opportunityId),
-      resultCount: results.length,
-    }),
-    [project, opportunities.length, opportunityId, results.length],
+  const zones = useMemo(
+    () => zoneReachable({ hasProject: Boolean(project), opportunityCount: opportunities.length }),
+    [project, opportunities.length],
   );
-
+  const stepReach = useMemo(
+    () => createStepReachable({ opportunityCount: opportunities.length, hasOpportunity: Boolean(opportunityId), resultCount: results.length }),
+    [opportunities.length, opportunityId, results.length],
+  );
   const steps = useMemo(
-    () => stepStatus({
-      activeTab,
-      hasProject: Boolean(project),
-      opportunityCount: opportunities.length,
-      hasOpportunity: Boolean(opportunityId),
-      resultCount: results.length,
-    }),
-    [activeTab, project, opportunities.length, opportunityId, results.length],
+    () => createStepStatus({ activeStep: step, opportunityCount: opportunities.length, hasOpportunity: Boolean(opportunityId), resultCount: results.length }),
+    [step, opportunities.length, opportunityId, results.length],
   );
-  const SEQ: Record<QuickTab, string> = { project: '1', topic: '2', config: '3', result: '4', history: '5' };
 
   const fail = (e: unknown, fallback: string) => {
     toast.push(e instanceof Error ? e.message : fallback, 'error');
     setBusy(false);
   };
 
-  const goTo = (tab: QuickTab) => { if (reachable[tab]) setActiveTab(tab); };
-
-  const onProjectChosen = (p: Project) => {
+  const resetDownstream = (p: Project) => {
     setProject(p);
     const cleared = clearDownstreamOfProject();
     setOpportunities(cleared.opportunities);
@@ -83,11 +65,36 @@ export function QuickChannelPage() {
     setOverrides({});
   };
 
+  const switchProject = async (p: Project) => {
+    resetDownstream(p);
+    setProjectId(p.id);
+    setStep('topic');
+    try {
+      const opps = await api.opportunities.list(p.id);
+      if (opps.items.length > 0) {
+        setOpportunities(opps.items);
+        setZone(initialZone({ opportunityCount: opps.items.length }));
+      } else {
+        setZone('prepare');
+      }
+    } catch {
+      setZone('prepare');
+    }
+  };
+
+  useEffect(() => {
+    if (!project && currentProject) void switchProject(currentProject);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentProject]);
+
+  const onProjectChosen = (p: Project) => { resetDownstream(p); setProjectId(p.id); };
+
   const onAnalyzed = (opps: TopicOpportunity[]) => {
     setOpportunities(opps);
     setOpportunityId('');
     setResults(clearResults().results);
-    setActiveTab('topic');
+    setZone('create');
+    setStep('topic');
   };
 
   const onPickTopic = (id: string, loadedPresets: ContentPreset[]) => {
@@ -95,70 +102,94 @@ export function QuickChannelPage() {
     setResults(clearResults().results);
     setPresets(loadedPresets);
     setPresetId(loadedPresets.find((p) => p.isDefault)?.id ?? loadedPresets[0]?.id);
-    setActiveTab('config');
+    setStep('config');
   };
 
-  const onGenerated = (r: QuickCandidateView[]) => {
-    setResults(r);
-    setActiveTab('result');
-  };
+  const onGenerated = (r: QuickCandidateView[]) => { setResults(r); setStep('result'); };
+
+  const goToZone = (z: QuickZone) => { if (zones[z]) setZone(z); };
+  const goToStep = (s: CreateStep) => { if (stepReach[s]) setStep(s); };
 
   return (
     <div className="page qc-page">
-      <V2Hero index="Q" status={<>极简创作 · 完整频道</>} title="极简创作" description="一个页面完成建项目、传资料、选题、配置、生成、看历史。" />
+      <V2Hero index="Q" status={<>极简创作 · 完整频道</>} title="极简创作" />
 
-      <nav className="qc-tabs">
-        {TAB_ORDER.map((tab) => (
-          <button
-            key={tab}
-            type="button"
-            className={`qc-tab qc-tab--${steps[tab]}${tab === activeTab ? ' active' : ''}`}
-            disabled={!reachable[tab]}
-            title={reachable[tab] ? '' : TAB_HINT[tab]}
-            onClick={() => setActiveTab(tab)}
-          >
-            <span className="qc-tab__seq">{steps[tab] === 'done' ? '✓' : SEQ[tab]}</span>
-            {TAB_LABELS[tab]}
-          </button>
-        ))}
-      </nav>
+      <div className="qc-topbar">
+        <select
+          className="qc-switcher"
+          value={project?.id ?? ''}
+          onChange={(e) => {
+            const p = projects.find((x) => x.id === e.target.value);
+            if (p) void switchProject(p);
+          }}
+        >
+          <option value="" disabled>选择项目…</option>
+          {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
 
-      {activeTab !== 'history' && (
-        <div className="qc-guide" role="note">
-          {activeTab === 'project' && '下一步:选择或新建项目,上传知识后点「分析知识库」生成选题。'}
-          {activeTab === 'topic' && '下一步:挑一个选题进入配置;不满意可「换一批」。'}
-          {activeTab === 'config' && '下一步:选内容预设(可留默认),点「生成文案」。'}
-          {activeTab === 'result' && '已生成。可复制、重新生成,或「换个选题」再来一篇。'}
-        </div>
-      )}
+        <nav className="qc-zones">
+          {ZONE_ORDER.map((z) => (
+            <button
+              key={z}
+              type="button"
+              className={`qc-zone${z === zone ? ' active' : ''}`}
+              disabled={!zones[z]}
+              onClick={() => goToZone(z)}
+            >
+              {ZONE_LABELS[z]}
+            </button>
+          ))}
+        </nav>
+      </div>
 
       <div className="qc-panel">
-        {activeTab === 'project' && (
+        {zone === 'prepare' && (
           <ProjectKnowledgeTab
             project={project} projects={projects} busy={busy} setBusy={setBusy} fail={fail}
             onProjectChosen={onProjectChosen} onAnalyzed={onAnalyzed}
           />
         )}
-        {activeTab === 'topic' && (
-          <TopicTab
-            project={project} opportunities={opportunities} opportunityId={opportunityId}
-            busy={busy} setBusy={setBusy} fail={fail} onPickTopic={onPickTopic} onAnalyzed={onAnalyzed}
-          />
+
+        {zone === 'create' && (
+          <>
+            <nav className="qc-steps">
+              {STEP_ORDER.map((s, i) => (
+                <button
+                  key={s}
+                  type="button"
+                  className={`qc-step-chip qc-step-chip--${steps[s]}`}
+                  disabled={!stepReach[s]}
+                  onClick={() => goToStep(s)}
+                >
+                  <span className="qc-step-chip__dot">{steps[s] === 'done' ? '✓' : i + 1}</span>
+                  {STEP_LABELS[s]}
+                </button>
+              ))}
+            </nav>
+
+            {step === 'topic' && (
+              <TopicTab
+                project={project} opportunities={opportunities} opportunityId={opportunityId}
+                busy={busy} setBusy={setBusy} fail={fail} onPickTopic={onPickTopic} onAnalyzed={onAnalyzed}
+              />
+            )}
+            {step === 'config' && (
+              <ConfigTab
+                project={project} opportunityId={opportunityId} presets={presets} presetId={presetId}
+                overrides={overrides} busy={busy} setBusy={setBusy} fail={fail}
+                setPresetId={setPresetId} setOverrides={setOverrides} onGenerated={onGenerated}
+              />
+            )}
+            {step === 'result' && (
+              <ResultTab
+                project={project} opportunityId={opportunityId} presetId={presetId} overrides={overrides}
+                results={results} setBusy={setBusy} fail={fail} onGenerated={onGenerated} goToTopic={() => goToStep('topic')}
+              />
+            )}
+          </>
         )}
-        {activeTab === 'config' && (
-          <ConfigTab
-            project={project} opportunityId={opportunityId} presets={presets} presetId={presetId}
-            overrides={overrides} busy={busy} setBusy={setBusy} fail={fail}
-            setPresetId={setPresetId} setOverrides={setOverrides} onGenerated={onGenerated}
-          />
-        )}
-        {activeTab === 'result' && (
-          <ResultTab
-            project={project} opportunityId={opportunityId} presetId={presetId} overrides={overrides}
-            results={results} setBusy={setBusy} fail={fail} onGenerated={onGenerated} goTo={goTo}
-          />
-        )}
-        {activeTab === 'history' && (
+
+        {zone === 'history' && (
           <HistoryTab
             project={project} history={history} busy={busy} setBusy={setBusy} fail={fail} setHistory={setHistory}
           />
