@@ -3060,3 +3060,11 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .qc-badge--warn { background: #fff3e0; color: var(--v2-warn); }
 .qc-badge--error { background: #fbeaea; color: var(--v2-error); }
 .qc-badge--muted { background: var(--v2-line); color: var(--v2-muted); }
+
+.qc-preset-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+.qc-preset-card { text-align: left; display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius); background: var(--v2-surface); cursor: pointer; transition: border-color .15s, box-shadow .15s; }
+.qc-preset-card:hover { border-color: var(--v2-line-dark); box-shadow: var(--v2-shadow-sm); }
+.qc-preset-card.selected { border-color: var(--v2-brand); box-shadow: var(--v2-shadow-sm); }
+.qc-preset-card strong { display: inline-flex; align-items: center; gap: 5px; font-size: var(--v2-fs-md); color: var(--v2-ink); }
+.qc-preset-card.selected strong { color: var(--v2-brand-ink); }
+.qc-preset-card small { color: var(--v2-muted); font-size: var(--v2-fs-sm); line-height: 1.4; }

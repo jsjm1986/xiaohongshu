@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { RefreshCw } from 'lucide-react';
+import { RefreshCw, Star } from 'lucide-react';
 import { Button, Field } from '../Ui';
 import { autoApproveAndGenerate, quickCandidateFields, type QuickCandidateView } from '../../lib/quick-generation';
 import type { CommentRichnessLevel, SimpleSettingOverrides } from '../../lib/simple-generation';
@@ -68,14 +68,24 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
 
   return (
     <div className="qc-step">
-      <Field label="内容预设" required>
-        <select value={presetId ?? ''} onChange={(e) => setPresetId(e.target.value || undefined)}>
-          {presets.map((p) => <option key={p.id} value={p.id}>{p.name}{p.isDefault ? '（默认）' : ''}</option>)}
-        </select>
-      </Field>
+      <div className="qc-preset-list" role="radiogroup" aria-label="内容预设">
+        {presets.map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            role="radio"
+            aria-checked={presetId === p.id}
+            className={`qc-preset-card${presetId === p.id ? ' selected' : ''}`}
+            onClick={() => setPresetId(p.id)}
+          >
+            <strong>{p.name}{p.isDefault && <Star size={12} fill="currentColor" />}</strong>
+            <small>{p.description}</small>
+          </button>
+        ))}
+      </div>
 
       <details className="qc-advanced">
-        <summary>高级设置（可留空，全部有默认值）</summary>
+        <summary>精确制导（可选）· 留空则依据知识库与选题自动生成</summary>
         <div className="qc-advanced-grid">
           <Field label="读者阶段">
             <select value={overrides.audienceStage ?? ''} onChange={(e) => patch({ audienceStage: e.target.value || undefined })}>
