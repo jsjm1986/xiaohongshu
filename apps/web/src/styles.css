@@ -3015,3 +3015,7 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .v2 .generate-page .preview-conflict-row--warning > svg, .v2 .generate-page .preview-conflict-row--info > svg { color: var(--v2-muted-2); }
 .v2 .generate-page .preview-conflict-row strong { font-size: 12px; font-weight: 600; color: var(--v2-ink-2); }
 .v2 .generate-page .preview-conflict-row p { font-size: 11px; color: var(--v2-muted-2); }
+
+.qc-analysis-status { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; }
+.qc-analysis-status.analyzed { border-color: var(--coral); }
+.qc-analysis-status strong { font-size: 14px; }

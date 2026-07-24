@@ -3,7 +3,7 @@ import { Trash2, Upload } from 'lucide-react';
 import { useProjects } from '../ProjectContext';
 import { Button, Field, Modal } from '../Ui';
 import { api } from '../../lib/api';
-import type { KnowledgeFile, Project, TopicOpportunity } from '../../types';
+import type { KnowledgeFile, Project, ProjectIntelligence, TopicOpportunity } from '../../types';
 
 const CATEGORIES = ['未分类', '知识地图', '项目与服务', '用户与场景', '案例样本', '方法论', '约束'];
 const KINDS = ['已知事实', '案例样本', '用户观点', '方法论推理', '猜想', '信息不足', '禁止表达'];
@@ -27,12 +27,22 @@ export function ProjectKnowledgeTab({ project, projects, busy, setBusy, fail, on
   const [category, setCategory] = useState('未分类');
   const [kind, setKind] = useState('已知事实');
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [intel, setIntel] = useState<ProjectIntelligence | null>(null);
+  const [topicCount, setTopicCount] = useState(0);
 
   useEffect(() => {
-    if (!project) { setFiles([]); return; }
-    api.knowledge.list(project.id).then((r) => setFiles(r.items)).catch(() => setFiles([]));
+    if (!project) { setFiles([]); setIntel(null); setTopicCount(0); return; }
+    let cancelled = false;
+    setIntel(null);
+    setTopicCount(0);
+    api.knowledge.list(project.id).then((r) => { if (!cancelled) setFiles(r.items); }).catch(() => { if (!cancelled) setFiles([]); });
+    api.intelligence.get(project.id).then((r) => { if (!cancelled && r.status !== 'missing') setIntel(r); }).catch(() => {});
+    api.opportunities.list(project.id).then((r) => { if (!cancelled) setTopicCount(r.items.length); }).catch(() => {});
     setRenaming(project.name);
+    return () => { cancelled = true; };
   }, [project]);
+
+  const analyzed = Boolean(intel?.id);
 
   const createProject = async () => {
     if (!newName.trim()) return;
@@ -93,11 +103,23 @@ export function ProjectKnowledgeTab({ project, projects, busy, setBusy, fail, on
     if (!project) return;
     setBusy(true);
     try {
-      await api.intelligence.analyze(project.id, true);
+      const result = await api.intelligence.analyze(project.id, true);
+      setIntel(result.intelligence);
       const opps = await api.opportunities.list(project.id);
+      setTopicCount(opps.items.length);
       onAnalyzed(opps.items);
       setBusy(false);
     } catch (e) { fail(e, '分析知识库失败'); }
+  };
+
+  const goToTopics = async () => {
+    if (!project) return;
+    setBusy(true);
+    try {
+      const opps = await api.opportunities.list(project.id);
+      onAnalyzed(opps.items);
+      setBusy(false);
+    } catch (e) { fail(e, '读取选题失败'); }
   };
 
   return (
@@ -136,6 +158,17 @@ export function ProjectKnowledgeTab({ project, projects, busy, setBusy, fail, on
             </div>
           </details>
 
+          <div className={`qc-analysis-status${analyzed ? ' analyzed' : ''}`}>
+            {analyzed ? (
+              <>
+                <strong>{intel?.entity || '已分析'}</strong>
+                <small className="qc-hint">{intel?.industry || '已建立内容地图'}{topicCount > 0 ? ` · ${topicCount} 个选题可用` : ''}</small>
+              </>
+            ) : (
+              <small className="qc-hint">尚未分析。上传知识后点「分析知识库」，AI 会建立内容地图并生成选题。</small>
+            )}
+          </div>
+
           <Field label="知识文件">
             <ul className="qc-file-list">
               {files.map((f) => (
@@ -160,7 +193,16 @@ export function ProjectKnowledgeTab({ project, projects, busy, setBusy, fail, on
           </details>
           <Button variant="secondary" loading={busy} disabled={pending.length === 0} icon={<Upload size={15} />} onClick={() => void uploadAll()}>上传 {pending.length > 0 ? `(${pending.length})` : ''}</Button>
 
-          <Button loading={busy} onClick={() => void analyze()}>分析知识库</Button>
+          <div className="qc-project-row">
+            {analyzed ? (
+              <>
+                {topicCount > 0 && <Button loading={busy} onClick={() => void goToTopics()}>去选题</Button>}
+                <Button variant="ghost" loading={busy} onClick={() => void analyze()}>重新分析</Button>
+              </>
+            ) : (
+              <Button loading={busy} onClick={() => void analyze()}>分析知识库</Button>
+            )}
+          </div>
         </>
       )}
 
