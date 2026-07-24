@@ -33,6 +33,16 @@ import {
   sectionEvidenceText,
   selectKnowledgeContext,
 } from "./knowledge.js";
+import {
+  attachKnowledgeAnchors,
+  attachKnowledgeAnchorSelections,
+  collectUnanchoredSensitiveClaims,
+  knowledgeAnchorEvidencePool,
+  parseClaimJudgeVerdicts,
+  parseKnowledgeAnchorSelections,
+  resolveClaimJudgments,
+  type KnowledgeAnchorContext,
+} from "./knowledge-anchor.js";
 import type { ModelProvider } from "./model.js";
 import { buildParameterDiagnostics, compileGenerationParameters } from "./parameters.js";
 import {
@@ -42,6 +52,8 @@ import {
   createCoverageSignature,
 } from "./planning.js";
 import {
+  buildClaimJudgePrompt,
+  buildKnowledgeAnchorReviewPrompt,
   buildRepairPrompt,
   buildStagedCommentGrowthPrompt,
   buildStagedCommentsPrompt,
@@ -112,6 +124,99 @@ export interface ContentGenerationEngineOptions {
   modelProvider?: ModelProvider;
   now?: () => Date;
   systemPromptTokenEstimate?: number;
+}
+
+/**
+ * AI 锚定复核兜底(混合锚定第二路):仅对机械锚定未命中的敏感声明批量发起
+ * 一次模型调用,模型只"选"不"判"——系统对每条选择做机械校验(源内逐字连续
+ * 片段 + conservativeEvidenceSupport + 证据角色闸门)后才挂台账。机械全命中
+ * 时不发起调用(零成本);模型调用或输出解析失败视为全部 none,不挂不炸,
+ * error 照旧由校验层报出。
+ */
+export async function reviewKnowledgeAnchorsWithModel(
+  provider: ModelProvider,
+  draft: GenerationDraft,
+  context: KnowledgeAnchorContext,
+  request: {
+    model?: string;
+    seed?: number;
+    temperature?: number;
+    maxOutputTokens?: number;
+    metadata?: Record<string, string | number | boolean>;
+  },
+): Promise<GenerationDraft> {
+  const claims = collectUnanchoredSensitiveClaims(draft, context);
+  if (!claims.length) return draft;
+  const evidenceSources = knowledgeAnchorEvidencePool(context);
+  if (!evidenceSources.length) return draft;
+  const prompt = buildKnowledgeAnchorReviewPrompt({
+    statements: claims.map((claim) => claim.statement),
+    evidenceSources,
+  });
+  try {
+    const response = await provider.generate({
+      messages: prompt.messages,
+      responseSchema: prompt.responseSchema,
+      schemaName: "knowledge_anchor_review",
+      model: request.model,
+      seed: request.seed,
+      temperature: request.temperature,
+      maxOutputTokens: request.maxOutputTokens,
+      metadata: request.metadata,
+    });
+    const selections = parseKnowledgeAnchorSelections(parseJsonObject(response.text), claims.length);
+    return attachKnowledgeAnchorSelections(draft, context, claims, selections);
+  } catch {
+    return draft;
+  }
+}
+
+/**
+ * AI 判官(敏感声明校验的语义裁决层):机械锚定(含 AI 选段兜底)后仍未锚定的
+ * 词表命中句,批量一次模型调用做分类与支持判断。裁决经机械校验(引文必须是
+ * 证据源内逐字连续片段,不过改判无据)后以文本匹配形式并入 draft.claimJudgments,
+ * 由校验层消费:邀约/限定/疑问放行,事实断言 supported 放行、unsupported 报
+ * error(与旧行为同码)。无未锚定句不调用(零成本);调用或解析失败安全降级为
+ * 无裁决——校验层走词面旧逻辑,error 照旧,不更坏。
+ */
+export async function judgeSensitiveClaimsWithModel(
+  provider: ModelProvider,
+  draft: GenerationDraft,
+  context: KnowledgeAnchorContext,
+  request: {
+    model?: string;
+    seed?: number;
+    temperature?: number;
+    maxOutputTokens?: number;
+    metadata?: Record<string, string | number | boolean>;
+  },
+): Promise<GenerationDraft> {
+  // 无未锚定句或无锚定池时不调用;同时清掉可能残留的过期裁决(句面已变)。
+  const clear = (): GenerationDraft => draft.claimJudgments ? { ...draft, claimJudgments: undefined } : draft;
+  const claims = collectUnanchoredSensitiveClaims(draft, context);
+  if (!claims.length) return clear();
+  const evidencePool = knowledgeAnchorEvidencePool(context);
+  if (!evidencePool.length) return clear();
+  const prompt = buildClaimJudgePrompt({
+    statements: claims.map((claim) => claim.statement),
+    evidenceSources: evidencePool,
+  });
+  try {
+    const response = await provider.generate({
+      messages: prompt.messages,
+      responseSchema: prompt.responseSchema,
+      schemaName: "claim_judge",
+      model: request.model,
+      seed: request.seed,
+      temperature: request.temperature,
+      maxOutputTokens: request.maxOutputTokens,
+      metadata: request.metadata,
+    });
+    const verdicts = parseClaimJudgeVerdicts(parseJsonObject(response.text), claims.length);
+    return { ...draft, claimJudgments: resolveClaimJudgments(claims, verdicts, evidencePool) };
+  } catch {
+    return clear();
+  }
 }
 
 export interface ReviseContentInput {
@@ -1985,6 +2090,28 @@ export class ContentGenerationAgent implements GenerationEngine {
       draft = keepCriticalBoundariesInBody(draft, orchestrationPlan, input.config);
     }
     draft = bindDialogueProvenance(draft, orchestrationPlan, allowedEvidenceIds, evidenceSources);
+    const anchorContext: KnowledgeAnchorContext = { allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, projectBlueprint: input.planningContext?.projectBlueprint };
+    // 证据自动锚定:bind 完成后、校验前,为敏感面上可精确锚定的受控声明补
+    // fact 台账;锚不到的声明不挂,仍由校验层 error 拦截。
+    draft = attachKnowledgeAnchors(draft, anchorContext);
+    if (this.provider && useProvider) {
+      // AI 复核兜底:仅对机械未命中句子批量一次调用;AI 只选不判,系统机械校验后才挂。
+      draft = await reviewKnowledgeAnchorsWithModel(this.provider, draft, anchorContext, {
+        model: input.config.model.model,
+        seed: seed + 4,
+        temperature: Math.min(input.config.model.temperature, 0.2),
+        maxOutputTokens: input.config.model.maxOutputTokens,
+        metadata: { jobId: input.jobId, candidateIndex, purpose: "knowledge_anchor_review", stage: 3.5 },
+      });
+      // AI 判官兜底:仍未锚定的句子批量一次裁决,邀约/限定/疑问与有据断言放行。
+      draft = await judgeSensitiveClaimsWithModel(this.provider, draft, anchorContext, {
+        model: input.config.model.model,
+        seed: seed + 5,
+        temperature: Math.min(input.config.model.temperature, 0.2),
+        maxOutputTokens: input.config.model.maxOutputTokens,
+        metadata: { jobId: input.jobId, candidateIndex, purpose: "claim_judge", stage: 3.6 },
+      });
+    }
     draft = refreshCreativeScenarioIdentities(draft);
     let issues = [
       ...validateGenerationDraft({ draft, config: input.config, ledger, allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, orchestrationPlan, projectBlueprint: input.planningContext?.projectBlueprint }),
@@ -2053,6 +2180,26 @@ export class ContentGenerationAgent implements GenerationEngine {
         draft = keepCriticalBoundariesInBody(draft, orchestrationPlan, input.config);
       }
       draft = bindDialogueProvenance(draft, orchestrationPlan, allowedEvidenceIds, evidenceSources);
+      // 修复回路同样在校验前做证据自动锚定(幂等,已挂的不会重复挂)。
+      draft = attachKnowledgeAnchors(draft, anchorContext);
+      if (this.provider && useProvider) {
+        // 修复后仍机械未命中的句子,再走一次 AI 复核兜底(无未命中则不调用)。
+        draft = await reviewKnowledgeAnchorsWithModel(this.provider, draft, anchorContext, {
+          model: input.config.model.model,
+          seed: seed + repairAttempts + 100,
+          temperature: Math.min(input.config.model.temperature, 0.2),
+          maxOutputTokens: input.config.model.maxOutputTokens,
+          metadata: { jobId: input.jobId, candidateIndex, purpose: "knowledge_anchor_review", attempt: repairAttempts },
+        });
+        // 修复后重跑判官:旧裁决已随 patch 丢弃,这里按当前句面重新裁决。
+        draft = await judgeSensitiveClaimsWithModel(this.provider, draft, anchorContext, {
+          model: input.config.model.model,
+          seed: seed + repairAttempts + 200,
+          temperature: Math.min(input.config.model.temperature, 0.2),
+          maxOutputTokens: input.config.model.maxOutputTokens,
+          metadata: { jobId: input.jobId, candidateIndex, purpose: "claim_judge", attempt: repairAttempts },
+        });
+      }
       draft = refreshCreativeScenarioIdentities(draft);
       issues = [
         ...validateGenerationDraft({ draft, config: input.config, ledger, allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, orchestrationPlan, projectBlueprint: input.planningContext?.projectBlueprint }),
@@ -2220,6 +2367,26 @@ export class ContentGenerationAgent implements GenerationEngine {
     if (input.package.orchestrationSnapshot) {
       if (!this.provider) revised = keepCriticalBoundariesInBody(revised, input.package.orchestrationSnapshot, config);
       revised = bindDialogueProvenance(revised, input.package.orchestrationSnapshot, allowedEvidenceIds, evidenceSources);
+      // 修订路径同样在校验前做证据自动锚定。
+      revised = attachKnowledgeAnchors(revised, { allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, projectBlueprint: input.planningContext?.projectBlueprint });
+      if (this.provider) {
+        // 修订路径的 AI 复核兜底:仅机械未命中时调用一次,选择经机械校验后才挂。
+        revised = await reviewKnowledgeAnchorsWithModel(this.provider, revised, { allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, projectBlueprint: input.planningContext?.projectBlueprint }, {
+          model: config.model.model,
+          seed: input.package.seed + input.package.revisions.length + 101,
+          temperature: Math.min(config.model.temperature, 0.2),
+          maxOutputTokens: config.model.maxOutputTokens,
+          metadata: { jobId: input.package.jobId, candidateIndex: input.package.candidateIndex, purpose: "knowledge_anchor_review" },
+        });
+        // 修订路径的 AI 判官兜底:同上,仍未锚定的句子批量一次裁决。
+        revised = await judgeSensitiveClaimsWithModel(this.provider, revised, { allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, projectBlueprint: input.planningContext?.projectBlueprint }, {
+          model: config.model.model,
+          seed: input.package.seed + input.package.revisions.length + 202,
+          temperature: Math.min(config.model.temperature, 0.2),
+          maxOutputTokens: config.model.maxOutputTokens,
+          metadata: { jobId: input.package.jobId, candidateIndex: input.package.candidateIndex, purpose: "claim_judge" },
+        });
+      }
       revised = refreshCreativeScenarioIdentities(revised);
     }
     const issues = validateGenerationDraft({ draft: revised, config, ledger, allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, orchestrationPlan: input.package.orchestrationSnapshot, projectBlueprint: input.planningContext?.projectBlueprint });

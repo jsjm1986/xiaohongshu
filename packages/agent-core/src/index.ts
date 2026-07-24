@@ -5,6 +5,7 @@ export * from "./content.js";
 export * from "./engine.js";
 export * from "./formula.js";
 export * from "./knowledge.js";
+export * from "./knowledge-anchor.js";
 export * from "./model.js";
 export * from "./parameters.js";
 export * from "./planning.js";
