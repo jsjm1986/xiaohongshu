@@ -32,7 +32,7 @@ test('migration v11 adds user_kind column and bumps user_version', () => {
     .get() as { name: string } | undefined;
   assert.equal(row?.name, 'registration_requests');
   const version = Number(db.prepare('PRAGMA user_version').get()?.user_version);
-  assert.equal(version, 11);
+  assert.equal(version, 12);
   const columns = db.prepare('PRAGMA table_info(users)').all() as Array<{ name: string; dflt_value: string | null }>;
   const userKind = columns.find((column) => column.name === 'user_kind');
   assert.ok(userKind, 'users.user_kind 列应存在');
