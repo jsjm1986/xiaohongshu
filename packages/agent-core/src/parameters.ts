@@ -111,7 +111,7 @@ function slider(
     path,
     label,
     group,
-    control: { kind: "slider", min: 0, max: 100, step: 5, unit, simpleMode: false, advanced: true },
+    control: { kind: "slider", min: 0, max: 100, step: 1, unit, simpleMode: false, advanced: true },
     defaultValue,
     noviceExplanation,
     increaseEffect,
