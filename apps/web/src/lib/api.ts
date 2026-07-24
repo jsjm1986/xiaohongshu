@@ -9,6 +9,7 @@ import type {
   FormulaVersion,
   FormulaCalculationResult,
   GenerateInput,
+  GenerationBatch,
   GenerationJob,
   ImageAsset,
   InformationGap,
@@ -1243,6 +1244,16 @@ export const api = {
       format: "markdown" | "json" | "docx" | "pdf",
     ) =>
       `/api/generations/${encodeURIComponent(id)}/candidates/${encodeURIComponent(candidateId)}/export?format=${format}`,
+  },
+  generationBatches: {
+    create: (input: { projectId: string; name?: string; jobs: GenerateInput[] }) =>
+      request<GenerationBatch>("/api/generation-batches", {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    get: (id: string) => request<GenerationBatch>(`/api/generation-batches/${encodeURIComponent(id)}`),
+    list: (projectId: string) =>
+      request<GenerationBatch[]>(`/api/generation-batches?projectId=${encodeURIComponent(projectId)}`),
   },
   settings: {
     get: (workspaceId?: string) =>
