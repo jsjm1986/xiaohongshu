@@ -73,6 +73,8 @@ export function QuickChannelPage() {
 
   const onAnalyzed = (opps: TopicOpportunity[]) => {
     setOpportunities(opps);
+    setOpportunityId('');
+    setResults(clearResults().results);
     setActiveTab('topic');
   };
 

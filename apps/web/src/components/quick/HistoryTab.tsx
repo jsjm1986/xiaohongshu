@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Button, useToast } from '../Ui';
 import { api } from '../../lib/api';
-import { quickCandidateFields } from '../../lib/quick-generation';
+import { quickCandidateFields, quickCandidateToMarkdown, type QuickCandidateView } from '../../lib/quick-generation';
 import type { GenerationJob, Project } from '../../types';
 
 interface Props {
@@ -34,6 +34,16 @@ export function HistoryTab({ project, history, setBusy, fail, setHistory }: Prop
     catch { toast.push('复制失败，请手动选择文本', 'error'); }
   };
 
+  const exportMarkdown = (job: GenerationJob, v: QuickCandidateView) => {
+    const blob = new Blob([quickCandidateToMarkdown(v)], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${job.topic || '文案'}-${v.label || v.id}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="qc-step">
       <ul className="qc-history-list">
@@ -53,7 +63,7 @@ export function HistoryTab({ project, history, setBusy, fail, setHistory }: Prop
                   <p className="quick-body">{v.body}</p>
                   <div className="qc-project-row">
                     <Button variant="ghost" onClick={() => void copy(`${v.title}\n\n${v.body}`)}>复制</Button>
-                    <Button variant="ghost" onClick={() => window.open(api.generations.exportUrl(job.id, v.id, 'markdown'), '_blank')}>导出 Markdown</Button>
+                    <Button variant="ghost" onClick={() => exportMarkdown(job, v)}>导出 Markdown</Button>
                   </div>
                 </div>
               ))}
