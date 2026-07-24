@@ -35,6 +35,13 @@ interface KnowledgeUploadBody {
   metadata?: string | Record<string, unknown>;
 }
 
+// multer/Express decodes multipart originalname as Latin-1, mangling UTF-8
+// (non-ASCII) filenames. Re-decode the raw bytes as UTF-8 to restore them.
+function decodeMultipartFilename(originalname: string): string {
+  const utf8 = Buffer.from(originalname, 'latin1').toString('utf8');
+  return utf8.includes('�') ? originalname : utf8;
+}
+
 @Controller('api/knowledge')
 @UseGuards(SessionAuthGuard, CsrfGuard)
 export class KnowledgeController {
@@ -85,7 +92,7 @@ export class KnowledgeController {
     const projectId = forcedProjectId ?? body.projectId;
     if (!projectId) throw new BadRequestException('projectId 不能为空');
     this.assert(rawRequest, projectId, 'knowledge.import');
-    const filename = file?.originalname ?? body.filename;
+    const filename = file ? decodeMultipartFilename(file.originalname) : body.filename;
     const content = file?.buffer ?? body.content;
     if (!filename || (typeof content !== 'string' && !Buffer.isBuffer(content))) {
       throw new BadRequestException('请提供 file，或 filename + content');
@@ -163,7 +170,7 @@ export class ProjectKnowledgeController {
     @UploadedFile() file?: UploadedKnowledgeFile,
   ) {
     this.assert(rawRequest, projectId, 'knowledge.import');
-    const filename = file?.originalname ?? body.filename;
+    const filename = file ? decodeMultipartFilename(file.originalname) : body.filename;
     const content = file?.buffer ?? body.content;
     if (!filename || (typeof content !== 'string' && !Buffer.isBuffer(content))) {
       throw new BadRequestException('请提供 file，或 filename + content');

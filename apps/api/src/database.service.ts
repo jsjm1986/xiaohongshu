@@ -720,6 +720,29 @@ export class DatabaseService implements OnModuleDestroy {
       `);
     });
     if (version < 9) version = 9;
+
+    if (version < 10) this.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE registration_requests (
+          id TEXT PRIMARY KEY,
+          username TEXT NOT NULL,
+          password_hash TEXT NOT NULL,
+          organization_name TEXT NOT NULL,
+          phone TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending','approved','rejected')),
+          review_note TEXT,
+          reviewed_by TEXT REFERENCES users(id),
+          reviewed_at TEXT,
+          created_user_id TEXT REFERENCES users(id),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX registration_requests_status_idx ON registration_requests(status, created_at);
+        PRAGMA user_version = 10;
+      `);
+    });
+    if (version < 10) version = 10;
   }
 
   onModuleDestroy(): void {

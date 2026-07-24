@@ -2,7 +2,8 @@ import { ArrowRight, BookOpenText, Boxes, MoreHorizontal, Pencil, Plus, Sparkles
 import { type FormEvent, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useProjects } from '../components/ProjectContext';
-import { Badge, Button, Field, Modal, PageHeader, Skeleton, useToast } from '../components/Ui';
+import { Badge, Button, Field, Modal, Skeleton, useToast } from '../components/Ui';
+import { V2Hero } from '../components/V2';
 import { formatDate } from '../lib/utils';
 
 export function ProjectsPage() {
@@ -56,7 +57,13 @@ export function ProjectsPage() {
 
   return (
     <div className="page">
-      <PageHeader eyebrow="PROJECTS" title="项目管理" description="每个项目拥有独立的知识库、公式版本与生成历史。" actions={<Button icon={<Plus size={17} />} onClick={() => setModalOpen(true)}>新建项目</Button>} />
+      <V2Hero
+        index="03"
+        status={<>共 {projects.length} 个项目 · 知识与历史相互隔离</>}
+        title="项目管理"
+        description="每个项目拥有独立的知识库、公式版本与生成历史。"
+        actions={<Button icon={<Plus size={17} />} onClick={() => setModalOpen(true)}>新建项目</Button>}
+      />
       {loading ? (
         <div className="table-loading"><Skeleton lines={5} /></div>
       ) : (

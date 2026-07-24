@@ -1,7 +1,6 @@
 import {
   AlertTriangle,
   ArrowDown,
-  ArrowLeft,
   ArrowRight,
   ArrowUp,
   BookOpenText,
@@ -45,10 +44,10 @@ import {
   Button,
   Field,
   Modal,
-  PageHeader,
   Skeleton,
   useToast,
 } from "../components/Ui";
+import { V2Hero } from "../components/V2";
 import { api, ApiError } from "../lib/api";
 import { demoGenerations } from "../lib/fixtures";
 import {
@@ -135,17 +134,9 @@ const defaultForm: GenerationFormState = {
   forbidden: "",
 };
 
-const simpleSteps = [
-  { number: 1, title: "选择项目", description: "确定知识边界" },
-  { number: 2, title: "描述主题", description: "说清要解决的问题" },
-  { number: 3, title: "选择读者", description: "确定阶段与入口" },
-  { number: 4, title: "补充约束", description: "可选地域、人物与边界" },
-];
-
 export function GeneratorPage() {
   const { projects, projectId, setProjectId, currentProject } = useProjects();
   const [mode, setMode] = useState<"simple" | "advanced">("simple");
-  const [step, setStep] = useState(1);
   const [form, setForm] = useState<GenerationFormState>(defaultForm);
   const [advanced, setAdvanced] = useState<AdvancedGenerationConfig>(defaultAdvanced);
   const [parameterOverrides, setParameterOverrides] = useState<Record<string, unknown>>({});
@@ -197,16 +188,6 @@ export function GeneratorPage() {
       alive = false;
     };
   }, [projectId]);
-
-  const canContinue = useMemo(
-    () =>
-      step === 1
-        ? Boolean(projectId)
-        : step === 2
-          ? form.topic.trim().length >= 4 && Boolean(form.goal)
-          : true,
-    [step, projectId, form.topic, form.goal],
-  );
 
   const selectedPreset = presets.find((item) => item.id === selectedPresetId);
   const effectiveBodyLength = Number(parameterOverrides.body_max_chars ?? advanced.bodyLength);
@@ -573,8 +554,9 @@ export function GeneratorPage() {
 
   return (
     <div className="page generate-page">
-      <PageHeader
-        eyebrow="CREATE"
+      <V2Hero
+        index="02"
+        status={<>{currentProject?.name || "当前项目"} · {mode === "simple" ? "简单模式" : "设置模式"}</>}
         title="生成完整内容"
         description="标题、正文、标签和评论区共用同一个信息补全计划；每个参数都能解释它将影响什么。"
       />
@@ -694,6 +676,9 @@ export function GeneratorPage() {
         preview={preview}
         input={previewInput}
         presetName={selectedPreset?.name}
+        projectName={currentProject?.name}
+        formulaLabel={(typeof schema.formulaVersion === "string" ? schema.formulaVersion : schema.formulaVersion?.version) || "项目当前版本"}
+        schema={schema}
         submitting={submitting}
         onClose={() => !submitting && setPreviewOpen(false)}
         onConfirm={runGeneration}
@@ -729,58 +714,6 @@ function PresetShelf({ presets, selectedId, loading, compact, onApply, onCopy, o
       </article>)}
     </div>}
   </section>;
-}
-
-function SimpleWizard({ projects, projectId, currentProject, step, form, canContinue, submitting, selectedPreset, onProject, onStep, onForm, onPreview }: {
-  projects: ReturnType<typeof useProjects>["projects"];
-  projectId: string;
-  currentProject: ReturnType<typeof useProjects>["currentProject"];
-  step: number;
-  form: GenerationFormState;
-  canContinue: boolean;
-  submitting: boolean;
-  selectedPreset?: ContentPreset;
-  onProject: (id: string) => void;
-  onStep: (step: number) => void;
-  onForm: (form: GenerationFormState) => void;
-  onPreview: (event?: FormEvent) => void;
-}) {
-  return <div className="wizard-layout">
-    <aside className="wizard-steps">
-      <div className="wizard-steps__intro"><span>生成向导</span><strong>{step} / 4</strong></div>
-      {simpleSteps.map((item) => <button key={item.number} type="button" className={`${step === item.number ? "active" : ""} ${step > item.number ? "complete" : ""}`} onClick={() => item.number <= step && onStep(item.number)}><span>{step > item.number ? <Check size={15} /> : item.number}</span><div><strong>{item.title}</strong><small>{item.description}</small></div></button>)}
-      <div className="wizard-note"><Sparkles size={17} /><p><strong>{selectedPreset ? `已应用：${selectedPreset.name}` : "其余会自动完成"}</strong><br />隐藏参数来自预设、当前项目和已启用公式。</p></div>
-    </aside>
-    <form className="wizard-card" onSubmit={onPreview}>
-      {step === 1 && <section className="wizard-section">
-        <WizardHeading step="第 1 步" title="这篇内容属于哪个项目？" description="项目决定本次可使用的知识、事实边界和公式版本。" />
-        <div className="choice-list choice-list--projects">{projects.map((project) => <button type="button" key={project.id} className={project.id === projectId ? "selected" : ""} onClick={() => onProject(project.id)}><span className="choice-list__icon"><BookOpenText size={20} /></span><span><strong>{project.name}</strong><small>{project.knowledgeCount || 0} 份知识 · 公式 {project.activeFormulaVersion || "项目当前版本"}</small></span>{project.id === projectId && <Check size={18} />}</button>)}</div>
-        {currentProject && <div className="context-preview"><div><span>将使用</span><strong>{currentProject.knowledgeCount || 0} 份项目知识</strong></div><div><span>公式版本</span><strong>{currentProject.activeFormulaVersion || "项目当前版本"}</strong></div><div><span>注入方式</span><strong>优先全量</strong></div></div>}
-      </section>}
-      {step === 2 && <section className="wizard-section">
-        <WizardHeading step="第 2 步" title="这次想写什么？" description="不用写提示词，用日常语言说清主题和读者应得到的帮助。" />
-        <Field label="内容主题" required hint="建议写具体问题，不要只写品类名"><textarea className="textarea-large" value={form.topic} onChange={(event) => onForm({ ...form, topic: event.target.value })} rows={4} placeholder="例如：第一次了解这个项目，做决定前最应该问清哪些信息？" /></Field>
-        <Field label="内容目标" required><div className="goal-options">{["帮助用户建立判断标准", "补全用户容易忽略的信息", "降低犹豫与不确定性", "引导用户进入具体选择"].map((goal) => <button type="button" key={goal} className={form.goal === goal ? "selected" : ""} onClick={() => onForm({ ...form, goal })}>{form.goal === goal && <Check size={15} />}{goal}</button>)}</div></Field>
-      </section>}
-      {step === 3 && <section className="wizard-section">
-        <WizardHeading step="第 3 步" title="谁会看到这篇内容？" description="读者所处阶段决定他最需要补全哪类信息。" />
-        <Field label="读者阶段" required><div className="stage-grid">{stages.map(({ id, title, text, icon: Icon }) => <button type="button" key={id} className={form.audienceStage === id ? "selected" : ""} onClick={() => onForm({ ...form, audienceStage: id })}><Icon size={20} /><strong>{title}</strong><small>{text}</small>{form.audienceStage === id && <span><Check size={13} /></span>}</button>)}</div></Field>
-        <Field label="内容入口" required hint="入口会影响标题、关键词和首段信息密度"><div className="entry-options">{entryPoints.map((entry) => <button type="button" key={entry.id} className={form.entryPoint === entry.id ? "selected" : ""} onClick={() => onForm({ ...form, entryPoint: entry.id })}><span>{form.entryPoint === entry.id && <Check size={14} />}</span><div><strong>{entry.title}</strong><small>{entry.text}</small></div></button>)}</div></Field>
-      </section>}
-      {step === 4 && <section className="wizard-section">
-        <WizardHeading step="第 4 步 · 可选" title="有没有必须遵守的信息？" description="留空也可以生成，项目已有约束仍会自动生效。" />
-        <div className="field-grid field-grid--two"><Field label="地点"><input value={form.city} onChange={(event) => onForm({ ...form, city: event.target.value })} placeholder="例如：北京 / 线上" /></Field><Field label="关键人物 / 对象"><input value={form.doctor} onChange={(event) => onForm({ ...form, doctor: event.target.value })} placeholder="选填，不会自动虚构" /></Field></div>
-        <Field label="必须提及" hint="每行一项，只填写知识库能够支持的信息"><textarea value={form.mustInclude} onChange={(event) => onForm({ ...form, mustInclude: event.target.value })} rows={3} /></Field>
-        <Field label="禁止出现"><textarea value={form.forbidden} onChange={(event) => onForm({ ...form, forbidden: event.target.value })} rows={3} /></Field>
-        <div className="generation-summary"><Sparkles size={20} /><div><strong>下一步先预览配置，再生成 3 个完整候选</strong><p>预览会说明知识、公式和隐藏参数如何影响标题、正文与评论区。</p></div></div>
-      </section>}
-      <footer className="wizard-card__footer"><Button type="button" variant="ghost" disabled={step === 1} icon={<ArrowLeft size={17} />} onClick={() => onStep(step - 1)}>上一步</Button><span>生成前会检查冲突和知识边界</span>{step < 4 ? <Button type="button" disabled={!canContinue} onClick={() => onStep(step + 1)}>继续 <ArrowRight size={17} /></Button> : <Button type="submit" loading={submitting} icon={<Eye size={17} />}>预览配置</Button>}</footer>
-    </form>
-  </div>;
-}
-
-function WizardHeading({ step, title, description }: { step: string; title: string; description: string }) {
-  return <div className="wizard-section__heading"><span>{step}</span><h2>{title}</h2><p>{description}</p></div>;
 }
 
 function TaskPanel({ projects, projectId, form, onProject, onForm }: {
@@ -893,24 +826,51 @@ function ParameterInput({ parameter, value, onChange }: { parameter: GenerationP
   return <input value={String(value ?? "")} onChange={(event) => onChange(event.target.value)} placeholder={parameter.description} />;
 }
 
-function ConfigPreviewModal({ open, loading, preview, input, presetName, submitting, onClose, onConfirm }: {
+const looksLikeUuid = (value: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.trim());
+
+function ConfigPreviewModal({ open, loading, preview, input, presetName, projectName, formulaLabel, schema, submitting, onClose, onConfirm }: {
   open: boolean;
   loading: boolean;
   preview: ResolvedConfigPreview | null;
   input: GenerateInput | null;
   presetName?: string;
+  projectName?: string;
+  formulaLabel: string;
+  schema: GenerationParameterSchema;
   submitting: boolean;
   onClose: () => void;
   onConfirm: () => void;
 }) {
-  const conflicts = [...(preview?.conflicts || []), ...(preview?.warnings || [])];
+  const severityRank: Record<string, number> = { error: 0, warning: 1, info: 2 };
+  const conflicts = [...(preview?.conflicts || []), ...(preview?.warnings || [])]
+    .sort((a, b) => (severityRank[a.severity] ?? 3) - (severityRank[b.severity] ?? 3));
   const hasErrors = conflicts.some((item) => item.severity === "error");
-  return <Modal open={open} onClose={onClose} title="生成前配置预览" description="确认本次参数如何继承、是否冲突，以及它们会影响哪些内容环节。" footer={<><Button variant="ghost" onClick={onClose}>返回修改</Button><Button disabled={loading || hasErrors || !input} loading={submitting} icon={<Sparkles size={16} />} onClick={onConfirm}>确认并生成 3 个候选</Button></>}>
+  const visibleConflicts = conflicts.filter((item) => item.severity !== "info");
+  const infoConflicts = conflicts.filter((item) => item.severity === "info");
+  const conflictRow = (conflict: ConfigConflict, index: number) => <div key={`${conflict.title}-${index}`} className={`preview-conflict-row preview-conflict-row--${conflict.severity}`}>{conflict.severity === "error" ? <XCircle size={15} /> : conflict.severity === "warning" ? <AlertTriangle size={15} /> : <Info size={15} />}<span><strong>{conflict.title}</strong><p>{conflict.message}</p>{conflict.suggestion && <small>建议：{conflict.suggestion}</small>}</span></div>;
+  const impactGroups = schema.groups
+    .map((group) => ({
+      ...group,
+      items: (preview?.impacts || []).filter((impact) => schema.parameters.find((parameter) => parameter.id === impact.parameterId)?.group === group.id),
+    }))
+    .filter((group) => group.items.length > 0);
+  const ungroupedImpacts = (preview?.impacts || []).filter((impact) => !schema.parameters.some((parameter) => parameter.id === impact.parameterId));
+  const formulaVersionLabel = preview?.formulaVersion && !looksLikeUuid(preview.formulaVersion) ? preview.formulaVersion : formulaLabel;
+  return <Modal open={open} onClose={onClose} title="生成前配置预览" description="确认本次参数如何继承、是否冲突，以及它们会影响哪些内容环节。" size="wide" footer={<><Button variant="ghost" onClick={onClose}>返回修改</Button><Button disabled={loading || hasErrors || !input} loading={submitting} icon={<Sparkles size={16} />} onClick={onConfirm}>确认并生成 3 个候选</Button></>}>
     {loading ? <div className="preview-loading"><span className="spinner" /><strong>正在解析配置继承与冲突…</strong><p>系统 → 工作区 → 项目 → 预设 → 本次覆盖</p></div> : preview && input ? <div className="config-preview">
       <section className="preview-inheritance"><span>系统默认</span><i>→</i><span>工作区</span><i>→</i><span>项目</span><i>→</i>{presetName && <><span className="active">{presetName}</span><i>→</i></>}<span className="active">本次任务</span></section>
-      <section className="preview-facts"><div><small>项目</small><strong>{input.projectId}</strong></div><div><small>读者 / 入口</small><strong>{stageLabel(input.audienceStage)} · {entryLabel(input.entryPoint)}</strong></div><div><small>公式版本</small><strong>{preview.formulaVersion || "项目当前版本"}</strong></div><div><small>知识注入</small><strong>{preview.knowledgeMode || "优先全量"}{preview.knowledgeFiles !== undefined ? ` · ${preview.knowledgeFiles} 份` : ""}</strong></div></section>
-      {conflicts.length ? <section className="preview-conflicts"><h3>冲突与提示 <Badge tone={hasErrors ? "danger" : "warning"}>{conflicts.length} 项</Badge></h3>{conflicts.map((conflict, index) => <div key={`${conflict.title}-${index}`} className={`preview-conflict preview-conflict--${conflict.severity}`}>{conflict.severity === "error" ? <XCircle size={17} /> : conflict.severity === "warning" ? <AlertTriangle size={17} /> : <Info size={17} />}<span><strong>{conflict.title}</strong><p>{conflict.message}</p>{conflict.suggestion && <small>建议：{conflict.suggestion}</small>}</span></div>)}</section> : <div className="preview-clear"><CheckCircle2 size={18} /><span><strong>没有发现阻断生成的配置冲突</strong><small>未知信息仍会在结果中保留，不会自动当作事实。</small></span></div>}
-      <section className="preview-impacts"><h3>参数影响预览 <Badge>{preview.impacts.length} 项</Badge></h3><div>{preview.impacts.map((impact) => <article key={impact.parameterId}><span className={`impact-direction impact-direction--${impact.direction || "changed"}`}>{impact.direction === "higher" ? <ArrowUp size={13} /> : impact.direction === "lower" ? <ArrowDown size={13} /> : <Settings2 size={13} />}</span><span><strong>{impact.label}<b>{isDiagnosticEmphasisParameterId(impact.parameterId) ? `${formatImpactValue(impact.value)}（显示/人工顺序刻度）` : formatImpactValue(impact.value)}</b></strong><p>{impact.summary}</p>{impact.affects?.length ? <small>影响：{impact.affects.join(" · ")}</small> : null}</span></article>)}</div></section>
+      <section className="preview-facts"><div><small>项目</small><strong>{projectName || input.projectId}</strong></div><div><small>读者 / 入口</small><strong>{stageLabel(input.audienceStage)} · {entryLabel(input.entryPoint)}</strong></div><div><small>公式版本</small><strong>{formulaVersionLabel}</strong></div><div><small>知识注入</small><strong>{preview.knowledgeMode || "优先全量"}{preview.knowledgeFiles !== undefined ? ` · ${preview.knowledgeFiles} 份` : ""}</strong></div></section>
+      {conflicts.length ? <section className="preview-conflicts"><h3>冲突与提示 <Badge tone={hasErrors ? "danger" : "warning"}>{conflicts.length} 项</Badge></h3>{visibleConflicts.map(conflictRow)}{infoConflicts.length > 0 && <details className="preview-info-toggle"><summary>还有 {infoConflicts.length} 条配置提示 <ChevronDown size={13} /></summary>{infoConflicts.map(conflictRow)}</details>}</section> : <div className="preview-clear"><CheckCircle2 size={16} /><span><strong>没有发现阻断生成的配置冲突</strong><small>未知信息仍会在结果中保留，不会自动当作事实。</small></span></div>}
+      <section className="preview-impacts"><h3>参数影响预览 <Badge>{preview.impacts.length} 项</Badge></h3>
+        {impactGroups.map((group) => <div className="preview-impact-group" key={group.id}>
+          <header><span>{group.label}</span><b>{group.items.length}</b></header>
+          {group.items.map((impact) => <div className="preview-impact-row" key={impact.parameterId}>
+            <span className={`impact-direction impact-direction--${impact.direction || "changed"}`}>{impact.direction === "higher" ? <ArrowUp size={13} /> : impact.direction === "lower" ? <ArrowDown size={13} /> : <Settings2 size={13} />}</span>
+            <span className="preview-impact-row__main"><strong>{impact.label}<b>{isDiagnosticEmphasisParameterId(impact.parameterId) ? `${formatImpactValue(impact.value)}（显示/人工顺序刻度）` : formatImpactValue(impact.value)}</b></strong><p>{impact.summary}</p>{impact.affects?.length ? <small>影响：{impact.affects.join(" · ")}</small> : null}</span>
+          </div>)}
+        </div>)}
+        {ungroupedImpacts.length > 0 && <div className="preview-impact-group"><header><span>其他</span><b>{ungroupedImpacts.length}</b></header>{ungroupedImpacts.map((impact) => <div className="preview-impact-row" key={impact.parameterId}><span className={`impact-direction impact-direction--${impact.direction || "changed"}`}>{impact.direction === "higher" ? <ArrowUp size={13} /> : impact.direction === "lower" ? <ArrowDown size={13} /> : <Settings2 size={13} />}</span><span className="preview-impact-row__main"><strong>{impact.label}<b>{formatImpactValue(impact.value)}</b></strong><p>{impact.summary}</p>{impact.affects?.length ? <small>影响：{impact.affects.join(" · ")}</small> : null}</span></div>)}</div>}
+      </section>
       <details className="resolved-config"><summary><Braces size={15} />查看最终解析配置 <ChevronDown size={14} /></summary><pre>{JSON.stringify(preview.resolvedConfig, null, 2)}</pre></details>
     </div> : null}
   </Modal>;

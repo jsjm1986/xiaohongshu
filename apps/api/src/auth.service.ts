@@ -81,6 +81,48 @@ export class AuthService implements OnModuleInit {
     });
   }
 
+  provisionUserWithWorkspace(input: {
+    username: string;
+    passwordHash: string;
+    systemRole: 'admin' | 'user';
+    mustChangePassword: boolean;
+    workspaceName: string;
+  }): { userId: string; workspaceId: string } {
+    const userId = randomUUID();
+    const workspaceId = randomUUID();
+    const now = nowIso();
+    const slug = this.uniqueWorkspaceSlug(input.workspaceName);
+    this.database
+      .prepare(
+        `INSERT INTO users
+           (id, username, password_hash, system_role, must_change_password, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(userId, input.username, input.passwordHash, input.systemRole, input.mustChangePassword ? 1 : 0, now, now);
+    this.database
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, owner_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(workspaceId, slug, input.workspaceName, userId, now, now);
+    this.database
+      .prepare(
+        `INSERT INTO workspace_members (workspace_id, user_id, role, created_at, updated_at)
+         VALUES (?, ?, 'Owner', ?, ?)`,
+      )
+      .run(workspaceId, userId, now, now);
+    return { userId, workspaceId };
+  }
+
+  private uniqueWorkspaceSlug(base: string): string {
+    let candidate = slugify(base) || 'workspace';
+    let suffix = 2;
+    while (this.database.prepare('SELECT 1 FROM workspaces WHERE slug = ?').get(candidate)) {
+      candidate = `${(slugify(base) || 'workspace').slice(0, 56)}-${suffix++}`;
+    }
+    return candidate;
+  }
+
   async login(usernameInput: unknown, passwordInput: unknown): Promise<{
     principal: SessionPrincipal;
     token: string;

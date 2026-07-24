@@ -16,6 +16,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { useProjects } from "../components/ProjectContext";
 import { Badge, Button, Field, Modal, PageHeader, Skeleton, useToast } from "../components/Ui";
+import { V2Hero } from "../components/V2";
 import { api, ApiError } from "../lib/api";
 import { defaultParameterSchema, normalizeParameterSchema } from "../lib/parameter-schema";
 import {
@@ -213,8 +214,9 @@ export function ResearchPage() {
   if (loading) return <div className="page research-page"><PageHeader title="研究与证据" description="正在装载版本化研究记录" /><Skeleton lines={8} /></div>;
 
   return <div className="page research-page">
-    <PageHeader
-      eyebrow="Research & Evidence"
+    <V2Hero
+      index="06"
+      status={<>{currentProject?.name || "当前项目"} · 研究边界已启用</>}
       title="研究与证据中心"
       description={`管理 ${currentProject?.name || "当前项目"} 的理论、论文、实践数据、实验、校准和发布基线。`}
       actions={<>

@@ -14,16 +14,17 @@ import {
   Sparkles,
   UsersRound,
   X,
+  Zap,
 } from "lucide-react";
 import { useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "./AuthContext";
 import { ProjectProvider, useProjects } from "./ProjectContext";
-import { ToastProvider } from "./Ui";
 
 const navigation = [
   { to: "/", label: "概览", icon: LayoutDashboard, end: true },
   { to: "/generate", label: "内容生成", icon: Sparkles },
+  { to: "/quick", label: "极简创作", icon: Zap },
   { to: "/projects", label: "项目管理", icon: Boxes },
   { to: "/knowledge", label: "知识库", icon: BookOpenText },
   { to: "/formulas", label: "公式版本", icon: FlaskConical },
@@ -35,7 +36,7 @@ const navigation = [
 function ShellContent() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
-  const { user, logout, isDemo } = useAuth();
+  const { user, logout } = useAuth();
   const { projects, projectId, setProjectId, loading } = useProjects();
   const location = useLocation();
   const navigate = useNavigate();
@@ -162,7 +163,6 @@ function ShellContent() {
             </div>
           </div>
           <div className="topbar__right">
-            {isDemo && <span className="demo-pill">演示数据</span>}
             <button
               className="icon-button topbar__notification"
               aria-label="通知"
@@ -217,10 +217,8 @@ function ShellContent() {
 
 export function AppShell() {
   return (
-    <ToastProvider>
-      <ProjectProvider>
-        <ShellContent />
-      </ProjectProvider>
-    </ToastProvider>
+    <ProjectProvider>
+      <ShellContent />
+    </ProjectProvider>
   );
 }

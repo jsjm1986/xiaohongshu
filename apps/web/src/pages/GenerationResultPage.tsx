@@ -30,6 +30,7 @@ import {
   EmptyState,
   useToast,
 } from "../components/Ui";
+import { V2Hero } from "../components/V2";
 import { api } from "../lib/api";
 import {
   commentNodeKindLabel,
@@ -268,64 +269,58 @@ export function GenerationResultPage() {
 
   return (
     <div className="page result-page">
-      <header className="result-header">
-        <div>
-          <Link to="/history">
-            <ArrowLeft size={16} />
-            返回历史
-          </Link>
-          <div className="eyebrow">GENERATION COMPLETE</div>
-          <h1>{job.topic}</h1>
-          <p>
-            {job.projectName} ·{" "}
-            {job.mode === "simple" ? "简单模式" : "设置模式"} ·{" "}
-            {formatDate(job.completedAt, true)}
-          </p>
-        </div>
-        <div className="result-header__actions">
-          {job.qualityStatus === "needs_review" && (
-            <Badge tone="warning">
-              <TriangleAlert size={13} /> 本次没有候选通过质量门禁
-            </Badge>
-          )}
-          {!publishable && (
-            <Badge tone="danger">
-              <TriangleAlert size={13} /> 未通过校验，禁止复制与导出
-            </Badge>
-          )}
-          <Button
-            variant="secondary"
-            icon={<Clipboard size={16} />}
-            onClick={copyContent}
-            disabled={!publishable}
-          >
-            复制全部
-          </Button>
-          <div className="export-menu">
-            <Button icon={<Download size={16} />} disabled={!publishable}>
-              导出 <ChevronDown size={14} />
+      <Link to="/history" className="v2-back-link">
+        <ArrowLeft size={15} /> 返回历史
+      </Link>
+      <V2Hero
+        status={<>{job.projectName} · {job.mode === "simple" ? "简单模式" : "设置模式"} · {formatDate(job.completedAt, true)}</>}
+        title={job.topic}
+        actions={
+          <>
+            {job.qualityStatus === "needs_review" && (
+              <Badge tone="warning">
+                <TriangleAlert size={13} /> 本次没有候选通过质量门禁
+              </Badge>
+            )}
+            {!publishable && (
+              <Badge tone="danger">
+                <TriangleAlert size={13} /> 未通过校验，禁止复制与导出
+              </Badge>
+            )}
+            <Button
+              variant="secondary"
+              icon={<Clipboard size={16} />}
+              onClick={copyContent}
+              disabled={!publishable}
+            >
+              复制全部
             </Button>
-            <div className="export-menu__dropdown">
-              <button type="button" disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "markdown"))}>
-                <FileText size={16} />
-                Markdown
-              </button>
-              <button type="button" disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "json"))}>
-                <FileJson size={16} />
-                JSON
-              </button>
-              <button type="button" disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "docx"))}>
-                <FileText size={16} />
-                DOCX
-              </button>
-              <button type="button" disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "pdf"))}>
-                <FileText size={16} />
-                PDF
-              </button>
+            <div className="export-menu">
+              <Button icon={<Download size={16} />} disabled={!publishable}>
+                导出 <ChevronDown size={14} />
+              </Button>
+              <div className="export-menu__dropdown">
+                <button type="button" disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "markdown"))}>
+                  <FileText size={16} />
+                  Markdown
+                </button>
+                <button type="button" disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "json"))}>
+                  <FileJson size={16} />
+                  JSON
+                </button>
+                <button type="button" disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "docx"))}>
+                  <FileText size={16} />
+                  DOCX
+                </button>
+                <button type="button" disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "pdf"))}>
+                  <FileText size={16} />
+                  PDF
+                </button>
             </div>
           </div>
-        </div>
-      </header>
+          </>
+        }
+      />
 
       {job.qualityStatus === "needs_review" && (
         <div className="generation-fallback-notice" role="status">

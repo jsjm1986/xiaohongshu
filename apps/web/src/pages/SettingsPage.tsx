@@ -17,10 +17,10 @@ import {
   Badge,
   Button,
   Field,
-  PageHeader,
   Skeleton,
   useToast,
 } from "../components/Ui";
+import { V2Hero } from "../components/V2";
 import { api } from "../lib/api";
 import { demoSettings } from "../lib/fixtures";
 import type { AppSettings } from "../types";
@@ -129,8 +129,9 @@ export function SettingsPage() {
 
   return (
     <div className="page settings-page">
-      <PageHeader
-        eyebrow="SETTINGS"
+      <V2Hero
+        index="08"
+        status={<>工作区 · 模型与账户</>}
         title="模型与设置"
         description="管理模型来源、平台额度与账户安全。"
       />

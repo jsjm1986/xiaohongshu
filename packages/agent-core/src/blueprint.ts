@@ -8,7 +8,6 @@ import {
   type ProjectClaimRule,
   type ProjectCreativeBlueprint,
   type ProjectKnowledgeMapEntry,
-  type ProjectRoleDefinition,
   type ProjectScenarioFamily,
   type ResolvedGenerationConfig,
 } from "./types.js";
@@ -110,7 +109,11 @@ function normalizeScenarioFamilies(raw: unknown): ProjectScenarioFamily[] {
   }).filter((item) => item.id && item.label).slice(0, 100);
 }
 
-function normalizeRoles(raw: unknown): { hostVoiceTraits: string[]; hostSpeechMarkers: string[]; roles: ProjectRoleDefinition[] } {
+const SERVICE_MODELS = new Set<NonNullable<ProjectCreativeBlueprint["roleModel"]["serviceModel"]>>([
+  "one_time", "recurring", "mixed",
+]);
+
+function normalizeRoles(raw: unknown): ProjectCreativeBlueprint["roleModel"] {
   const data = record(raw);
   const items = Array.isArray(data.roles) ? data.roles : [];
   const roles = items.map(record).map((item, index) => ({
@@ -132,10 +135,12 @@ function normalizeRoles(raw: unknown): { hostVoiceTraits: string[]; hostSpeechMa
     accountable: item.accountable === true,
     source: sourceRef(item.source, "hypothesis"),
   })).filter((item) => item.displayRole).slice(0, 100);
+  const serviceModelValue = text(data.serviceModel) as ProjectCreativeBlueprint["roleModel"]["serviceModel"];
   return {
     hostVoiceTraits: strings(data.hostVoiceTraits),
     hostSpeechMarkers: strings(data.hostSpeechMarkers),
     roles,
+    ...(serviceModelValue && SERVICE_MODELS.has(serviceModelValue) ? { serviceModel: serviceModelValue } : {}),
   };
 }
 

@@ -1716,6 +1716,15 @@ export interface SystemUser {
   disabledAt?: string | null;
 }
 
+export interface RegistrationRequest {
+  id: string;
+  username: string;
+  organizationName: string;
+  phone: string;
+  status: 'pending' | 'approved' | 'rejected';
+  createdAt: string;
+}
+
 export interface WorkspaceMember {
   userId: string;
   username: string;

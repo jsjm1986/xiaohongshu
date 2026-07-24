@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { AppShell } from './components/AppShell';
 import { ProtectedRoute } from './components/AuthContext';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { ToastProvider } from './components/Ui';
 import { AuditPage } from './pages/AuditPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { FormulasPage } from './pages/FormulasPage';
@@ -11,6 +12,8 @@ import { HistoryPage } from './pages/HistoryPage';
 import { KnowledgePage } from './pages/KnowledgePage';
 import { LoginPage } from './pages/LoginPage';
 import { ProjectsPage } from './pages/ProjectsPage';
+import { QuickChannelPage } from './pages/QuickChannelPage';
+import { RegisterPage } from './pages/RegisterPage';
 import { ResearchPage } from './pages/ResearchPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { TeamPage } from './pages/TeamPage';
@@ -18,11 +21,14 @@ import { TeamPage } from './pages/TeamPage';
 export default function App() {
   return (
     <ErrorBoundary>
+    <ToastProvider>
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/register" element={<RegisterPage />} />
       <Route element={<ProtectedRoute><AppShell /></ProtectedRoute>}>
         <Route index element={<DashboardPage />} />
         <Route path="generate" element={<GeneratorPage />} />
+        <Route path="quick" element={<QuickChannelPage />} />
         <Route path="projects" element={<ProjectsPage />} />
         <Route path="knowledge" element={<KnowledgePage />} />
         <Route path="formulas" element={<FormulasPage />} />
@@ -35,6 +41,7 @@ export default function App() {
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </ToastProvider>
     </ErrorBoundary>
   );
 }

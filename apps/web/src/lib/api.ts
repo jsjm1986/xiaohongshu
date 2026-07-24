@@ -20,6 +20,7 @@ import type {
   PromptTemplate,
   ProjectBlueprintModule,
   ProjectIntelligence,
+  RegistrationRequest,
   ResolvedConfigPreview,
   ResearchCalibrationProposal,
   ResearchClaim,
@@ -740,6 +741,16 @@ export const api = {
         method: "DELETE",
       }),
   },
+  register: (input: {
+    username: string;
+    password: string;
+    organizationName: string;
+    phone: string;
+  }) =>
+    request<{ ok: true }>("/api/register", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
   admin: {
     users: () => request<SystemUser[]>("/api/admin/users"),
     createUser: (input: {
@@ -750,6 +761,20 @@ export const api = {
       request<SystemUser>("/api/admin/users", {
         method: "POST",
         body: JSON.stringify(input),
+      }),
+    registrations: (status = "pending") =>
+      request<RegistrationRequest[]>(
+        `/api/admin/registrations?status=${encodeURIComponent(status)}`,
+      ),
+    approveRegistration: (id: string) =>
+      request<{ userId: string; workspaceId: string }>(
+        `/api/admin/registrations/${id}/approve`,
+        { method: "POST" },
+      ),
+    rejectRegistration: (id: string, reason: string) =>
+      request<{ ok: true }>(`/api/admin/registrations/${id}/reject`, {
+        method: "POST",
+        body: JSON.stringify({ reason }),
       }),
   },
   audit: {
