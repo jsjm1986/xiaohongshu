@@ -136,7 +136,6 @@ function blueprintModuleHighlights(module: ProjectBlueprintModule): BlueprintHig
     for (const key of keys) { const value = row[key]; if (typeof value === "string" && value.trim()) return value.trim(); }
     return "未命名";
   };
-  const named = (value: unknown, keys: string[], max = 8): string[] => rows(value).map((row) => label(row, ...keys)).slice(0, max);
   const group = (heading: string, items: string[]): BlueprintHighlightGroup[] => items.length ? [{ label: heading, items }] : [];
 
   switch (module.moduleKey) {
@@ -167,7 +166,9 @@ function blueprintModuleHighlights(module: ProjectBlueprintModule): BlueprintHig
       }).slice(0, 8));
     case "role_model":
       return [
-        ...group("评论角色", named(data.roles, ["displayRole", "id"])),
+        ...group("运营身份", rows(data.roles).filter((role) => role.accountable === true).map((role) => label(role, "displayRole", "id"))),
+        ...group("评论角色", rows(data.roles).filter((role) => role.accountable !== true).map((role) => label(role, "displayRole", "id"))),
+        ...group("服务模型", typeof data.serviceModel === "string" ? [{ one_time: "一次性服务", recurring: "疗程/复购", mixed: "混合" }[data.serviceModel] || data.serviceModel] : []),
         ...group("主播声音特质", strings(data.hostVoiceTraits)),
       ];
     case "claim_policy":

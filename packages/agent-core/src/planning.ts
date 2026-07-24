@@ -523,6 +523,51 @@ function hashUnit(seed: number, salt: string): number {
   return Number.parseInt(stableHash(`${seed}:${salt}`).slice(0, 8), 16) / 0xffffffff;
 }
 
+/**
+ * 评论区展示昵称词库(纯展示元数据):小红书风的食物系/动物系/心情系/状态系
+ * 昵称,让读者能在界面与导出里分清"谁是谁"。只作后台展示标签——不投给
+ * 模型,评论文字也不要求互相称呼。禁止机构感词(见 content.ts
+ * INSTITUTIONAL_NICKNAME_TERMS)与真人感名字(姓氏、小X、阿X),避免与
+ * 可追责身份混淆。
+ */
+export const COMMENT_NICKNAME_POOL: readonly string[] = [
+  // 食物系
+  "桃子气泡水", "半糖去冰", "橘子和海", "芝士乌龙", "一颗奶糖", "冰美式续杯",
+  "芒果糯米饭", "盐焗开心果", "桂花酒酿圆子", "西瓜中间那勺", "焦糖布丁", "柠檬养乐多",
+  "抹茶大福", "椰椰西米露", "红豆双皮奶", "葡萄冻冻", "奶茶三分甜", "烤红薯趁热",
+  "草莓果酱", "酸梅汤加冰", "豆乳盒子", "海盐小饼干", "菠萝咕咾肉", "芝麻糊不糊",
+  // 动物系
+  "熬夜的猫", "散步的柴犬", "打盹的树懒", "圆滚滚的刺猬", "偷鱼的橘猫", "慢半拍的企鹅",
+  "爱晒太阳的猫", "蹦蹦的兔子", "发呆的水豚", "捡松果的松鼠", "迷路的麋鹿", "打呼的小海豹",
+  "早起的布谷鸟", "怕冷的树袋熊", "追尾巴的狗勾", "揣手手的猫", "窗台上的麻雀", "翻肚皮的猫",
+  "等投喂的仓鼠", "夜跑的狐狸", "晒太阳的乌龟", "摇尾巴的柯基",
+  // 心情系
+  "今天也想躺平", "有点小开心", "困困的日常", "元气半格电", "心情放晴中", "偷偷期待一下",
+  "纠结到打滚", "先开心了再说", "心里亮堂堂", "有点小紧张", "慢慢不焦虑", "偷着乐一会儿",
+  "揣着小心愿", "脑袋放空中", "莫名很踏实", "小小的雀跃", "困并快乐着", "心里有点甜",
+  "暗自鼓劲中", "松一口气了",
+  // 状态系
+  "蹲一个答案", "在做功课中", "攒钱买快乐", "摸鱼刷手机", "通勤路上刷到", "周末睡到自然醒",
+  "下班就想躺", "咖啡续命中", "努力早睡中", "笔记记了一页", "收藏了又忘了", "正在货比三家",
+  "半夜刷到的我", "洗完澡躺床上", "午休偷偷看", "排队等位中", "边吃瓜边看", "刚发工资的我",
+  "备忘录记下来", "拉着闺蜜一起看", "躲在被窝里刷", "做完功课再定",
+];
+
+/**
+ * 确定性昵称分配:hashUnit(seed, salt) 定位词库起点,used 内去重、命中即顺延;
+ * 同种子同盐必同结果。词库耗尽(昵称需求超过词库大小)时追加序号兜底,仍确定。
+ * 线程盐为 `nickname:${threadId}`,追问接话人盐为 `nickname:${threadId}:fu:${index}`,
+ * 因此同一接话人在同一线程内昵称固定。
+ */
+export function assignCommentDisplayName(seed: number, salt: string, used: ReadonlySet<string>): string {
+  const start = Math.floor(hashUnit(seed, salt) * COMMENT_NICKNAME_POOL.length) % COMMENT_NICKNAME_POOL.length;
+  for (let offset = 0; offset < COMMENT_NICKNAME_POOL.length; offset += 1) {
+    const candidate = COMMENT_NICKNAME_POOL[(start + offset) % COMMENT_NICKNAME_POOL.length]!;
+    if (!used.has(candidate)) return candidate;
+  }
+  return `${COMMENT_NICKNAME_POOL[start]!}·${used.size + 1}`;
+}
+
 function strategyWeight(strategy: ExpressionStrategy, recent: CoverageSignature[], cooldown: number): number {
   const base = Math.max(0.01, strategy.selectionWeight ?? strategy.randomization?.weight ?? 1);
   const recentCount = recent.slice(0, cooldown).filter((signature) => signature.strategyId === strategy.id).length;
@@ -1236,10 +1281,16 @@ function dialoguePlans(
     hashUnit(seed, `role-order:${opportunity.audienceStage}:${left}`)
       - hashUnit(seed, `role-order:${opportunity.audienceStage}:${right}`));
   const usedQuestionIntents = new Set<string>();
+  // 展示昵称(纯展示元数据):包内去重,种子确定性;开口者盐 `nickname:${threadId}`,
+  // 追问接话人的昵称在引擎绑定时按 `nickname:${threadId}:fu:${index}` 同样分配。
+  const usedDisplayNames = new Set<string>();
   const constraintStart = constraintPool.length
     ? Math.floor(hashUnit(seed, "constraint-start") * constraintPool.length)
     : 0;
   return Array.from({ length: targetCount }, (_, index) => {
+    const threadId = `${strategy.id}_thread_${index + 1}`;
+    const displayName = assignCommentDisplayName(seed, `nickname:${threadId}`, usedDisplayNames);
+    usedDisplayNames.add(displayName);
     const gap = primaryOrdered[index % primaryOrdered.length]!;
     const roleStage = roleStages[Math.floor(hashUnit(seed, `role-stage:${index}`) * roleStages.length)] ?? opportunity.audienceStage;
     const stagePersonas = personasByStage[roleStage];
@@ -1259,10 +1310,48 @@ function dialoguePlans(
       .filter((candidate): candidate is InformationGapPlanningCard => Boolean(candidate))
       .map((candidate) => candidate.question || candidate.label);
     const knowledge = [...new Set(config.task.preContactKnown ?? [])].slice(0, 4);
-    const boundary = gap.boundary ?? availableDecisionBoundaries[0] ?? "未披露的个体条件不得代填";
-    const unknown = gap.answer || gap.framework
-      ? "资料未覆盖的个体差异仍保持未知"
-      : "当前资料不足以形成确定答案";
+    // replyPlan 去同质化：线程 function 在此提前推导，措辞模板按
+    // function / utteranceMode / personaRole 与种子确定性分化（hashUnit 选取，
+    // 每字段 2-3 套变体，同输入必同输出）；真实内容（gap.answer/framework/
+    // boundary 与已声明边界）保持原样，只替换模板兜底字面。
+    const threadFunction = deriveThreadFunction(gap, counterexampleAllowed && !counterexampleAssigned);
+    if (threadFunction === "counterexample") counterexampleAssigned = true;
+    const surfaceRoleCard = personaScenePlan.commentCast[roleOrder[index % roleOrder.length]!]!;
+    const personaRole = stagePersonas[personaOffset] ?? personas[index % personas.length]!;
+    const variantSalt = `${index}:${threadFunction}:${surfaceRoleCard.utteranceMode}:${personaRole}`;
+    const pickVariant = (pool: readonly string[], field: string) =>
+      pool[Math.floor(hashUnit(seed, `reply-variant:${field}:${variantSalt}`) * pool.length)]!;
+    const boundary = gap.boundary ?? availableDecisionBoundaries[0] ?? pickVariant([
+      "未披露的个体条件不得代填",
+      "资料没覆盖的个人情况不替对方假设",
+      "个体差异部分只标明边界、不代为判断",
+    ], "boundary");
+    // 未知路径同样去同质化：按线程 function 分化措辞，不再全员共用
+    // “需要核实、不能下结论、资料未覆盖”这一套字面。
+    const unknownPools: Partial<Record<DialogueThreadPlan["function"], readonly string[]>> = {
+      next_step: [
+        "当前资料不足以形成确定答案",
+        `“${gap.label}”缺可追责来源，结论保持未知`,
+        "这部分资料没有覆盖，保持未知、不代填",
+      ],
+      clarify: [
+        "资料未覆盖的个体差异仍保持未知",
+        "超出已披露口径的个体情况保持未知",
+        "个人条件部分缺少依据，结论保留为未知",
+      ],
+      counterexample: [
+        "反例之外的一般适用性仍属未知",
+        "具体不适用的范围资料不足，保持未知",
+      ],
+      verification: [
+        "资料未覆盖的个体差异仍保持未知",
+        "证据之外的个体适用差异仍是未知",
+      ],
+    };
+    const unknown = pickVariant(
+      unknownPools[threadFunction] ?? ["当前资料不足以形成确定答案", "资料未覆盖部分保持未知"],
+      "unknown",
+    );
     const threadFocus = (constraintPool[index % Math.max(1, constraintPool.length)] ?? "会改变结论的个人条件")
       .replace(/^(?:待核实维度|已披露地点范围)[：:]/u, "");
     const nextQuestionBase = auxiliaryQuestions.length
@@ -1276,7 +1365,27 @@ function dialoguePlans(
       decisionTask: gap.question,
       evidenceStance,
     };
-    const baseDirectAnswer = gap.answer ?? gap.framework ?? "当前不能直接下结论，先给出可执行核验路径";
+    const directAnswerFallbackPools: Partial<Record<DialogueThreadPlan["function"], readonly string[]>> = {
+      next_step: [
+        `“${gap.label}”目前没有可下结论的资料，先给出可执行的核验动作`,
+        `关于“${gap.label}”还不能直接下结论，先指明向谁核实、带上什么信息`,
+        `“${gap.label}”缺直接答案，这里只给一条可追责的核实路径`,
+      ],
+      clarify: [
+        `“${gap.label}”不能一概而论，先校准一个容易偏高或偏低的预期`,
+        `关于“${gap.label}”只能先把话说稳：讲得清的讲清，讲不清的保留`,
+        `“${gap.label}”没有统一答案，先点明一个常被忽略的前提`,
+      ],
+      counterexample: [
+        `“${gap.label}”不能照搬一般结论，先提一个谨慎反例`,
+        `关于“${gap.label}”存在不按常规走的情况，先看不适用的情形`,
+      ],
+    };
+    const baseDirectAnswer = gap.answer ?? gap.framework
+      ?? pickVariant(
+        directAnswerFallbackPools[threadFunction] ?? ["当前不能直接下结论，先给出可执行核验路径", "这里不能直接给结论，先给一条能落地的核实路径"],
+        "directAnswer",
+      );
     // M7 per-mechanism ruling — 需求 7.6 / design 组件 E · E1: replyPlan = (b) → RETAINED but
     // already NON-blocking. Evidence support is weak (a), but the answer-requirement template
     // (directAnswer / condition / boundary / unknown / nextQuestion) carries recorded creative
@@ -1284,14 +1393,26 @@ function dialoguePlans(
     // `warning` in content.ts (comment_reply_plan_missing), never a hard gate; kept as-is.
     const replyPlan: DialogueThreadPlan["replyPlan"] = {
       directAnswer: replyIncrement >= 70 && gap.evidenceIds.length
-        ? `${baseDirectAnswer}；核验时只采用本线程列出的证据来源`
+        ? `${baseDirectAnswer}${pickVariant([
+          "；核验时只采用本线程列出的证据来源",
+          "；适用性核对以本条所列证据来源为准",
+          "；下结论前回到本线程挂出的来源逐项核对",
+        ], "evidenceSuffix")}`
         : baseDirectAnswer,
       condition: replyIncrement >= 70 && constraints.length > 1
         ? constraints.join("；")
-        : constraints[0] ?? "仅在已披露条件内回答",
+        : constraints[0] ?? pickVariant([
+          "仅在已披露条件内回答",
+          "只在对方已说清的条件范围内回应",
+          "未披露的个人条件不作为回答依据",
+        ], "condition"),
       boundary,
       unknown,
-      nextQuestion: replyIncrement >= 70 ? nextQuestion : "核实一个会改变结论的条件",
+      nextQuestion: replyIncrement >= 70 ? nextQuestion : pickVariant([
+        "核实一个会改变结论的条件",
+        "补问一项足以改变判断的输入",
+        "确认一个还没说清、且会改变结论的条件",
+      ], "nextQuestion"),
     };
     const cueSource = gap.answer ?? gap.framework
       ?? (gap.evidenceIds.length ? "已有可核验来源，但答案仍需核实" : "当前资料未给出确定答案");
@@ -1303,7 +1424,6 @@ function dialoguePlans(
         : evidenceStance === "boundary_sensitive"
           ? `有“${cueCore}”，${gap.label}就能定吗？`
           : `只知道“${cueCore}”，判断${gap.label}还缺什么？`;
-    const surfaceRoleCard = personaScenePlan.commentCast[roleOrder[index % roleOrder.length]!]!;
     // 双号运营:营销话头分流给公开助理身份(staff),其余由发布账号 IP
     // (publisher)解答;staff 线程的 replyDisplayRole 同步指向蓝图里的助理
     // (accountable + service_answer 角色),没有蓝图助理时退为角色池里的
@@ -1392,10 +1512,9 @@ function dialoguePlans(
           : "下一人只围绕上句新出现的条件继续问，不得凭空换题",
       ...(extensionGapId ? { extensionGapId } : {}),
     };
-    const threadFunction = deriveThreadFunction(gap, counterexampleAllowed && !counterexampleAssigned);
-    if (threadFunction === "counterexample") counterexampleAssigned = true;
     return {
-      id: `${strategy.id}_thread_${index + 1}`,
+      id: threadId,
+      displayName,
       gapId: gap.gapId,
       stage: roleStage,
       function: threadFunction,
@@ -1415,7 +1534,7 @@ function dialoguePlans(
       sourceClusterIds: gap.evidenceIds.map((sourceId) => sourceId.replace(/^evidence_/u, "")),
       evidenceIds: [...gap.evidenceIds],
       boundaryRequired: Boolean(gap.boundary),
-      personaRole: stagePersonas[personaOffset] ?? personas[index % personas.length]!,
+      personaRole,
       speakerType: "simulated_reader",
       claimStatus: gap.answer && gap.evidenceIds.length
         ? "verified"

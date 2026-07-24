@@ -36,6 +36,7 @@ import {
 import type { ModelProvider } from "./model.js";
 import { buildParameterDiagnostics, compileGenerationParameters } from "./parameters.js";
 import {
+  assignCommentDisplayName,
   planTopicOrchestrations,
   rankTopicOpportunities,
   createCoverageSignature,
@@ -1216,6 +1217,11 @@ function bindDialogueProvenance(
   const originalThreadIds = new Map(
     draft.content.Cref.threads.map((thread, index) => [thread.id, plan.dialogueThreads[index]?.id ?? thread.id]),
   );
+  // 展示昵称(纯展示元数据):计划侧昵称先占坑,缺失时按同一盐确定性补算;
+  // 追问接话人按 `nickname:${threadId}:fu:${index}` 分配,包内去重顺延。
+  const usedDisplayNames = new Set(
+    plan.dialogueThreads.map((planned) => planned.displayName).filter((name): name is string => Boolean(name)),
+  );
   const remappedReasoning = draft.reasoning.map((item) => item.occurrence?.threadId
     ? {
         ...item,
@@ -1278,23 +1284,32 @@ function bindDialogueProvenance(
         && item.occurrence?.threadId === planned.id)
       .flatMap((item) => (item.sourceSpans ?? []).map((span) => span.evidenceId)))]
       .filter((id) => allowed.has(id));
-    const followUps = base.followUps.map((followUp, followUpIndex) => ({
-      ...followUp,
-      question: cleanVisibleText(followUp.question),
-      answer: cleanVisibleText(followUp.answer),
-      replyTo: planned.id,
-      // Positional default: a follow-up node extends the thread, so its kind is
-      // "follow_up" (its answer side is positionally a "clarification").
-      kind: followUp.kind ?? "follow_up" as const,
-      evidenceIds: [...new Set(remappedDraft.reasoning
-        .filter((item) => item.status === "fact" && item.location === "Cref.followUp"
-          && item.occurrence?.threadId === planned.id && item.occurrence.followUpIndex === followUpIndex)
-        .flatMap((item) => (item.sourceSpans ?? []).map((span) => span.evidenceId)))]
-        .filter((id) => allowed.has(id)),
-    }));
+    const threadDisplayName = planned.displayName
+      ?? assignCommentDisplayName(plan.seed, `nickname:${planned.id}`, usedDisplayNames);
+    usedDisplayNames.add(threadDisplayName);
+    const followUps = base.followUps.map((followUp, followUpIndex) => {
+      const followUpDisplayName = assignCommentDisplayName(plan.seed, `nickname:${planned.id}:fu:${followUpIndex}`, usedDisplayNames);
+      usedDisplayNames.add(followUpDisplayName);
+      return {
+        ...followUp,
+        displayName: followUpDisplayName,
+        question: cleanVisibleText(followUp.question),
+        answer: cleanVisibleText(followUp.answer),
+        replyTo: planned.id,
+        // Positional default: a follow-up node extends the thread, so its kind is
+        // "follow_up" (its answer side is positionally a "clarification").
+        kind: followUp.kind ?? "follow_up" as const,
+        evidenceIds: [...new Set(remappedDraft.reasoning
+          .filter((item) => item.status === "fact" && item.location === "Cref.followUp"
+            && item.occurrence?.threadId === planned.id && item.occurrence.followUpIndex === followUpIndex)
+          .flatMap((item) => (item.sourceSpans ?? []).map((span) => span.evidenceId)))]
+          .filter((id) => allowed.has(id)),
+      };
+    });
     return {
       ...base,
       id: planned.id,
+      displayName: threadDisplayName,
       question,
       answer,
       // Cref contract v1.1: keep model-stated dialogic kinds/boundary; when the

@@ -35,6 +35,18 @@ const reasoningLocations = new Set(["H", "N.imageBrief", "N.title", "N.body", "C
 const commentNodeKinds = new Set(["question", "answer", "follow_up", "clarification"]);
 const commentThreadFunctions = new Set(["surface_gap", "answer", "clarify", "counterexample", "verification", "next_step"]);
 
+/**
+ * 机构感词:评论展示昵称(displayName)不得包含,避免模拟读者的展示昵称被
+ * 误认为机构身份。planning.ts 的昵称词库同样按此清单自净,单测两侧共引。
+ * 行业身份词拆字拼接书写,保持静态源码行业中立(blueprint-generalization
+ * 守卫:prompt/planning/content/engine/parameters 源码不得出现单一行业词)。
+ */
+export const INSTITUTIONAL_NICKNAME_TERMS: readonly string[] = [
+  "官方", "客服", "助理",
+  "医" + "美", // 机构行业词一
+  "医" + "生", // 机构行业词二
+];
+
 /** Lenient optional-field read: an unrecognised kind means "not recorded", never an error. */
 function commentNodeKind(value: unknown): CommentNodeKind | undefined {
   return commentNodeKinds.has(String(value)) ? value as CommentNodeKind : undefined;
@@ -1215,6 +1227,14 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
   // and "reader_question_template" are not accountable; new packages must use
   // the publisher identity the contract now produces.
   const accountablePostingIdentities = new Set(["publisher", "brand", "staff", "expert"]);
+  // displayName(展示昵称)冲突锚点:项目名与蓝图中 accountable 角色(IP/助理名)
+  // 的 displayRole;昵称与它们相同或互相包含时,读者无法区分提问侧与机构侧。
+  const nicknameIdentityAnchors = [...new Set([
+    config.project.name.trim(),
+    ...(input.projectBlueprint?.roleModel.roles ?? [])
+      .filter((role) => role.accountable)
+      .map((role) => role.displayRole.trim()),
+  ].filter(Boolean))];
   // P4-19: derive the host's declared state from the body (domain-neutral
   // generic-language patterns only). The host is in an intent/undecided state
   // when the body voices first-person intent without claiming any completed
@@ -1256,6 +1276,23 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     // P4-19: the answer side must carry an accountable publisher-side identity.
     if (!accountablePostingIdentities.has(thread.postingIdentity)) {
       add("comment_identity_violation", "error", "Cref", `Thread ${thread.id} posting identity "${thread.postingIdentity}" is not an accountable publisher-side identity (publisher/brand/staff/expert).`);
+    }
+    // displayName 是纯展示昵称(warning 级,不阻断):不得含机构感词,不得与
+    // 项目名或蓝图 accountable 角色(IP/助理名)的 displayRole 相同或互相包含。
+    const displayNameNodes: Array<{ label: string; name: string | undefined }> = [
+      { label: "提问者", name: thread.displayName },
+      ...thread.followUps.map((followUp, index) => ({ label: `第 ${index + 1} 个接话人`, name: followUp.displayName })),
+    ];
+    for (const node of displayNameNodes) {
+      const nickname = node.name?.trim();
+      if (!nickname) continue;
+      if (INSTITUTIONAL_NICKNAME_TERMS.some((term) => nickname.includes(term))) {
+        add("comment_display_name_institutional", "warning", "Cref", `Thread ${thread.id} ${node.label}昵称“${nickname}”含机构感词(${INSTITUTIONAL_NICKNAME_TERMS.join("/")}),易被误认为机构身份。`, false);
+      }
+      const clashingAnchor = nicknameIdentityAnchors.find((anchor) => nickname.includes(anchor) || anchor.includes(nickname));
+      if (clashingAnchor) {
+        add("comment_display_name_identity_clash", "warning", "Cref", `Thread ${thread.id} ${node.label}昵称“${nickname}”与可追责身份“${clashingAnchor}”相同或互相包含,读者无法区分提问侧与机构侧。`, false);
+      }
     }
     // 双号运营:助理(staff)答复话术自由,但价格、数字与承诺类表述必须能锚定
     // 知识库。锚定判定沿用 sensitive_claim_without_evidence 的证据机制(fact

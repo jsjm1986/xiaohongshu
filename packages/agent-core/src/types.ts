@@ -873,6 +873,13 @@ export interface CommentFollowUp extends CommentScenarioMetadata {
   kind?: CommentNodeKind;
   /** Optional node-level boundary note (e.g. what this exchange must not assert). */
   boundary?: string;
+  /**
+   * Backend display nickname for this follow-up speaker (纯展示元数据).
+   * Assigned deterministically from the package seed so readers can tell the
+   * speakers apart; never sent to the model, and comment copy is not required
+   * to address anyone by name. Optional so historical packages still parse.
+   */
+  displayName?: string;
 }
 
 export interface CommentReferenceThread extends CommentScenarioMetadata {
@@ -902,6 +909,13 @@ export interface CommentReferenceThread extends CommentScenarioMetadata {
   discoveryPlan?: CommentDiscoveryPlan;
   conversationPlan?: DialogueThreadPlan["conversationPlan"];
   surfaceRoleCard?: CommentSurfaceRoleCard;
+  /**
+   * Backend display nickname for the thread opener (纯展示元数据), assigned
+   * deterministically from the package seed. Display-only: it lets readers
+   * tell commenters apart and must never collide with an accountable
+   * publisher-side identity. Optional so historical packages still parse.
+   */
+  displayName?: string;
 }
 
 export interface ContentPackageContent {
@@ -1478,6 +1492,12 @@ export interface DialogueThreadPlan {
   };
   /** Visible person/scene carrier. The legacy roleCard remains the hidden decision task. */
   surfaceRoleCard?: CommentSurfaceRoleCard;
+  /**
+   * Backend display nickname for the thread opener (纯展示元数据), assigned by
+   * the planner from the plan seed and carried into the bound thread; never
+   * projected to the model. Optional so historical plan snapshots stay readable.
+   */
+  displayName?: string;
 }
 
 export type CommentGapCoverageStatus =

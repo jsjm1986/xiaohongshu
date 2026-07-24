@@ -121,6 +121,8 @@ export function GenerationResultPage() {
   const isFallback = recordSource === "fallback";
   const recordNotice = generationRecordNotice(isFallback);
   const publishable = selected?.validation?.valid === true;
+  // 双号运营：评论区出现 staff 线程即按双身份呈现徽标(IP 专业解答 / 机构助理)
+  const dualIdentity = Boolean(selected?.comments?.some((comment) => comment.postingIdentity === "staff"));
   const impactDetails = useMemo(
     () => {
       const normalized = normalizeImpactReport(
@@ -569,7 +571,7 @@ export function GenerationResultPage() {
                   <div className="comment-question">
                     <span className="comment-avatar">评</span>
                     <div>
-                      <div className="comment-meta">{comment.simulated && <Badge tone="warning">{comment.simulationLabel || "模拟潜在读者"}</Badge>}{comment.kind && <Badge>{commentNodeKindLabel(comment.kind)}</Badge>}{comment.personaRole && <Badge>{personaRoleLabel(comment.personaRole)}</Badge>}{comment.speakerType && <Badge>{speakerTypeLabel(comment.speakerType)}</Badge>}{comment.stage && <Badge>{comment.stage}</Badge>}{comment.function && <Badge tone="purple">{commentFunctionLabel(comment.function)}</Badge>}{comment.claimStatus && <Badge tone={comment.claimStatus === "verified" ? "positive" : comment.claimStatus === "unknown" ? "warning" : "blue"}>{claimStatusLabel(comment.claimStatus)}</Badge>}{comment.postingIdentity && <Badge tone="blue">{identityLabel(comment.postingIdentity)}可追责答复</Badge>}</div>
+                      <div className="comment-meta">{comment.displayName && <Badge tone="blue">{comment.displayName}</Badge>}{comment.simulated && <Badge tone="warning">{comment.simulationLabel || "模拟潜在读者"}</Badge>}{comment.kind && <Badge>{commentNodeKindLabel(comment.kind)}</Badge>}{comment.personaRole && <Badge>{personaRoleLabel(comment.personaRole)}</Badge>}{comment.speakerType && <Badge>{speakerTypeLabel(comment.speakerType)}</Badge>}{comment.stage && <Badge>{comment.stage}</Badge>}{comment.function && <Badge tone="purple">{commentFunctionLabel(comment.function)}</Badge>}{comment.claimStatus && <Badge tone={comment.claimStatus === "verified" ? "positive" : comment.claimStatus === "unknown" ? "warning" : "blue"}>{claimStatusLabel(comment.claimStatus)}</Badge>}{comment.postingIdentity && <Badge tone={comment.postingIdentity === "staff" ? "blue" : "positive"}>{comment.postingIdentity === "staff" ? "机构助理 · 营销承接" : dualIdentity ? "机构 IP · 专业解答" : `${identityLabel(comment.postingIdentity)}可追责答复`}</Badge>}</div>
                       <strong>{comment.question}</strong>
                       {comment.purpose && (
                         <small>信息任务：{comment.purpose}</small>
@@ -616,7 +618,7 @@ export function GenerationResultPage() {
                       回
                     </span>
                     <div>
-                      {comment.answerKind && <div className="comment-meta"><Badge tone="positive">{commentNodeKindLabel(comment.answerKind)}</Badge></div>}
+                      {(comment.answerKind || replyOrgDisplayName(comment)) && <div className="comment-meta">{replyOrgDisplayName(comment) && <Badge tone="positive">{replyOrgDisplayName(comment)}</Badge>}{comment.answerKind && <Badge tone="positive">{commentNodeKindLabel(comment.answerKind)}</Badge>}</div>}
                       <p>{primaryCommentAnswer(comment)}</p>
                     </div>
                   </div>
@@ -625,7 +627,7 @@ export function GenerationResultPage() {
                   {comment.followUps?.map((followUp, followUpIndex) => (
                     <div className="comment-follow-up" key={`${followUp.question}-${followUpIndex}`}>
                       {(followUp.kind || followUp.personaRole || followUp.claimStatus || followUp.threadDepth !== undefined) && <div className="comment-meta">{followUp.kind && <Badge>{commentNodeKindLabel(followUp.kind)}</Badge>}{followUp.personaRole && <Badge>{personaRoleLabel(followUp.personaRole)}</Badge>}{followUp.claimStatus && <Badge tone="blue">{claimStatusLabel(followUp.claimStatus)}</Badge>}{followUp.threadDepth !== undefined && <Badge>第 {followUp.threadDepth} 层</Badge>}</div>}
-                      <strong>接话：{followUp.question}</strong>
+                      <strong>{followUp.displayName ? `${followUp.displayName} · 接话：` : "接话："}{followUp.question}</strong>
                       <p>{followUp.answer}</p>
                       {followUp.boundary && <p>边界：{followUp.boundary}</p>}
                       {followUp.evidenceIds?.length ? <p>证据引用：{followUp.evidenceIds.join("、")}</p> : null}
@@ -865,6 +867,18 @@ function identityLabel(value?: string) {
     publisher: "发布账号",
   };
   return value ? labels[value] || value : "可追责发布者";
+}
+
+/**
+ * 答复侧机构名:surfaceRoleCard.replyDisplayRole 原样显示;assistant_account /
+ * host_account 这类内部 id 形态只显示「机构助理/机构 IP」通用文案,不裸露内部
+ * id;历史包没有 surfaceRoleCard 时不显示(不出空徽标)。
+ */
+function replyOrgDisplayName(comment: Candidate["comments"][number]) {
+  const raw = comment.surfaceRoleCard?.replyDisplayRole?.trim();
+  if (!raw) return undefined;
+  if (/^[a-z][a-z0-9_]*$/.test(raw)) return comment.postingIdentity === "staff" ? "机构助理" : "机构 IP";
+  return raw;
 }
 
 function commentFunctionLabel(value?: string) {

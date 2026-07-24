@@ -410,6 +410,69 @@ describe("non-vector orchestration planning", () => {
     expect(JSON.stringify(highThreads)).not.toMatch(/\d+\s*(?:元|天|公里|岁)/u);
   });
 
+  it("differentiates replyPlan phrasing across thread functions and stays seed-deterministic", () => {
+    const scenario = config();
+    scenario.content.commentThreadMin = 4;
+    scenario.content.commentThreadMax = 4;
+    // 评论区线程全部锚定排序第一的 required 主缺口，因此用两组输入分别制造
+    // 两种 function：A 组主缺口 required 且无答案 → 全部 next_step（对应真实
+    // 样本里 15 线程同措辞的场景）；B 组主缺口 required 且有答案+证据 → 全部
+    // verification（真实答案应原样透传，不参与措辞分化）。
+    const unansweredGaps: InformationGap[] = [
+      {
+        id: "fit", label: "适用条件", question: "哪些条件会改变适用性？", category: "decision",
+        audienceStages: ["comparing"], importance: 0.9, decisionLeverage: 0.9, proofability: 0.8,
+        boundary: "个体适用性需要单独核验", evidenceIds: ["evidence_d1"], required: true,
+      },
+      {
+        id: "personal_unknown", label: "个人未知条件", question: "还缺哪些个人条件才能判断？", category: "risk",
+        audienceStages: ["comparing"], importance: 0.85, decisionLeverage: 0.88, proofability: 0.2,
+        evidenceIds: [], required: true,
+      },
+    ];
+    const groundedGaps: InformationGap[] = [
+      {
+        id: "grounded", label: "核验路径", question: "核验路径是什么？", category: "process",
+        audienceStages: ["comparing"], importance: 0.9, decisionLeverage: 0.9, proofability: 0.8,
+        answer: "按资料给出的两步核验", evidenceIds: ["evidence_d1"], required: true,
+      },
+      {
+        id: "open", label: "个人条件", question: "哪些个人条件会改变结论？", category: "risk",
+        audienceStages: ["comparing"], importance: 0.85, decisionLeverage: 0.85, proofability: 0.3,
+        evidenceIds: [], required: true,
+      },
+    ];
+    const planWith = (gaps: InformationGap[], id: string) => planTopicOrchestrations({
+      opportunity: { ...opportunity(id), gapIds: gaps.map((gap) => gap.id) },
+      gaps,
+      config: scenario,
+      seed: 4242,
+    }).flatMap((plan) => plan.dialogueThreads);
+    const nextStepThreads = planWith(unansweredGaps, "reply-next-step");
+    const nextStepThreadsAgain = planWith(unansweredGaps, "reply-next-step");
+    const verificationThreads = planWith(groundedGaps, "reply-verification");
+    expect(nextStepThreads.length).toBeGreaterThanOrEqual(4);
+    expect(verificationThreads.length).toBeGreaterThanOrEqual(4);
+    expect(new Set(nextStepThreads.map((thread) => thread.function))).toEqual(new Set(["next_step"]));
+    expect(new Set(verificationThreads.map((thread) => thread.function))).toEqual(new Set(["verification"]));
+    // 同种子确定性：同输入同输出。
+    expect(JSON.stringify(nextStepThreadsAgain.map((thread) => thread.replyPlan)))
+      .toBe(JSON.stringify(nextStepThreads.map((thread) => thread.replyPlan)));
+    // 同一 function、同一缺口的多条线程：directAnswer / unknown 不再全员同一字面。
+    expect(new Set(nextStepThreads.map((thread) => thread.replyPlan.directAnswer)).size).toBeGreaterThan(1);
+    expect(new Set(nextStepThreads.map((thread) => thread.replyPlan.unknown)).size).toBeGreaterThan(1);
+    expect(new Set(verificationThreads.map((thread) => thread.replyPlan.unknown)).size).toBeGreaterThan(1);
+    // 不同 function 的未知路径措辞分化：next_step 至少有一种说法是 verification 组不用的。
+    const verificationUnknowns = new Set(verificationThreads.map((thread) => thread.replyPlan.unknown));
+    expect(nextStepThreads.some((thread) => !verificationUnknowns.has(thread.replyPlan.unknown))).toBe(true);
+    // 有真实答案时 directAnswer 原样透传，不被模板分化改写。
+    expect(verificationThreads.every((thread) => thread.replyPlan.directAnswer === "按资料给出的两步核验"
+      || thread.replyPlan.directAnswer.startsWith("按资料给出的两步核验；"))).toBe(true);
+    // 结构不变：五字段仍然齐全且非空。
+    expect([...nextStepThreads, ...verificationThreads]
+      .every((thread) => Object.values(thread.replyPlan).every(Boolean))).toBe(true);
+  });
+
   it("does not allocate comment gaps or threads when comments are disabled", () => {
     const withoutComments = config();
     withoutComments.expressionWindow.channels = withoutComments.expressionWindow.channels.filter((channel) => channel !== "comments");
