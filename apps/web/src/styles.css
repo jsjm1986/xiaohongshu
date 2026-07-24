@@ -3037,3 +3037,10 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .qc-analysis-status { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; }
 .qc-analysis-status.analyzed { border-color: var(--coral); }
 .qc-analysis-status strong { font-size: 14px; }
+
+.qc-progress { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: var(--v2-radius-sm); background: var(--v2-ai-soft); color: var(--v2-ai-ink); font-size: var(--v2-fs-sm); }
+.qc-progress small { margin-left: auto; color: var(--v2-ai); }
+.qc-progress__track { flex: 0 0 64px; height: 3px; border-radius: 2px; background: rgb(114 87 200 / 20%); overflow: hidden; position: relative; }
+.qc-progress__track b { position: absolute; inset: 0; width: 40%; background: var(--v2-ai); border-radius: 2px; animation: qc-progress-slide 1.2s ease-in-out infinite; }
+@keyframes qc-progress-slide { 0% { left: -40%; } 100% { left: 100%; } }
+.qc-progress--failed { background: #fbeaea; color: var(--v2-error); }

@@ -3,7 +3,8 @@ import { Trash2, Upload } from 'lucide-react';
 import { useProjects } from '../ProjectContext';
 import { Button, Field, Modal } from '../Ui';
 import { api } from '../../lib/api';
-import type { KnowledgeFile, Project, ProjectIntelligence, TopicOpportunity } from '../../types';
+import { QuickTaskProgress } from './QuickTaskProgress';
+import type { AnalysisTask, KnowledgeFile, Project, ProjectIntelligence, TopicOpportunity } from '../../types';
 
 const CATEGORIES = ['未分类', '知识地图', '项目与服务', '用户与场景', '案例样本', '方法论', '约束'];
 const KINDS = ['已知事实', '案例样本', '用户观点', '方法论推理', '猜想', '信息不足', '禁止表达'];
@@ -29,6 +30,8 @@ export function ProjectKnowledgeTab({ project, projects, busy, setBusy, fail, on
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [intel, setIntel] = useState<ProjectIntelligence | null>(null);
   const [topicCount, setTopicCount] = useState(0);
+  const [analysisTask, setAnalysisTask] = useState<AnalysisTask | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
 
   useEffect(() => {
     if (!project) { setFiles([]); setIntel(null); setTopicCount(0); return; }
@@ -43,6 +46,21 @@ export function ProjectKnowledgeTab({ project, projects, busy, setBusy, fail, on
   }, [project]);
 
   const analyzed = Boolean(intel?.id);
+
+  const refreshAnalysisTask = () => {
+    if (!project) return Promise.resolve();
+    return api.intelligence.tasks.list(project.id).then((tasks) => {
+      const sorted = [...tasks].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      setAnalysisTask(sorted.find((t) => t.kind === 'project') ?? null);
+    }).catch(() => { /* 非致命 */ });
+  };
+
+  useEffect(() => {
+    if (!analyzing) return;
+    const timer = window.setInterval(() => { void refreshAnalysisTask(); }, 1800);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [analyzing, project]);
 
   const createProject = async () => {
     if (!newName.trim()) return;
@@ -102,14 +120,18 @@ export function ProjectKnowledgeTab({ project, projects, busy, setBusy, fail, on
   const analyze = async () => {
     if (!project) return;
     setBusy(true);
+    setAnalyzing(true);
+    void refreshAnalysisTask();
     try {
       const result = await api.intelligence.analyze(project.id, true);
       setIntel(result.intelligence);
       const opps = await api.opportunities.list(project.id);
       setTopicCount(opps.items.length);
+      setAnalyzing(false);
+      setAnalysisTask(null);
       onAnalyzed(opps.items);
       setBusy(false);
-    } catch (e) { fail(e, '分析知识库失败'); }
+    } catch (e) { setAnalyzing(false); fail(e, '分析知识库失败'); }
   };
 
   const goToTopics = async () => {
@@ -169,6 +191,10 @@ export function ProjectKnowledgeTab({ project, projects, busy, setBusy, fail, on
             )}
           </div>
 
+          {analyzing && (
+            <QuickTaskProgress text="三段模型串联运行:蓝图 → 缺口与策略 → 选题。完成前请勿离开或重复触发。" task={analysisTask} />
+          )}
+
           <Field label="知识文件">
             <ul className="qc-file-list">
               {files.map((f) => (
@@ -197,10 +223,10 @@ export function ProjectKnowledgeTab({ project, projects, busy, setBusy, fail, on
             {analyzed ? (
               <>
                 {topicCount > 0 && <Button loading={busy} onClick={() => void goToTopics()}>去选题</Button>}
-                <Button variant="ghost" loading={busy} onClick={() => void analyze()}>重新分析</Button>
+                <Button variant="ghost" loading={busy} disabled={busy || analyzing} onClick={() => void analyze()}>重新分析</Button>
               </>
             ) : (
-              <Button loading={busy} onClick={() => void analyze()}>分析知识库</Button>
+              <Button loading={busy} disabled={busy || analyzing} onClick={() => void analyze()}>分析知识库</Button>
             )}
           </div>
         </>
