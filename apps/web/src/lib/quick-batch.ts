@@ -44,6 +44,8 @@ export function batchStatusLabel(status: GenerationBatchStatus): string {
 }
 
 export function batchProgressText(jobs: GenerationJob[]): string {
-  const done = jobs.filter((j) => j.status === "completed" || j.status === "failed").length;
-  return `${done}/${jobs.length} 完成`;
+  // 失败不算「完成」：全失败批次显示 0/4 完成 · 4 失败，与「全部失败」徽章一致。
+  const ok = jobs.filter((j) => j.status === "completed").length;
+  const failed = jobs.filter((j) => j.status === "failed").length;
+  return failed ? `${ok}/${jobs.length} 完成 · ${failed} 失败` : `${ok}/${jobs.length} 完成`;
 }
