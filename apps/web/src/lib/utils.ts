@@ -1,6 +1,8 @@
 import { resolveProductionArtifactView } from './image-production';
 import {
   commentNodeKindLabel,
+  commentThreadKindLabel,
+  commentThreadKindOf,
   deploymentSla,
   liveRoutingLines,
   postingIdentityText,
@@ -82,15 +84,38 @@ const candidateToV11TwoPartMarkdown = (candidate: Candidate) => {
     ? `## 可发布首评参考\n\n> 【可发布首评参考】由发布账号（publisher）身份发布：${candidate.commentOwnedFirstComment}\n\n`
     : '';
   const disclaimer = candidate.commentDisclaimer || '以下仅演练潜在读者问题与可追责答复。';
-  const scripts = candidate.comments.map((item, index) => [
-    `### 话术 ${index + 1}\n`,
-    `- 提问：${nicknamePrefix(item.displayName)}${item.question}`,
-    `- 回复：${replyOrgName(item) ? `${replyOrgName(item)}：` : ''}${item.followUps?.length ? item.answer.split(/\n\n追问：/u)[0] || item.answer : item.answer}`,
-    `- 可追责答复身份：${postingIdentityText(item.postingIdentity) || '可追责发布者'}`,
-    item.boundary ? `- 答复边界：${item.boundary}` : '',
-    item.nextStep ? `- 下一步：${item.nextStep}` : '',
-    ...(item.followUps || []).map((followUp) => `  - 追问：${nicknamePrefix(followUp.displayName)}${followUp.question}\n  - 补充：${followUp.answer}`),
-  ].filter(Boolean).join('\n')).join('\n\n');
+  const scripts = candidate.comments.map((item, index) => {
+    // 读者互动层:T2 读者互聊的「回复」位是读者 B 接话;T3 漂浮短反应无回答
+    // 需求;T1(含历史包缺省)维持机构问答格式。
+    const threadKind = commentThreadKindOf(item);
+    if (threadKind === 'organic_reaction') {
+      return [
+        `### 话术 ${index + 1}（漂浮短反应）\n`,
+        `- 漂浮反应：${nicknamePrefix(item.displayName)}${item.question}`,
+        `- 无需机构回复（4-20 字短共鸣，机构不出现）`,
+      ].filter(Boolean).join('\n');
+    }
+    if (threadKind === 'reader_exchange') {
+      return [
+        `### 话术 ${index + 1}（读者互聊）\n`,
+        `- 提问：${nicknamePrefix(item.displayName)}${item.question}`,
+        `- 读者接话：${nicknamePrefix(item.replyDisplayName)}${item.followUps?.length ? item.answer.split(/\n\n追问：/u)[0] || item.answer : item.answer}`,
+        `- 互动类型：读者互聊（模拟读者之间接话，不谈项目事实；真实问题由${postingIdentityText(item.postingIdentity) || '可追责发布者'}承接）`,
+        item.boundary ? `- 答复边界：${item.boundary}` : '',
+        item.nextStep ? `- 下一步：${item.nextStep}` : '',
+        ...(item.followUps || []).map((followUp) => `  - 追问：${nicknamePrefix(followUp.displayName)}${followUp.question}\n  - 补充：${followUp.answer}`),
+      ].filter(Boolean).join('\n');
+    }
+    return [
+      `### 话术 ${index + 1}\n`,
+      `- 提问：${nicknamePrefix(item.displayName)}${item.question}`,
+      `- 回复：${replyOrgName(item) ? `${replyOrgName(item)}：` : ''}${item.followUps?.length ? item.answer.split(/\n\n追问：/u)[0] || item.answer : item.answer}`,
+      `- 可追责答复身份：${postingIdentityText(item.postingIdentity) || '可追责发布者'}`,
+      item.boundary ? `- 答复边界：${item.boundary}` : '',
+      item.nextStep ? `- 下一步：${item.nextStep}` : '',
+      ...(item.followUps || []).map((followUp) => `  - 追问：${nicknamePrefix(followUp.displayName)}${followUp.question}\n  - 补充：${followUp.answer}`),
+    ].filter(Boolean).join('\n');
+  }).join('\n\n');
   const appendixImagePlan = candidate.imagePlan
     ? `### 图片计划（规划信息，非最终图片）\n\n${imagePlanMarkdown(candidate)}\n\n`
     : '';
@@ -116,6 +141,7 @@ const commentThreadAuditMarkdown = (candidate: Candidate) => candidate.comments.
   `> 【${item.simulated ? item.simulationLabel || '模拟潜在读者情景' : '历史内容，模拟字段未标注'}】${item.simulated ? '不代表真实评论、消费经历或第三方口碑。' : ''}`,
   `**评论：${item.question}**`,
   `> 角色：${commentPersonaLabel(item.personaRole)}；提问方：${commentSpeakerLabel(item.speakerType)}；声明：${commentClaimLabel(item.claimStatus)}；答复身份：${postingIdentityText(item.postingIdentity) || '可追责发布者'}`,
+  item.threadKind ? `> 互动类型：${commentThreadKindLabel(item.threadKind)}${item.threadKind === 'reader_exchange' && item.replyDisplayName ? `（${item.displayName || '读者A'} → ${item.replyDisplayName}）` : ''}` : '',
   item.kind || item.answerKind ? `> 节点类型：提问=${item.kind ? commentNodeKindLabel(item.kind) : '问题（默认）'}；答复=${item.answerKind ? commentNodeKindLabel(item.answerKind) : '回答（默认）'}` : '',
   item.boundary ? `> 答复边界：${item.boundary}` : '',
   item.evidenceIds?.length ? `> 证据引用：${item.evidenceIds.join('、')}` : '',

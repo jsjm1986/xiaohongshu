@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type {
+  CommentThreadKind,
   ContentChannel,
   CoverageSignature,
   DialogueThreadPlan,
@@ -566,6 +567,18 @@ export function assignCommentDisplayName(seed: number, salt: string, used: Reado
     if (!used.has(candidate)) return candidate;
   }
   return `${COMMENT_NICKNAME_POOL[start]!}·${used.size + 1}`;
+}
+
+/**
+ * 线程级互动形态(读者互动层)的确定性分配:hashUnit(seed, salt) 一次抽取,
+ * 同种子同盐必同结果。不设死比例——每线程独立抽取,包内配比自然涌现;
+ * 营销话头 gap(marketingTopic=true,即答复分流为助理 staff 的话题)的线程
+ * org_answer 概率自然偏高,因为价格/预约等动态信息必须由可追责身份承接。
+ */
+export function assignCommentThreadKind(seed: number, salt: string, marketingTopic: boolean): CommentThreadKind {
+  const unit = hashUnit(seed, salt);
+  if (marketingTopic) return unit < 0.8 ? "org_answer" : unit < 0.97 ? "reader_exchange" : "organic_reaction";
+  return unit < 0.55 ? "org_answer" : unit < 0.85 ? "reader_exchange" : "organic_reaction";
 }
 
 function strategyWeight(strategy: ExpressionStrategy, recent: CoverageSignature[], cooldown: number): number {
@@ -1264,8 +1277,41 @@ function dialoguePlans(
   // strategy's commentMode carries one (see deriveThreadFunction).
   const counterexampleAllowed = strategy.commentMode.includes("counterexample");
   let counterexampleAssigned = false;
+  // 读者互动层:线程级互动形态(org_answer 机构问答 / reader_exchange 读者互聊 /
+  // organic_reaction 漂浮短反应)按种子确定性预分配——每线程独立抽取,不设死
+  // 比例;营销话头 gap(答复分流为 staff)的线程 T1 概率自然偏高。
+  const rawThreadKinds = Array.from({ length: targetCount }, (_, index) => {
+    const gap = primaryOrdered[index % primaryOrdered.length]!;
+    const marketingTopic = routeReplyPostingIdentity(gap, replyRouting.claimRules) === "staff";
+    return assignCommentThreadKind(seed, `thread-kind:${strategy.id}_thread_${index + 1}`, marketingTopic);
+  });
+  // T2 可行性:读者互聊需要两个不同 displayRole 的可见角色,角色池不足时
+  // 确定性退化为 T1 机构问答。
+  const readerExchangeFeasible = new Set(personaScenePlan.commentCast.map((role) => role.displayRole)).size >= 2;
+  const threadKinds: CommentThreadKind[] = rawThreadKinds.map((kind) =>
+    kind === "reader_exchange" && !readerExchangeFeasible ? "org_answer" : kind);
+  // T3 规划为 1-3 条:超过 3 条按确定性顺序降级多余条;targetCount>=3 且一条
+  // 都没抽到时,从 T2 线程里确定性提拔一条(不挤占 T1 机构问答)。
+  const organicIndexes = threadKinds
+    .map((kind, index) => (kind === "organic_reaction" ? index : -1))
+    .filter((index) => index >= 0)
+    .sort((left, right) => hashUnit(seed, `organic-order:${left}`) - hashUnit(seed, `organic-order:${right}`));
+  for (const dropped of organicIndexes.slice(3)) {
+    threadKinds[dropped] = readerExchangeFeasible ? "reader_exchange" : "org_answer";
+  }
+  if (organicIndexes.length === 0 && targetCount >= 3) {
+    const promotable = threadKinds
+      .map((kind, index) => (kind === "reader_exchange" ? index : -1))
+      .filter((index) => index >= 0)
+      .sort((left, right) => hashUnit(seed, `organic-promote:${left}`) - hashUnit(seed, `organic-promote:${right}`));
+    if (promotable[0] !== undefined) threadKinds[promotable[0]] = "organic_reaction";
+  }
+  // T3 漂浮短反应不生长(见 conversationPlan),多轮/深轮候选池只从非 T3 线程
+  // 抽取,保证 commentNetwork.multiTurnTarget 的生长下限不会落在不生长的线程上。
+  const growableIndexes = Array.from({ length: targetCount }, (_, index) => index)
+    .filter((index) => threadKinds[index] !== "organic_reaction");
   const multiTurnIndexes = new Set(
-    Array.from({ length: targetCount }, (_, index) => index)
+    growableIndexes
       .sort((left, right) => hashUnit(seed, `multi-turn:${left}`) - hashUnit(seed, `multi-turn:${right}`))
       .slice(0, multiTurnCount),
   );
@@ -1289,9 +1335,10 @@ function dialoguePlans(
     : 0;
   return Array.from({ length: targetCount }, (_, index) => {
     const threadId = `${strategy.id}_thread_${index + 1}`;
+    const threadKind = threadKinds[index]!;
+    const gap = primaryOrdered[index % primaryOrdered.length]!;
     const displayName = assignCommentDisplayName(seed, `nickname:${threadId}`, usedDisplayNames);
     usedDisplayNames.add(displayName);
-    const gap = primaryOrdered[index % primaryOrdered.length]!;
     const roleStage = roleStages[Math.floor(hashUnit(seed, `role-stage:${index}`) * roleStages.length)] ?? opportunity.audienceStage;
     const stagePersonas = personasByStage[roleStage];
     const personaOffset = roleDiversity >= 40 ? Math.floor(hashUnit(seed, `persona:${index}`) * stagePersonas.length) : 0;
@@ -1316,7 +1363,30 @@ function dialoguePlans(
     // boundary 与已声明边界）保持原样，只替换模板兜底字面。
     const threadFunction = deriveThreadFunction(gap, counterexampleAllowed && !counterexampleAssigned);
     if (threadFunction === "counterexample") counterexampleAssigned = true;
-    const surfaceRoleCard = personaScenePlan.commentCast[roleOrder[index % roleOrder.length]!]!;
+    const castSurfaceRoleCard = personaScenePlan.commentCast[roleOrder[index % roleOrder.length]!]!;
+    // T3 漂浮短反应来自围观共鸣型角色:优先 utteranceMode=social_reaction 的
+    // 可见角色,并把公开长度软目标收敛到 4-20 字。
+    const surfaceRoleCard = threadKind === "organic_reaction"
+      ? {
+          ...(roleOrder
+            .map((roleIndex) => personaScenePlan.commentCast[roleIndex]!)
+            .find((role) => role.utteranceMode === "social_reaction")
+            ?? castSurfaceRoleCard),
+          targetChars: [4, 20] as [number, number],
+        }
+      : castSurfaceRoleCard;
+    // T2 读者互聊:接话读者 B 必须与开口者 A 不同 displayRole(readerExchangeFeasible
+    // 已保证找得到)、不同昵称(类型分配先于昵称分配);B 接话范围限其
+    // permittedContribution,在 conversationPlan.replyMove 与 2A 提示词中生效。
+    const replySurfaceRoleCard = threadKind === "reader_exchange"
+      ? roleOrder
+        .map((roleIndex) => personaScenePlan.commentCast[roleIndex]!)
+        .find((role) => role.displayRole !== surfaceRoleCard.displayRole)
+      : undefined;
+    const replyDisplayName = threadKind === "reader_exchange"
+      ? assignCommentDisplayName(seed, `nickname:${threadId}:reader:b`, usedDisplayNames)
+      : undefined;
+    if (replyDisplayName) usedDisplayNames.add(replyDisplayName);
     const personaRole = stagePersonas[personaOffset] ?? personas[index % personas.length]!;
     const variantSalt = `${index}:${threadFunction}:${surfaceRoleCard.utteranceMode}:${personaRole}`;
     const pickVariant = (pool: readonly string[], field: string) =>
@@ -1459,6 +1529,10 @@ function dialoguePlans(
       questionIntent = `${baseQuestionIntent.replace(/[？?]+$/u, "")}，从${roleStage}阶段还缺哪项输入？`;
     }
     usedQuestionIntents.add(comparableQuestion(questionIntent));
+    // T3 漂浮短反应:开口意图是一条 4-20 字短共鸣,不提问、不答题、不需要机构回复。
+    if (threadKind === "organic_reaction") {
+      questionIntent = `只留一句4-20字的短共鸣（如“蹲一个”“码住”“姐妹我也是”），围绕“${gap.label}”同款处境，不提问、不答题、不需要机构回复`;
+    }
     // M7 per-mechanism ruling — 需求 7.6 / design 组件 E · E1: discoveryPlan STRUCTURE = (c)
     // no traceable evidence → DOWNGRADED to optional (task 7.1). Its derived *safety* checks
     // (不扣留信息 / 不伪闭合 / 发现感≠证据) carry (b) value and are RETAINED at `error` level in
@@ -1487,13 +1561,24 @@ function dialoguePlans(
       difficulty: inferenceEffort >= 40 ? "moderate" : "low",
     };
     const wantsFollowUp = multiTurnIndexes.has(index);
-    const targetFollowUps = (!wantsFollowUp || config.content.followUpDepth === 0)
+    const plannedFollowUps = (!wantsFollowUp || config.content.followUpDepth === 0)
       ? 0
       : Math.min(2, config.content.followUpDepth, deepTurnIndexes.has(index) ? 2 : 1) as 1 | 2;
-    const extensionGapId = branchingStrength >= 45 ? auxiliaryGapIds[0] : undefined;
-    const topology: NonNullable<DialogueThreadPlan["conversationPlan"]>["topology"] = targetFollowUps === 0
-      ? (surfaceRoleCard.utteranceMode === "social_reaction" ? "reaction_then_reply" : "single_exchange")
-      : targetFollowUps === 2 ? "three_person_branch" : "two_turn";
+    // 读者互动层:T3 漂浮短反应不生长;T2 读者互聊最多再接一轮(读者对读者
+    // 或机构按 postingIdentity 插话一次);T1 机构问答维持原多轮逻辑。
+    const targetFollowUps = threadKind === "organic_reaction"
+      ? 0 as const
+      : threadKind === "reader_exchange"
+        ? Math.min(1, plannedFollowUps) as 0 | 1
+        : plannedFollowUps;
+    const extensionGapId = threadKind === "org_answer" && branchingStrength >= 45 ? auxiliaryGapIds[0] : undefined;
+    const topology: NonNullable<DialogueThreadPlan["conversationPlan"]>["topology"] = threadKind === "organic_reaction"
+      ? "organic_reaction"
+      : threadKind === "reader_exchange"
+        ? "reader_exchange"
+        : targetFollowUps === 0
+          ? (surfaceRoleCard.utteranceMode === "social_reaction" ? "reaction_then_reply" : "single_exchange")
+          : targetFollowUps === 2 ? "three_person_branch" : "two_turn";
     // M7 per-mechanism ruling — 需求 7.6 / design 组件 E · E1: conversationPlan = derived,
     // NON-required. Evidence is (c)/weak, but it is cheap and *derived* from the already-decided
     // followUp count (targetFollowUps) rather than an extra input or LLM call, and no `error`-level
@@ -1501,20 +1586,34 @@ function dialoguePlans(
     const conversationPlan: NonNullable<DialogueThreadPlan["conversationPlan"]> = {
       topology,
       targetFollowUps,
-      openingMove: `${surfaceRoleCard.displayRole}以“${surfaceRoleCard.interactionHook}”开口；${surfaceRoleCard.lexicalCues.length ? `可择一参考语域：${surfaceRoleCard.lexicalCues.join("、")}` : "使用普通口语"}`,
-      replyMove: surfaceRoleCard.utteranceMode === "knowledge_translation"
-        ? "可追责身份先用人话回答，再留一个会改变答案的条件"
-        : "楼主只接住对方真正关心的一点，延续正文人物声音，不做完整讲座",
-      extensionMove: targetFollowUps === 0
-        ? (organicVariation >= 70 ? "允许这一支停在自然反应，不强行收口" : "本支一次回复结束")
-        : extensionGapId
-          ? `下一人必须抓住上句中的一个具体词，再自然带出相邻缺口 ${extensionGapId}`
-          : "下一人只围绕上句新出现的条件继续问，不得凭空换题",
+      openingMove: threadKind === "organic_reaction"
+        ? `${surfaceRoleCard.displayRole}留一条4-20字短共鸣（如“蹲一个”“码住”），不提问、不答题`
+        : `${surfaceRoleCard.displayRole}以“${surfaceRoleCard.interactionHook}”开口；${surfaceRoleCard.lexicalCues.length ? `可择一参考语域：${surfaceRoleCard.lexicalCues.join("、")}` : "使用普通口语"}`,
+      replyMove: threadKind === "organic_reaction"
+        ? "无回答需求，机构不出现"
+        : threadKind === "reader_exchange"
+          ? `${replySurfaceRoleCard?.displayRole ?? "另一位读者"}以模拟读者身份接话，只说自己的处境、感受、疑问或轻反应，范围限「${replySurfaceRoleCard?.permittedContribution ?? "自身处境与感受"}」；不讲项目事实、价格数字、效果证词或机构信息`
+          : surfaceRoleCard.utteranceMode === "knowledge_translation"
+            ? "可追责身份先用人话回答，再留一个会改变答案的条件"
+            : "楼主只接住对方真正关心的一点，延续正文人物声音，不做完整讲座",
+      extensionMove: threadKind === "organic_reaction"
+        ? "本支为漂浮短反应，不生长"
+        : threadKind === "reader_exchange"
+          ? (targetFollowUps > 0
+            ? "读者对读者继续接话，或机构按 postingIdentity 插话一次；读者发言仍只谈处境与感受"
+            : "读者互聊一轮自然停住，机构可不出现")
+          : targetFollowUps === 0
+            ? (organicVariation >= 70 ? "允许这一支停在自然反应，不强行收口" : "本支一次回复结束")
+            : extensionGapId
+              ? `下一人必须抓住上句中的一个具体词，再自然带出相邻缺口 ${extensionGapId}`
+              : "下一人只围绕上句新出现的条件继续问，不得凭空换题",
       ...(extensionGapId ? { extensionGapId } : {}),
     };
     return {
       id: threadId,
       displayName,
+      threadKind,
+      ...(replyDisplayName ? { replyDisplayName } : {}),
       gapId: gap.gapId,
       stage: roleStage,
       function: threadFunction,
@@ -1536,9 +1635,13 @@ function dialoguePlans(
       boundaryRequired: Boolean(gap.boundary),
       personaRole,
       speakerType: "simulated_reader",
-      claimStatus: gap.answer && gap.evidenceIds.length
-        ? "verified"
-        : gap.answer || gap.framework ? "bounded" : gap.evidenceIds.length ? "bounded" : "unknown",
+      // T2/T3 的发言方是模拟读者,声明状态一律 hypothetical(创作参考,
+      // 不算证据);T1 机构问答维持证据驱动的 verified/bounded/unknown。
+      claimStatus: threadKind !== "org_answer"
+        ? "hypothetical"
+        : gap.answer && gap.evidenceIds.length
+          ? "verified"
+          : gap.answer || gap.framework ? "bounded" : gap.evidenceIds.length ? "bounded" : "unknown",
       replyTo: null,
       threadDepth: 0,
       simulated: true,
@@ -1570,6 +1673,7 @@ function dialoguePlans(
       discoveryPlan,
       conversationPlan,
       surfaceRoleCard: threadSurfaceRoleCard,
+      ...(replySurfaceRoleCard ? { replySurfaceRoleCard } : {}),
     };
   });
 }

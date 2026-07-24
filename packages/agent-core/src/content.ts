@@ -53,6 +53,17 @@ function commentNodeKind(value: unknown): CommentNodeKind | undefined {
 }
 
 /**
+ * 读者互动层:线程级互动形态归一化。缺省或不可识别的值一律按
+ * org_answer(机构问答)处理——历史包没有 threadKind 字段,校验、渲染与导出
+ * 都按 T1 理解,不出错。
+ */
+export function commentThreadKindOf(thread: { threadKind?: string }): "org_answer" | "reader_exchange" | "organic_reaction" {
+  return thread.threadKind === "reader_exchange" || thread.threadKind === "organic_reaction"
+    ? thread.threadKind
+    : "org_answer";
+}
+
+/**
  * Lenient optional-field read: a legal thread function, otherwise absent.
  * Used by the staged parser and by the engine's bind step, where an illegal
  * model-stated value silently falls back to the planning derivation (P3-15).
@@ -1038,8 +1049,13 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     // capacity is unsatisfiable; the honest expectation floor is the
     // capacity-clamped target, matching what the planner itself scheduled.
     const followUpLineCapacity = Math.max(0, Math.floor((surfacePlan.surfaceTargets.visibleCommentLines[1] - threadCount * 2) / 2));
-    const effectiveGrowingMin = Math.min(threadCount, targetGrowingMin, followUpLineCapacity);
-    const effectiveGrowingMax = Math.min(threadCount, Math.max(effectiveGrowingMin, targetGrowingMax));
+    // 读者互动层:T3 漂浮短反应按设计不生长(followUps 恒为空),生长下限只
+    // 落在可生长的线程(T1/T2)上;这是与行数容量同类的诚实下限收敛。
+    const growableThreadCount = draft.content.Cref.threads
+      .filter((thread) => commentThreadKindOf(thread) !== "organic_reaction")
+      .length;
+    const effectiveGrowingMin = Math.min(growableThreadCount, targetGrowingMin, followUpLineCapacity);
+    const effectiveGrowingMax = Math.min(growableThreadCount, Math.max(effectiveGrowingMin, targetGrowingMax));
     const actualGrowingThreads = draft.content.Cref.threads.filter((thread) => thread.followUps.length > 0).length;
     if (actualGrowingThreads < effectiveGrowingMin) {
       // P4-20: with the growth switch on and a non-zero multi-turn target the
@@ -1186,10 +1202,14 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
   // 双号运营:助理(staff)答复中的承诺类营销表述(不一定带数字,敏感声明检查
   // 不一定覆盖),配合 genericMeasuredClaim 与受控声明 terms 一起做锚定复核。
   const marketingPromiseClaim = /(?:优惠|折扣|免费|赠送|包干|保证|承诺|退款|名额|套餐|秒杀|团购|立减|满减|到店礼|活动价)/u;
+  // 读者互动层:T2 读者互聊/T3 漂浮短反应的 answer 是模拟读者发言(或空串),
+  // 不进入 error 级受控声明扫描;T2 读者发言命中受控声明由 warning 级
+  // reader_exchange_controlled_claim 承接(见下方逐线程检查)。
+  const orgAnsweredThreads = draft.content.Cref.threads.filter((thread) => commentThreadKindOf(thread) === "org_answer");
   const sensitiveSurfaces: Array<{ location: NonNullable<GenerationDraft["reasoning"][number]["location"]>; text: string }> = [
     { location: "N.body", text: draft.content.N.body },
-    ...draft.content.Cref.threads.map((thread) => ({ location: "Cref.thread" as const, text: thread.answer })),
-    ...draft.content.Cref.threads.flatMap((thread) => thread.followUps.map((followUp) => ({ location: "Cref.followUp" as const, text: followUp.answer }))),
+    ...orgAnsweredThreads.map((thread) => ({ location: "Cref.thread" as const, text: thread.answer })),
+    ...orgAnsweredThreads.flatMap((thread) => thread.followUps.map((followUp) => ({ location: "Cref.followUp" as const, text: followUp.answer }))),
   ];
   for (const surface of sensitiveSurfaces) {
     for (const statement of surface.text.split(/(?<=[。！？!?；;])|\n+/u).map((item) => item.trim()).filter(Boolean)) {
@@ -1243,13 +1263,16 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
   const hostDeclaresIntent = hostIntentPattern.test(draft.content.N.body)
     && !claimsFirstPersonCompletion(draft.content.N.body);
   for (const thread of draft.content.Cref.threads) {
+    // 读者互动层:T1 机构问答(缺省)/ T2 读者互聊 / T3 漂浮短反应。
+    const threadKind = commentThreadKindOf(thread);
     const missingThreadFields = [
       !thread.stage ? "Stage" : "",
       !thread.gap ? "Gap" : "",
       !thread.function ? "Function" : "",
       !thread.question ? "Q" : "",
-      !thread.answer ? "A" : "",
-      !thread.nextStep ? "Next" : "",
+      // T3 漂浮短反应无回答需求:answer 为空、无下一步属正常形态,不算缺漏。
+      threadKind !== "organic_reaction" && !thread.answer ? "A" : "",
+      threadKind !== "organic_reaction" && !thread.nextStep ? "Next" : "",
       !thread.postingIdentity ? "Role" : "",
     ].filter(Boolean);
     if (missingThreadFields.length) {
@@ -1298,8 +1321,9 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     // 知识库。锚定判定沿用 sensitive_claim_without_evidence 的证据机制(fact
     // 台账 + sourceSpans + conservativeEvidenceSupport);不可锚定不阻断生成
     // (受控声明仍由 error 级 sensitive_claim_without_evidence 拦截),而是
-    // warning 提示人工复核出处。
-    if (thread.postingIdentity === "staff") {
+    // warning 提示人工复核出处。读者互动层:T2/T3 的 answer 不是助理发言,
+    // 其读者侧受控声明由 reader_exchange_controlled_claim 承接。
+    if (threadKind === "org_answer" && thread.postingIdentity === "staff") {
       const staffSurfaces: Array<{ location: "Cref.thread" | "Cref.followUp"; text: string }> = [
         { location: "Cref.thread", text: thread.answer },
         ...thread.followUps.map((followUp) => ({ location: "Cref.followUp" as const, text: followUp.answer })),
@@ -1320,13 +1344,42 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
         }
       }
     }
+    // 读者互动层:T2 读者互聊中,读者侧(A 开口、B 接话及后续读者发言)命中受控
+    // 声明词表(价格/机构/效果类,即 requiresEvidence 规则词、度量数字、营销承诺
+    // 词)→ warning 提示人工复核;证词形态(已完成项目动作 + 效果证词)→ error,
+    // 复用 fabricated_operational_experience 语义。T3 漂浮短反应只查证词形态。
+    if (threadKind === "reader_exchange" || threadKind === "organic_reaction") {
+      const readerNodes = [
+        thread.question,
+        thread.answer,
+        ...thread.followUps.flatMap((followUp) => [followUp.question, followUp.answer]),
+      ];
+      const readerTestimonial = readerNodes.find((node) =>
+        /(?:我|本人).{0,12}(?:做了|做过|买过了?|用过|体验过).{0,12}(?:效果|恢复|满意|值|靠谱)/u.test(node)
+        || /(?:效果(?:很好|真的不错|超预期)|恢复得(?:很好|很快)|亲测(?:有效|好用|靠谱))/u.test(node));
+      if (readerTestimonial) {
+        add("fabricated_operational_experience", "error", "Cref", `A simulated reader in a ${threadKind} thread claims a completed project action or effect testimonial, which reader-to-reader speech must never carry: ${readerTestimonial}`);
+      }
+      if (threadKind === "reader_exchange") {
+        for (const node of readerNodes) {
+          for (const statement of node.split(/(?<=[。！？!?；;])|\n+/u).map((item) => item.trim()).filter(Boolean)) {
+            const controlledHit = genericMeasuredClaim.test(statement)
+              || marketingPromiseClaim.test(statement)
+              || controlledRules.some((rule) => rule.terms.some((term) => term && statement.includes(term)));
+            if (!controlledHit || /[？?]$/u.test(statement)) continue;
+            add("reader_exchange_controlled_claim", "warning", "Cref", `Thread ${thread.id} reader-to-reader speech carries a controlled project claim (price/org/effect); a reader may only speak their own situation, feelings and questions — route to human review: ${statement}`, false);
+          }
+        }
+      }
+    }
     // P4-19: while the body only declares host intent, the publisher answer
     // side must not claim a completed first-person action. The question side
     // of simulated readers is covered by fabricated_operational_experience
     // (same host-state signal, question-side nodes only). Scoped to the
     // publisher identity: brand/staff/expert answers speak for the
     // organization, where first-person completion is a different claim class.
-    if (hostDeclaresIntent && thread.postingIdentity === "publisher") {
+    // 读者互动层:T2/T3 的 answer 是模拟读者发言(或空串),不按楼主声音校验。
+    if (hostDeclaresIntent && threadKind === "org_answer" && thread.postingIdentity === "publisher") {
       const completionAnswer = [thread.answer, ...thread.followUps.map((followUp) => followUp.answer)]
         .find((answerText) => claimsFirstPersonCompletion(answerText));
       if (completionAnswer) {
@@ -1506,10 +1559,14 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     .flatMap((reference) => [reference.quote, ...(reference.quotedSpans ?? [])])
     .filter((quote): quote is string => typeof quote === "string" && quote.trim().length >= 4);
   if (knowledgeQuotes.length) {
-    const answerSurfaces = draft.content.Cref.threads.flatMap((thread) => [
-      { threadId: thread.id, text: thread.answer },
-      ...thread.followUps.map((followUp) => ({ threadId: thread.id, text: followUp.answer })),
-    ]);
+    // 读者互动层:只有 T1 机构问答的答复侧可能是知识口径声明;T2/T3 的
+    // answer 是模拟读者发言(或空串),不参与知识重合记账复核。
+    const answerSurfaces = draft.content.Cref.threads
+      .filter((thread) => commentThreadKindOf(thread) === "org_answer")
+      .flatMap((thread) => [
+        { threadId: thread.id, text: thread.answer },
+        ...thread.followUps.map((followUp) => ({ threadId: thread.id, text: followUp.answer })),
+      ]);
     const warnedSegments = new Set<string>();
     for (const surface of answerSurfaces) {
       const segments = surface.text

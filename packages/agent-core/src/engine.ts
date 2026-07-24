@@ -865,9 +865,20 @@ function deterministicDraft(
       }
       return fallback;
     };
-    const question = pickDistinct(questions, usedNaturalQuestions, rawQuestion);
+    // 读者互动层:T3 漂浮短反应从 4-20 字短共鸣池取开口,answer 为空(无回答
+    // 需求);T2 读者互聊的 answer 是读者 B 的接话,不用机构答复模板。
+    const threadKind = planned?.threadKind ?? "org_answer";
+    const organicReactionTable = Object.fromEntries(utteranceModePool.map((mode, modeIndex) =>
+      [mode, ["蹲一个", "姐妹我也是", "码住慢慢看", "先收藏了", "看看后续怎么说"][modeIndex % 5]!]));
+    const question = threadKind === "organic_reaction"
+      ? pickDistinct(organicReactionTable, usedNaturalQuestions, "蹲一个")
+      : pickDistinct(questions, usedNaturalQuestions, rawQuestion);
     usedNaturalQuestions.add(comparable(question));
-    const answer = pickDistinct(ungroundedGap ? unknownAnswerVariants : answers, usedNaturalAnswers, rawAnswer);
+    const answer = threadKind === "organic_reaction"
+      ? ""
+      : threadKind === "reader_exchange"
+        ? pickDistinct(answers, usedNaturalAnswers, "姐妹我也是，还在纠结要不要去问问")
+        : pickDistinct(ungroundedGap ? unknownAnswerVariants : answers, usedNaturalAnswers, rawAnswer);
     usedNaturalAnswers.add(comparable(answer));
     const plannedFollowUps = planned?.conversationPlan?.targetFollowUps ?? 0;
     const fallbackFollowUpLines = [
@@ -923,6 +934,9 @@ function deterministicDraft(
       discoveryPlan: planned?.discoveryPlan,
       conversationPlan: planned?.conversationPlan,
       surfaceRoleCard: surface,
+      threadKind,
+      replyDisplayName: planned?.replyDisplayName,
+      replySurfaceRoleCard: planned?.replySurfaceRoleCard,
     };
   }) : [];
   const personaQuestion = (planned: OrchestrationPlan["dialogueThreads"][number] | undefined, gap: string): string => {
@@ -980,6 +994,11 @@ function deterministicDraft(
       question = `${rawQuestion.replace(/[？?]+$/u, "")}，还要核实第${index + 1}项什么？`;
     }
     usedCommentQuestions.add(normalizedQuestion(question));
+    // 读者互动层:T3 漂浮短反应的开口为 4-20 字短共鸣,不走缺口问句模板。
+    const threadKind = planned?.threadKind ?? "org_answer";
+    if (threadKind === "organic_reaction") {
+      question = ["蹲一个", "姐妹我也是", "码住慢慢看", "先收藏了"][index % 4]!;
+    }
     const requirement = (prefix: string, fallback: string): string =>
       planned?.answerRequirements.find((item) => item.startsWith(`${prefix}：`))?.slice(prefix.length + 1) || fallback;
     const directAnswer = (planned?.replyPlan.directAnswer ?? requirement("DirectAnswer", primaryEvidence ? "先按已披露资料核实主缺口" : "当前资料不足，不能直接下结论"))
@@ -1025,9 +1044,13 @@ function deterministicDraft(
       `${unknownGapLead}先看${naturalCondition}：${directAnswer}。${unknown}；${boundary}。下一步确认${nextQuestion}。`,
       `${unknownGapLead}${directAnswer}。比较时单独核实${naturalCondition}；${unknown}。${boundary}，再看${nextQuestion}。`,
     ];
-    const answer = method.commentReplyIncrement >= 70
-      ? richAnswerVariants[index % richAnswerVariants.length]!
-      : compactAnswerVariants[index % compactAnswerVariants.length]!;
+    const answer = threadKind === "organic_reaction"
+      ? ""
+      : threadKind === "reader_exchange"
+        ? "姐妹我也是，还在纠结要不要去问问"
+        : method.commentReplyIncrement >= 70
+          ? richAnswerVariants[index % richAnswerVariants.length]!
+          : compactAnswerVariants[index % compactAnswerVariants.length]!;
     const followUpQuestions = [
       [`${nextQuestion}具体怎么核实？`, `如果${naturalCondition}还没确定怎么办？`],
       [`核实${nextQuestion}时先看什么？`, `什么情况会让上面的判断改变？`],
@@ -1045,7 +1068,7 @@ function deterministicDraft(
       function: planned?.function ?? (method.commentConditionality >= 70 ? "clarify" as const : "answer" as const),
       question,
       answer,
-      followUps: Array.from({ length: Math.max(0, config.content.followUpDepth - 1) }, (__, followUpIndex) => ({
+      followUps: threadKind === "organic_reaction" ? [] : Array.from({ length: Math.max(0, config.content.followUpDepth - 1) }, (__, followUpIndex) => ({
         question: followUpQuestions[followUpIndex % followUpQuestions.length]!,
         answer: followUpAnswers[followUpIndex % followUpAnswers.length]!,
         evidenceIds: [],
@@ -1075,6 +1098,9 @@ function deterministicDraft(
       replyPlan: planned?.replyPlan,
       discoveryPlan: planned?.discoveryPlan,
       surfaceRoleCard: planned?.surfaceRoleCard,
+      threadKind,
+      replyDisplayName: planned?.replyDisplayName,
+      replySurfaceRoleCard: planned?.replySurfaceRoleCard,
     };
   });
   // Cref contract v1.1 (demo): assemble a deterministic publisher-owned first
@@ -1219,8 +1245,10 @@ function bindDialogueProvenance(
   );
   // 展示昵称(纯展示元数据):计划侧昵称先占坑,缺失时按同一盐确定性补算;
   // 追问接话人按 `nickname:${threadId}:fu:${index}` 分配,包内去重顺延。
+  // T2 读者互聊的接话读者 B 昵称(计划侧 replyDisplayName)同样先占坑。
   const usedDisplayNames = new Set(
-    plan.dialogueThreads.map((planned) => planned.displayName).filter((name): name is string => Boolean(name)),
+    plan.dialogueThreads.flatMap((planned) => [planned.displayName, planned.replyDisplayName])
+      .filter((name): name is string => Boolean(name)),
   );
   const remappedReasoning = draft.reasoning.map((item) => item.occurrence?.threadId
     ? {
@@ -1242,6 +1270,9 @@ function bindDialogueProvenance(
     .replace(/；。/gu, "。")
     .trim();
   const answerFromPlan = (planned: OrchestrationPlan["dialogueThreads"][number]): string => {
+    // 读者互动层:T3 漂浮短反应无回答需求(空串);T2 读者互聊由读者 B 接话。
+    if (planned.threadKind === "organic_reaction") return "";
+    if (planned.threadKind === "reader_exchange") return "姐妹我也是，还在纠结要不要去问问";
     const surface = planned.surfaceRoleCard;
     if (surface?.utteranceMode === "social_reaction") return "哈哈我也是今天才注意到";
     if (surface?.utteranceMode === "detail_spotter") return "对，我也是看照片才注意到这个";
@@ -1287,6 +1318,13 @@ function bindDialogueProvenance(
     const threadDisplayName = planned.displayName
       ?? assignCommentDisplayName(plan.seed, `nickname:${planned.id}`, usedDisplayNames);
     usedDisplayNames.add(threadDisplayName);
+    // 读者互动层:线程形态透传(缺省 org_answer);T2 接话读者 B 的昵称优先取
+    // 计划侧,缺失时按同一盐确定性补算,包内去重。
+    const threadKind = planned.threadKind ?? "org_answer";
+    const replyDisplayName = threadKind === "reader_exchange"
+      ? (planned.replyDisplayName ?? assignCommentDisplayName(plan.seed, `nickname:${planned.id}:reader:b`, usedDisplayNames))
+      : undefined;
+    if (replyDisplayName) usedDisplayNames.add(replyDisplayName);
     const followUps = base.followUps.map((followUp, followUpIndex) => {
       const followUpDisplayName = assignCommentDisplayName(plan.seed, `nickname:${planned.id}:fu:${followUpIndex}`, usedDisplayNames);
       usedDisplayNames.add(followUpDisplayName);
@@ -1310,6 +1348,8 @@ function bindDialogueProvenance(
       ...base,
       id: planned.id,
       displayName: threadDisplayName,
+      threadKind,
+      ...(replyDisplayName ? { replyDisplayName } : {}),
       question,
       answer,
       // Cref contract v1.1: keep model-stated dialogic kinds/boundary; when the
@@ -1349,6 +1389,12 @@ function bindDialogueProvenance(
       discoveryPlan: planned.discoveryPlan ? { ...planned.discoveryPlan } : undefined,
       conversationPlan: realizedConversation ? { ...realizedConversation } : undefined,
       surfaceRoleCard: selectedSurface ? { ...selectedSurface, targetChars: [...selectedSurface.targetChars] as [number, number] } : undefined,
+      ...(planned.replySurfaceRoleCard ? {
+        replySurfaceRoleCard: {
+          ...planned.replySurfaceRoleCard,
+          targetChars: [...planned.replySurfaceRoleCard.targetChars] as [number, number],
+        },
+      } : {}),
     };
   });
   // Plan-level uncovered-gap projection (Cref contract v1.1): a gap selected
@@ -1835,19 +1881,27 @@ export class ContentGenerationAgent implements GenerationEngine {
           threads: deterministicBase.content.Cref.threads.map((base, threadIndex) => {
             const visible = comments.threads[threadIndex]!;
             const root = normalizedRoots.threads[threadIndex]!;
-            const followUps = visible.followUps.slice(0, Math.min(input.config.content.followUpDepth, remainingFollowUps));
+            // T3 漂浮短反应不生长:模型多写了也确定性截为空。
+            const followUps = base.threadKind === "organic_reaction"
+              ? []
+              : visible.followUps.slice(0, Math.min(input.config.content.followUpDepth, remainingFollowUps));
             remainingFollowUps -= followUps.length;
             const rootAnswer = root.answer.split(/\n\s*(?:追问|Q\d*)[：:]/iu)[0]?.trim() || root.answer.trim();
             const cast = orchestrationPlan.personaScenePlan?.commentCast ?? [];
             const selectedRoleIndex = root.roleIndex ?? threadIndex % Math.max(1, cast.length);
             const selectedSurface = cast[selectedRoleIndex] ?? base.surfaceRoleCard;
-            const topology = followUps.length >= 2
-              ? "three_person_branch" as const
-              : followUps.length === 1
-                ? "two_turn" as const
-                : selectedSurface?.utteranceMode === "social_reaction"
-                  ? "reaction_then_reply" as const
-                  : "single_exchange" as const;
+            // 读者互动层:T2/T3 线程的对话拓扑由线程形态决定,不随接话数漂移。
+            const topology = base.threadKind === "organic_reaction"
+              ? "organic_reaction" as const
+              : base.threadKind === "reader_exchange"
+                ? "reader_exchange" as const
+                : followUps.length >= 2
+                  ? "three_person_branch" as const
+                  : followUps.length === 1
+                    ? "two_turn" as const
+                    : selectedSurface?.utteranceMode === "social_reaction"
+                      ? "reaction_then_reply" as const
+                      : "single_exchange" as const;
             return {
               ...base,
               id: root.id,

@@ -307,16 +307,36 @@ function renderCrefV11TwoPartMarkdown(pkg: JsonObject): string {
     lines.push('_未提供问答话术_', '');
   } else {
     threads.forEach((thread, index) => {
+      // 读者互动层:T2 读者互聊的「回复」位是读者 B 接话;T3 漂浮短反应无回答
+      // 需求;T1(含历史包缺省 threadKind)维持机构问答格式。
+      const threadKind = text(thread.threadKind);
       const replyOrg = commentReplyOrgName(thread);
-      lines.push(
-        `### 话术 ${index + 1}`,
-        '',
-        `- 提问：${commentNicknamePrefix(thread.displayName)}${text(thread.question) || '未提供'}`,
-        `- 回复：${replyOrg ? `${replyOrg}：` : ''}${text(thread.answer) || '未提供'}`,
-        `- 可追责答复身份：${postingIdentityText(thread.postingIdentity) || '未标注'}`,
-      );
-      if (text(thread.boundary)) lines.push(`- 答复边界：${text(thread.boundary)}`);
-      if (text(thread.nextStep)) lines.push(`- 下一步：${text(thread.nextStep)}`);
+      if (threadKind === 'organic_reaction') {
+        lines.push(
+          `### 话术 ${index + 1}（漂浮短反应）`,
+          '',
+          `- 漂浮反应：${commentNicknamePrefix(thread.displayName)}${text(thread.question) || '未提供'}`,
+          '- 无需机构回复（4-20 字短共鸣，机构不出现）',
+        );
+      } else if (threadKind === 'reader_exchange') {
+        lines.push(
+          `### 话术 ${index + 1}（读者互聊）`,
+          '',
+          `- 提问：${commentNicknamePrefix(thread.displayName)}${text(thread.question) || '未提供'}`,
+          `- 读者接话：${commentNicknamePrefix(thread.replyDisplayName)}${text(thread.answer) || '未提供'}`,
+          `- 互动类型：读者互聊（模拟读者之间接话，不谈项目事实；真实问题由${postingIdentityText(thread.postingIdentity) || '可追责发布者'}承接）`,
+        );
+      } else {
+        lines.push(
+          `### 话术 ${index + 1}`,
+          '',
+          `- 提问：${commentNicknamePrefix(thread.displayName)}${text(thread.question) || '未提供'}`,
+          `- 回复：${replyOrg ? `${replyOrg}：` : ''}${text(thread.answer) || '未提供'}`,
+          `- 可追责答复身份：${postingIdentityText(thread.postingIdentity) || '未标注'}`,
+        );
+      }
+      if (threadKind !== 'organic_reaction' && text(thread.boundary)) lines.push(`- 答复边界：${text(thread.boundary)}`);
+      if (threadKind !== 'organic_reaction' && text(thread.nextStep)) lines.push(`- 下一步：${text(thread.nextStep)}`);
       for (const followUp of objectArray(thread.followUps)) {
         lines.push(
           `  - 追问：${commentNicknamePrefix(followUp.displayName)}${text(followUp.question) || '未提供'}`,
@@ -373,6 +393,10 @@ function appendCommentThreadAudit(lines: string[], threads: JsonObject[], dialog
     // historical packages keep their previous output verbatim.
     if (text(thread.kind) || text(thread.answerKind)) lines.push(
       `- 节点类型：提问=${commentKindText(text(thread.kind)) || '问题（默认）'}；答复=${commentKindText(text(thread.answerKind)) || '回答（默认）'}`,
+    );
+    // 读者互动层:线程形态只在字段存在时输出;历史包保持原样。
+    if (text(thread.threadKind)) lines.push(
+      `- 互动类型：${commentThreadKindText(text(thread.threadKind))}${text(thread.threadKind) === 'reader_exchange' && text(thread.replyDisplayName) ? `（${text(thread.displayName) || '读者A'} → ${text(thread.replyDisplayName)}）` : ''}`,
     );
     if (text(thread.boundary)) lines.push(`- 答复边界：${text(thread.boundary)}`);
     if (stringArray(thread.evidenceIds).length) lines.push(`- 证据引用：${stringArray(thread.evidenceIds).join('、')}`);
@@ -791,6 +815,16 @@ function commentKindText(value: string): string {
     answer: '回答',
     follow_up: '追问',
     clarification: '澄清',
+  };
+  return value ? labels[value] || value : '';
+}
+
+/** 线程级互动形态(读者互动层) → 中文标签;未知值原样透传。 */
+function commentThreadKindText(value: string): string {
+  const labels: Record<string, string> = {
+    org_answer: '机构问答',
+    reader_exchange: '读者互聊',
+    organic_reaction: '漂浮短反应',
   };
   return value ? labels[value] || value : '';
 }
