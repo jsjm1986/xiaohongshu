@@ -2759,6 +2759,50 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .v2 .intelligence-status p { margin: 2px 0 0; }
 .v2 .intelligence-status .panel-actions { margin-top: 0; align-items: flex-start; }
 
+/* 极简创作频道 */
+.quick-page .quick-step { max-width: 640px; display: flex; flex-direction: column; gap: 16px; margin-top: 24px; }
+.quick-loading { align-items: center; text-align: center; gap: 12px; }
+.quick-hint { color: var(--muted); font-size: 13px; }
+.quick-topic-list { display: flex; flex-direction: column; gap: 10px; }
+.quick-topic { text-align: left; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: #fff; cursor: pointer; font-size: 15px; transition: border-color .15s, transform .15s; }
+.quick-topic:hover { border-color: var(--coral); transform: translateY(-1px); }
+.quick-result { display: flex; flex-direction: column; gap: 14px; margin-top: 20px; }
+.quick-tabs { display: flex; gap: 8px; }
+.quick-tabs button { padding: 8px 14px; border: 1px solid var(--border); border-radius: 8px; background: #fff; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.quick-tabs button.active { border-color: var(--coral); color: var(--coral); font-weight: 600; }
+.quick-tab-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--amber, #e0a100); display: inline-block; }
+.quick-card { border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; background: #fff; }
+.quick-card header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.quick-card header h3 { font-size: 13px; color: var(--muted); margin: 0; }
+.quick-body { white-space: pre-wrap; }
+.quick-tag-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.quick-tag { background: var(--panel-inset, #f5f5f4); padding: 3px 8px; border-radius: 6px; font-size: 13px; }
+.quick-qa { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.quick-qa small { display: block; color: var(--muted); }
+.quick-followup { display: flex; flex-direction: column; padding-left: 12px; border-left: 2px solid var(--border); margin-top: 4px; font-size: 13px; }
+.quick-result__actions { display: flex; gap: 10px; margin-top: 8px; }
+
+/* 极简创作 · 完整频道 */
+.qc-page .qc-tabs { display: flex; gap: 8px; margin: 20px 0 16px; border-bottom: 1px solid var(--border); }
+.qc-tabs button { padding: 10px 16px; border: none; background: none; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; font-size: 15px; }
+.qc-tabs button.active { color: var(--coral); border-bottom-color: var(--coral); font-weight: 600; }
+.qc-tabs button:disabled { opacity: .4; cursor: not-allowed; }
+.qc-panel { max-width: 720px; }
+.qc-step { display: flex; flex-direction: column; gap: 16px; }
+.qc-hint { color: var(--muted); font-size: 13px; }
+.qc-advanced { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 4px; }
+.qc-advanced summary { cursor: pointer; color: var(--coral); font-size: 14px; }
+.qc-advanced-grid { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+.qc-project-row { display: flex; align-items: center; gap: 8px; }
+.qc-file-list { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.qc-file-list li { display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; }
+.qc-topic-list { display: flex; flex-direction: column; gap: 10px; }
+.qc-topic { text-align: left; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: #fff; cursor: pointer; font-size: 15px; }
+.qc-topic.selected { border-color: var(--coral); }
+.qc-history-list { display: flex; flex-direction: column; gap: 10px; }
+.qc-history-item { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+.qc-history-candidate { border-top: 1px dashed var(--border); margin-top: 10px; padding-top: 10px; }
+
 /* ==========================================================================
    生成频道 R5：蓝图模型卡读数化（方案 A）
    等高读数卡:标题+版本芯片+状态 / 单行描述 / AI 摘要两行 /
