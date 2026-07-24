@@ -676,6 +676,9 @@ export function GeneratorPage() {
         preview={preview}
         input={previewInput}
         presetName={selectedPreset?.name}
+        projectName={currentProject?.name}
+        formulaLabel={(typeof schema.formulaVersion === "string" ? schema.formulaVersion : schema.formulaVersion?.version) || "项目当前版本"}
+        schema={schema}
         submitting={submitting}
         onClose={() => !submitting && setPreviewOpen(false)}
         onConfirm={runGeneration}
@@ -823,24 +826,51 @@ function ParameterInput({ parameter, value, onChange }: { parameter: GenerationP
   return <input value={String(value ?? "")} onChange={(event) => onChange(event.target.value)} placeholder={parameter.description} />;
 }
 
-function ConfigPreviewModal({ open, loading, preview, input, presetName, submitting, onClose, onConfirm }: {
+const looksLikeUuid = (value: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.trim());
+
+function ConfigPreviewModal({ open, loading, preview, input, presetName, projectName, formulaLabel, schema, submitting, onClose, onConfirm }: {
   open: boolean;
   loading: boolean;
   preview: ResolvedConfigPreview | null;
   input: GenerateInput | null;
   presetName?: string;
+  projectName?: string;
+  formulaLabel: string;
+  schema: GenerationParameterSchema;
   submitting: boolean;
   onClose: () => void;
   onConfirm: () => void;
 }) {
-  const conflicts = [...(preview?.conflicts || []), ...(preview?.warnings || [])];
+  const severityRank: Record<string, number> = { error: 0, warning: 1, info: 2 };
+  const conflicts = [...(preview?.conflicts || []), ...(preview?.warnings || [])]
+    .sort((a, b) => (severityRank[a.severity] ?? 3) - (severityRank[b.severity] ?? 3));
   const hasErrors = conflicts.some((item) => item.severity === "error");
-  return <Modal open={open} onClose={onClose} title="生成前配置预览" description="确认本次参数如何继承、是否冲突，以及它们会影响哪些内容环节。" footer={<><Button variant="ghost" onClick={onClose}>返回修改</Button><Button disabled={loading || hasErrors || !input} loading={submitting} icon={<Sparkles size={16} />} onClick={onConfirm}>确认并生成 3 个候选</Button></>}>
+  const visibleConflicts = conflicts.filter((item) => item.severity !== "info");
+  const infoConflicts = conflicts.filter((item) => item.severity === "info");
+  const conflictRow = (conflict: ConfigConflict, index: number) => <div key={`${conflict.title}-${index}`} className={`preview-conflict-row preview-conflict-row--${conflict.severity}`}>{conflict.severity === "error" ? <XCircle size={15} /> : conflict.severity === "warning" ? <AlertTriangle size={15} /> : <Info size={15} />}<span><strong>{conflict.title}</strong><p>{conflict.message}</p>{conflict.suggestion && <small>建议：{conflict.suggestion}</small>}</span></div>;
+  const impactGroups = schema.groups
+    .map((group) => ({
+      ...group,
+      items: (preview?.impacts || []).filter((impact) => schema.parameters.find((parameter) => parameter.id === impact.parameterId)?.group === group.id),
+    }))
+    .filter((group) => group.items.length > 0);
+  const ungroupedImpacts = (preview?.impacts || []).filter((impact) => !schema.parameters.some((parameter) => parameter.id === impact.parameterId));
+  const formulaVersionLabel = preview?.formulaVersion && !looksLikeUuid(preview.formulaVersion) ? preview.formulaVersion : formulaLabel;
+  return <Modal open={open} onClose={onClose} title="生成前配置预览" description="确认本次参数如何继承、是否冲突，以及它们会影响哪些内容环节。" size="wide" footer={<><Button variant="ghost" onClick={onClose}>返回修改</Button><Button disabled={loading || hasErrors || !input} loading={submitting} icon={<Sparkles size={16} />} onClick={onConfirm}>确认并生成 3 个候选</Button></>}>
     {loading ? <div className="preview-loading"><span className="spinner" /><strong>正在解析配置继承与冲突…</strong><p>系统 → 工作区 → 项目 → 预设 → 本次覆盖</p></div> : preview && input ? <div className="config-preview">
       <section className="preview-inheritance"><span>系统默认</span><i>→</i><span>工作区</span><i>→</i><span>项目</span><i>→</i>{presetName && <><span className="active">{presetName}</span><i>→</i></>}<span className="active">本次任务</span></section>
-      <section className="preview-facts"><div><small>项目</small><strong>{input.projectId}</strong></div><div><small>读者 / 入口</small><strong>{stageLabel(input.audienceStage)} · {entryLabel(input.entryPoint)}</strong></div><div><small>公式版本</small><strong>{preview.formulaVersion || "项目当前版本"}</strong></div><div><small>知识注入</small><strong>{preview.knowledgeMode || "优先全量"}{preview.knowledgeFiles !== undefined ? ` · ${preview.knowledgeFiles} 份` : ""}</strong></div></section>
-      {conflicts.length ? <section className="preview-conflicts"><h3>冲突与提示 <Badge tone={hasErrors ? "danger" : "warning"}>{conflicts.length} 项</Badge></h3>{conflicts.map((conflict, index) => <div key={`${conflict.title}-${index}`} className={`preview-conflict preview-conflict--${conflict.severity}`}>{conflict.severity === "error" ? <XCircle size={17} /> : conflict.severity === "warning" ? <AlertTriangle size={17} /> : <Info size={17} />}<span><strong>{conflict.title}</strong><p>{conflict.message}</p>{conflict.suggestion && <small>建议：{conflict.suggestion}</small>}</span></div>)}</section> : <div className="preview-clear"><CheckCircle2 size={18} /><span><strong>没有发现阻断生成的配置冲突</strong><small>未知信息仍会在结果中保留，不会自动当作事实。</small></span></div>}
-      <section className="preview-impacts"><h3>参数影响预览 <Badge>{preview.impacts.length} 项</Badge></h3><div>{preview.impacts.map((impact) => <article key={impact.parameterId}><span className={`impact-direction impact-direction--${impact.direction || "changed"}`}>{impact.direction === "higher" ? <ArrowUp size={13} /> : impact.direction === "lower" ? <ArrowDown size={13} /> : <Settings2 size={13} />}</span><span><strong>{impact.label}<b>{isDiagnosticEmphasisParameterId(impact.parameterId) ? `${formatImpactValue(impact.value)}（显示/人工顺序刻度）` : formatImpactValue(impact.value)}</b></strong><p>{impact.summary}</p>{impact.affects?.length ? <small>影响：{impact.affects.join(" · ")}</small> : null}</span></article>)}</div></section>
+      <section className="preview-facts"><div><small>项目</small><strong>{projectName || input.projectId}</strong></div><div><small>读者 / 入口</small><strong>{stageLabel(input.audienceStage)} · {entryLabel(input.entryPoint)}</strong></div><div><small>公式版本</small><strong>{formulaVersionLabel}</strong></div><div><small>知识注入</small><strong>{preview.knowledgeMode || "优先全量"}{preview.knowledgeFiles !== undefined ? ` · ${preview.knowledgeFiles} 份` : ""}</strong></div></section>
+      {conflicts.length ? <section className="preview-conflicts"><h3>冲突与提示 <Badge tone={hasErrors ? "danger" : "warning"}>{conflicts.length} 项</Badge></h3>{visibleConflicts.map(conflictRow)}{infoConflicts.length > 0 && <details className="preview-info-toggle"><summary>还有 {infoConflicts.length} 条配置提示 <ChevronDown size={13} /></summary>{infoConflicts.map(conflictRow)}</details>}</section> : <div className="preview-clear"><CheckCircle2 size={16} /><span><strong>没有发现阻断生成的配置冲突</strong><small>未知信息仍会在结果中保留，不会自动当作事实。</small></span></div>}
+      <section className="preview-impacts"><h3>参数影响预览 <Badge>{preview.impacts.length} 项</Badge></h3>
+        {impactGroups.map((group) => <div className="preview-impact-group" key={group.id}>
+          <header><span>{group.label}</span><b>{group.items.length}</b></header>
+          {group.items.map((impact) => <div className="preview-impact-row" key={impact.parameterId}>
+            <span className={`impact-direction impact-direction--${impact.direction || "changed"}`}>{impact.direction === "higher" ? <ArrowUp size={13} /> : impact.direction === "lower" ? <ArrowDown size={13} /> : <Settings2 size={13} />}</span>
+            <span className="preview-impact-row__main"><strong>{impact.label}<b>{isDiagnosticEmphasisParameterId(impact.parameterId) ? `${formatImpactValue(impact.value)}（显示/人工顺序刻度）` : formatImpactValue(impact.value)}</b></strong><p>{impact.summary}</p>{impact.affects?.length ? <small>影响：{impact.affects.join(" · ")}</small> : null}</span>
+          </div>)}
+        </div>)}
+        {ungroupedImpacts.length > 0 && <div className="preview-impact-group"><header><span>其他</span><b>{ungroupedImpacts.length}</b></header>{ungroupedImpacts.map((impact) => <div className="preview-impact-row" key={impact.parameterId}><span className={`impact-direction impact-direction--${impact.direction || "changed"}`}>{impact.direction === "higher" ? <ArrowUp size={13} /> : impact.direction === "lower" ? <ArrowDown size={13} /> : <Settings2 size={13} />}</span><span className="preview-impact-row__main"><strong>{impact.label}<b>{formatImpactValue(impact.value)}</b></strong><p>{impact.summary}</p>{impact.affects?.length ? <small>影响：{impact.affects.join(" · ")}</small> : null}</span></div>)}</div>}
+      </section>
       <details className="resolved-config"><summary><Braces size={15} />查看最终解析配置 <ChevronDown size={14} /></summary><pre>{JSON.stringify(preview.resolvedConfig, null, 2)}</pre></details>
     </div> : null}
   </Modal>;
