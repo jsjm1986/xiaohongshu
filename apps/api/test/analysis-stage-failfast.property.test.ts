@@ -228,7 +228,7 @@ test('Property 8: three-stage analysis fails fast on missing required stage cont
 
     const service = app.get(IntelligenceService);
     const principal: SessionPrincipal = {
-      kind: 'session', userId: user.id, username: 'admin', systemRole: 'admin',
+      kind: 'session', userId: user.id, username: 'admin', systemRole: 'admin', userKind: 'research',
       mustChangePassword: false, tokenHash: '', csrfHash: '',
     };
 

@@ -743,6 +743,16 @@ export class DatabaseService implements OnModuleDestroy {
       `);
     });
     if (version < 10) version = 10;
+
+    if (version < 11) this.transaction(() => {
+      this.db.exec(`
+        ALTER TABLE users ADD COLUMN user_kind TEXT NOT NULL DEFAULT 'research'
+          CHECK(user_kind IN ('research','saas'));
+
+        PRAGMA user_version = 11;
+      `);
+    });
+    if (version < 11) version = 11;
   }
 
   onModuleDestroy(): void {

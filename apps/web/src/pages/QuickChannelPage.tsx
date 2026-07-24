@@ -1,37 +1,27 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { useProjects } from '../components/ProjectContext';
 import { useToast } from '../components/Ui';
-import { V2Hero } from '../components/V2';
+import { QuickHome } from '../components/quick/QuickHome';
+import { OverviewTab } from '../components/quick/OverviewTab';
 import { ProjectKnowledgeTab } from '../components/quick/ProjectKnowledgeTab';
-import { TopicTab } from '../components/quick/TopicTab';
-import { ConfigTab } from '../components/quick/ConfigTab';
-import { ResultTab } from '../components/quick/ResultTab';
+import { CreateTab } from '../components/quick/CreateTab';
 import { HistoryTab } from '../components/quick/HistoryTab';
 import { type QuickCandidateView } from '../lib/quick-generation';
-import { tabReachable, stepStatus, clearDownstreamOfProject, clearResults, type QuickTab } from '../lib/quick-channel-state';
+import { clearDownstreamOfProject, clearResults, type QuickTab } from '../lib/quick-channel-state';
 import type { ContentPreset, GenerationJob, Project, TopicOpportunity } from '../types';
 import type { SimpleSettingOverrides } from '../lib/simple-generation';
 
 const TAB_LABELS: Record<QuickTab, string> = {
-  project: '项目 & 知识',
-  topic: '选题',
-  config: '配置',
-  result: '结果',
-  history: '历史',
+  overview: '总览',
+  knowledge: '知识库',
+  create: '创作',
+  history: '产出',
 };
 
-const TAB_ORDER: QuickTab[] = ['project', 'topic', 'config', 'result', 'history'];
-
-const TAB_HINT: Record<QuickTab, string> = {
-  project: '',
-  topic: '先分析知识库生成选题',
-  config: '先选择一个选题',
-  result: '先生成文案',
-  history: '先选择或新建项目',
-};
+const TAB_ORDER: QuickTab[] = ['overview', 'knowledge', 'create', 'history'];
 
 export function QuickChannelPage() {
-  const { projects } = useProjects();
+  const { projects, loading } = useProjects();
   const toast = useToast();
   const [project, setProject] = useState<Project | null>(null);
   const [opportunities, setOpportunities] = useState<TopicOpportunity[]>([]);
@@ -41,37 +31,18 @@ export function QuickChannelPage() {
   const [overrides, setOverrides] = useState<SimpleSettingOverrides>({});
   const [results, setResults] = useState<QuickCandidateView[]>([]);
   const [history, setHistory] = useState<GenerationJob[]>([]);
-  const [activeTab, setActiveTab] = useState<QuickTab>('project');
+  const [imageAssetIds, setImageAssetIds] = useState<string[]>([]);
+  const [jobId, setJobId] = useState<string | undefined>(undefined);
+  const [activeTab, setActiveTab] = useState<QuickTab>('overview');
   const [busy, setBusy] = useState(false);
-
-  const reachable = useMemo(
-    () => tabReachable({
-      hasProject: Boolean(project),
-      opportunityCount: opportunities.length,
-      hasOpportunity: Boolean(opportunityId),
-      resultCount: results.length,
-    }),
-    [project, opportunities.length, opportunityId, results.length],
-  );
-
-  const steps = useMemo(
-    () => stepStatus({
-      activeTab,
-      hasProject: Boolean(project),
-      opportunityCount: opportunities.length,
-      hasOpportunity: Boolean(opportunityId),
-      resultCount: results.length,
-    }),
-    [activeTab, project, opportunities.length, opportunityId, results.length],
-  );
-  const SEQ: Record<QuickTab, string> = { project: '1', topic: '2', config: '3', result: '4', history: '5' };
 
   const fail = (e: unknown, fallback: string) => {
     toast.push(e instanceof Error ? e.message : fallback, 'error');
     setBusy(false);
   };
 
-  const goTo = (tab: QuickTab) => { if (reachable[tab]) setActiveTab(tab); };
+  // 四区导航常开,goTo 不再门控
+  const goTo = (tab: QuickTab) => setActiveTab(tab);
 
   const onProjectChosen = (p: Project) => {
     setProject(p);
@@ -81,81 +52,122 @@ export function QuickChannelPage() {
     setResults(cleared.results);
     setPresetId(undefined);
     setOverrides({});
+    setImageAssetIds([]);
+    setJobId(undefined);
+    setActiveTab('overview');
   };
+
+  // 重命名/保存设置:只更新项目本身,不动下游选题/配置/结果
+  const onProjectUpdated = (p: Project) => {
+    setProject(p);
+  };
+
+  // 回首页/删项目共用:清空项目与全部下游状态,回到「总览」标签
+  const clearWorkspace = () => {
+    setProject(null);
+    const cleared = clearDownstreamOfProject();
+    setOpportunities(cleared.opportunities);
+    setOpportunityId(cleared.opportunityId);
+    setResults(cleared.results);
+    setPresetId(undefined);
+    setOverrides({});
+    setImageAssetIds([]);
+    setJobId(undefined);
+    setActiveTab('overview');
+  };
+
+  // 删除项目:清空后回首页
+  const onProjectDeleted = () => clearWorkspace();
+
+  // 面包屑「‹ 全部项目」:放弃当前项目回首页(与删项目同一清法)
+  const onBackToHome = () => clearWorkspace();
 
   const onAnalyzed = (opps: TopicOpportunity[]) => {
     setOpportunities(opps);
     setOpportunityId('');
     setResults(clearResults().results);
-    setActiveTab('topic');
+    setJobId(undefined);
+    setActiveTab('create');
   };
 
+  // 选题池就在生成区左侧:选中只更新下游状态,不跳标签(换选题清结果的级联保留)
   const onPickTopic = (id: string, loadedPresets: ContentPreset[]) => {
     setOpportunityId(id);
     setResults(clearResults().results);
+    setJobId(undefined);
     setPresets(loadedPresets);
     setPresetId(loadedPresets.find((p) => p.isDefault)?.id ?? loadedPresets[0]?.id);
-    setActiveTab('config');
   };
 
-  const onGenerated = (r: QuickCandidateView[]) => {
+  // 归档/删除选题后调用:若它是当前选中项,级联清选中与结果(同 onPickTopic 的清法)
+  const onOpportunityGone = (id: string) => {
+    if (id !== opportunityId) return;
+    setOpportunityId('');
+    setResults(clearResults().results);
+    setJobId(undefined);
+  };
+
+  // 结果就地出现在创作区右栏,不再跳标签
+  const onGenerated = (r: QuickCandidateView[], id: string) => {
     setResults(r);
-    setActiveTab('result');
+    setJobId(id);
   };
 
+  // Home 态:未选项目 → 产品首页(卡墙选项目/内联新建)
+  if (!project) {
+    return (
+      <div className="page qc-page">
+        <QuickHome
+          projects={projects} loading={loading} busy={busy} setBusy={setBusy} fail={fail}
+          onProjectChosen={onProjectChosen}
+        />
+      </div>
+    );
+  }
+
+  // 工作区态:已选项目 → 四区结构(总览/知识库/创作/产出),标签全常开
   return (
     <div className="page qc-page">
-      <V2Hero index="Q" status={<>极简创作 · 完整频道</>} title="极简创作" description="一个页面完成建项目、传资料、选题、配置、生成、看历史。" />
+      <div className="qc-crumb">
+        <button type="button" className="qc-crumb__back" onClick={onBackToHome}>‹ 全部项目</button>
+        <h1>{project.name}</h1>
+        {project.domain && <small>{project.domain}</small>}
+      </div>
 
       <nav className="qc-tabs">
         {TAB_ORDER.map((tab) => (
           <button
             key={tab}
             type="button"
-            className={`qc-tab qc-tab--${steps[tab]}${tab === activeTab ? ' active' : ''}`}
-            disabled={!reachable[tab]}
-            title={reachable[tab] ? '' : TAB_HINT[tab]}
+            className={`qc-tab${tab === activeTab ? ' active' : ''}`}
             onClick={() => setActiveTab(tab)}
           >
-            <span className="qc-tab__seq">{steps[tab] === 'done' ? '✓' : SEQ[tab]}</span>
             {TAB_LABELS[tab]}
           </button>
         ))}
       </nav>
 
-      {activeTab !== 'history' && (
-        <div className="qc-guide" role="note">
-          {activeTab === 'project' && '下一步:选择或新建项目,上传知识后点「分析知识库」生成选题。'}
-          {activeTab === 'topic' && '下一步:挑一个选题进入配置;不满意可「换一批」。'}
-          {activeTab === 'config' && '下一步:选内容预设(可留默认),点「生成文案」。'}
-          {activeTab === 'result' && '已生成。可复制、重新生成,或「换个选题」再来一篇。'}
-        </div>
-      )}
-
-      <div className="qc-panel">
-        {activeTab === 'project' && (
+      <div className={activeTab === 'create' ? 'qc-panel qc-panel--wide' : 'qc-panel'} key={activeTab}>
+        {activeTab === 'overview' && (
+          <OverviewTab
+            project={project} busy={busy} setBusy={setBusy} fail={fail} goTo={goTo}
+            onProjectUpdated={onProjectUpdated} onProjectDeleted={onProjectDeleted}
+          />
+        )}
+        {activeTab === 'knowledge' && (
           <ProjectKnowledgeTab
-            project={project} projects={projects} busy={busy} setBusy={setBusy} fail={fail}
-            onProjectChosen={onProjectChosen} onAnalyzed={onAnalyzed}
+            project={project} busy={busy} setBusy={setBusy} fail={fail} onAnalyzed={onAnalyzed}
           />
         )}
-        {activeTab === 'topic' && (
-          <TopicTab
+        {activeTab === 'create' && (
+          <CreateTab
             project={project} opportunities={opportunities} opportunityId={opportunityId}
-            busy={busy} setBusy={setBusy} fail={fail} onPickTopic={onPickTopic} onAnalyzed={onAnalyzed}
-          />
-        )}
-        {activeTab === 'config' && (
-          <ConfigTab
-            project={project} opportunityId={opportunityId} presets={presets} presetId={presetId}
-            overrides={overrides} busy={busy} setBusy={setBusy} fail={fail}
-            setPresetId={setPresetId} setOverrides={setOverrides} onGenerated={onGenerated}
-          />
-        )}
-        {activeTab === 'result' && (
-          <ResultTab
-            project={project} opportunityId={opportunityId} presetId={presetId} overrides={overrides}
-            results={results} setBusy={setBusy} fail={fail} onGenerated={onGenerated} goTo={goTo}
+            presets={presets} presetId={presetId} overrides={overrides} imageAssetIds={imageAssetIds}
+            jobId={jobId} results={results} busy={busy} setBusy={setBusy} fail={fail}
+            onPickTopic={onPickTopic} onAnalyzed={onAnalyzed} setOpportunities={setOpportunities}
+            onOpportunityGone={onOpportunityGone} setPresetId={setPresetId} setPresets={setPresets}
+            setOverrides={setOverrides} setImageAssetIds={setImageAssetIds} onGenerated={onGenerated}
+            goTo={goTo}
           />
         )}
         {activeTab === 'history' && (

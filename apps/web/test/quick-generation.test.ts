@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { autoApproveAndGenerate, quickCandidateFields, quickCandidateToMarkdown } from '../src/lib/quick-generation.js';
+import { autoApproveAndGenerate, quickCandidateFields, quickCandidateToMarkdown, reviseCandidate } from '../src/lib/quick-generation.js';
 
 const fullCandidate = {
   id: 'c1',
@@ -9,7 +9,9 @@ const fullCandidate = {
   body: '正文内容……',
   tags: ['去眼袋', '医美功课'],
   imageBrief: '封面：术前术后对比图',
+  commentDisclaimer: '问答参考，不代表真实用户发言',
   commentOwnedFirstComment: '楼主补充：先看资质',
+  commentUncoveredGaps: ['价格区间'],
   comments: [
     {
       question: '会反弹吗？',
@@ -41,7 +43,9 @@ test('quickCandidateFields keeps only usable copy fields', () => {
   assert.equal(view.body, '正文内容……');
   assert.deepEqual(view.tags, ['去眼袋', '医美功课']);
   assert.equal(view.imageBrief, '封面：术前术后对比图');
+  assert.equal(view.commentDisclaimer, '问答参考，不代表真实用户发言');
   assert.equal(view.commentOwnedFirstComment, '楼主补充：先看资质');
+  assert.deepEqual(view.commentUncoveredGaps, ['价格区间']);
   assert.equal(view.comments.length, 1);
   assert.equal(view.comments[0].question, '会反弹吗？');
   assert.equal(view.comments[0].answer, '结构性去除不易反弹');
@@ -69,7 +73,9 @@ test('quickCandidateFields tolerates missing optional fields', () => {
   const view = quickCandidateFields({ id: 'c2', title: 't', body: 'b', tags: [], comments: [] } as any);
   assert.equal(view.publishable, false); // 无 validation 视为未通过
   assert.equal(view.imageBrief, undefined);
+  assert.equal(view.commentDisclaimer, undefined);
   assert.equal(view.commentOwnedFirstComment, undefined);
+  assert.equal(view.commentUncoveredGaps, undefined);
   assert.deepEqual(view.comments, []);
 });
 
@@ -80,6 +86,9 @@ test('quickCandidateToMarkdown includes usable copy and no audit appendix', () =
   assert.match(md, /#去眼袋/);
   assert.match(md, /会反弹吗？/);
   assert.match(md, /楼主补充/);
+  assert.match(md, /免责声明: 问答参考/);
+  assert.match(md, /## 未展开缺口/);
+  assert.match(md, /- 价格区间/);
   assert.doesNotMatch(md, /审计附录/);
   assert.doesNotMatch(md, /primaryGapId/);
 });
@@ -188,4 +197,123 @@ test('autoApproveAndGenerate forwards overrides into buildInput and resolveSetti
   await autoApproveAndGenerate({ project, opportunityId: 'o1', overrides, pollIntervalMs: 1, maxPolls: 5, deps: deps as any });
   assert.deepEqual(seen.resolveOverrides, overrides);
   assert.deepEqual(seen.buildOverrides, overrides);
+});
+
+test('autoApproveAndGenerate calls onProgress with each polled job', async () => {
+  const base = makeDeps().deps;
+  let n = 0;
+  const deps = {
+    ...base,
+    api: {
+      ...base.api,
+      generations: {
+        create: async () => ({ id: 'job1', status: 'queued', projectId: 'proj1', topic: 't', mode: 'simple' }),
+        get: async () => {
+          n += 1;
+          return n >= 2
+            ? { id: 'job1', projectId: 'proj1', topic: 't', mode: 'simple', status: 'completed', progress: 100, candidates: [] }
+            : { id: 'job1', projectId: 'proj1', topic: 't', mode: 'simple', status: 'running', progress: 44 };
+        },
+      },
+    },
+  };
+  const seen: Array<{ id: string; status: string; progress?: number }> = [];
+  const project = { id: 'proj1', name: 'p' } as any;
+  await autoApproveAndGenerate({
+    project, opportunityId: 'o1', pollIntervalMs: 1, maxPolls: 5,
+    onProgress: (job) => seen.push({ id: job.id, status: job.status, progress: job.progress }),
+    deps: deps as any,
+  });
+  // created 一次 + 每次轮询各一次,进度逐次送达
+  assert.deepEqual(seen.map((s) => s.progress), [undefined, 44, 100]);
+  assert.deepEqual(seen.map((s) => s.status), ['queued', 'running', 'completed']);
+  assert.ok(seen.every((s) => s.id === 'job1'));
+});
+
+test('autoApproveAndGenerate forwards imageAssetIds into buildInput', async () => {
+  const seen: { imageAssetIds?: unknown } = {};
+  const base = makeDeps().deps;
+  const deps = {
+    ...base,
+    buildInput: (arg: { imageAssetIds?: unknown }) => {
+      seen.imageAssetIds = arg.imageAssetIds;
+      return { projectId: 'proj1', mode: 'simple', opportunityId: 'o1', topic: 't', goal: 'w', audienceStage: 'hesitation', entryPoint: 'x' };
+    },
+  };
+  const project = { id: 'proj1', name: 'p' } as any;
+  await autoApproveAndGenerate({ project, opportunityId: 'o1', imageAssetIds: ['a1', 'a2'], pollIntervalMs: 1, maxPolls: 5, deps: deps as any });
+  assert.deepEqual(seen.imageAssetIds, ['a1', 'a2']);
+});
+
+test('autoApproveAndGenerate defaults imageAssetIds to []', async () => {
+  const seen: { imageAssetIds?: unknown } = {};
+  const base = makeDeps().deps;
+  const deps = {
+    ...base,
+    buildInput: (arg: { imageAssetIds?: unknown }) => {
+      seen.imageAssetIds = arg.imageAssetIds;
+      return { projectId: 'proj1', mode: 'simple', opportunityId: 'o1', topic: 't', goal: 'w', audienceStage: 'hesitation', entryPoint: 'x' };
+    },
+  };
+  const project = { id: 'proj1', name: 'p' } as any;
+  await autoApproveAndGenerate({ project, opportunityId: 'o1', pollIntervalMs: 1, maxPolls: 5, deps: deps as any });
+  assert.deepEqual(seen.imageAssetIds, []);
+});
+
+function makeReviseDeps(reviseImpl: () => Promise<any>, getImpl?: () => Promise<any>) {
+  const calls: string[] = [];
+  const deps = {
+    api: {
+      generations: {
+        revise: async (jobId: string, candidateId: string, instruction: string) => {
+          calls.push(`revise:${jobId}:${candidateId}:${instruction}`);
+          return reviseImpl();
+        },
+        get: async (id: string) => { calls.push(`get:${id}`); return getImpl ? getImpl() : { id: 'job1', status: 'completed', progress: 100 }; },
+      },
+    },
+  };
+  return { deps, calls };
+}
+
+test('reviseCandidate calls revise and returns the completed job without polling', async () => {
+  const { deps, calls } = makeReviseDeps(async () => ({
+    id: 'job1', projectId: 'proj1', topic: 't', mode: 'simple', status: 'completed', progress: 100,
+    candidates: [{ id: 'c1', title: 't2', body: 'b2', tags: [], comments: [], validation: { valid: true, repairAttempts: 0, issues: [] } }],
+  }));
+  const progresses: Array<number | undefined> = [];
+  const job = await reviseCandidate({
+    jobId: 'job1', candidateId: 'c1', instruction: '标题再口语化一点',
+    pollIntervalMs: 1, maxPolls: 5, onProgress: (j) => progresses.push(j.progress), deps: deps as any,
+  });
+  assert.equal(job.status, 'completed');
+  assert.equal(job.candidates?.[0]?.title, 't2');
+  assert.deepEqual(calls, ['revise:job1:c1:标题再口语化一点']);
+  assert.deepEqual(progresses, [100]);
+});
+
+test('reviseCandidate polls to completion when revise returns a running job', async () => {
+  const { deps, calls } = makeReviseDeps(
+    async () => ({ id: 'job1', status: 'running', progress: 50 }),
+    async () => ({ id: 'job1', status: 'completed', progress: 100, candidates: [] }),
+  );
+  const job = await reviseCandidate({ jobId: 'job1', candidateId: 'c1', instruction: 'x', pollIntervalMs: 1, maxPolls: 5, deps: deps as any });
+  assert.equal(job.status, 'completed');
+  assert.deepEqual(calls, ['revise:job1:c1:x', 'get:job1']);
+});
+
+test('reviseCandidate throws job.error when the revised job failed', async () => {
+  const { deps } = makeReviseDeps(async () => ({ id: 'job1', status: 'failed', error: '模型拒绝' }));
+  await assert.rejects(
+    () => reviseCandidate({ jobId: 'job1', candidateId: 'c1', instruction: 'x', pollIntervalMs: 1, maxPolls: 5, deps: deps as any }),
+    /模型拒绝/,
+  );
+});
+
+test('reviseCandidate throws fallback message when failed without error', async () => {
+  const { deps } = makeReviseDeps(async () => ({ id: 'job1', status: 'failed' }));
+  await assert.rejects(
+    () => reviseCandidate({ jobId: 'job1', candidateId: 'c1', instruction: 'x', pollIntervalMs: 1, maxPolls: 5, deps: deps as any }),
+    /修改失败，请重试/,
+  );
 });

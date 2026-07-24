@@ -86,6 +86,10 @@ const normalizeUser = (raw: JsonRecord): User => ({
       "成员",
   ),
   mustChangePassword: Boolean(raw.mustChangePassword),
+  // 原始字段透传,不做显示转换;role 才是展示用字段。
+  systemRole: typeof raw.systemRole === "string" ? raw.systemRole : undefined,
+  workspaceRole: typeof raw.workspaceRole === "string" ? raw.workspaceRole : undefined,
+  userKind: raw.userKind === "saas" || raw.userKind === "research" ? raw.userKind : undefined,
 });
 
 const normalizeProject = (raw: JsonRecord): Project => {
@@ -757,6 +761,7 @@ export const api = {
       username: string;
       password: string;
       systemRole: "admin" | "user";
+      userKind?: "research" | "saas";
     }) =>
       request<SystemUser>("/api/admin/users", {
         method: "POST",

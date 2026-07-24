@@ -100,6 +100,7 @@ export class AuthController {
       id: principal.userId,
       username: principal.username,
       systemRole: principal.systemRole,
+      userKind: principal.userKind,
       workspaceRole,
       role: principal.systemRole === 'admin' ? '系统管理员' : workspaceRole ?? '成员',
       mustChangePassword: principal.mustChangePassword,

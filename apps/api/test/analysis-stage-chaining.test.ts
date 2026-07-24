@@ -190,7 +190,7 @@ test('three-stage project analysis assembles in fixed order, chains each stage o
 
     const service = app.get(IntelligenceService);
     const principal: SessionPrincipal = {
-      kind: 'session', userId: user.id, username: 'admin', systemRole: 'admin',
+      kind: 'session', userId: user.id, username: 'admin', systemRole: 'admin', userKind: 'research',
       mustChangePassword: false, tokenHash: '', csrfHash: '',
     };
 

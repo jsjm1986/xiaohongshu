@@ -60,6 +60,7 @@ export interface SessionPrincipal {
   userId: string;
   username: string;
   systemRole: 'admin' | 'user';
+  userKind: 'research' | 'saas';
   mustChangePassword: boolean;
   tokenHash: string;
   csrfHash: string;

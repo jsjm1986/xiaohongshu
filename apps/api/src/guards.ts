@@ -11,6 +11,7 @@ import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import { AuthService } from './auth.service.js';
 import { DatabaseService } from './database.service.js';
+import { isSaasApiAllowed } from './saas-access.js';
 import {
   parseStringArray,
   ROLE_PERMISSIONS,
@@ -26,8 +27,17 @@ export class SessionAuthGuard implements CanActivate {
   constructor(@Inject(AuthService) private readonly auth: AuthService) {}
 
   canActivate(context: ExecutionContext): boolean {
-    const request = context.switchToHttp().getRequest<Request>() as unknown as AuthenticatedRequest;
-    request.principal = this.auth.authenticateSession(request.cookies?.ca_session);
+    const expressRequest = context.switchToHttp().getRequest<Request>();
+    const request = expressRequest as unknown as AuthenticatedRequest;
+    const principal = this.auth.authenticateSession(request.cookies?.ca_session);
+    request.principal = principal;
+    if (principal.userKind === 'saas' && !isSaasApiAllowed(expressRequest.method, expressRequest.path)) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        code: 'SAAS_RESTRICTED',
+        message: 'SaaS 用户仅可使用极简创作',
+      });
+    }
     return true;
   }
 }

@@ -2102,6 +2102,7 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .v2-instrument__chip--blue { background: var(--v2-unknown-soft); color: var(--v2-muted); }
 .v2-instrument__chip--ai { background: var(--v2-unknown-soft); color: var(--v2-ink-2); }
 .v2-instrument__chip--ok { background: var(--v2-ok-soft); color: var(--v2-ok); }
+.v2-instrument__chip--warn { background: var(--v2-warn-soft); color: var(--v2-warn); }
 .v2-instrument__value {
   font-size: 28px; font-weight: 750; letter-spacing: -0.025em;
   font-variant-numeric: tabular-nums; color: var(--v2-ink); line-height: 1.12;
@@ -2233,6 +2234,7 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .v2-instrument__cell--blue::before { background: #3e72b8; }
 .v2-instrument__cell--ai::before { background: var(--v2-ai); }
 .v2-instrument__cell--ok::before { background: var(--v2-ok); }
+.v2-instrument__cell--warn::before { background: var(--v2-warn); }
 .v2-instrument__value { font-size: 31px; }
 .v2-instrument__value--mono { font-size: 25px; }
 
@@ -2460,6 +2462,7 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .v2-instrument--3 { grid-template-columns: repeat(3, 1fr); }
 .v2-instrument--2 { grid-template-columns: repeat(2, 1fr); }
 .v2-instrument__chip--error { color: var(--v2-error) !important; }
+.v2-instrument__chip--warn { color: var(--v2-warn) !important; }
 .knowledge-table .data-table__head, .knowledge-table .data-table__row { grid-template-columns: 64px minmax(260px, 1.7fr) 130px 110px 110px 64px; gap: 12px; }
 .knowledge-table .v2-lab-id { font-family: var(--v2-mono); font-size: 11px; color: var(--v2-muted-2); white-space: nowrap; }
 
@@ -2788,11 +2791,11 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   font-size: var(--v2-fs-micro); font-weight: 700; line-height: 1;
   background: var(--v2-line); color: var(--v2-muted);
 }
-.qc-tab--current .qc-tab__seq { background: var(--v2-brand); color: #fff; }
-.qc-tab--done .qc-tab__seq { background: var(--v2-ok); color: #fff; }
+.qc-tab--current .qc-tab__seq { background: var(--v2-brand); color: var(--v2-surface); }
+.qc-tab--done .qc-tab__seq { background: var(--v2-ok); color: var(--v2-surface); }
 .qc-tab--active .qc-tab__seq { background: var(--v2-brand-soft); color: var(--v2-brand-ink); }
 .qc-guide {
-  max-width: 720px; margin: 0 0 16px;
+  max-width: 760px; margin: 0 0 16px;
   padding: 10px 14px; border-radius: var(--v2-radius-sm);
   background: var(--v2-brand-soft); color: var(--v2-brand-ink);
   font-size: var(--v2-fs-sm); line-height: 1.5;
@@ -2813,7 +2816,7 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .qc-topic.selected { border-color: var(--v2-brand); box-shadow: var(--v2-shadow-sm); }
 .qc-history-list { display: flex; flex-direction: column; gap: 10px; }
 .qc-history-item { border: 1px solid var(--v2-line); border-radius: var(--v2-radius); padding: 12px 14px; background: var(--v2-surface); }
-.qc-history-candidate { border-top: 1px dashed var(--v2-line); margin-top: 10px; padding-top: 10px; }
+.qc-history-detail { border-top: 1px dashed var(--v2-line); margin-top: 12px; padding-top: 12px; display: flex; flex-direction: column; gap: 14px; }
 
 /* ==========================================================================
    生成频道 R5：蓝图模型卡读数化（方案 A）
@@ -3032,19 +3035,77 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 
 .qc-progress { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: var(--v2-radius-sm); background: var(--v2-ai-soft); color: var(--v2-ai-ink); font-size: var(--v2-fs-sm); }
 .qc-progress small { margin-left: auto; color: var(--v2-ai); }
-.qc-progress__track { flex: 0 0 64px; height: 3px; border-radius: 2px; background: rgb(114 87 200 / 20%); overflow: hidden; position: relative; }
+.qc-progress__track { flex: 0 0 64px; height: 3px; border-radius: 2px; background: color-mix(in srgb, var(--v2-ai) 20%, transparent); overflow: hidden; position: relative; }
 .qc-progress__track b { position: absolute; inset: 0; width: 40%; background: var(--v2-ai); border-radius: 2px; animation: qc-progress-slide 1.2s ease-in-out infinite; }
 @keyframes qc-progress-slide { 0% { left: -40%; } 100% { left: 100%; } }
-.qc-progress--failed { background: #fbeaea; color: var(--v2-error); }
+.qc-progress--failed { background: var(--v2-error-soft); color: var(--v2-error); }
 
 .qc-topic { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .qc-topic__hint { color: var(--v2-brand-ink); font-size: var(--v2-fs-micro); white-space: nowrap; }
 
 .qc-badge { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 999px; font-size: var(--v2-fs-micro); font-weight: 600; }
 .qc-badge--ok { background: var(--v2-ok-soft); color: var(--v2-ok); }
-.qc-badge--warn { background: #fff3e0; color: var(--v2-warn); }
-.qc-badge--error { background: #fbeaea; color: var(--v2-error); }
+.qc-badge--warn { background: var(--v2-warn-soft); color: var(--v2-warn); }
+.qc-badge--error { background: var(--v2-error-soft); color: var(--v2-error); }
 .qc-badge--muted { background: var(--v2-line); color: var(--v2-muted); }
+
+/* ===== 极简频道 · 预设管理次级操作 ===== */
+.qc-preset-actions { display: flex; gap: 8px; margin-top: -8px; }
+.qc-preset-actions .button { padding: 5px 10px; font-size: var(--v2-fs-sm); }
+.qc-modal-form { display: flex; flex-direction: column; gap: 12px; }
+
+/* ===== 极简频道 · 源素材图选择器 ===== */
+.qc-picker { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.qc-picker__head { display: flex; align-items: center; gap: 10px; }
+.qc-picker__head .button { padding: 5px 10px; font-size: var(--v2-fs-sm); }
+.qc-asset-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.qc-asset { position: relative; margin: 0; border: 2px solid var(--v2-line); border-radius: var(--v2-radius-sm); overflow: hidden; background: var(--v2-surface); }
+.qc-asset.selected { border-color: var(--v2-brand); }
+.qc-asset__pick { display: block; width: 100%; padding: 0; border: 0; background: var(--v2-canvas); cursor: pointer; }
+.qc-asset__pick img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; }
+.qc-asset--locked .qc-asset__pick { cursor: not-allowed; }
+.qc-asset--locked .qc-asset__pick img { opacity: .55; }
+.qc-asset__check { position: absolute; top: 6px; left: 6px; display: grid; width: 20px; height: 20px; place-items: center; border-radius: 50%; background: var(--v2-brand); color: var(--v2-surface); }
+.qc-asset__remove { position: absolute; top: 6px; right: 6px; display: grid; width: 20px; height: 20px; place-items: center; border: 1px solid var(--v2-line); border-radius: 50%; background: var(--v2-surface); color: var(--v2-muted); cursor: pointer; }
+.qc-asset__remove:hover { color: var(--v2-error); }
+.qc-asset figcaption { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 5px 8px; }
+.qc-asset__status { color: var(--v2-muted); font-size: var(--v2-fs-micro); }
+.qc-asset__action { padding: 2px 7px; border: 1px solid var(--v2-line); border-radius: 6px; background: var(--v2-canvas); color: var(--v2-brand); font-size: var(--v2-fs-micro); cursor: pointer; }
+
+/* ===== 极简频道 · 按意见修改 ===== */
+.qc-revise { border: 1px solid var(--v2-line); border-radius: var(--v2-radius-sm); padding: 10px 12px; }
+.qc-revise summary { cursor: pointer; color: var(--v2-brand); font-size: var(--v2-fs-md); }
+.qc-revise textarea { width: 100%; box-sizing: border-box; margin: 10px 0 8px; }
+
+/* ===== 极简频道 P1:筛选 chips 激活色归一到品牌 ===== */
+.qc-page .chip--active { background: var(--v2-brand-soft); border-color: var(--v2-brand); color: var(--v2-brand-ink); }
+
+/* 选题卡:容器改 div 后,主点击区为内嵌透明按钮,操作位右置 */
+div.qc-topic { cursor: default; }
+.qc-topic__main { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0; border: none; background: none; text-align: left; font-size: var(--v2-fs-md); color: var(--v2-ink); cursor: pointer; }
+.qc-topic__ops { flex: none; display: flex; align-items: center; gap: 4px; }
+.qc-topic__ops .button { padding: 4px 8px; font-size: var(--v2-fs-micro); }
+
+/* 知识文件行:预览/删除操作位 */
+.qc-file-ops { flex: none; display: flex; align-items: center; gap: 4px; }
+
+/* 只读预览:等宽、按原文展示 */
+.qc-knowledge-preview { max-height: 55vh; overflow: auto; margin: 0; padding: 12px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius-sm); background: var(--v2-canvas); font-family: var(--v2-mono); font-size: var(--v2-fs-sm); line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+
+/* 引导词模板 chips */
+.qc-tpl-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.qc-tpl { display: inline-flex; align-items: center; border: 1px solid var(--v2-line); border-radius: 999px; background: var(--v2-surface); }
+.qc-tpl__use { padding: 4px 6px 4px 11px; border: none; background: none; color: var(--v2-brand); font-size: var(--v2-fs-micro); cursor: pointer; }
+.qc-tpl__use:hover { color: var(--v2-brand-ink); }
+.qc-tpl__del { display: grid; place-items: center; width: 20px; height: 20px; margin-right: 4px; border: none; border-radius: 50%; background: none; color: var(--v2-muted); cursor: pointer; }
+.qc-tpl__del:hover { color: var(--v2-error); }
+
+/* 历史筛选行 */
+.qc-history-filters { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.qc-history-filters input { flex: 1; min-width: 180px; }
+
+/* ===== 极简频道 P2:候选未过校验的一句话结论 ===== */
+.qc-issue-line { margin: 0; color: var(--v2-warn); font-size: var(--v2-fs-sm); }
 
 /* ===== 生成结果页 · 易用性优化(信息零丢失:诊断默认折叠,内容前置) ===== */
 .validation-summary { margin-bottom: 17px; padding: 14px 16px; border: 1px solid #f0caca; border-radius: 13px; background: #fff; box-shadow: var(--shadow-sm); }
@@ -3099,3 +3160,203 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .comment-purpose { display: block; margin-top: 3px; color: var(--muted); font-size: 8px; font-weight: 400; }
 .comment-meta--audit { margin: 2px 0 8px; opacity: .85; }
 .comment-meta__label { color: var(--muted); font-size: 8px; }
+
+/* ==========================================================================
+   极简创作 · 产品壳(独立 /quick:无专家侧边栏,顶栏 + 居中内容区)
+   本段只做基础结构(正确整洁);视觉精致化在后续段落统一进行
+   ========================================================================== */
+
+/* ---- 壳:画布与顶栏 ---- */
+.quick-shell { min-height: 100vh; display: flex; flex-direction: column; background: var(--v2-canvas); color: var(--v2-ink); }
+.qs-topbar {
+  position: sticky; top: 0; z-index: 40;
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  height: 56px; padding: 0 24px;
+  background: var(--v2-surface); border-bottom: 1px solid var(--v2-line);
+  box-shadow: var(--v2-shadow-sm);
+}
+.qs-brand { display: inline-flex; align-items: center; gap: 10px; color: inherit; text-decoration: none; }
+.qs-brand__mark {
+  display: grid; place-items: center; width: 30px; height: 30px;
+  border-radius: var(--v2-radius-sm); background: var(--v2-brand); color: var(--v2-surface);
+  box-shadow: var(--v2-shadow-sm);
+}
+.qs-brand__text { display: flex; flex-direction: column; line-height: 1.25; }
+.qs-brand__text strong { font-size: var(--v2-fs-md); color: var(--v2-ink); }
+.qs-brand__text small { font-size: var(--v2-fs-xs); color: var(--v2-muted); }
+.qs-topbar__right { display: flex; align-items: center; gap: 14px; }
+.qs-full-link {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 6px 12px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius-sm);
+  background: var(--v2-surface); color: var(--v2-ink-2);
+  font-size: var(--v2-fs-sm); text-decoration: none;
+}
+.qs-full-link:hover { border-color: var(--v2-line-dark); color: var(--v2-brand-ink); }
+/* 用户菜单:复用全站 profile 结构,壳内补 hover 微底色与圆角(不改全站规则) */
+.quick-shell .profile-button { padding: 4px 8px; border-radius: var(--v2-radius-sm); }
+.quick-shell .profile-button:hover { background: var(--v2-canvas); }
+.qs-main { flex: 1; width: 100%; max-width: 1000px; margin: 0 auto; }
+.qs-main .page { max-width: none; padding: 28px 24px 56px; }
+
+/* ---- 首页:欢迎区 + 项目卡墙 ---- */
+.qc-home-hero { margin: 4px 0 24px; padding-bottom: 20px; border-bottom: 1px solid var(--v2-line); }
+.qc-home-hero h1 { margin: 6px 0; font-size: var(--v2-fs-h1); font-weight: 700; letter-spacing: -0.01em; color: var(--v2-ink); }
+.qc-home-hero p { margin: 0; font-size: var(--v2-fs-md); color: var(--v2-muted); }
+.qc-home-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; }
+.qc-project-card {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 16px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius-lg);
+  background: var(--v2-surface); box-shadow: var(--v2-shadow-sm);
+  font: inherit; color: inherit; text-align: left; cursor: pointer;
+  transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.qc-project-card:hover { border-color: var(--v2-line-dark); box-shadow: var(--v2-shadow-md); transform: translateY(-2px); }
+.qc-project-card__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.qc-project-card__head strong { font-size: var(--v2-fs-lg); font-weight: 600; color: var(--v2-ink); }
+.qc-project-card__stats { display: flex; gap: 14px; font-size: var(--v2-fs-sm); color: var(--v2-muted); }
+.qc-project-card__stats span { display: inline-flex; align-items: center; gap: 5px; }
+.qc-project-card__date { font-size: var(--v2-fs-xs); color: var(--v2-muted-2); }
+.qc-project-card--new { align-items: center; justify-content: center; gap: 8px; border-style: dashed; border-color: var(--v2-line-dark); color: var(--v2-muted); text-align: center; }
+.qc-project-card--new:hover { color: var(--v2-brand); border-color: var(--v2-brand); }
+.qc-project-card--empty { max-width: 460px; margin: 0 auto; padding: 30px 24px; gap: 12px; cursor: default; }
+.qc-project-card--empty:hover { color: var(--v2-muted); border-color: var(--v2-line); box-shadow: none; transform: none; }
+.qc-project-card--empty strong { font-size: var(--v2-fs-md); color: var(--v2-ink); }
+.qc-project-card--form { cursor: default; }
+.qc-project-card--form:hover { transform: none; box-shadow: var(--v2-shadow-sm); border-color: var(--v2-line-dark); color: var(--v2-muted); }
+.qc-home-create { display: flex; flex-direction: column; gap: 10px; width: 100%; }
+.qc-home-create input { width: 100%; box-sizing: border-box; }
+.qc-home-create__actions { display: flex; justify-content: center; gap: 8px; }
+
+/* ---- 工作区:面包屑 ---- */
+.qc-crumb { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px; margin: 2px 0 6px; }
+.qc-crumb__back { padding: 0; border: none; background: none; font-size: var(--v2-fs-sm); color: var(--v2-muted); cursor: pointer; }
+.qc-crumb__back:hover { color: var(--v2-brand); }
+.qc-crumb h1 { margin: 0; font-size: var(--v2-fs-xl); font-weight: 600; color: var(--v2-ink); }
+.qc-crumb small { font-size: var(--v2-fs-sm); color: var(--v2-muted); }
+
+/* ==========================================================================
+   极简创作 · 视觉精致化(B 段)
+   全部规则限定在 /quick 命名空间(.quick-shell/.qc-page/.qc-home/.quick-* 开头),
+   不触碰裸 .v2-* 全局;与上游旧规则同属性处靠作用域权重 + 源顺序胜出
+   ========================================================================== */
+
+/* ---- 步骤条:下划线 tab 升级为底卡步骤条 ---- */
+.qc-page .qc-tabs {
+  padding: 8px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius-lg);
+  background: var(--v2-surface); box-shadow: var(--v2-shadow-sm);
+}
+.qc-page .qc-tabs button { padding: 8px 14px; border-bottom: 0; border-radius: var(--v2-radius-lg); }
+.qc-page .qc-tabs button:not(.active):not(:disabled):hover { background: var(--v2-canvas); }
+.qc-page .qc-tabs button.active { background: var(--v2-brand-soft); color: var(--v2-brand-ink); font-weight: 600; }
+/* 步骤连接线;前一步 done 时连接线加深为 ok 绿 */
+.qc-page .qc-tabs button:not(:first-child) { position: relative; margin-left: 14px; }
+.qc-page .qc-tabs button:not(:first-child)::before {
+  content: ""; position: absolute; left: -22px; top: 50%; width: 14px;
+  border-top: 1px solid var(--v2-line-dark);
+}
+.qc-page .qc-tabs .qc-tab--done + .qc-tab::before { border-top-color: color-mix(in srgb, var(--v2-ok) 40%, transparent); }
+.qc-page .qc-tab__seq { width: 20px; height: 20px; }
+
+/* ---- 引导条:callout 化(箭头图标在 TSX) ---- */
+.qc-page .qc-guide {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px; border: 1px solid color-mix(in srgb, var(--v2-brand) 18%, transparent);
+  border-radius: var(--v2-radius);
+  background: var(--v2-brand-soft); color: var(--v2-brand-ink); font-size: var(--v2-fs-sm);
+}
+.qc-page .qc-guide > svg { flex: 0 0 auto; }
+
+/* ---- 工作面板:卡片化 + 切 tab 淡入(TSX 用 key={activeTab} 重挂触发) ---- */
+.qc-page .qc-panel {
+  max-width: 760px; padding: 24px 28px;
+  border: 1px solid var(--v2-line); border-radius: var(--v2-radius-lg);
+  background: var(--v2-surface); box-shadow: var(--v2-shadow-sm);
+  animation: qc-panel-in .18s ease;
+}
+@keyframes qc-panel-in { from { opacity: 0; transform: translateY(4px); } }
+@media (max-width: 720px) {
+  .qc-page .qc-panel { padding: 16px; }
+}
+
+/* ---- 表单 focus 环:与 .v2 input:focus 同权重,靠源顺序在 /quick 内胜出 ---- */
+.qc-page input:focus, .qc-page select:focus, .qc-page textarea:focus {
+  border-color: var(--v2-brand); box-shadow: 0 0 0 3px var(--v2-brand-soft); outline: none;
+}
+
+/* ---- 选题卡:hover 浮起 + 选中品牌左边条;操作位 hover 显形 ---- */
+.qc-page .qc-topic { transition: border-color .15s, box-shadow .15s, transform .15s; }
+.qc-page .qc-topic:hover { transform: translateY(-1px); box-shadow: var(--v2-shadow-md); }
+.qc-page .qc-topic.selected {
+  border-color: var(--v2-brand);
+  background: color-mix(in srgb, var(--v2-brand-soft) 55%, var(--v2-surface));
+  box-shadow: inset 3px 0 0 var(--v2-brand);
+}
+.qc-page .qc-topic.selected:hover { box-shadow: inset 3px 0 0 var(--v2-brand), var(--v2-shadow-md); }
+.qc-page .qc-topic__ops .button { opacity: .55; transition: opacity .15s; }
+.qc-page .qc-topic:hover .qc-topic__ops .button { opacity: 1; }
+
+/* ---- 知识文件行:hover 底色 + 类型图标(图标在 TSX) ---- */
+.qc-page .qc-file-list li:hover { background: var(--v2-canvas); }
+.qc-page .qc-file-list li > svg { flex: 0 0 auto; color: var(--v2-muted); }
+.qc-page .qc-file-list .qc-file-name { flex: 1; min-width: 0; }
+
+/* ---- 历史卡 hover ---- */
+.qc-page .qc-history-item { transition: border-color .15s, box-shadow .15s; }
+.qc-page .qc-history-item:hover { border-color: var(--v2-line-dark); box-shadow: var(--v2-shadow-sm); }
+
+/* ---- 结果卡族(QuickResult) ---- */
+.quick-card { box-shadow: var(--v2-shadow-sm); transition: box-shadow .15s; }
+.quick-card:hover { box-shadow: var(--v2-shadow-md); }
+.quick-card header h3 { display: flex; align-items: center; gap: 6px; }
+.quick-card header h3::before { content: ""; width: 6px; height: 6px; border-radius: 2px; background: var(--v2-brand); }
+.quick-tabs button { border-radius: 999px; }
+.quick-tabs button.active { background: var(--v2-brand-soft); box-shadow: var(--v2-shadow-sm); }
+.quick-card .quick-tag { background: var(--v2-brand-soft); color: var(--v2-brand-ink); font-weight: 500; }
+.quick-card .quick-qa strong { color: var(--v2-ink); }
+.quick-card .quick-qa p { color: var(--v2-ink-2); }
+.quick-card .quick-followup { border-left-color: var(--v2-line-dark); }
+.quick-result .qc-revise { background: var(--v2-ai-soft); border-color: color-mix(in srgb, var(--v2-ai) 18%, transparent); }
+.quick-result .qc-revise summary { color: var(--v2-ai-ink); }
+.quick-result .qc-issue-line, .qc-page .qc-issue-line { display: flex; align-items: center; gap: 6px; }
+.quick-result .qc-issue-line::before, .qc-page .qc-issue-line::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--v2-warn); }
+
+/* ---- 候选完整内容(结果页与历史页共用) ---- */
+.qc-page .qc-disclaimer, .quick-result .qc-disclaimer { margin: 0 0 10px; padding: 8px 10px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius-sm); background: var(--v2-canvas); color: var(--v2-muted); font-size: var(--v2-fs-sm); }
+.qc-page .qc-uncovered, .quick-result .qc-uncovered { display: block; margin-top: 8px; color: var(--v2-muted-2); font-size: var(--v2-fs-xs); }
+
+/* ---- 空态统一(图标在 TSX) ---- */
+.qc-page .qc-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 28px 0; color: var(--v2-muted); font-size: var(--v2-fs-sm); text-align: center; }
+.qc-page .qc-empty__icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--v2-canvas); color: var(--v2-muted-2); }
+
+/* ---- 高级折叠 summary hover ---- */
+.qc-page .qc-advanced summary:hover { color: var(--v2-brand-ink); }
+
+/* ==========================================================================
+   极简创作 · 四区结构(① 总览 ② 知识库 ③ 创作 ④ 产出)
+   导航去序号/去锁链;创作区双栏;总览仪表 + 下一步主按钮 + 最近产出
+   ========================================================================== */
+
+/* 创作区用更宽面板,其余区维持 760px */
+.qc-page .qc-panel--wide { max-width: 1080px; }
+
+/* 创作区双栏:左 360px 选题池 | 右 1fr 生成与结果;窄屏上下堆叠 */
+.qc-page .qc-create { display: grid; grid-template-columns: 360px 1fr; gap: 20px; align-items: start; }
+@media (max-width: 960px) {
+  .qc-page .qc-create { grid-template-columns: 1fr; }
+}
+.qc-page .qc-create__pool { display: flex; flex-direction: column; gap: 16px; max-height: 70vh; overflow: auto; min-width: 0; }
+.qc-page .qc-create__main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+
+/* 总览:下一步主按钮区(按钮大一号) */
+.qc-page .qc-overview-next { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.qc-page .qc-overview-next .button { padding: 12px 22px; font-size: 15px; }
+
+/* 总览:最近产出发丝行列表(整行可点 → ④ 产出) */
+.qc-page .qc-overview-recent { display: flex; flex-direction: column; gap: 6px; }
+.qc-page .qc-overview-recent__label { font-size: var(--v2-fs-xs); color: var(--v2-muted-2); letter-spacing: .04em; }
+.qc-page .qc-overview-recent ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.qc-page .qc-overview-recent li + li { border-top: 1px solid var(--v2-line); }
+.qc-page .qc-overview-recent li > button { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; width: 100%; padding: 9px 2px; border: none; background: none; text-align: left; cursor: pointer; }
+.qc-page .qc-overview-recent li > button:hover strong { color: var(--v2-brand-ink); }
+.qc-page .qc-overview-recent strong { font-size: var(--v2-fs-md); font-weight: 500; color: var(--v2-ink); }
+.qc-page .qc-overview-recent small { flex: none; font-size: var(--v2-fs-xs); color: var(--v2-muted); }

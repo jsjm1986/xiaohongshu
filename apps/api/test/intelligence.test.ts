@@ -147,7 +147,7 @@ test('migrates a v3 database to the current schema with source-image boundaries'
 
   const migrated = new DatabaseService(resolveOptions({ dataDir, databasePath, logger: false }));
   try {
-    assert.equal(Number(migrated.prepare('PRAGMA user_version').get()?.user_version), 9);
+    assert.equal(Number(migrated.prepare('PRAGMA user_version').get()?.user_version), 11);
     const tables = new Set((migrated.prepare(
       "SELECT name FROM sqlite_master WHERE type='table'",
     ).all() as Array<{ name: string }>).map((row) => row.name));
@@ -1332,7 +1332,7 @@ test('planning CRUD, explicit approvals, image safety and generation snapshots w
 
   const service = app.get(IntelligenceService);
   const principal: SessionPrincipal = {
-    kind: 'session', userId: user.id, username: 'admin', systemRole: 'admin', mustChangePassword: false, tokenHash: '', csrfHash: '',
+    kind: 'session', userId: user.id, username: 'admin', systemRole: 'admin', userKind: 'research', mustChangePassword: false, tokenHash: '', csrfHash: '',
   };
   await assert.rejects(
     service.uploadImage({ projectId, filename: '../escape.png', buffer: source, principal }),

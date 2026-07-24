@@ -1,0 +1,76 @@
+import { Sparkles } from 'lucide-react';
+import { TopicTab } from './TopicTab';
+import { ConfigTab } from './ConfigTab';
+import { ResultTab } from './ResultTab';
+import type { QuickCandidateView } from '../../lib/quick-generation';
+import type { QuickTab } from '../../lib/quick-channel-state';
+import type { SimpleSettingOverrides } from '../../lib/simple-generation';
+import type { ContentPreset, Project, TopicOpportunity } from '../../types';
+
+// 布局容器:现 TopicTab + ConfigTab + ResultTab 的 props 并集(壳传下),零业务逻辑重写
+interface Props {
+  project: Project | null;
+  opportunities: TopicOpportunity[];
+  opportunityId: string;
+  presets: ContentPreset[];
+  presetId: string | undefined;
+  overrides: SimpleSettingOverrides;
+  imageAssetIds: string[];
+  jobId: string | undefined;
+  results: QuickCandidateView[];
+  busy: boolean;
+  setBusy: (b: boolean) => void;
+  fail: (e: unknown, fallback: string) => void;
+  onPickTopic: (id: string, presets: ContentPreset[]) => void;
+  onAnalyzed: (opps: TopicOpportunity[]) => void;
+  setOpportunities: (opps: TopicOpportunity[]) => void;
+  onOpportunityGone: (id: string) => void;
+  setPresetId: (id: string | undefined) => void;
+  setPresets: (presets: ContentPreset[]) => void;
+  setOverrides: (o: SimpleSettingOverrides) => void;
+  setImageAssetIds: (ids: string[]) => void;
+  onGenerated: (results: QuickCandidateView[], jobId: string) => void;
+  goTo: (tab: QuickTab) => void;
+}
+
+export function CreateTab(props: Props) {
+  const {
+    project, opportunities, opportunityId, presets, presetId, overrides, imageAssetIds, jobId, results,
+    busy, setBusy, fail,
+    onPickTopic, onAnalyzed, setOpportunities, onOpportunityGone,
+    setPresetId, setPresets, setOverrides, setImageAssetIds, onGenerated, goTo,
+  } = props;
+
+  return (
+    <div className="qc-create">
+      <div className="qc-create__pool">
+        <TopicTab
+          project={project} opportunities={opportunities} opportunityId={opportunityId}
+          busy={busy} setBusy={setBusy} fail={fail} onPickTopic={onPickTopic} onAnalyzed={onAnalyzed}
+          setOpportunities={setOpportunities} onOpportunityGone={onOpportunityGone}
+          onGoKnowledge={() => goTo('knowledge')}
+        />
+      </div>
+      <div className="qc-create__main">
+        <ConfigTab
+          project={project} opportunityId={opportunityId} presets={presets} presetId={presetId}
+          overrides={overrides} imageAssetIds={imageAssetIds} busy={busy} setBusy={setBusy} fail={fail}
+          setPresetId={setPresetId} setPresets={setPresets} setOverrides={setOverrides}
+          setImageAssetIds={setImageAssetIds} onGenerated={onGenerated}
+        />
+        {busy || results.length > 0 ? (
+          <ResultTab
+            project={project} opportunityId={opportunityId} presetId={presetId} overrides={overrides}
+            imageAssetIds={imageAssetIds} jobId={jobId}
+            results={results} busy={busy} setBusy={setBusy} fail={fail} onGenerated={onGenerated}
+          />
+        ) : (
+          <div className="qc-empty">
+            <span className="qc-empty__icon"><Sparkles size={18} /></span>
+            选好选题,点「生成文案」
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

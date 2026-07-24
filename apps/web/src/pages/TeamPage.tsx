@@ -80,6 +80,7 @@ export function TeamPage() {
     password: "",
     systemRole: "user" as "admin" | "user",
     role: "Viewer" as WorkspaceMember["role"],
+    userKind: "research" as "research" | "saas",
   });
   const toast = useToast();
   const { user: currentUser } = useAuth();
@@ -134,6 +135,7 @@ export function TeamPage() {
         username: form.username,
         password: form.password,
         systemRole: form.systemRole,
+        userKind: form.userKind,
       });
       await api.workspaces.setMember(workspaceId, user.id, {
         role: form.role,
@@ -146,6 +148,7 @@ export function TeamPage() {
         password: "",
         systemRole: "user",
         role: "Viewer",
+        userKind: "research",
       });
       toast.push("账号已创建，首次登录需修改密码");
       await load();
@@ -459,6 +462,20 @@ export function TeamPage() {
               required
             />
           </Field>
+          <Field label="用户类型" hint="SaaS 用户登录后只能使用极简创作">
+            <select
+              value={form.userKind}
+              onChange={(event) =>
+                setForm({
+                  ...form,
+                  userKind: event.target.value as "research" | "saas",
+                })
+              }
+            >
+              <option value="research">科研用户(默认)</option>
+              <option value="saas">SaaS 用户</option>
+            </select>
+          </Field>
           <div className="field-grid field-grid--two">
             <Field label="系统身份">
               <select
@@ -474,7 +491,10 @@ export function TeamPage() {
                 <option value="admin">系统管理员</option>
               </select>
             </Field>
-            <Field label="工作区角色">
+            <Field
+              label="工作区角色"
+              hint={form.userKind === "saas" ? "SaaS 用户建议选 Owner" : undefined}
+            >
               <select
                 value={form.role}
                 onChange={(event) =>
@@ -485,7 +505,7 @@ export function TeamPage() {
                 }
               >
                 {roles
-                  .filter((role) => role !== "Owner")
+                  .filter((role) => role !== "Owner" || form.userKind === "saas")
                   .map((role) => (
                     <option key={role}>{role}</option>
                   ))}

@@ -3,6 +3,7 @@ import { AppShell } from './components/AppShell';
 import { ProtectedRoute } from './components/AuthContext';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ToastProvider } from './components/Ui';
+import { QuickShell } from './components/quick/QuickShell';
 import { AuditPage } from './pages/AuditPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { FormulasPage } from './pages/FormulasPage';
@@ -28,7 +29,6 @@ export default function App() {
       <Route element={<ProtectedRoute><AppShell /></ProtectedRoute>}>
         <Route index element={<DashboardPage />} />
         <Route path="generate" element={<GeneratorPage />} />
-        <Route path="quick" element={<QuickChannelPage />} />
         <Route path="projects" element={<ProjectsPage />} />
         <Route path="knowledge" element={<KnowledgePage />} />
         <Route path="formulas" element={<FormulasPage />} />
@@ -38,6 +38,9 @@ export default function App() {
         <Route path="settings" element={<SettingsPage />} />
         <Route path="team" element={<TeamPage />} />
         <Route path="audit" element={<AuditPage />} />
+      </Route>
+      <Route element={<ProtectedRoute><QuickShell /></ProtectedRoute>}>
+        <Route path="quick" element={<QuickChannelPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

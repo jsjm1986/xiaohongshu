@@ -1,6 +1,7 @@
 import { createContext, type FormEvent, type ReactNode, useContext, useEffect, useState } from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
 import { api } from '../lib/api';
+import { isSaasUser, saasPageAllowed } from '../lib/saas-access';
 import type { User } from '../types';
 
 interface AuthContextValue {
@@ -49,6 +50,9 @@ export function ProtectedRoute({ children }: { children: ReactNode }) {
   if (loading) return <div className="app-loading"><span className="spinner" /><p>正在读取工作区…</p></div>;
   if (!user) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   if (user.mustChangePassword && location.pathname !== '/settings') return <Navigate to="/settings" replace />;
+  // SaaS 用户只允许 /quick 与 /settings(及各自子路径),其余一律弹回 /quick。
+  // 顺序:mustChangePassword 强制 /settings 在前,/settings 本来就在白名单内,不冲突。
+  if (isSaasUser(user) && !saasPageAllowed(location.pathname)) return <Navigate to="/quick" replace />;
   return children;
 }
 

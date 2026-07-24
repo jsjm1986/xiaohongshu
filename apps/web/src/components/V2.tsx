@@ -33,7 +33,7 @@ export function V2Hero({
   );
 }
 
-export type V2InstrumentTone = 'brand' | 'blue' | 'ai' | 'ok' | 'error';
+export type V2InstrumentTone = 'brand' | 'blue' | 'ai' | 'ok' | 'error' | 'warn';
 
 export function V2Instrument({ children, columns }: { children: ReactNode; columns?: 2 | 3 | 4 }) {
   return (

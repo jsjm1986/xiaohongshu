@@ -13,6 +13,12 @@ export interface User {
   displayName: string;
   role: string;
   mustChangePassword?: boolean;
+  /** 原始系统角色(透传,不做显示转换);role 仍是展示用字段。 */
+  systemRole?: string;
+  /** 原始工作区角色(透传,不做显示转换)。 */
+  workspaceRole?: string;
+  /** 用户类型:research 科研用户(默认) / saas 极简创作用户。 */
+  userKind?: "research" | "saas";
 }
 
 export interface Project {

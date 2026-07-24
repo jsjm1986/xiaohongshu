@@ -54,6 +54,7 @@ export class AdminController {
       username: body.username,
       password: body.password,
       systemRole: body.systemRole,
+      userKind: body.userKind,
     });
     const principal = (request as unknown as AuthenticatedRequest).principal as SessionPrincipal;
     this.audit.record({ userId: principal.userId, action: 'user.create', entityType: 'user', entityId: String(result.id), details: { username: result.username, systemRole: result.systemRole } });

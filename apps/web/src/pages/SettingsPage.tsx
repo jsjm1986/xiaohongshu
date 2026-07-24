@@ -23,6 +23,7 @@ import {
 import { V2Hero } from "../components/V2";
 import { api } from "../lib/api";
 import { demoSettings } from "../lib/fixtures";
+import { isSaasUser } from "../lib/saas-access";
 import type { AppSettings } from "../types";
 
 type SettingsTab = "model" | "quota" | "account";
@@ -47,18 +48,24 @@ export function SettingsPage() {
   const { user, setUser } = useAuth();
   const { currentProject } = useProjects();
   const toast = useToast();
+  // SaaS 用户只看得见「账户安全」,不调 /api/settings(后端会 403)。
+  const saas = isSaasUser(user);
 
   useEffect(() => {
     if (user?.mustChangePassword) setTab("account");
   }, [user?.mustChangePassword]);
 
   useEffect(() => {
+    if (saas) {
+      setLoading(false);
+      return;
+    }
     api.settings
       .get(currentProject?.workspaceId)
       .then(setSettings)
       .catch(() => setSettings(demoSettings))
       .finally(() => setLoading(false));
-  }, [currentProject?.workspaceId]);
+  }, [currentProject?.workspaceId, saas]);
 
   const saveSettings = async () => {
     if (!settings) return;
@@ -127,6 +134,103 @@ export function SettingsPage() {
     }
   };
 
+  // 「账户安全」区:改密码表单 + 账户信息卡,所需信息全部来自 useAuth,不调 API。
+  // SaaS 用户直接渲染这一块;科研用户仍在 tab === "account" 时渲染同一份。
+  const accountSections = (
+    <>
+      <section className="settings-section">
+        <header>
+          <div>
+            <h2>账户信息</h2>
+            <p>账号由管理员创建，用户名和归属权限不能在此修改。</p>
+          </div>
+        </header>
+        <div className="account-card">
+          <span className="account-avatar">
+            {user?.displayName.slice(0, 1)}
+          </span>
+          <div>
+            <strong>{user?.displayName}</strong>
+            <span>@{user?.username}</span>
+          </div>
+          <Badge tone="purple">{user?.role}</Badge>
+        </div>
+      </section>
+      <section className="settings-section">
+        <header>
+          <div>
+            <h2>更改密码</h2>
+            <p>修改后系统会保留当前会话，其他设备需重新登录。</p>
+          </div>
+          {user?.mustChangePassword && (
+            <Badge tone="warning">首次登录需修改</Badge>
+          )}
+        </header>
+        <form
+          className="form-stack password-form"
+          onSubmit={changePassword}
+        >
+          <Field label="当前密码">
+            <input
+              type="password"
+              value={password.current}
+              onChange={(event) =>
+                setPassword({
+                  ...password,
+                  current: event.target.value,
+                })
+              }
+              required
+            />
+          </Field>
+          <div className="field-grid field-grid--two">
+            <Field label="新密码" hint="至少 12 个字符">
+              <input
+                type="password"
+                value={password.next}
+                onChange={(event) =>
+                  setPassword({ ...password, next: event.target.value })
+                }
+                minLength={12}
+                required
+              />
+            </Field>
+            <Field label="再次输入新密码">
+              <input
+                type="password"
+                value={password.confirm}
+                onChange={(event) =>
+                  setPassword({
+                    ...password,
+                    confirm: event.target.value,
+                  })
+                }
+                minLength={12}
+                required
+              />
+            </Field>
+          </div>
+          <div className="security-note">
+            <LockKeyhole size={17} />
+            <p>
+              密码会使用 Argon2id
+              单向处理，服务器不保存可读取的明文密码。
+            </p>
+          </div>
+          <div className="settings-save">
+            <Button
+              type="submit"
+              loading={saving}
+              icon={<Save size={16} />}
+            >
+              更新密码
+            </Button>
+          </div>
+        </form>
+      </section>
+    </>
+  );
+
   return (
     <div className="page settings-page">
       <V2Hero
@@ -136,6 +240,7 @@ export function SettingsPage() {
         description="管理模型来源、平台额度与账户安全。"
       />
       <div className="settings-layout">
+        {!saas && (
         <aside className="settings-nav">
           <button
             type="button"
@@ -171,8 +276,11 @@ export function SettingsPage() {
             </span>
           </button>
         </aside>
+        )}
         <main className="settings-content">
-          {loading || !settings ? (
+          {saas ? (
+            accountSections
+          ) : loading || !settings ? (
             <Skeleton lines={7} />
           ) : tab === "model" ? (
             <>
@@ -413,98 +521,7 @@ export function SettingsPage() {
               </section>
             </>
           ) : (
-            <>
-              <section className="settings-section">
-                <header>
-                  <div>
-                    <h2>账户信息</h2>
-                    <p>账号由管理员创建，用户名和归属权限不能在此修改。</p>
-                  </div>
-                </header>
-                <div className="account-card">
-                  <span className="account-avatar">
-                    {user?.displayName.slice(0, 1)}
-                  </span>
-                  <div>
-                    <strong>{user?.displayName}</strong>
-                    <span>@{user?.username}</span>
-                  </div>
-                  <Badge tone="purple">{user?.role}</Badge>
-                </div>
-              </section>
-              <section className="settings-section">
-                <header>
-                  <div>
-                    <h2>更改密码</h2>
-                    <p>修改后系统会保留当前会话，其他设备需重新登录。</p>
-                  </div>
-                  {user?.mustChangePassword && (
-                    <Badge tone="warning">首次登录需修改</Badge>
-                  )}
-                </header>
-                <form
-                  className="form-stack password-form"
-                  onSubmit={changePassword}
-                >
-                  <Field label="当前密码">
-                    <input
-                      type="password"
-                      value={password.current}
-                      onChange={(event) =>
-                        setPassword({
-                          ...password,
-                          current: event.target.value,
-                        })
-                      }
-                      required
-                    />
-                  </Field>
-                  <div className="field-grid field-grid--two">
-                    <Field label="新密码" hint="至少 12 个字符">
-                      <input
-                        type="password"
-                        value={password.next}
-                        onChange={(event) =>
-                          setPassword({ ...password, next: event.target.value })
-                        }
-                        minLength={12}
-                        required
-                      />
-                    </Field>
-                    <Field label="再次输入新密码">
-                      <input
-                        type="password"
-                        value={password.confirm}
-                        onChange={(event) =>
-                          setPassword({
-                            ...password,
-                            confirm: event.target.value,
-                          })
-                        }
-                        minLength={12}
-                        required
-                      />
-                    </Field>
-                  </div>
-                  <div className="security-note">
-                    <LockKeyhole size={17} />
-                    <p>
-                      密码会使用 Argon2id
-                      单向处理，服务器不保存可读取的明文密码。
-                    </p>
-                  </div>
-                  <div className="settings-save">
-                    <Button
-                      type="submit"
-                      loading={saving}
-                      icon={<Save size={16} />}
-                    >
-                      更新密码
-                    </Button>
-                  </div>
-                </form>
-              </section>
-            </>
+            accountSections
           )}
         </main>
       </div>

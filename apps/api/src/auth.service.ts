@@ -20,6 +20,7 @@ interface UserRow {
   username: string;
   password_hash: string;
   system_role: 'admin' | 'user';
+  user_kind: string;
   must_change_password: number;
   disabled_at: string | null;
 }
@@ -161,6 +162,7 @@ export class AuthService implements OnModuleInit {
         userId: user.id,
         username: user.username,
         systemRole: user.system_role,
+        userKind: user.user_kind === 'saas' ? 'saas' : 'research',
         mustChangePassword: Boolean(user.must_change_password),
         tokenHash,
         csrfHash,
@@ -214,7 +216,7 @@ export class AuthService implements OnModuleInit {
     const row = this.database
       .prepare(
         `SELECT s.token_hash, s.csrf_hash, s.expires_at,
-                u.id AS user_id, u.username, u.system_role, u.must_change_password, u.disabled_at
+                u.id AS user_id, u.username, u.system_role, u.user_kind, u.must_change_password, u.disabled_at
          FROM sessions s JOIN users u ON u.id = s.user_id
          WHERE s.token_hash = ?`,
       )
@@ -226,6 +228,7 @@ export class AuthService implements OnModuleInit {
           user_id: string;
           username: string;
           system_role: 'admin' | 'user';
+          user_kind: string;
           must_change_password: number;
           disabled_at: string | null;
         }
@@ -242,6 +245,7 @@ export class AuthService implements OnModuleInit {
       userId: row.user_id,
       username: row.username,
       systemRole: row.system_role,
+      userKind: row.user_kind === 'saas' ? 'saas' : 'research',
       mustChangePassword: Boolean(row.must_change_password),
       tokenHash: row.token_hash,
       csrfHash: row.csrf_hash,
@@ -301,6 +305,7 @@ export class AuthService implements OnModuleInit {
     username: unknown;
     password: unknown;
     systemRole?: unknown;
+    userKind?: unknown;
   }): Promise<Record<string, unknown>> {
     const username = requireString(input.username, '用户名', {
       min: 3,
@@ -309,21 +314,22 @@ export class AuthService implements OnModuleInit {
     });
     if (typeof input.password !== 'string') throw new BadRequestException('密码不能为空');
     const role = input.systemRole === 'admin' ? 'admin' : 'user';
+    const userKind = input.userKind === 'saas' ? 'saas' : 'research';
     const id = randomUUID();
     const now = nowIso();
     try {
       this.database
         .prepare(
           `INSERT INTO users
-             (id, username, password_hash, system_role, must_change_password, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 1, ?, ?)`,
+             (id, username, password_hash, system_role, user_kind, must_change_password, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
         )
-        .run(id, username, await this.hashPassword(input.password), role, now, now);
+        .run(id, username, await this.hashPassword(input.password), role, userKind, now, now);
     } catch (error) {
       if (String(error).includes('UNIQUE')) throw new ConflictException('用户名已存在');
       throw error;
     }
-    return { id, username, systemRole: role, mustChangePassword: true, createdAt: now };
+    return { id, username, systemRole: role, userKind, mustChangePassword: true, createdAt: now };
   }
 
   createApiKey(workspaceId: string, name: string, createdBy: string): Record<string, unknown> {

@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Trash2, Sparkles, Building2, Lightbulb } from 'lucide-react';
-import { useProjects } from '../ProjectContext';
-import { Button, Field, Modal } from '../Ui';
+import { Trash2, Sparkles, Building2, Lightbulb, Eye, TriangleAlert, Info, FileText } from 'lucide-react';
+import { Button, Field, Modal, useToast } from '../Ui';
 import { api } from '../../lib/api';
 import { V2Instrument, V2InstrumentCell } from '../V2';
 import { QuickTaskProgress } from './QuickTaskProgress';
@@ -12,23 +11,22 @@ const KINDS = ['已知事实', '案例样本', '用户观点', '方法论推理'
 
 interface Props {
   project: Project | null;
-  projects: Project[];
   busy: boolean;
   setBusy: (b: boolean) => void;
   fail: (e: unknown, fallback: string) => void;
-  onProjectChosen: (p: Project) => void;
   onAnalyzed: (opps: TopicOpportunity[]) => void;
 }
 
-export function ProjectKnowledgeTab({ project, projects, busy, setBusy, fail, onProjectChosen, onAnalyzed }: Props) {
-  const { addProject, updateProject, removeProject, refresh } = useProjects();
-  const [newName, setNewName] = useState('');
-  const [renaming, setRenaming] = useState('');
+export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }: Props) {
+  const toast = useToast();
   const [files, setFiles] = useState<KnowledgeFile[]>([]);
   const [pending, setPending] = useState<File[]>([]);
   const [category, setCategory] = useState('未分类');
   const [kind, setKind] = useState('已知事实');
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [noteName, setNoteName] = useState('');
+  const [noteContent, setNoteContent] = useState('');
+  const [preview, setPreview] = useState<{ name: string; content: string } | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [intel, setIntel] = useState<ProjectIntelligence | null>(null);
   const [topicCount, setTopicCount] = useState(0);
   const [analysisTask, setAnalysisTask] = useState<AnalysisTask | null>(null);
@@ -42,11 +40,16 @@ export function ProjectKnowledgeTab({ project, projects, busy, setBusy, fail, on
     api.knowledge.list(project.id).then((r) => { if (!cancelled) setFiles(r.items); }).catch(() => { if (!cancelled) setFiles([]); });
     api.intelligence.get(project.id).then((r) => { if (!cancelled && r.status !== 'missing') setIntel(r); }).catch(() => {});
     api.opportunities.list(project.id).then((r) => { if (!cancelled) setTopicCount(r.items.length); }).catch(() => {});
-    setRenaming(project.name);
     return () => { cancelled = true; };
   }, [project]);
 
   const analyzed = Boolean(intel?.id);
+
+  // stale 感知:知识增删/图片审批/项目资料更新后,后端把审批链置 stale(规则 2);
+  // ready 但带 staleReasons 同属「建议重新分析」。draft(已分析未确认)不阻塞,仅提示。
+  const staleReasons = intel?.staleReasons ?? [];
+  const isStale = intel?.status === 'stale' || (intel?.status === 'ready' && staleReasons.length > 0);
+  const isDraft = intel?.status === 'draft';
 
   const refreshAnalysisTask = () => {
     if (!project) return Promise.resolve();
@@ -63,37 +66,28 @@ export function ProjectKnowledgeTab({ project, projects, busy, setBusy, fail, on
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [analyzing, project]);
 
-  const createProject = async () => {
-    if (!newName.trim()) return;
+  const createNote = async () => {
+    if (!project || !noteContent.trim()) return;
     setBusy(true);
     try {
-      const created = await addProject({ name: newName.trim() });
-      setNewName('');
-      onProjectChosen(created);
+      await api.knowledge.create(project.id, noteName.trim() || '未命名笔记.md', noteContent, category, kind);
+      const r = await api.knowledge.list(project.id);
+      setFiles(r.items);
+      setNoteName('');
+      setNoteContent('');
+      toast.push('文本已保存为知识文件');
       setBusy(false);
-    } catch (e) { fail(e, '创建项目失败'); }
+    } catch (e) { fail(e, '保存文本失败'); }
   };
 
-  const rename = async () => {
-    if (!project || !renaming.trim() || renaming.trim() === project.name) return;
-    setBusy(true);
+  const previewFile = async (f: KnowledgeFile) => {
+    setPreview({ name: f.name, content: '' });
+    setPreviewLoading(true);
     try {
-      const updated = await updateProject(project.id, { name: renaming.trim() });
-      onProjectChosen(updated);
-      setBusy(false);
-    } catch (e) { fail(e, '重命名失败'); }
-  };
-
-  const doDelete = async () => {
-    if (!project) return;
-    setBusy(true);
-    try {
-      await removeProject(project.id);
-      await refresh();
-      setConfirmDelete(false);
-      setBusy(false);
-      window.location.reload();
-    } catch (e) { fail(e, '删除项目失败'); }
+      const full = await api.knowledge.get(f.id);
+      setPreview({ name: full.name, content: full.content });
+      setPreviewLoading(false);
+    } catch (e) { setPreview(null); setPreviewLoading(false); fail(e, '加载预览失败'); }
   };
 
   const uploadFiles = async (picked: File[]) => {
@@ -148,45 +142,19 @@ export function ProjectKnowledgeTab({ project, projects, busy, setBusy, fail, on
 
   return (
     <div className="qc-step">
-      <Field label="项目">
-        <div className="qc-project-row">
-          <select value={project?.id ?? ''} onChange={(e) => {
-            const p = projects.find((x) => x.id === e.target.value);
-            if (p) onProjectChosen(p);
-          }}>
-            <option value="" disabled>选择已有项目…</option>
-            {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
-        </div>
-      </Field>
-
-      <Field label="或新建项目">
-        <div className="qc-project-row">
-          <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="项目名称" />
-          <Button variant="secondary" loading={busy} disabled={!newName.trim()} onClick={() => void createProject()}>新建</Button>
-        </div>
-      </Field>
-
       {project && (
         <>
-          <details className="qc-advanced">
-            <summary>项目设置</summary>
-            <div className="qc-advanced-grid">
-              <Field label="重命名">
-                <div className="qc-project-row">
-                  <input value={renaming} onChange={(e) => setRenaming(e.target.value)} />
-                  <Button variant="ghost" loading={busy} onClick={() => void rename()}>保存</Button>
-                </div>
-              </Field>
-              <Button variant="ghost" icon={<Trash2 size={15} />} onClick={() => setConfirmDelete(true)}>删除项目</Button>
-            </div>
-          </details>
-
           {analyzed ? (
-            <V2Instrument columns={3}>
+            <V2Instrument columns={isStale || isDraft ? 4 : 3}>
               <V2InstrumentCell tone="brand" icon={<Sparkles size={14} />} label="实体" value={intel?.entity || '已分析'} />
               <V2InstrumentCell tone="ai" icon={<Building2 size={14} />} label="行业" value={intel?.industry || '已建立内容地图'} />
               <V2InstrumentCell tone="ok" icon={<Lightbulb size={14} />} label="可用选题" value={topicCount} unit="个" />
+              {isStale && (
+                <V2InstrumentCell tone="warn" icon={<TriangleAlert size={14} />} label="需要更新" value="内容地图待刷新" note={staleReasons.join('；') || '资料有更新'} />
+              )}
+              {!isStale && isDraft && (
+                <V2InstrumentCell tone="ai" icon={<Info size={14} />} label="状态" value="待确认" note="生成时会自动确认,不阻塞使用" />
+              )}
             </V2Instrument>
           ) : (
             <V2Instrument columns={2}>
@@ -203,8 +171,12 @@ export function ProjectKnowledgeTab({ project, projects, busy, setBusy, fail, on
             <ul className="qc-file-list">
               {files.map((f) => (
                 <li key={f.id}>
+                  <FileText size={14} />
                   <span className="qc-file-name">{f.name}<small className="qc-hint"> · {f.category ?? '未分类'}</small></span>
-                  <Button variant="ghost" icon={<Trash2 size={14} />} onClick={() => void removeFile(f.id)}>删除</Button>
+                  <span className="qc-file-ops">
+                    <Button variant="ghost" icon={<Eye size={14} />} onClick={() => void previewFile(f)}>预览</Button>
+                    <Button variant="ghost" icon={<Trash2 size={14} />} onClick={() => void removeFile(f.id)}>删除</Button>
+                  </span>
                 </li>
               ))}
               {files.length === 0 && <li className="qc-hint">还没有知识文件</li>}
@@ -233,11 +205,26 @@ export function ProjectKnowledgeTab({ project, projects, busy, setBusy, fail, on
             </div>
           </details>
 
+          <details className="qc-advanced">
+            <summary>或直接录入文本</summary>
+            <div className="qc-advanced-grid">
+              <Field label="文件名">
+                <input value={noteName} onChange={(e) => setNoteName(e.target.value)} placeholder="未命名笔记.md" />
+              </Field>
+              <Field label="内容" hint="分类与证据类型沿用上方「上传分类」的当前选择">
+                <textarea value={noteContent} rows={5} onChange={(e) => setNoteContent(e.target.value)} placeholder="直接粘贴或书写文本内容" />
+              </Field>
+              <div className="qc-project-row">
+                <Button variant="secondary" loading={busy} disabled={!noteContent.trim()} onClick={() => void createNote()}>保存</Button>
+              </div>
+            </div>
+          </details>
+
           <div className="qc-project-row">
             {analyzed ? (
               <>
-                {topicCount > 0 && <Button loading={busy} onClick={() => void goToTopics()}>去选题</Button>}
-                <Button variant="ghost" loading={busy} disabled={busy || analyzing} onClick={() => void analyze()}>重新分析</Button>
+                {topicCount > 0 && <Button variant={isStale ? 'secondary' : 'primary'} loading={busy} onClick={() => void goToTopics()}>去创作</Button>}
+                <Button variant={isStale ? 'primary' : 'ghost'} loading={busy} disabled={busy || analyzing} onClick={() => void analyze()}>重新分析</Button>
               </>
             ) : (
               <Button loading={busy} disabled={busy || analyzing} onClick={() => void analyze()}>分析知识库</Button>
@@ -246,9 +233,8 @@ export function ProjectKnowledgeTab({ project, projects, busy, setBusy, fail, on
         </>
       )}
 
-      <Modal open={confirmDelete} title="删除项目" description={`确定删除「${project?.name}」？此操作不可撤销。`} onClose={() => setConfirmDelete(false)}
-        footer={<><Button variant="ghost" onClick={() => setConfirmDelete(false)}>取消</Button><Button loading={busy} onClick={() => void doDelete()}>确认删除</Button></>}>
-        <p className="qc-hint">项目及其知识、选题、历史都将被移除。</p>
+      <Modal open={preview !== null} title={preview?.name ?? '预览'} description="只读预览,内容按原文展示" onClose={() => setPreview(null)} size="wide">
+        {previewLoading ? <p className="qc-hint">正在加载内容…</p> : <pre className="qc-knowledge-preview">{preview?.content || '(文件没有文本内容)'}</pre>}
       </Modal>
     </div>
   );

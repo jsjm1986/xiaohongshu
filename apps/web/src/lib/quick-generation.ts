@@ -25,8 +25,12 @@ export interface QuickCandidateView {
   body: string;
   tags: string[];
   imageBrief?: string;
+  commentDisclaimer?: string;
   commentOwnedFirstComment?: string;
+  commentUncoveredGaps?: string[];
   comments: QuickComment[];
+  /** 校验未通过项的 code 列表(仅 code,不带系统原文 message),用于一句话结论 */
+  issueCodes?: string[];
 }
 
 function mapComment(thread: CommentThread): QuickComment {
@@ -52,8 +56,13 @@ export function quickCandidateFields(candidate: Candidate): QuickCandidateView {
     body: candidate.body,
     tags: candidate.tags ?? [],
     imageBrief: candidate.imageBrief,
+    commentDisclaimer: candidate.commentDisclaimer,
     commentOwnedFirstComment: candidate.commentOwnedFirstComment,
+    commentUncoveredGaps: candidate.commentUncoveredGaps,
     comments: (candidate.comments ?? []).map(mapComment),
+    issueCodes: candidate.validation?.issues
+      .map((issue) => issue.code)
+      .filter((code): code is string => Boolean(code)),
   };
 }
 
@@ -79,6 +88,10 @@ export function quickCandidateToMarkdown(view: QuickCandidateView): string {
   if (view.comments.length) {
     parts.push('');
     parts.push(`## 问答话术`);
+    if (view.commentDisclaimer) {
+      parts.push('');
+      parts.push(`免责声明: ${view.commentDisclaimer}`);
+    }
     for (const c of view.comments) {
       parts.push('');
       parts.push(`Q: ${c.question}`);
@@ -90,6 +103,11 @@ export function quickCandidateToMarkdown(view: QuickCandidateView): string {
         parts.push(`    回应: ${f.answer}`);
       }
     }
+  }
+  if (view.commentUncoveredGaps?.length) {
+    parts.push('');
+    parts.push(`## 未展开缺口`);
+    for (const gap of view.commentUncoveredGaps) parts.push(`- ${gap}`);
   }
   return parts.join('\n');
 }
@@ -113,6 +131,8 @@ export async function autoApproveAndGenerate(args: {
   opportunityId: string;
   presetId?: string;
   overrides?: SimpleSettingOverrides;
+  imageAssetIds?: string[];
+  onProgress?: (job: GenerationJob) => void;
   pollIntervalMs?: number;
   maxPolls?: number;
   deps?: AutoDeps;
@@ -176,7 +196,7 @@ export async function autoApproveAndGenerate(args: {
     projectId,
     opportunity,
     settings,
-    imageAssetIds: [],
+    imageAssetIds: args.imageAssetIds ?? [],
     lockedGapIds: [],
     presetId,
     localFieldsEnabled: false,
@@ -186,6 +206,7 @@ export async function autoApproveAndGenerate(args: {
 
   // 7. 发起生成
   const created = await d.api.generations.create(input);
+  args.onProgress?.(created);
 
   // 8. 轮询
   let job = created;
@@ -194,8 +215,43 @@ export async function autoApproveAndGenerate(args: {
     if (polls >= maxPolls) throw new Error('生成超时，请稍后重试');
     await sleep(pollIntervalMs);
     job = await d.api.generations.get(created.id);
+    args.onProgress?.(job);
     polls += 1;
   }
   if (job.status === 'failed') throw new Error(job.error || '生成失败，请重试');
+  return job;
+}
+
+interface ReviseDeps {
+  api: ApiClient;
+}
+
+// 按意见局部重生成:后端 revise 目前同步返回更新后的 job,仍沿用与
+// autoApproveAndGenerate 相同的轮询模式兜底(若未来改为异步任务,调用方不用改)。
+export async function reviseCandidate(args: {
+  jobId: string;
+  candidateId: string;
+  instruction: string;
+  pollIntervalMs?: number;
+  maxPolls?: number;
+  onProgress?: (job: GenerationJob) => void;
+  deps?: ReviseDeps;
+}): Promise<GenerationJob> {
+  const { jobId, candidateId, instruction } = args;
+  const pollIntervalMs = args.pollIntervalMs ?? 1800;
+  const maxPolls = args.maxPolls ?? 100;
+  const d = args.deps ?? (await defaultDeps());
+
+  let job = await d.api.generations.revise(jobId, candidateId, instruction);
+  args.onProgress?.(job);
+  let polls = 0;
+  while (job.status === 'queued' || job.status === 'running') {
+    if (polls >= maxPolls) throw new Error('修改超时，请稍后重试');
+    await sleep(pollIntervalMs);
+    job = await d.api.generations.get(jobId);
+    args.onProgress?.(job);
+    polls += 1;
+  }
+  if (job.status === 'failed') throw new Error(job.error || '修改失败，请重试');
   return job;
 }

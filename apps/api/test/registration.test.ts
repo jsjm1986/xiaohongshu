@@ -25,14 +25,18 @@ function makeAuth(db: DatabaseService): AuthService {
   return new AuthService(db, options);
 }
 
-test('migration v10 creates registration_requests table', () => {
+test('migration v11 adds user_kind column and bumps user_version', () => {
   const db = makeDb();
   const row = db
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='registration_requests'")
     .get() as { name: string } | undefined;
   assert.equal(row?.name, 'registration_requests');
   const version = Number(db.prepare('PRAGMA user_version').get()?.user_version);
-  assert.equal(version, 10);
+  assert.equal(version, 11);
+  const columns = db.prepare('PRAGMA table_info(users)').all() as Array<{ name: string; dflt_value: string | null }>;
+  const userKind = columns.find((column) => column.name === 'user_kind');
+  assert.ok(userKind, 'users.user_kind 列应存在');
+  assert.equal(userKind.dflt_value, "'research'");
 });
 
 test('provisionUserWithWorkspace creates user + workspace + Owner member', async () => {
