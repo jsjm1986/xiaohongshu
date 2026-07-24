@@ -3404,3 +3404,7 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .qc-jobcell--completed .qc-jobcell__badge { color: var(--v2-ok); }
 .qc-jobcell__badge--fail { color: var(--v2-error); }
 .qc-jobcell__badge .button { padding: 2px 6px; font-size: var(--v2-fs-micro); }
+
+/* 换一批「存为模板」内联命名行(替代原弹窗,少一层交互) */
+.qc-tpl-inline { display: flex; align-items: center; gap: 8px; }
+.qc-tpl-inline input { flex: 1 1 auto; min-width: 0; }
