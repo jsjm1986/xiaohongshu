@@ -6,6 +6,7 @@ import { api } from '../../lib/api';
 import { quickCandidateFields, quickCandidateToMarkdown, type QuickCandidateView } from '../../lib/quick-generation';
 import { firstValidationIssueLabel } from '../../lib/validation-labels';
 import { filterGenerationJobs, type GenerationStatusFilter } from '../../lib/quick-channel-state';
+import { BatchBoard } from './BatchBoard';
 import type { GenerationJob, Project } from '../../types';
 
 interface Props {
@@ -15,6 +16,10 @@ interface Props {
   setBusy: (b: boolean) => void;
   fail: (e: unknown, fallback: string) => void;
   setHistory: (h: GenerationJob[]) => void;
+  /** 刚提交的批次:看板里高亮置顶 */
+  activeBatchId?: string;
+  /** 「再来一篇同款」:把该任务的配方回灌创作区 */
+  onReuseRecipe?: (job: GenerationJob) => void;
 }
 
 const STATUS_LABEL: Record<string, { text: string; tone: 'ok' | 'warn' | 'error' | 'muted' }> = {
@@ -34,7 +39,7 @@ const STATUS_CHIPS: Array<{ key: GenerationStatusFilter; label: string }> = [
   { key: 'failed', label: '失败' },
 ];
 
-export function HistoryTab({ project, history, setBusy, fail, setHistory }: Props) {
+export function HistoryTab({ project, history, setBusy, fail, setHistory, activeBatchId, onReuseRecipe }: Props) {
   const toast = useToast();
   const [expanded, setExpanded] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<GenerationStatusFilter>('all');
@@ -73,22 +78,46 @@ export function HistoryTab({ project, history, setBusy, fail, setHistory }: Prop
     URL.revokeObjectURL(url);
   };
 
+  // list 不含候选,首次展开时拉一次详情并缓存
+  const loadJobDetail = async (jobId: string) => {
+    if (details[jobId]) return;
+    setLoadingId(jobId);
+    try {
+      const full = await api.generations.get(jobId);
+      setDetails((cur) => ({ ...cur, [jobId]: full.candidates ?? [] }));
+    } catch (e) { fail(e, '加载候选失败'); } finally { setLoadingId(null); }
+  };
+
   const toggle = async (job: GenerationJob) => {
     if (expanded === job.id) { setExpanded(null); return; }
     setExpanded(job.id);
     setCandidateIdx(0);
-    // 只有已完成任务有候选;list 不含候选,展开时拉一次详情并缓存
-    if (job.status === 'completed' && !details[job.id]) {
-      setLoadingId(job.id);
-      try {
-        const full = await api.generations.get(job.id);
-        setDetails((cur) => ({ ...cur, [job.id]: full.candidates ?? [] }));
-      } catch (e) { fail(e, '加载候选失败'); } finally { setLoadingId(null); }
+    // 只有已完成任务有候选
+    if (job.status === 'completed') await loadJobDetail(job.id);
+  };
+
+  // 看板子卡 → 展开下方列表里的同一任务。批次里刚完成的任务可能还不在 history
+  // (history 只在挂载时拉过一次),所以先补一次列表再展开。
+  const openJobFromBoard = async (jobId: string) => {
+    setExpanded(jobId);
+    setCandidateIdx(0);
+    if (!history.some((j) => j.id === jobId) && projectId) {
+      try { setHistory((await api.generations.list(projectId)).items); }
+      catch { /* 静默:详情仍可单独加载 */ }
     }
+    await loadJobDetail(jobId);
   };
 
   return (
     <div className="qc-step">
+      {project && (
+        <BatchBoard
+          project={project} activeBatchId={activeBatchId} fail={fail}
+          onOpenJob={(id) => void openJobFromBoard(id)}
+          onReuseRecipe={onReuseRecipe}
+        />
+      )}
+
       <div className="qc-history-filters">
         <div className="chip-group">
           {STATUS_CHIPS.map((c) => (

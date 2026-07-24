@@ -3383,3 +3383,24 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 /* 右栏批量配置态抬头 */
 .qc-batch-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .qc-batch-head strong { font-size: var(--v2-fs-md); color: var(--v2-ink); }
+
+/* 产出区批次看板:批次卡 + 子卡三态(排队/生成中/完成或失败) */
+.qc-batch-board { display: flex; flex-direction: column; gap: 14px; margin-bottom: 20px; }
+.qc-batch-card { border: 1px solid var(--v2-line); border-radius: var(--v2-radius-sm); padding: 14px; background: var(--v2-surface); }
+.qc-batch-card--active { border-color: var(--v2-brand); }
+.qc-batch-card__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.qc-batch-card__head strong { font-size: var(--v2-fs-md); color: var(--v2-ink); font-weight: 500; }
+.qc-batch-card__meta { display: inline-flex; align-items: center; gap: 8px; }
+.qc-batch-card__status { font-size: var(--v2-fs-sm); color: var(--v2-ai); }
+.qc-batch-card__count { font-size: var(--v2-fs-sm); color: var(--v2-muted); }
+.qc-batch-card__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
+.qc-jobcell { display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius-sm); font-size: var(--v2-fs-sm); }
+.qc-jobcell--completed { border-color: var(--v2-ok); }
+.qc-jobcell--failed { border-color: var(--v2-error); }
+.qc-jobcell__topic { text-align: left; border: none; background: none; padding: 0; font-size: var(--v2-fs-sm); color: var(--v2-ink); cursor: pointer; }
+.qc-jobcell__topic:disabled { cursor: default; color: var(--v2-muted); }
+.qc-jobcell__topic:hover:not(:disabled) { color: var(--v2-brand-ink); }
+.qc-jobcell__badge { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; color: var(--v2-muted); }
+.qc-jobcell--completed .qc-jobcell__badge { color: var(--v2-ok); }
+.qc-jobcell__badge--fail { color: var(--v2-error); }
+.qc-jobcell__badge .button { padding: 2px 6px; font-size: var(--v2-fs-micro); }

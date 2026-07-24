@@ -241,6 +241,7 @@ export function QuickChannelPage() {
         {activeTab === 'history' && (
           <HistoryTab
             project={project} history={history} busy={busy} setBusy={setBusy} fail={fail} setHistory={setHistory}
+            activeBatchId={activeBatchId}
           />
         )}
       </div>
