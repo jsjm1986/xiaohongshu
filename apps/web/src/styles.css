@@ -3484,6 +3484,19 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
   font-size: var(--v2-fs-sm); text-decoration: none;
 }
 .qs-full-link:hover { border-color: var(--v2-line-dark); color: var(--v2-brand-ink); }
+/* 顶栏常驻额度:原来只在总览页有一格,而额度是在创作页花掉的 */
+.qs-quota {
+  display: inline-flex; align-items: baseline; gap: 5px;
+  padding: 5px 10px; border-radius: 999px; text-decoration: none;
+  border: 1px solid var(--v2-line); background: var(--v2-surface);
+  color: var(--v2-muted); font-size: var(--v2-fs-xs);
+}
+.qs-quota:hover { border-color: var(--v2-line-dark); }
+.qs-quota strong { font-size: var(--v2-fs-sm); color: var(--v2-ink); }
+.qs-quota--warn { border-color: color-mix(in srgb, var(--v2-warn) 40%, var(--v2-line)); background: var(--v2-warn-soft); }
+.qs-quota--warn strong { color: var(--v2-warn); }
+.qs-quota--error { border-color: color-mix(in srgb, var(--v2-error) 40%, var(--v2-line)); background: var(--v2-error-soft); }
+.qs-quota--error strong { color: var(--v2-error); }
 /* 用户菜单:复用全站 profile 结构,壳内补 hover 微底色与圆角(不改全站规则) */
 .quick-shell .profile-button { padding: 4px 8px; border-radius: var(--v2-radius-sm); }
 .quick-shell .profile-button:hover { background: var(--v2-canvas); }

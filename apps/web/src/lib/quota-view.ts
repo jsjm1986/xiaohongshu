@@ -1,4 +1,5 @@
 import type { V2InstrumentTone } from '../components/V2';
+import { SUPPORT_HINT } from './support';
 
 /** GET /api/settings/quota 的响应。只有额度,不含供应商与密钥字段。 */
 export interface QuotaSnapshot {
@@ -16,6 +17,22 @@ export interface QuotaCell {
   /** 「/ 500 次」 */
   unit: string;
   note?: string;
+}
+
+/**
+ * 不显示额度格时的原因说明。
+ *
+ * quotaCell 返回 null 有三种完全不同的情形,而界面此前一律留空白——用户看到的是
+ * 一片空,分不清"没配额度""用的是自己的密钥""读取失败了"。BYOK 是其中最常见的
+ * 一种(实测当前工作区就是),明说一句比留白强。
+ *
+ * 返回 null 表示连说明都不必给(拉取失败,静默即可,不该拿技术故障打扰用户)。
+ */
+export function quotaAbsenceNote(q: QuotaSnapshot | null | undefined): string | null {
+  if (!q) return null;
+  if (q.providerMode !== 'platform') return '当前使用自有密钥，不消耗平台额度。';
+  if (!q.monthlyQuota || q.monthlyQuota <= 0) return '尚未配置平台额度。';
+  return null;
 }
 
 /** 余量低于这个比例就转警示色。20% 给的是"还够用几篇"的手感,不是精确阈值。 */
@@ -40,9 +57,11 @@ export function quotaCell(q: QuotaSnapshot | null | undefined): QuotaCell | null
   const ratio = remaining / q.monthlyQuota;
 
   const tone: V2InstrumentTone = remaining === 0 ? 'error' : ratio <= LOW_RATIO ? 'warn' : 'ok';
-  // 文案与后端 consumePlatformQuota 抛的 403 保持一致口径,不自创说法
+  // 用完时的出路必须是 SaaS 用户真能走的那条:他看不到管理员是谁,也没权限配
+  // BYOK(PATCH /api/settings 对他 403),所以原来那句「联系管理员增加额度或改用
+  // 自有密钥」两条路都走不通。改成可复制的客服微信。
   const note = remaining === 0
-    ? '已用完，联系管理员增加额度或改用自有密钥'
+    ? `额度已用完，无法继续生成。${SUPPORT_HINT}`
     : tone === 'warn'
       ? '余量不多，用完后将无法生成'
       : undefined;

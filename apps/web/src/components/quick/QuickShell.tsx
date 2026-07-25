@@ -1,8 +1,10 @@
-import { ArrowUpRight, ChevronDown, LogOut, Settings, Zap } from 'lucide-react';
-import { useState } from 'react';
+import { ArrowUpRight, ChevronDown, Gauge, LogOut, Settings, Zap } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
 import { ProjectProvider } from '../ProjectContext';
+import { api } from '../../lib/api';
+import { quotaCell, type QuotaSnapshot } from '../../lib/quota-view';
 import { isSaasUser, SAAS_ACCOUNT_PATH } from '../../lib/saas-access';
 
 /**
@@ -14,11 +16,38 @@ function QuickShellContent() {
   const [profileOpen, setProfileOpen] = useState(false);
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const [quota, setQuota] = useState<QuotaSnapshot | null>(null);
+
+  /**
+   * 顶栏常驻额度。
+   *
+   * 原来额度只在【总览】页有一格,而用户真正会花掉额度的地方是【创作】页——在那里
+   * 提一批 24 篇时看不见余量,只能撞上 403 才知道不够。付费产品不该让人这样发现
+   * 余额问题。放在壳上,四个区都看得见。
+   *
+   * 只拉一次:额度变化的粒度是"每次生成 +1",没必要轮询;真正需要精确数字的地方
+   * (账户页)会自己再拉。
+   */
+  useEffect(() => {
+    let cancelled = false;
+    api.workspaces.list()
+      .then((list) => {
+        const workspaceId = list[0]?.id;
+        if (!workspaceId || cancelled) return;
+        return api.settings.quota(workspaceId).then((snapshot) => {
+          if (!cancelled) setQuota(snapshot);
+        });
+      })
+      .catch(() => { /* 静默:额度读不到不该阻塞整个壳 */ });
+    return () => { cancelled = true; };
+  }, []);
 
   const handleLogout = async () => {
     await logout();
     navigate('/login');
   };
+
+  const cell = quotaCell(quota);
 
   return (
     <div className="quick-shell v2">
@@ -33,6 +62,18 @@ function QuickShellContent() {
           </span>
         </NavLink>
         <div className="qs-topbar__right">
+          {/* 额度常驻:BYOK 或读取失败时 quotaCell 返回 null,这一格整体不渲染 */}
+          {cell && (
+            <NavLink
+              to={SAAS_ACCOUNT_PATH}
+              className={`qs-quota qs-quota--${cell.tone}`}
+              title={cell.note ?? '本月剩余生成次数'}
+            >
+              <Gauge size={13} />
+              <strong>{cell.value}</strong>
+              <small>{cell.unit}</small>
+            </NavLink>
+          )}
           {!isSaasUser(user) && (
             <NavLink to="/" end className="qs-full-link" title="返回完整工作台">
               完整版

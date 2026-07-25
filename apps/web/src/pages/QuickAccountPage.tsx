@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../components/AuthContext';
 import { Button, Field, useToast } from '../components/Ui';
 import { api } from '../lib/api';
-import { quotaCell, type QuotaSnapshot } from '../lib/quota-view';
+import { quotaAbsenceNote, quotaCell, type QuotaSnapshot } from '../lib/quota-view';
 
 /**
  * 极简创作的账户页。
@@ -65,6 +65,7 @@ export function QuickAccountPage() {
   };
 
   const cell = quotaCell(quota);
+  const absenceNote = quotaAbsenceNote(quota);
 
   return (
     <div className="page qc-page qc-account">
@@ -95,16 +96,24 @@ export function QuickAccountPage() {
           </dl>
         </section>
 
-        {/* 额度:付费用户在任何时候都该看得见还剩多少。BYOK 或读取失败时
-            quotaCell 返回 null,这一块整体不渲染(既有约定,不显示假数据)。 */}
-        {cell && (
+        {/* 额度。不显示数字时也要说清原因(BYOK / 未配额度),而不是留一片空白
+            让用户猜是没额度还是坏了。拉取失败时 absenceNote 为 null,静默略过。 */}
+        {(cell || absenceNote) && (
           <section className="qc-account__card">
             <h2>本月额度</h2>
-            <div className={`qc-account__quota qc-account__quota--${cell.tone}`}>
-              <strong>{cell.value}</strong>
-              <span>{cell.unit}</span>
-            </div>
-            {cell.note && <p className="qc-hint">{cell.note}</p>}
+            {cell ? (
+              <>
+                <div className={`qc-account__quota qc-account__quota--${cell.tone}`}>
+                  <strong>{cell.value}</strong>
+                  <span>{cell.unit}</span>
+                </div>
+                {cell.note && (
+                  <p className={cell.tone === 'error' ? 'qc-warn-line' : 'qc-hint'}>{cell.note}</p>
+                )}
+              </>
+            ) : (
+              <p className="qc-hint">{absenceNote}</p>
+            )}
           </section>
         )}
 
