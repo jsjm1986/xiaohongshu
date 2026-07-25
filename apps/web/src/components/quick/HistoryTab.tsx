@@ -188,6 +188,11 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
    *
    * 后端一直支持 markdown/json/docx/pdf 四种,完整版工作台四个按钮都给;极简创作
    * 此前只有一个本地 Markdown Blob,付费用户要交付用的 docx/pdf 拿不到。
+   *
+   * 门槛差异要紧:后端导出对未通过校验的候选一律 400
+   * (export.service.ts:155「禁止导出」),实测 165 个候选里 129 个都过不了;
+   * 而本地 Markdown 不经后端,不受此限。所以只门控后端三种格式,
+   * 本地 Markdown 始终可用——待核对的稿子仍然要能拿出来给人看。
    */
   const exportAs = (job: GenerationJob, v: QuickCandidateView, format: 'markdown' | 'json' | 'docx' | 'pdf') => {
     if (format === 'markdown') {
@@ -351,11 +356,25 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
                       {/* 四种格式都给:docx/pdf 走后端,markdown 本地即时 */}
                       <span className="qc-export-group">
                         <span className="qc-export-group__label"><Download size={13} />导出</span>
-                        {(['markdown', 'docx', 'pdf', 'json'] as const).map((fmt) => (
-                          <Button key={fmt} variant="ghost" onClick={() => exportAs(job, current, fmt)}>
-                            {fmt === 'markdown' ? 'Markdown' : fmt.toUpperCase()}
-                          </Button>
-                        ))}
+                        {(['markdown', 'docx', 'pdf', 'json'] as const).map((fmt) => {
+                          // 后端三种格式对未通过校验的候选会 400,禁用并说明原因;
+                          // 本地 Markdown 不经后端,始终可用。
+                          const blocked = fmt !== 'markdown' && !current.publishable;
+                          return (
+                            <Button
+                              key={fmt}
+                              variant="ghost"
+                              disabled={blocked}
+                              title={blocked ? '未通过可发布校验的稿子不能导出为该格式，可先导出 Markdown 人工核对' : undefined}
+                              onClick={() => exportAs(job, current, fmt)}
+                            >
+                              {fmt === 'markdown' ? 'Markdown' : fmt.toUpperCase()}
+                            </Button>
+                          );
+                        })}
+                        {!current.publishable && (
+                          <small className="qc-hint">仅 Markdown 可导出（未通过校验）</small>
+                        )}
                       </span>
                     </div>
                   </div>
