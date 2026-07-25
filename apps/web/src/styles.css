@@ -3218,6 +3218,11 @@ div.qc-topic { cursor: default; }
 }
 .qc-batch-card__collapsed:hover { border-color: var(--v2-brand); color: var(--v2-brand-ink); }
 
+/* 整批导出条 */
+.qc-batch-card__export { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-bottom: 9px; }
+.qc-batch-card__export-label { display: inline-flex; align-items: center; gap: 4px; margin-right: 5px; color: var(--v2-muted); font-size: var(--v2-fs-micro); }
+.qc-batch-card__export .button { padding: 3px 8px; font-size: var(--v2-fs-micro); }
+
 /* ===== 极简频道 P2:候选未过校验的一句话结论 ===== */
 .qc-issue-line { margin: 0; color: var(--v2-warn); font-size: var(--v2-fs-sm); }
 /* 通过态:与未通过态同一位置、同一字号,只换语气与颜色 */

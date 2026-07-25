@@ -373,7 +373,10 @@ export class GenerationService implements OnModuleInit {
   getBatch(id: string): Record<string, unknown> {
     const batch = this.batchRow(id);
     const jobRows = this.database.prepare('SELECT * FROM generation_jobs WHERE batch_id = ? ORDER BY created_at').all(id) as unknown as JobRow[];
-    const jobs = jobRows.map((row) => this.mapJob(row, false));
+    // 与列表同一套轻量投影:批次看板读的字段和列表页一样(状态、进度、topic、
+    // 配方回填),不需要 planningContext/configImpact 那些重字段。改前实测单个
+    // 任务 35 个键,一个 10 篇批次就带上十份重复的影响报告。
+    const jobs = jobRows.map((row) => this.mapJobForList(row));
     const status = computeBatchStatus(jobRows.map((row) => row.status));
     // 状态漂移时惰性回写(含 completed_at)。回写后必须回传新值:batch 行是回写前读的,
     // 直接用 batch.completed_at 会让「批次刚好在本次请求收敛到终态」的那一次响应

@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import { CheckCircle2, Clock, RefreshCw, RotateCcw, XCircle } from 'lucide-react';
-import { Button } from '../Ui';
+import { CheckCircle2, Clock, Download, RefreshCw, RotateCcw, XCircle } from 'lucide-react';
+import { Button, useToast } from '../Ui';
 import { api } from '../../lib/api';
 import { mergeJobUpdates, pendingJobIds } from '../../lib/batch-polling';
 import { batchProgressText, batchStatusLabel, buildBatchJobs, liveBatchStatus } from '../../lib/quick-batch';
 import { extractRecipe, resolveRecipeTargets } from '../../lib/quick-recipe';
-import { approveOpportunitiesForBatch } from '../../lib/quick-generation';
+import { approveOpportunitiesForBatch, quickCandidateFields, quickCandidateToMarkdown } from '../../lib/quick-generation';
+import { planBatchExport, type ExportFormat } from '../../lib/batch-export';
 import type { GenerationBatch, GenerationJob, Project } from '../../types';
 
 interface Props {
@@ -24,11 +25,74 @@ const POLL_INTERVAL_MS = 2000;
 export function BatchBoard({ project, activeBatchId, fail, onOpenJob, onReuseRecipe }: Props) {
   const [batches, setBatches] = useState<GenerationBatch[]>([]);
   const [jobsByBatch, setJobsByBatch] = useState<Record<string, GenerationJob[]>>({});
+  const toast = useToast();
   const [retrying, setRetrying] = useState<string | null>(null);
+  const [exporting, setExporting] = useState<string | null>(null);
   // 用户手动展开过的全失败批次
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const toggleExpanded = (id: string) =>
     setExpanded((cur) => { const next = new Set(cur); next.has(id) ? next.delete(id) : next.add(id); return next; });
+
+  /**
+   * 批量导出一个批次。
+   *
+   * 一个批次实测有 24–27 个候选,逐个点开导出不可接受。
+   *
+   * 几处不得不这么做的地方:
+   * - 批次接口不返回 candidates(轻量投影),所以先并发取详情拿候选 id。
+   * - 下载必须串行 + 间隔:浏览器对连续多次 location/anchor 下载有节流,
+   *   一口气触发 20 多个只会成功前几个。
+   * - 后端导出对未通过校验的候选一律 400(实测 165 个里 129 个过不了),
+   *   所以 planBatchExport 先筛,再如实报告跳过多少,而不是让用户收到一堆失败。
+   */
+  const exportBatch = async (batch: GenerationBatch, format: ExportFormat) => {
+    setExporting(batch.id);
+    try {
+      const jobs = jobsByBatch[batch.id] ?? [];
+      const completed = jobs.filter((j) => j.status === 'completed');
+      // 批次任务不含候选,逐个取详情(并发,失败的当未完成处理)
+      const detailed = await Promise.all(
+        completed.map((j) => api.generations.get(j.id).catch(() => null)),
+      );
+      const usable = detailed.filter((j): j is GenerationJob => Boolean(j));
+      const plan = planBatchExport(usable, format);
+
+      if (plan.total === 0) {
+        const why = plan.skippedUnpublishable > 0
+          ? `${plan.skippedUnpublishable} 篇未通过可发布校验，无法导出为 ${format.toUpperCase()}；可改用 Markdown`
+          : '这个批次还没有可导出的产出';
+        toast.push(why, 'error');
+        return;
+      }
+
+      for (const [index, item] of plan.items.entries()) {
+        if (format === 'markdown') {
+          const job = usable.find((j) => j.id === item.jobId);
+          const candidate = job?.candidates?.find((c) => c.id === item.candidateId);
+          if (!candidate) continue;
+          const blob = new Blob([quickCandidateToMarkdown(quickCandidateFields(candidate))], { type: 'text/markdown;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = item.filename;
+          a.click();
+          URL.revokeObjectURL(url);
+        } else {
+          const a = document.createElement('a');
+          a.href = api.generations.exportUrl(item.jobId, item.candidateId, format);
+          a.download = item.filename;
+          a.click();
+        }
+        // 节流:连续触发会被浏览器拦掉,最后一个不必等
+        if (index < plan.items.length - 1) await new Promise((r) => setTimeout(r, 350));
+      }
+
+      const notes = [`已导出 ${plan.total} 篇`];
+      if (plan.skippedUnpublishable > 0) notes.push(`${plan.skippedUnpublishable} 篇未通过校验已跳过`);
+      if (plan.skippedUnfinished > 0) notes.push(`${plan.skippedUnfinished} 篇未完成已跳过`);
+      toast.push(notes.join('，'));
+    } catch (e) { fail(e, '批量导出失败'); } finally { setExporting(null); }
+  };
 
   const loadBatches = useCallback(async () => {
     try {
@@ -94,6 +158,24 @@ export function BatchBoard({ project, activeBatchId, fail, onOpenJob, onReuseRec
                 {jobs.length > 0 && <span className="qc-batch-card__count">{batchProgressText(jobs)}</span>}
               </span>
             </div>
+            {/* 批量导出:一个批次实测 24–27 个候选,逐个点开导出不可接受。
+                只在有已完成任务时出现——全失败的批次没东西可导。 */}
+            {jobs.some((j) => j.status === 'completed') && (
+              <div className="qc-batch-card__export">
+                <span className="qc-batch-card__export-label"><Download size={12} />整批导出</span>
+                {(['markdown', 'docx', 'pdf'] as const).map((fmt) => (
+                  <Button
+                    key={fmt}
+                    variant="ghost"
+                    loading={exporting === batch.id}
+                    disabled={exporting !== null}
+                    onClick={() => void exportBatch(batch, fmt)}
+                  >
+                    {fmt === 'markdown' ? 'Markdown' : fmt.toUpperCase()}
+                  </Button>
+                ))}
+              </div>
+            )}
             {/* 全失败的批次默认折叠:实测三个批次全是 0/10,展开后就是一墙红色卡片,
                 把还能用的产出挤到屏幕外。折叠后仍可点开逐条重试。 */}
             {allFailed && !expanded.has(batch.id) ? (
