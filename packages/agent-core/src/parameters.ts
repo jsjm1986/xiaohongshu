@@ -417,11 +417,56 @@ const DIAGNOSTIC_PARAMETERS: GenerationParameterDefinition[] = [
   )),
 ];
 
-export const GENERATION_PARAMETER_REGISTRY: readonly GenerationParameterDefinition[] = Object.freeze([
-  ...CORE_PARAMETERS,
-  ...EXTRA_PARAMETERS,
-  ...DIAGNOSTIC_PARAMETERS,
-]);
+/**
+ * 评论参数的单一真源:声明每个作用于 Cref 通道的写作行为参数注入哪个评论阶段。
+ * reader=读者提问侧(2A-R)、answer=机构答复侧(2A-O/2B-O)、both=两侧都注入。
+ * engine.ts 按此字段把参数的 behaviorInstructions 分侧注入——只注入写作指令文本,
+ * 绝不连带角色身份/口径/task_data(那是旧串台根因)。此处是唯一归属声明,禁止在
+ * engine/planning 里再维护第二份归属表。规划层已消化的形态参数(platformRegister /
+ * conversationRate / branchingStrength / organicVariation / roleDiversity 等,见
+ * planning.ts buildPersonaScenePlan)不在此表——它们经 personaScenePlan 分侧投影,
+ * 不走提示词文本注入,避免双真源冲突。
+ */
+const COMMENT_STAGE_BY_ID: Record<string, GenerationParameterDefinition["commentStage"]> = {
+  // 读者提问侧:决定"读者问什么、怎么问"。
+  audience_stage: "reader",
+  comment_constraint_density: "reader",
+  comment_gap_multiplexing: "reader",
+  question_compression: "reader",
+  question_naturalness: "reader",
+  state_information_strength: "reader",
+  experience_information_strength: "reader",
+  // 机构答复侧:决定"怎么答"。comment_conditionality 本轮从空转接通到答复侧。
+  comment_reply_increment: "answer",
+  comment_conditionality: "answer",
+  comment_self_verification: "answer",
+  comment_discovery_strength: "answer",
+  comment_inference_effort: "answer",
+  decision_information_depth: "answer",
+  information_boundaries: "answer",
+  // 两侧:结构/展开/安全边界,提问与答复都受约束。
+  information_breadth: "both",
+  comment_thread_min: "both",
+  comment_thread_max: "both",
+  follow_up_depth: "both",
+  comment_expansion: "both",
+  redundancy_tolerance: "both",
+  evidence_strictness: "both",
+  boundary_visibility: "both",
+  comment_false_closure_guard: "both",
+  information_gaps: "both",
+};
+
+export const GENERATION_PARAMETER_REGISTRY: readonly GenerationParameterDefinition[] = Object.freeze(
+  [
+    ...CORE_PARAMETERS,
+    ...EXTRA_PARAMETERS,
+    ...DIAGNOSTIC_PARAMETERS,
+  ].map((definition) => {
+    const commentStage = COMMENT_STAGE_BY_ID[definition.id];
+    return Object.freeze(commentStage ? { ...definition, commentStage } : definition);
+  }),
+);
 
 export const CONFIRMED_REFERENCE_SAMPLE_BASELINE: ConfirmedSampleBaseline = {
   id: "reference_copy_70_descriptive_v1",
@@ -1079,6 +1124,58 @@ export function parameterInstructionsForChannels(report: ParameterImpactReport, 
   return report.parameterTraces
     .filter((trace) => trace.channels.some((channel) => selected.has(channel)))
     .flatMap((trace) => trace.behaviorInstructions)
+    .filter((value, index, all) => all.indexOf(value) === index);
+}
+
+/** parameterId → commentStage 的归属索引(单一真源是 COMMENT_STAGE_BY_ID)。 */
+const COMMENT_STAGE_BY_PARAMETER_ID = new Map(
+  GENERATION_PARAMETER_REGISTRY
+    .filter((definition) => definition.commentStage)
+    .map((definition) => [definition.id, definition.commentStage!]),
+);
+
+/**
+ * 评论阶段的参数行为指令(2A-R 读者侧 / 2A-O·2B-O 答复侧)。
+ *
+ * 只取 trace 级的逐参数执行指令,**不含 preset/style 散文**——散文是整篇作文的
+ * 编排口径,天然跨身份(例如 search_decision 预设里有"避免单个楼主回复包办全部
+ * 信息"),把它塞进单一身份的调用等于把另一侧的角色概念漏过去,正是旧串台根因。
+ *
+ * 归属只认 commentStage,不叠加"channels 含 Cref":两者正交。channels 决定"指令
+ * 在哪个通道展示",commentStage 决定"注入哪个评论子阶段"。experience_information_
+ * strength 的 channels 是 [N.imageBrief, N.body] 却属读者侧,按 channel 过滤会漏。
+ *
+ * 计划语言脱敏:指令原文含 personaScenePlan / surfaceRoleCard 这类内部字段名
+ * (state_information_strength、experience_information_strength、question_
+ * compression 在默认档位就命中)。stage1 有全量 task_data,字段名在那里是有效
+ * 指代;但隔离的评论调用刻意不给这些结构,把字段名递进去等于把计划语言交给模型
+ * ——comment_plan_language_surface_leak / internal_audit_artifact_visible 两个
+ * 校验器存在的理由正是模型会照抄它们。因此只在评论阶段这条路径上换成人话指代。
+ */
+const PLAN_LANGUAGE_SUBSTITUTIONS: ReadonlyArray<[RegExp, string]> = [
+  [/personaScenePlan(?:中|的)?/gu, "所分配人物"],
+  [/surfaceRoleCard(?:中|的)?/gu, "所分配人物"],
+  [/commentCast(?:中|的)?/gu, "角色池"],
+];
+
+function withoutPlanLanguage(instruction: string): string {
+  return PLAN_LANGUAGE_SUBSTITUTIONS.reduce(
+    (text, [pattern, replacement]) => text.replace(pattern, replacement),
+    instruction,
+  );
+}
+
+export function commentStageInstructions(
+  report: ParameterImpactReport | undefined,
+  stage: "reader" | "answer",
+): string[] {
+  return (report?.parameterTraces ?? [])
+    .filter((trace) => {
+      const owner = COMMENT_STAGE_BY_PARAMETER_ID.get(trace.parameterId);
+      return owner === stage || owner === "both";
+    })
+    .flatMap((trace) => trace.behaviorInstructions)
+    .map(withoutPlanLanguage)
     .filter((value, index, all) => all.indexOf(value) === index);
 }
 
