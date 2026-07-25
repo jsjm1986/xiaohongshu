@@ -17,11 +17,14 @@ interface Props {
   results: QuickCandidateView[];
   busy: boolean;
   setBusy: (b: boolean) => void;
+  /** 仅「正在生成文案」为真;普通操作只动 busy,不该显示生成进度条 */
+  generating: boolean;
+  setGenerating: (b: boolean) => void;
   fail: (e: unknown, fallback: string) => void;
   onGenerated: (results: QuickCandidateView[], jobId: string) => void;
 }
 
-export function ResultTab({ project, opportunityId, presetId, overrides, imageAssetIds, jobId, results, busy, setBusy, fail, onGenerated }: Props) {
+export function ResultTab({ project, opportunityId, presetId, overrides, imageAssetIds, jobId, results, busy, setBusy, generating, setGenerating, fail, onGenerated }: Props) {
   const toast = useToast();
   const [progress, setProgress] = useState<number | undefined>(undefined);
   const [revisingId, setRevisingId] = useState<string | null>(null);
@@ -29,6 +32,7 @@ export function ResultTab({ project, opportunityId, presetId, overrides, imageAs
   const regenerate = async () => {
     if (!project || !opportunityId) return;
     setBusy(true);
+    setGenerating(true);
     setProgress(undefined);
     try {
       const job = await autoApproveAndGenerate({
@@ -40,6 +44,7 @@ export function ResultTab({ project, opportunityId, presetId, overrides, imageAs
         onProgress: (j) => setProgress(j.progress),
       });
       onGenerated((job.candidates ?? []).map(quickCandidateFields), job.id);
+      setGenerating(false);
       setBusy(false);
     } catch (e) { fail(e, '生成失败'); }
   };
@@ -69,7 +74,7 @@ export function ResultTab({ project, opportunityId, presetId, overrides, imageAs
 
   return (
     <div className="qc-step">
-      {(busy || revisingId) && (
+      {(generating || revisingId) && (
         <div className="qc-progress" role="status">
           <RefreshCw size={15} className="spin" />
           <span>{revisingId ? '正在修改' : '正在生成'}:{progressStageText(progress)}…</span>

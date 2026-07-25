@@ -6,7 +6,7 @@ import { OverviewTab } from '../components/quick/OverviewTab';
 import { ProjectKnowledgeTab } from '../components/quick/ProjectKnowledgeTab';
 import { CreateTab } from '../components/quick/CreateTab';
 import { HistoryTab } from '../components/quick/HistoryTab';
-import { approveOpportunitiesForBatch, type QuickCandidateView } from '../lib/quick-generation';
+import { approveOpportunitiesForBatch, GenerationStillRunningError, type QuickCandidateView } from '../lib/quick-generation';
 import { api } from '../lib/api';
 import { buildBatchJobs } from '../lib/quick-batch';
 import { extractRecipe, resolveRecipeTargets } from '../lib/quick-recipe';
@@ -38,15 +38,33 @@ export function QuickChannelPage() {
   const [jobId, setJobId] = useState<string | undefined>(undefined);
   const [activeTab, setActiveTab] = useState<QuickTab>('overview');
   const [busy, setBusy] = useState(false);
+  // busy = 「有操作在跑」（用于禁用按钮，防并发）；generating = 「真的在生成文案」。
+  // 两者必须分开：以前只有 busy，于是在创作区点一下收藏/归档，右栏就会闪出
+  // 「正在生成…请勿离开」的进度条（progress 还是 undefined，显示成「排队等待中」）。
+  const [generating, setGenerating] = useState(false);
   // 批量:左栏勾选的选题 + 右栏批量态 + 批量预设多选 + 提交后要高亮的批次
   const [checkedIds, setCheckedIds] = useState<string[]>([]);
   const [batchMode, setBatchMode] = useState(false);
   const [batchPresetIds, setBatchPresetIds] = useState<string[]>([]);
   const [activeBatchId, setActiveBatchId] = useState<string | undefined>(undefined);
+  // 生成耗时过长交接到产出区时，要展开的那一条(见 fail 里的 GenerationStillRunningError)
+  const [focusJobId, setFocusJobId] = useState<string | undefined>(undefined);
 
   const fail = (e: unknown, fallback: string) => {
+    // 「前端不等了」不是「任务失败了」。后端 process() 独立在跑，任务还在产出区，
+    // 所以这里既不报红也不劝重试（重试会派出第二个任务），直接把用户送到产出区。
+    if (e instanceof GenerationStillRunningError) {
+      toast.push(e.message, 'info');
+      setBusy(false);
+      setGenerating(false);
+      setFocusJobId(e.jobId);
+      setActiveTab('history');
+      return;
+    }
     toast.push(e instanceof Error ? e.message : fallback, 'error');
     setBusy(false);
+    // 生成失败也要收掉进度条，否则报错后「正在生成」会一直挂在那里
+    setGenerating(false);
   };
 
   // 四区导航常开,goTo 不再门控
@@ -66,6 +84,8 @@ export function QuickChannelPage() {
     setBatchMode(false);
     setBatchPresetIds([]);
     setActiveBatchId(undefined);
+    setFocusJobId(undefined);
+    setGenerating(false);
     setActiveTab('overview');
   };
 
@@ -89,6 +109,8 @@ export function QuickChannelPage() {
     setBatchMode(false);
     setBatchPresetIds([]);
     setActiveBatchId(undefined);
+    setFocusJobId(undefined);
+    setGenerating(false);
     setActiveTab('overview');
   };
 
@@ -260,6 +282,7 @@ export function QuickChannelPage() {
             project={project} opportunities={opportunities} opportunityId={opportunityId}
             presets={presets} presetId={presetId} overrides={overrides} imageAssetIds={imageAssetIds}
             jobId={jobId} results={results} busy={busy} setBusy={setBusy} fail={fail}
+            generating={generating} setGenerating={setGenerating}
             onPickTopic={onPickTopic} onAnalyzed={onAnalyzed} setOpportunities={setOpportunities}
             onOpportunityGone={onOpportunityGone} setPresetId={setPresetId} setPresets={setPresets}
             setOverrides={setOverrides} setImageAssetIds={setImageAssetIds} onGenerated={onGenerated}
@@ -271,8 +294,8 @@ export function QuickChannelPage() {
         )}
         {activeTab === 'history' && (
           <HistoryTab
-            project={project} history={history} busy={busy} setBusy={setBusy} fail={fail} setHistory={setHistory}
-            activeBatchId={activeBatchId} onReuseRecipe={(job) => void onReuseRecipe(job)}
+            project={project} history={history} fail={fail} setHistory={setHistory}
+            activeBatchId={activeBatchId} focusJobId={focusJobId} onReuseRecipe={(job) => void onReuseRecipe(job)}
           />
         )}
       </div>

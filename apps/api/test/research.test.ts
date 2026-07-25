@@ -3,9 +3,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
+import { PROMPT_CONTRACT_DIGEST } from '@content-agent/agent-core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { createApplication } from '../src/app.js';
 import { DatabaseService } from '../src/database.service.js';
+import { ResearchService } from '../src/research.service.js';
 import { seedApprovedProjectBlueprint } from './project-blueprint-fixture.js';
 
 let app: NestExpressApplication;
@@ -274,4 +276,81 @@ test('formula activation invalidates the old release and formal generation locks
   assert.equal(generation.response.status, 201, JSON.stringify(generation.body));
   assert.equal(generation.body.releaseManifestId, replacement.body.id);
   assert.equal(generation.body.formulaVersion, activated.body.id);
+});
+
+test('代码合同 digest 漂移后：未绑定研究产物的基线自愈，绑定过的保持报错等人复核', async () => {
+  const database = app.get(DatabaseService);
+  const research = app.get(ResearchService);
+  const project = await post('/api/projects', { name: '合同漂移自愈', domain: '眼袋' });
+  assert.equal(project.response.status, 201, JSON.stringify(project.body));
+  const healProjectId = project.body.id;
+  seedApprovedProjectBlueprint(app, healProjectId);
+
+  const activeRow = () => database.prepare(
+    "SELECT * FROM release_manifests WHERE project_id=? AND status='active'",
+  ).get(healProjectId) as { id: string; version: string; prompt_digest: string; bindings_json: string } | undefined;
+
+  // 基线由 bootstrap 建好，digest 与当前运行时一致
+  const baseline = activeRow();
+  assert.ok(baseline, '项目创建后应有 active 基线');
+  assert.equal(baseline!.prompt_digest, PROMPT_CONTRACT_DIGEST);
+
+  // 模拟发版后 prompt 合同 digest 漂移（改 prompt.ts 就会这样）
+  database.prepare("UPDATE release_manifests SET prompt_digest='stale-digest-from-older-build' WHERE id=?")
+    .run(baseline!.id);
+
+  // 关键行为：generation.service 每次建任务都先 bootstrapProject 再取 active 快照，
+  // 所以 bindings 为空的漂移会就地自愈，生成不该被挡。这正是修复的目的——原先这里
+  // 会 400「发布清单绑定的运行合同已经过期」，而 SaaS 用户进不了 /research，无路可走。
+  const recoveredInline = await post('/api/generations', {
+    projectId: healProjectId,
+    mode: 'simple',
+    topic: '合同漂移应就地自愈而不是把人挡死',
+    audienceStage: '收集期',
+    entryPoint: '搜索',
+  });
+  assert.equal(recoveredInline.response.status, 201, JSON.stringify(recoveredInline.body));
+
+  // bindings 为空 → 只钉代码合同，没有人做过的研究决定，按当前运行时重建不丢信息
+  research.bootstrapProject(healProjectId, 'admin');
+  const healed = activeRow();
+  assert.ok(healed);
+  assert.notEqual(healed!.id, baseline!.id, '应换成新的 active manifest');
+  assert.equal(healed!.prompt_digest, PROMPT_CONTRACT_DIGEST);
+  assert.equal(JSON.parse(healed!.bindings_json).source, 'baseline-heal');
+  // 旧的那条转 archived，保留审计痕迹而不是删掉
+  const superseded = database.prepare('SELECT status FROM release_manifests WHERE id=?')
+    .get(baseline!.id) as { status: string };
+  assert.equal(superseded.status, 'archived');
+  // release_manifests_active_idx 是 (project_id) WHERE status='active' 唯一索引
+  const activeCount = database.prepare(
+    "SELECT COUNT(*) AS c FROM release_manifests WHERE project_id=? AND status='active'",
+  ).get(healProjectId) as { c: number };
+  assert.equal(activeCount.c, 1);
+
+  // 自愈后生成恢复
+  const recovered = await post('/api/generations', {
+    projectId: healProjectId,
+    mode: 'simple',
+    topic: '自愈后恢复生成',
+    audienceStage: '收集期',
+    entryPoint: '搜索',
+  });
+  assert.equal(recovered.response.status, 201, JSON.stringify(recovered.body));
+  assert.equal(recovered.body.releaseManifestId, healed!.id);
+
+  // 绑过研究产物的发布：漂移后不许自动重建，必须留给人复核
+  const dataset = database.prepare(
+    "SELECT id FROM dataset_snapshots WHERE project_id=? LIMIT 1",
+  ).get(healProjectId) as { id: string } | undefined;
+  assert.ok(dataset, 'bootstrap 应导入参考数据快照');
+  database.prepare('UPDATE release_manifests SET bindings_json=?, prompt_digest=? WHERE id=?').run(
+    JSON.stringify({ datasetSnapshotIds: [dataset!.id], experimentResultIds: [], calibrationProposalIds: [] }),
+    'stale-digest-again',
+    healed!.id,
+  );
+  research.bootstrapProject(healProjectId, 'admin');
+  const untouched = activeRow();
+  assert.equal(untouched!.id, healed!.id, '绑过研究产物的发布不得被自动替换');
+  assert.equal(untouched!.prompt_digest, 'stale-digest-again');
 });

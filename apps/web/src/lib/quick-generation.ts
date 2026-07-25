@@ -114,6 +114,24 @@ export function quickCandidateToMarkdown(view: QuickCandidateView): string {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * 前端停止轮询,但后端任务还活着。
+ *
+ * 后端 process() 由 setImmediate 独立驱动(generation.service.ts:510),既不看
+ * 也不需要 HTTP 连接,所以轮询上限到了只是「我们不再等」,不是「任务没了」。
+ * 任务始终在 GET /api/generations?projectId= 里,产出区能查到、能展开候选。
+ * 单独立一个错误类型,让调用方把文案说对:别劝用户重试(会派出重复任务),
+ * 而是指向产出区。jobId 带出去,好让 UI 直接定位到那一条。
+ */
+export class GenerationStillRunningError extends Error {
+  readonly jobId: string;
+  constructor(jobId: string, action: '生成' | '修改') {
+    super(`${action}耗时较长，任务仍在后台继续。请到「产出」区查看进度，不用重新提交。`);
+    this.name = 'GenerationStillRunningError';
+    this.jobId = jobId;
+  }
+}
+
 interface AutoDeps {
   api: ApiClient;
   buildInput: typeof buildSimpleGenerateInput;
@@ -208,7 +226,9 @@ export async function autoApproveAndGenerate(args: {
 }): Promise<GenerationJob> {
   const { project, opportunityId, presetId, overrides } = args;
   const pollIntervalMs = args.pollIntervalMs ?? 1800;
-  const maxPolls = args.maxPolls ?? 100;
+  // 一次生成要跑完知识加载、规划、写作、校验,实测 2-4 分钟,原来 100 次 ×1.8s
+  // = 3 分钟经常在最后一步前就放弃。放到 10 分钟做真正的兜底上限,不是常规超时。
+  const maxPolls = args.maxPolls ?? 333;
   const d = args.deps ?? (await defaultDeps());
   const projectId = project.id;
 
@@ -247,7 +267,7 @@ export async function autoApproveAndGenerate(args: {
   let job = created;
   let polls = 0;
   while (job.status === 'queued' || job.status === 'running') {
-    if (polls >= maxPolls) throw new Error('生成超时，请稍后重试');
+    if (polls >= maxPolls) throw new GenerationStillRunningError(created.id, '生成');
     await sleep(pollIntervalMs);
     job = await d.api.generations.get(created.id);
     args.onProgress?.(job);
@@ -274,14 +294,16 @@ export async function reviseCandidate(args: {
 }): Promise<GenerationJob> {
   const { jobId, candidateId, instruction } = args;
   const pollIntervalMs = args.pollIntervalMs ?? 1800;
-  const maxPolls = args.maxPolls ?? 100;
+  // 与 autoApproveAndGenerate 同一个兜底上限:局部重生成同样要走写作与校验,
+  // 没道理给它更短的耐心。
+  const maxPolls = args.maxPolls ?? 333;
   const d = args.deps ?? (await defaultDeps());
 
   let job = await d.api.generations.revise(jobId, candidateId, instruction);
   args.onProgress?.(job);
   let polls = 0;
   while (job.status === 'queued' || job.status === 'running') {
-    if (polls >= maxPolls) throw new Error('修改超时，请稍后重试');
+    if (polls >= maxPolls) throw new GenerationStillRunningError(jobId, '修改');
     await sleep(pollIntervalMs);
     job = await d.api.generations.get(jobId);
     args.onProgress?.(job);

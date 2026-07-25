@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { approveOpportunitiesForBatch, autoApproveAndGenerate, quickCandidateFields, quickCandidateToMarkdown, reviseCandidate } from '../src/lib/quick-generation.js';
+import { approveOpportunitiesForBatch, autoApproveAndGenerate, GenerationStillRunningError, quickCandidateFields, quickCandidateToMarkdown, reviseCandidate } from '../src/lib/quick-generation.js';
 
 const fullCandidate = {
   id: 'c1',
@@ -380,4 +380,38 @@ test('approveOpportunitiesForBatch rejects when an opportunity disappeared', asy
     () => approveOpportunitiesForBatch({ project, opportunityIds: ['o1', 'oX'], deps: deps as any }),
     /选题/,
   );
+});
+
+// 轮询上限到了不等于任务失败:后端 process() 由 setImmediate 独立驱动,不看 HTTP 连接。
+// 这两个用例锁住「抛 GenerationStillRunningError 而不是普通 Error」,因为壳的 fail()
+// 靠这个类型把提示从「请稍后重试」(会派出重复任务) 改成「去产出区看进度」,并带 jobId 定位。
+test('autoApproveAndGenerate 轮询用尽时抛 GenerationStillRunningError 并带上 jobId', async () => {
+  const { deps } = makeDeps({
+    api: {
+      ...makeDeps().deps.api,
+      generations: {
+        create: async () => ({ id: 'job1', status: 'queued', projectId: 'proj1', topic: 't', mode: 'simple' }),
+        // 永远 running:模拟后端还在跑
+        get: async () => ({ id: 'job1', projectId: 'proj1', topic: 't', mode: 'simple', status: 'running', progress: 60 }),
+      },
+    },
+  });
+  const project = { id: 'proj1', name: 'p' } as any;
+  const err = await autoApproveAndGenerate({ project, opportunityId: 'o1', pollIntervalMs: 1, maxPolls: 2, deps: deps as any })
+    .then(() => null, (e) => e);
+  assert.ok(err instanceof GenerationStillRunningError, '应是 GenerationStillRunningError');
+  assert.equal(err.jobId, 'job1');
+  assert.match(err.message, /产出/);
+  assert.doesNotMatch(err.message, /重试/, '不能劝用户重试:会派出第二个任务');
+});
+
+test('reviseCandidate 轮询用尽时同样抛 GenerationStillRunningError', async () => {
+  const { deps } = makeReviseDeps(
+    async () => ({ id: 'job1', status: 'running', progress: 40 }),
+    async () => ({ id: 'job1', status: 'running', progress: 40 }),
+  );
+  const err = await reviseCandidate({ jobId: 'job1', candidateId: 'c1', instruction: 'x', pollIntervalMs: 1, maxPolls: 2, deps: deps as any })
+    .then(() => null, (e) => e);
+  assert.ok(err instanceof GenerationStillRunningError, '应是 GenerationStillRunningError');
+  assert.equal(err.jobId, 'job1');
 });

@@ -581,27 +581,101 @@ export class ResearchService implements OnModuleInit {
 
   private ensureBaselineRelease(projectId: string, userId: string): void {
     const existing = this.database.prepare('SELECT 1 FROM release_manifests WHERE project_id=? LIMIT 1').get(projectId);
-    if (existing) return;
+    if (existing) {
+      this.healStaleBaselineRelease(projectId, userId);
+      return;
+    }
+    this.insertBaselineRelease(projectId, userId);
+  }
+
+  /**
+   * 代码合同 digest 漂移后的自愈。
+   *
+   * execution/prompt/parameter/catalog 四个 digest 是**编译期常量**——改了 prompt.ts
+   * 或 parameters.ts 就会变。而 ensureBaselineRelease 原先只判断「有没有 manifest」,
+   * 有就直接 return,于是一次发版之后库里那条 active manifest 永久失效:
+   * validateActiveRuntime 每次生成都抛「发布清单绑定的运行合同已经过期」,而
+   * 极简创作(SaaS)用户连 /research 都进不去(前后端白名单都挡),没有任何自救入口。
+   * 实测 9 个项目里有 3 个卡在这个状态,生成完全不可用。
+   *
+   * 只在 bindings 为空时自愈。bindings 空 = 没有绑定任何数据快照/实验结果/校准提案,
+   * 也就是这条 manifest 只钉代码合同,不承载任何人做过的研究决定,按当前代码重建
+   * 不丢信息。一旦绑过东西就保持报错——那是真的需要人复核的发布,不能替人决定。
+   */
+  private healStaleBaselineRelease(projectId: string, userId: string): void {
+    const active = this.database.prepare(
+      "SELECT * FROM release_manifests WHERE project_id=? AND status='active'",
+    ).get(projectId) as JsonObject | undefined;
+    if (!active) return;
+
+    try {
+      this.validateReleaseContract(projectId, active);
+      return; // 合同仍然有效,不动
+    } catch {
+      // 落到下面判断能不能自愈
+    }
+
+    const bindings = parseJson<JsonObject>(active.bindings_json, {});
+    const pinned = [
+      ...stringArray(bindings.datasetSnapshotIds),
+      ...stringArray(bindings.experimentResultIds),
+      ...stringArray(bindings.calibrationProposalIds),
+    ];
+    // 绑过研究产物 → 交给人处理,保持原有报错行为
+    if (pinned.length > 0) return;
+
+    this.database.transaction(() => {
+      // (project_id) WHERE status='active' 是唯一索引,必须先让旧的退位
+      this.database.prepare(
+        "UPDATE release_manifests SET status='archived' WHERE id=?",
+      ).run(String(active.id));
+      this.insertBaselineRelease(projectId, userId, String(active.id));
+    });
+    this.record(projectId, userId, 'research.release.baseline-heal', 'release_manifest', String(active.id), {
+      reason: 'code_contract_digest_drift',
+      supersededVersion: active.version,
+    });
+  }
+
+  private insertBaselineRelease(projectId: string, userId: string, parentId?: string): void {
     const formula = this.activeFormula(projectId);
     const stored = parseJson<JsonObject>(formula.definition_json, {});
     const definition = isRecord(stored.version) ? stored.version : {};
     const id = randomUUID();
     const now = nowIso();
+    // UNIQUE(project_id, version):自愈重建时不能再叫 0.1.0-baseline(旧那条还在,
+    // 只是转 archived)。名字必须覆盖全部四个合同 digest——只取 prompt 的话,
+    // 仅 parameter 或 catalog 漂移的下一次自愈会撞上同名而插入失败。
+    const contractTag = createHash('sha256')
+      .update([
+        FORMULA_EXECUTION_POLICY_DIGEST,
+        PROMPT_CONTRACT_DIGEST,
+        PARAMETER_POLICY_DIGEST,
+        this.catalog.digest,
+      ].join(':'), 'utf8')
+      .digest('hex')
+      .slice(0, 12);
+    const version = parentId
+      ? `0.1.0-baseline+${PROMPT_CONTRACT_VERSION}.${contractTag}`
+      : '0.1.0-baseline';
+    const notes = parentId
+      ? '代码合同 digest 漂移后按当前运行时重建的只读基线；未绑定任何研究产物，不代表研究结论或参数校准。'
+      : '迁移前已运行行为的只读基线；不代表研究结论或参数校准。';
     this.database.prepare(
       `INSERT INTO release_manifests
        (id,project_id,version,parent_id,status,app_version,build_id,formula_version_id,formula_digest,
         execution_policy_version,execution_policy_digest,prompt_version,prompt_digest,
         parameter_policy_version,parameter_policy_digest,evidence_catalog_version,evidence_catalog_digest,
         bindings_json,notes,created_by,approved_by,created_at,approved_at,activated_at)
-       VALUES (?,?, '0.1.0-baseline',NULL,'active','0.1.0','',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?)`,
+       VALUES (?,?,?,?,'active','0.1.0','',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?)`,
     ).run(
-      id, projectId, String(formula.id), String(definition.digest ?? ''),
+      id, projectId, version, parentId ?? null, String(formula.id), String(definition.digest ?? ''),
       FORMULA_EXECUTION_POLICY_VERSION, FORMULA_EXECUTION_POLICY_DIGEST,
       PROMPT_CONTRACT_VERSION, PROMPT_CONTRACT_DIGEST,
       PARAMETER_POLICY_VERSION, PARAMETER_POLICY_DIGEST,
       String(this.catalog.data.catalogVersion ?? 'unknown'), this.catalog.digest,
-      JSON.stringify({ datasetSnapshotIds: [], experimentResultIds: [], calibrationProposalIds: [], source: 'baseline-migration' }),
-      '迁移前已运行行为的只读基线；不代表研究结论或参数校准。', userId, userId, now, now, now,
+      JSON.stringify({ datasetSnapshotIds: [], experimentResultIds: [], calibrationProposalIds: [], source: parentId ? 'baseline-heal' : 'baseline-migration' }),
+      notes, userId, userId, now, now, now,
     );
     this.record(projectId, userId, 'research.release.baseline', 'release_manifest', id, { formulaVersionId: formula.id });
   }
