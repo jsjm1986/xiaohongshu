@@ -31,6 +31,13 @@ export interface QuickCandidateView {
   comments: QuickComment[];
   /** 校验未通过项的 code 列表(仅 code,不带系统原文 message),用于一句话结论 */
   issueCodes?: string[];
+  /**
+   * 发布执行方案与仍然未知。原样透传,不在这里整理——展示层由
+   * deploymentPlanView 负责。带上它们是为了创作区生成完就能看到「下一步做什么」,
+   * 不必先去产出区。
+   */
+  deploymentPlan?: Candidate['deploymentPlan'];
+  unknowns?: Candidate['unknowns'];
 }
 
 function mapComment(thread: CommentThread): QuickComment {
@@ -63,6 +70,8 @@ export function quickCandidateFields(candidate: Candidate): QuickCandidateView {
     issueCodes: candidate.validation?.issues
       .map((issue) => issue.code)
       .filter((code): code is string => Boolean(code)),
+    deploymentPlan: candidate.deploymentPlan,
+    unknowns: candidate.unknowns,
   };
 }
 

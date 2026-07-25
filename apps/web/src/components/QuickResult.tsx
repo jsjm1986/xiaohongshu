@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { Button, useToast } from './Ui';
 import { quickCandidateToMarkdown, type QuickCandidateView } from '../lib/quick-generation';
 import { allValidationIssueLabels, firstValidationIssueLabel } from '../lib/validation-labels';
+import { DeploymentPlanCard } from './quick/DeploymentPlanCard';
 
 async function copyText(text: string, toast: ReturnType<typeof useToast>) {
   try {
@@ -138,6 +139,9 @@ export function QuickResult({ candidates, onRegenerate, onPickAnotherTopic, onRe
       )}
 
       <QuickCandidateCards view={view} />
+
+      {/* 发布执行方案:生成完当场就能看到「下一步做什么」,不必先去产出区 */}
+      <DeploymentPlanCard candidate={view} />
 
       {onRevise && (
         <details className="qc-revise">
