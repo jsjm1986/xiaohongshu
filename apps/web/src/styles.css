@@ -3435,6 +3435,54 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .qc-page .qc-overview-recent li > button:hover strong { color: var(--v2-brand-ink); }
 .qc-page .qc-overview-recent strong { font-size: var(--v2-fs-md); font-weight: 500; color: var(--v2-ink); }
 .qc-page .qc-overview-recent small { flex: none; font-size: var(--v2-fs-xs); color: var(--v2-muted); }
+/* 最近产出多了状态徽标:标题占据剩余宽度,徽标与时间不收缩 */
+.qc-page .qc-overview-recent strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qc-page .qc-overview-recent .qc-badge { flex: none; }
+
+/* ---- 总览工作台:产出质量 + 下一步 ---- */
+.qc-page .qc-board { display: grid; grid-template-columns: 1.35fr 1fr; gap: 16px; align-items: start; }
+@media (max-width: 900px) {
+  .qc-page .qc-board { grid-template-columns: 1fr; }
+}
+.qc-page .qc-board__card {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 12px;
+  padding: 18px 20px; border: 1px solid var(--v2-line);
+  border-radius: var(--v2-radius); background: var(--v2-canvas);
+}
+.qc-page .qc-board__title { margin: 0; font-size: var(--v2-fs-sm); font-weight: 600; color: var(--v2-muted); letter-spacing: .03em; }
+.qc-page .qc-board__foot { margin: 0; font-size: var(--v2-fs-xs); color: var(--v2-muted); }
+.qc-page .qc-board__foot small { display: block; margin-top: 3px; color: var(--v2-muted-2); font-size: var(--v2-fs-micro); }
+.qc-page .qc-board .button { padding: 11px 20px; font-size: var(--v2-fs-md); }
+
+/* 质量分布条:三段按比例,零宽度段自动消失(width:0 不占位) */
+.qc-page .qc-quality-bar { display: flex; width: 100%; height: 8px; border-radius: 999px; background: var(--v2-line); overflow: hidden; }
+.qc-page .qc-quality-bar > i { display: block; height: 100%; }
+.qc-page .qc-quality-bar__ok { background: var(--v2-ok); }
+.qc-page .qc-quality-bar__warn { background: var(--v2-warn); }
+.qc-page .qc-quality-bar__err { background: var(--v2-error); }
+.qc-page .qc-quality-legend { list-style: none; display: flex; flex-wrap: wrap; gap: 6px 20px; margin: 0; padding: 0; }
+.qc-page .qc-quality-legend li { display: flex; align-items: baseline; gap: 5px; }
+.qc-page .qc-quality-legend b { font-size: var(--v2-fs-xl); font-weight: 700; color: var(--v2-ink); font-variant-numeric: tabular-nums; }
+.qc-page .qc-quality-legend span { font-size: var(--v2-fs-xs); color: var(--v2-muted); }
+/* 图例色点靠 nth-child 对位,与上面条形三段同序 */
+.qc-page .qc-quality-legend li:nth-child(1) b { color: var(--v2-ok); }
+.qc-page .qc-quality-legend li:nth-child(2) b { color: var(--v2-warn); }
+.qc-page .qc-quality-legend li:nth-child(3) b { color: var(--v2-error); }
+/* 计数为 0 时收成中性灰:绿色的「0 可直接发布」会被读成好消息,而它恰恰相反。
+   同理红色的「0 失败」不该报警。 */
+.qc-page .qc-quality-legend li b.is-zero { color: var(--v2-muted-2); }
+
+/* 待办:每条可点,直达对应区 */
+.qc-page .qc-todo { list-style: none; width: 100%; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.qc-page .qc-todo li + li { border-top: 1px solid var(--v2-line); }
+.qc-page .qc-todo li > button {
+  display: flex; align-items: center; gap: 6px; width: 100%; padding: 9px 2px;
+  border: none; background: none; text-align: left; cursor: pointer;
+  font-size: var(--v2-fs-sm); color: var(--v2-ink);
+}
+.qc-page .qc-todo li > button:hover { color: var(--v2-brand-ink); }
+.qc-page .qc-todo b { font-size: var(--v2-fs-md); font-variant-numeric: tabular-nums; }
+.qc-page .qc-todo__clear { padding: 9px 2px; font-size: var(--v2-fs-sm); color: var(--v2-muted); }
 
 /* 极简创作 · 预设卡片(单选/多选共用) */
 .qc-preset-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
