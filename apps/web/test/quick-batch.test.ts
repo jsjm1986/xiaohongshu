@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildBatchJobs, batchStatusLabel, batchProgressText } from '../src/lib/quick-batch.js';
+import { buildBatchJobs, batchStatusLabel, batchProgressText, liveBatchStatus } from '../src/lib/quick-batch.js';
 import type { ContentPreset, GenerationJob, Project, TopicOpportunity } from '../src/types.js';
 
 const project = { id: 'p1', name: 'P', cities: [], doctors: [] } as unknown as Project;
@@ -72,4 +72,31 @@ test('batchProgressText omits failure suffix when nothing failed', () => {
     { status: 'completed' }, { status: 'completed' }, { status: 'running' },
   ] as GenerationJob[];
   assert.equal(batchProgressText(jobs), '2/3 完成');
+});
+
+// ── 回归防线:看板徽章必须跟着实时任务走 ──
+// 轮询只刷新 jobsByBatch,不会刷新 batch.status。若徽章直接读 batch.status,
+// 任务全部跑完后徽章仍停在「生成中」,而旁边计数已是「4/4 完成」——自相矛盾。
+
+test('liveBatchStatus aggregates from polled jobs, not the stale batch row', () => {
+  const jobs = [{ status: 'completed' }, { status: 'completed' }] as GenerationJob[];
+  assert.equal(liveBatchStatus('running', jobs), 'completed');
+});
+
+test('liveBatchStatus reports partial when some jobs failed', () => {
+  const jobs = [{ status: 'completed' }, { status: 'failed' }] as GenerationJob[];
+  assert.equal(liveBatchStatus('running', jobs), 'partial');
+  assert.equal(liveBatchStatus('running', [{ status: 'failed' }] as GenerationJob[]), 'failed');
+});
+
+test('liveBatchStatus keeps running while any job is unfinished, and queued before any starts', () => {
+  assert.equal(liveBatchStatus('queued', [{ status: 'queued' }, { status: 'queued' }] as GenerationJob[]), 'queued');
+  assert.equal(liveBatchStatus('queued', [{ status: 'running' }, { status: 'queued' }] as GenerationJob[]), 'running');
+  assert.equal(liveBatchStatus('queued', [{ status: 'completed' }, { status: 'running' }] as GenerationJob[]), 'running');
+});
+
+test('liveBatchStatus falls back to the server status when jobs are not loaded yet', () => {
+  // 列表刚回来、jobs 还没填充时不能把空数组当「已完成」——那会把排队中的批次显示成完成。
+  assert.equal(liveBatchStatus('queued', []), 'queued');
+  assert.equal(liveBatchStatus('partial', []), 'partial');
 });

@@ -3,7 +3,7 @@ import { CheckCircle2, Clock, RefreshCw, RotateCcw, XCircle } from 'lucide-react
 import { Button } from '../Ui';
 import { api } from '../../lib/api';
 import { mergeJobUpdates, pendingJobIds } from '../../lib/batch-polling';
-import { batchProgressText, batchStatusLabel, buildBatchJobs } from '../../lib/quick-batch';
+import { batchProgressText, batchStatusLabel, buildBatchJobs, liveBatchStatus } from '../../lib/quick-batch';
 import { extractRecipe, resolveRecipeTargets } from '../../lib/quick-recipe';
 import { approveOpportunitiesForBatch } from '../../lib/quick-generation';
 import type { GenerationBatch, GenerationJob, Project } from '../../types';
@@ -85,7 +85,7 @@ export function BatchBoard({ project, activeBatchId, fail, onOpenJob, onReuseRec
             <div className="qc-batch-card__head">
               <strong>{batch.name || `批次 ${batch.createdAt?.slice(0, 10) ?? ''}`}</strong>
               <span className="qc-batch-card__meta">
-                <span className="qc-batch-card__status">{batchStatusLabel(batch.status)}</span>
+                <span className="qc-batch-card__status">{batchStatusLabel(liveBatchStatus(batch.status, jobs))}</span>
                 {jobs.length > 0 && <span className="qc-batch-card__count">{batchProgressText(jobs)}</span>}
               </span>
             </div>
