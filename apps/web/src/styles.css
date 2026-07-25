@@ -3392,6 +3392,13 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .qc-page .qc-file-list li:hover { background: var(--v2-canvas); }
 .qc-page .qc-file-list li > svg { flex: 0 0 auto; color: var(--v2-muted); }
 .qc-page .qc-file-list .qc-file-name { flex: 1; min-width: 0; }
+/* 分类下拉:全局 select 是 width:100%,在这行 flex 里会吃掉整行把文件名挤成 0 宽
+   (与勾选框同一类问题),这里显式收窄并禁止伸缩。 */
+.qc-page .qc-file-cat {
+  flex: 0 0 auto; width: auto; min-width: 104px; margin: 0 10px; padding: 3px 6px;
+  font-size: var(--v2-fs-xs); color: var(--v2-muted);
+}
+.qc-page .qc-file-cat:disabled { opacity: .5; cursor: wait; }
 
 /* ---- 历史卡 hover ---- */
 .qc-page .qc-history-item { transition: border-color .15s, box-shadow .15s; }

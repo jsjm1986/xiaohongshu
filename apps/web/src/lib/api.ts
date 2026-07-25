@@ -832,6 +832,15 @@ export const api = {
         total: result.total,
       };
     },
+    /**
+     * 重新归类已有文件。不改内容、不升版本,但会让已审批的分析链失效——
+     * 分类决定这份资料怎么参与生成,不是纯标签。
+     */
+    recategorize: (fileId: string, input: { category?: string; evidenceStatus?: string }) =>
+      request<JsonRecord>(`/api/knowledge/${encodeURIComponent(fileId)}`, {
+        method: "PATCH",
+        body: JSON.stringify(input),
+      }).then(normalizeKnowledge),
     upload: (projectId: string, file: File, category: string, kind: string) => {
       const body = new FormData();
       body.append("projectId", projectId);
