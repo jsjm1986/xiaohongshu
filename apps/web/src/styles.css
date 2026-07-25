@@ -3158,6 +3158,31 @@ div.qc-topic { cursor: default; }
 .qc-history-filters { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .qc-history-filters input { flex: 1; min-width: 180px; }
 
+/* ---- 极简创作账户页:SaaS 用户不再被送进专家版 /settings ---- */
+.qc-account .qc-panel { display: flex; flex-direction: column; gap: 16px; }
+.qc-account__card {
+  border: 1px solid var(--v2-line); border-radius: var(--v2-radius);
+  background: var(--v2-surface); padding: 18px 20px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.qc-account__card h2 {
+  margin: 0; font-size: var(--v2-fs-sm);
+  display: flex; align-items: center; gap: 8px;
+}
+.qc-account__card > p { margin: 0; }
+.qc-account__meta { display: flex; flex-wrap: wrap; gap: 10px 32px; margin: 4px 0 0; }
+.qc-account__meta dt { margin: 0 0 2px; font-size: var(--v2-fs-micro); color: var(--v2-muted); }
+.qc-account__meta dd { margin: 0; font-size: var(--v2-fs-sm); color: var(--v2-ink); }
+.qc-account__quota { display: flex; align-items: baseline; gap: 6px; }
+.qc-account__quota strong { font-size: var(--v2-fs-h1); line-height: 1; }
+.qc-account__quota span { font-size: var(--v2-fs-xs); color: var(--v2-muted); }
+.qc-account__quota--warn strong { color: var(--v2-warn); }
+.qc-account__quota--error strong { color: var(--v2-error); }
+/* 密码三个输入框排一行,窄屏自动落行。全局 input{width:100%} 会把它们撑满,
+   所以这里给列宽而不是靠 input 自身宽度(styles.css:57 那条坑过两次)。 */
+.qc-account__form { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px 16px; }
+.qc-account__form .qc-actions { grid-column: 1 / -1; }
+
 /* ---- 「查看」详情:成品 / 判断依据 / 发布方案 三段 ---- */
 .qc-reader { display: flex; flex-direction: column; gap: 18px; }
 .qc-reader__section { display: flex; flex-direction: column; gap: 12px; }

@@ -48,13 +48,17 @@ test('provisionUserWithWorkspace creates user + workspace + Owner member', async
       username: 'clinic01',
       passwordHash,
       systemRole: 'user',
+      userKind: 'saas',
       mustChangePassword: false,
       workspaceName: '示范口腔诊所',
     }),
   );
-  const user = db.prepare('SELECT username, system_role, must_change_password FROM users WHERE id = ?').get(userId) as any;
+  const user = db.prepare('SELECT username, system_role, user_kind, must_change_password FROM users WHERE id = ?').get(userId) as any;
   assert.equal(user.username, 'clinic01');
   assert.equal(user.system_role, 'user');
+  // userKind 必须落库。原来这个 INSERT 压根不写 user_kind,于是落到列默认值
+  // 'research',把专家版权限发给了每个自助开通的客户。
+  assert.equal(user.user_kind, 'saas');
   assert.equal(Number(user.must_change_password), 0);
   const member = db.prepare('SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?').get(workspaceId, userId) as any;
   assert.equal(member.role, 'Owner');
@@ -85,7 +89,7 @@ test('submit stores a pending request with hashed password', async () => {
 test('submit rejects duplicate username taken by an existing user', async () => {
   const db = makeDb();
   const auth = makeAuth(db);
-  db.transaction(() => auth.provisionUserWithWorkspace({ username: 'taken', passwordHash: 'x', systemRole: 'user', mustChangePassword: false, workspaceName: 'w' }));
+  db.transaction(() => auth.provisionUserWithWorkspace({ username: 'taken', passwordHash: 'x', systemRole: 'user', userKind: 'saas', mustChangePassword: false, workspaceName: 'w' }));
   const reg = makeReg(db, auth);
   await assert.rejects(() => reg.submit({ ...validInput(), username: 'taken' }));
 });
@@ -104,8 +108,12 @@ test('approve provisions user and marks request approved', async () => {
   await reg.submit(validInput());
   const req = db.prepare('SELECT id FROM registration_requests WHERE username = ?').get('clinicA') as any;
   const { userId } = reg.approve(req.id, 'admin-id');
-  const user = db.prepare('SELECT username, must_change_password FROM users WHERE id = ?').get(userId) as any;
+  const user = db.prepare('SELECT username, user_kind, must_change_password FROM users WHERE id = ?').get(userId) as any;
   assert.equal(user.username, 'clinicA');
+  // /register 审批通过的是付费 SaaS 客户,必须建成 saas。
+  // 改前这里落的是列默认值 'research' —— 等于把完整专家版权限发出去了,
+  // 因为前端白名单与后端 guard 都只对 userKind === 'saas' 生效。
+  assert.equal(user.user_kind, 'saas');
   assert.equal(Number(user.must_change_password), 0);
   const after = db.prepare('SELECT status, created_user_id FROM registration_requests WHERE id = ?').get(req.id) as any;
   assert.equal(after.status, 'approved');

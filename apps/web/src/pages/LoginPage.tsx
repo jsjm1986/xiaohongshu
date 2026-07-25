@@ -3,7 +3,7 @@ import { type FormEvent, useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../components/AuthContext';
 import { ApiError } from '../lib/api';
-import { isSaasUser } from '../lib/saas-access';
+import { isSaasUser, loginLandingPath } from '../lib/saas-access';
 
 export function LoginPage() {
   const [username, setUsername] = useState('admin');
@@ -16,8 +16,14 @@ export function LoginPage() {
   const location = useLocation();
 
   useEffect(() => {
-    // SaaS 用户登录落 /quick;state.from 指向其他页时 ProtectedRoute 也会弹回,双保险。
-    if (user) navigate(isSaasUser(user) ? '/quick' : ((location.state as { from?: string } | null)?.from || '/'), { replace: true });
+    if (!user) return;
+    // SaaS 用户一律进极简创作(强制改密时进 /quick/account,不再是专家版 /settings)。
+    // 专家用户尊重 state.from 以便回到原本要去的页面。
+    if (isSaasUser(user) || user.mustChangePassword) {
+      navigate(loginLandingPath(user), { replace: true });
+      return;
+    }
+    navigate((location.state as { from?: string } | null)?.from || '/', { replace: true });
   }, [user, navigate, location.state]);
 
   const handleSubmit = async (event: FormEvent) => {

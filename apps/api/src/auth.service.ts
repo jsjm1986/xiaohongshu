@@ -86,6 +86,13 @@ export class AuthService implements OnModuleInit {
     username: string;
     passwordHash: string;
     systemRole: 'admin' | 'user';
+    /**
+     * 用户类型。刻意**必填、不给默认值**:这里原来根本不写 user_kind,于是落到列
+     * 默认值 'research' —— 从 /register「申请开通」审批进来的付费客户全部被建成
+     * 专家类用户,前端不拦(白名单只对 saas 生效)、后端 guard 也不拦(同理)。
+     * 必填是为了让每个调用方明确表态,不会再有第二次"忘了写就默认成专家"。
+     */
+    userKind: 'research' | 'saas';
     mustChangePassword: boolean;
     workspaceName: string;
   }): { userId: string; workspaceId: string } {
@@ -96,10 +103,10 @@ export class AuthService implements OnModuleInit {
     this.database
       .prepare(
         `INSERT INTO users
-           (id, username, password_hash, system_role, must_change_password, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           (id, username, password_hash, system_role, user_kind, must_change_password, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(userId, input.username, input.passwordHash, input.systemRole, input.mustChangePassword ? 1 : 0, now, now);
+      .run(userId, input.username, input.passwordHash, input.systemRole, input.userKind, input.mustChangePassword ? 1 : 0, now, now);
     this.database
       .prepare(
         `INSERT INTO workspaces (id, slug, name, owner_id, created_at, updated_at)

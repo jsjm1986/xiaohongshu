@@ -1,6 +1,6 @@
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Route, Routes } from 'react-router-dom';
 import { AppShell } from './components/AppShell';
-import { ProtectedRoute } from './components/AuthContext';
+import { ProtectedRoute, RootRedirect } from './components/AuthContext';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ToastProvider } from './components/Ui';
 import { QuickShell } from './components/quick/QuickShell';
@@ -13,6 +13,7 @@ import { HistoryPage } from './pages/HistoryPage';
 import { KnowledgePage } from './pages/KnowledgePage';
 import { LoginPage } from './pages/LoginPage';
 import { ProjectsPage } from './pages/ProjectsPage';
+import { QuickAccountPage } from './pages/QuickAccountPage';
 import { QuickChannelPage } from './pages/QuickChannelPage';
 import { RegisterPage } from './pages/RegisterPage';
 import { ResearchPage } from './pages/ResearchPage';
@@ -26,7 +27,13 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/register" element={<RegisterPage />} />
-      <Route element={<ProtectedRoute><AppShell /></ProtectedRoute>}>
+      {/*
+        两棵独立的路由树。SaaS 用户的树里**根本没有专家页面**——不是渲染出来再
+        弹走。改前是「先挂 AppShell,再由内部判断跳转」,实测结果是付费客户首次
+        登录稳定停在专家壳里,整条 9 个入口的侧边栏可见可点。
+        expertOnly 让 SaaS 用户在 AppShell 挂载之前就被弹回 /quick。
+      */}
+      <Route element={<ProtectedRoute expertOnly><AppShell /></ProtectedRoute>}>
         <Route index element={<DashboardPage />} />
         <Route path="generate" element={<GeneratorPage />} />
         <Route path="projects" element={<ProjectsPage />} />
@@ -41,8 +48,10 @@ export default function App() {
       </Route>
       <Route element={<ProtectedRoute><QuickShell /></ProtectedRoute>}>
         <Route path="quick" element={<QuickChannelPage />} />
+        <Route path="quick/account" element={<QuickAccountPage />} />
       </Route>
-      <Route path="*" element={<Navigate to="/" replace />} />
+      {/* 兜底也要按用户类型分叉:统一去 / 会让 SaaS 用户再被弹一次 */}
+      <Route path="*" element={<RootRedirect />} />
     </Routes>
     </ToastProvider>
     </ErrorBoundary>

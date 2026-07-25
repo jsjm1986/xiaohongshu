@@ -23,7 +23,6 @@ import {
 import { V2Hero } from "../components/V2";
 import { api } from "../lib/api";
 import { demoSettings } from "../lib/fixtures";
-import { isSaasUser } from "../lib/saas-access";
 import type { AppSettings } from "../types";
 
 type SettingsTab = "model" | "quota" | "account";
@@ -48,24 +47,21 @@ export function SettingsPage() {
   const { user, setUser } = useAuth();
   const { currentProject } = useProjects();
   const toast = useToast();
-  // SaaS 用户只看得见「账户安全」,不调 /api/settings(后端会 403)。
-  const saas = isSaasUser(user);
+  // 这个页面现在只服务专家用户:SaaS 用户的账户页是 /quick/account,渲染在极简
+  // 创作壳里。原来这里有一堆 saas 分支(遮侧栏、只给 accountSections、跳过
+  // /api/settings),既让页面难改,也留着"以后加东西忘了判 saas"的漏点。
 
   useEffect(() => {
     if (user?.mustChangePassword) setTab("account");
   }, [user?.mustChangePassword]);
 
   useEffect(() => {
-    if (saas) {
-      setLoading(false);
-      return;
-    }
     api.settings
       .get(currentProject?.workspaceId)
       .then(setSettings)
       .catch(() => setSettings(demoSettings))
       .finally(() => setLoading(false));
-  }, [currentProject?.workspaceId, saas]);
+  }, [currentProject?.workspaceId]);
 
   const saveSettings = async () => {
     if (!settings) return;
@@ -240,7 +236,6 @@ export function SettingsPage() {
         description="管理模型来源、平台额度与账户安全。"
       />
       <div className="settings-layout">
-        {!saas && (
         <aside className="settings-nav">
           <button
             type="button"
@@ -276,11 +271,8 @@ export function SettingsPage() {
             </span>
           </button>
         </aside>
-        )}
         <main className="settings-content">
-          {saas ? (
-            accountSections
-          ) : loading || !settings ? (
+          {loading || !settings ? (
             <Skeleton lines={7} />
           ) : tab === "model" ? (
             <>
