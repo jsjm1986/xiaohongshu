@@ -6,8 +6,11 @@ import { OverviewTab } from '../components/quick/OverviewTab';
 import { ProjectKnowledgeTab } from '../components/quick/ProjectKnowledgeTab';
 import { CreateTab } from '../components/quick/CreateTab';
 import { HistoryTab } from '../components/quick/HistoryTab';
-import { type QuickCandidateView } from '../lib/quick-generation';
-import { clearDownstreamOfProject, clearResults, type QuickTab } from '../lib/quick-channel-state';
+import { approveOpportunitiesForBatch, type QuickCandidateView } from '../lib/quick-generation';
+import { api } from '../lib/api';
+import { buildBatchJobs } from '../lib/quick-batch';
+import { extractRecipe, resolveRecipeTargets } from '../lib/quick-recipe';
+import { clearDownstreamOfProject, clearResults, pruneCheckedIds, type QuickTab } from '../lib/quick-channel-state';
 import type { ContentPreset, GenerationJob, Project, TopicOpportunity } from '../types';
 import type { SimpleSettingOverrides } from '../lib/simple-generation';
 
@@ -35,6 +38,11 @@ export function QuickChannelPage() {
   const [jobId, setJobId] = useState<string | undefined>(undefined);
   const [activeTab, setActiveTab] = useState<QuickTab>('overview');
   const [busy, setBusy] = useState(false);
+  // 批量:左栏勾选的选题 + 右栏批量态 + 批量预设多选 + 提交后要高亮的批次
+  const [checkedIds, setCheckedIds] = useState<string[]>([]);
+  const [batchMode, setBatchMode] = useState(false);
+  const [batchPresetIds, setBatchPresetIds] = useState<string[]>([]);
+  const [activeBatchId, setActiveBatchId] = useState<string | undefined>(undefined);
 
   const fail = (e: unknown, fallback: string) => {
     toast.push(e instanceof Error ? e.message : fallback, 'error');
@@ -54,6 +62,10 @@ export function QuickChannelPage() {
     setOverrides({});
     setImageAssetIds([]);
     setJobId(undefined);
+    setCheckedIds([]);
+    setBatchMode(false);
+    setBatchPresetIds([]);
+    setActiveBatchId(undefined);
     setActiveTab('overview');
   };
 
@@ -73,6 +85,10 @@ export function QuickChannelPage() {
     setOverrides({});
     setImageAssetIds([]);
     setJobId(undefined);
+    setCheckedIds([]);
+    setBatchMode(false);
+    setBatchPresetIds([]);
+    setActiveBatchId(undefined);
     setActiveTab('overview');
   };
 
@@ -99,8 +115,10 @@ export function QuickChannelPage() {
     setPresetId(loadedPresets.find((p) => p.isDefault)?.id ?? loadedPresets[0]?.id);
   };
 
-  // 归档/删除选题后调用:若它是当前选中项,级联清选中与结果(同 onPickTopic 的清法)
+  // 归档/删除选题后调用:先收敛批量勾选(勾了但没选中的也得剔,否则批量提交会打到幽灵选题),
+  // 再看它是否是当前选中项,级联清选中与结果(同 onPickTopic 的清法)
   const onOpportunityGone = (id: string) => {
+    setCheckedIds((cur) => pruneCheckedIds(cur, id));
     if (id !== opportunityId) return;
     setOpportunityId('');
     setResults(clearResults().results);
@@ -111,6 +129,84 @@ export function QuickChannelPage() {
   const onGenerated = (r: QuickCandidateView[], id: string) => {
     setResults(r);
     setJobId(id);
+  };
+
+  const onToggleCheck = (id: string) =>
+    setCheckedIds((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
+
+  const onToggleBatchPreset = (id: string) =>
+    setBatchPresetIds((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
+
+  // 进入批量态:预设可能还没加载过(单篇路径是选题时才拉),这里按需补一次
+  const onConfigBatch = async () => {
+    let list = presets;
+    if (list.length === 0) {
+      setBusy(true);
+      try {
+        list = (await api.presets.list(project!.id)).items;
+        setPresets(list);
+        setBusy(false);
+      } catch (e) { fail(e, '读取预设失败'); return; }
+    }
+    setBatchMode(true);
+    setBatchPresetIds(list.filter((p) => p.isDefault).map((p) => p.id));
+  };
+
+  const onCancelBatch = () => {
+    setBatchMode(false);
+    setBatchPresetIds([]);
+  };
+
+  const onSubmitBatch = async () => {
+    if (!project || checkedIds.length === 0 || batchPresetIds.length === 0) return;
+    setBusy(true);
+    try {
+      // 后端 selectOpportunity 要求选题及其依赖已审批,批量与单篇共用同一审批段
+      const approved = await approveOpportunitiesForBatch({ project, opportunityIds: checkedIds });
+      const jobs = buildBatchJobs({
+        project,
+        opportunities: approved,
+        presets: presets.filter((p) => batchPresetIds.includes(p.id)),
+        overrides,
+        imageAssetIds,
+      });
+      const batch = await api.generationBatches.create({ projectId: project.id, jobs });
+      setBusy(false);
+      setBatchMode(false);
+      setBatchPresetIds([]);
+      setCheckedIds([]);
+      setActiveBatchId(batch.id);
+      setActiveTab('history');
+      toast.push(`已提交 ${jobs.length} 篇，正在后台生成`);
+    } catch (e) { fail(e, '批量生成提交失败'); }
+  };
+
+  // 「再来一篇同款」:把历史任务的配方回灌创作区(不直接生成,留一步给人改)
+  const onReuseRecipe = async (job: GenerationJob) => {
+    if (!project) return;
+    setBusy(true);
+    try {
+      // 选题池/预设可能还没在本次会话加载过,按需各拉一次再校验失效
+      const [oppList, presetList] = await Promise.all([
+        opportunities.length > 0 ? Promise.resolve({ items: opportunities }) : api.opportunities.list(project.id),
+        api.presets.list(project.id),
+      ]);
+      setOpportunities(oppList.items);
+      setPresets(presetList.items);
+      const targets = resolveRecipeTargets(extractRecipe(job), oppList.items, presetList.items);
+      setOpportunityId(targets.opportunityId);
+      setPresetId(targets.presetId);
+      setOverrides(targets.overrides);
+      setImageAssetIds(targets.imageAssetIds);
+      setResults(clearResults().results);
+      setJobId(undefined);
+      setBatchMode(false);
+      setBatchPresetIds([]);
+      setActiveTab('create');
+      setBusy(false);
+      for (const warning of targets.warnings) toast.push(warning, 'info');
+      if (targets.warnings.length === 0) toast.push('已回填这篇的配置，确认后点「生成文案」');
+    } catch (e) { fail(e, '回填配方失败'); }
   };
 
   // Home 态:未选项目 → 产品首页(卡墙选项目/内联新建)
@@ -168,11 +264,15 @@ export function QuickChannelPage() {
             onOpportunityGone={onOpportunityGone} setPresetId={setPresetId} setPresets={setPresets}
             setOverrides={setOverrides} setImageAssetIds={setImageAssetIds} onGenerated={onGenerated}
             goTo={goTo}
+            checkedIds={checkedIds} onToggleCheck={onToggleCheck} onConfigBatch={() => void onConfigBatch()}
+            batchMode={batchMode} batchPresetIds={batchPresetIds} onToggleBatchPreset={onToggleBatchPreset}
+            onSubmitBatch={() => void onSubmitBatch()} onCancelBatch={onCancelBatch}
           />
         )}
         {activeTab === 'history' && (
           <HistoryTab
             project={project} history={history} busy={busy} setBusy={setBusy} fail={fail} setHistory={setHistory}
+            activeBatchId={activeBatchId} onReuseRecipe={(job) => void onReuseRecipe(job)}
           />
         )}
       </div>

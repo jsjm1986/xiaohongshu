@@ -6,6 +6,7 @@ import {
   clearResults,
   parseCities,
   parseDoctors,
+  pruneCheckedIds,
   formatCities,
   formatDoctors,
   filterOpportunities,
@@ -133,4 +134,19 @@ test('filterGenerationJobs:关键词 trim 后小写包含匹配,空关键词不�
   assert.deepEqual(filterGenerationJobs(items, { status: 'all', keyword: '  ' }).map((i) => i.id), ['1', '2', '3']);
   assert.deepEqual(filterGenerationJobs(items, { status: 'completed', keyword: '双眼皮' }).map((i) => i.id), ['1']);
   assert.deepEqual(filterGenerationJobs(items, { status: 'all', keyword: '不存在' }).map((i) => i.id), []);
+});
+
+// ── 回归防线:归档/删除选题后,批量勾选集必须同步剔除该选题 ──
+// 否则勾选后再删除,批量提交会带着一个已不存在的 opportunityId,
+// 被 approveOpportunitiesForBatch 判为「选题不存在或已过期」而整批失败。
+
+test('pruneCheckedIds 剔除已消失的选题,保留其余勾选(保序)', () => {
+  assert.deepEqual(pruneCheckedIds(['a', 'b', 'c'], 'b'), ['a', 'c']);
+  assert.deepEqual(pruneCheckedIds(['a', 'b', 'c'], 'a'), ['b', 'c']);
+});
+
+test('pruneCheckedIds 未勾选该选题时返回原数组引用,避免无意义重渲染', () => {
+  const checked = ['a', 'b'];
+  assert.equal(pruneCheckedIds(checked, 'zzz'), checked);
+  assert.equal(pruneCheckedIds([], 'a').length, 0);
 });

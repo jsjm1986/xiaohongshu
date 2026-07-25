@@ -217,6 +217,12 @@ export class GenerationService implements OnModuleInit {
   }
 
   create(raw: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
+    const id = this.insertJob(raw, principal, null);
+    this.enqueue(id);
+    return this.get(id);
+  }
+
+  private insertJob(raw: Record<string, unknown>, principal: SessionPrincipal, batchId: string | null): string {
     const projectId = this.requiredString(raw.projectId, 'projectId');
     const project = this.resources.projectRow(projectId);
     this.research.bootstrapProject(projectId, principal.userId);
@@ -281,8 +287,8 @@ export class GenerationService implements OnModuleInit {
            created_at, updated_at, topic, goal, mode, progress, knowledge_context_json,
            preset_id, style_profile_version, resolution_snapshot_json, config_impact_json,
            opportunity_id, opportunity_snapshot_json, planning_context_json, image_context_json,
-           release_manifest_id, research_snapshot_json)
-         VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, 2, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           release_manifest_id, research_snapshot_json, batch_id)
+         VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, 2, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -315,6 +321,7 @@ export class GenerationService implements OnModuleInit {
         JSON.stringify(planning.imageContext),
         typeof releaseSnapshot.id === 'string' ? releaseSnapshot.id : null,
         JSON.stringify(releaseSnapshot),
+        batchId,
       );
     this.event(id, 'queued', {
       providerMode: provider.mode,
@@ -325,10 +332,71 @@ export class GenerationService implements OnModuleInit {
       imageAssetCount: planning.imageContext.length,
       changedParameters: resolution.impactPreview.filter((item) => item.source !== 'default').length,
       releaseManifestId: typeof releaseSnapshot.id === 'string' ? releaseSnapshot.id : null,
+      batchId,
     });
-    this.audit.record({ workspaceId, userId: principal.userId, action: 'generation.create', entityType: 'generation_job', entityId: id, details: { projectId, mode, presetId: resolution.preset.id, styleProfileVersion: resolution.styleProfileVersion, releaseManifestId: typeof releaseSnapshot.id === 'string' ? releaseSnapshot.id : null } });
-    this.enqueue(id);
-    return this.get(id);
+    this.audit.record({ workspaceId, userId: principal.userId, action: 'generation.create', entityType: 'generation_job', entityId: id, details: { projectId, mode, presetId: resolution.preset.id, styleProfileVersion: resolution.styleProfileVersion, releaseManifestId: typeof releaseSnapshot.id === 'string' ? releaseSnapshot.id : null, batchId } });
+    return id;
+  }
+
+  createBatch(raw: { projectId?: unknown; name?: unknown; jobs?: unknown }, principal: SessionPrincipal): Record<string, unknown> {
+    const projectId = this.requiredString(raw.projectId, 'projectId');
+    const jobs = Array.isArray(raw.jobs) ? raw.jobs.filter(isRecord) : [];
+    if (!jobs.length) throw new BadRequestException('批量任务不能为空');
+    if (jobs.length > 60) throw new BadRequestException('单批任务不能超过 60 篇');
+    const name = typeof raw.name === 'string' ? raw.name.trim().slice(0, 120) : '';
+    const batchId = randomUUID();
+    const now = nowIso();
+    // 先建批次账本(queued),再逐个插 job;任一 job 校验失败则整批回滚。
+    const jobIds = this.database.transaction(() => {
+      this.database
+        .prepare(
+          `INSERT INTO generation_batches
+            (id, project_id, name, status, total_jobs, config_json, created_by, created_at, updated_at)
+           VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)`,
+        )
+        .run(batchId, projectId, name, jobs.length, JSON.stringify({ count: jobs.length }), principal.userId, now, now);
+      return jobs.map((job) => this.insertJob({ ...job, projectId }, principal, batchId));
+    });
+    // 事务提交后再入队(enqueue 触发异步 process,不能在事务里跑)
+    for (const id of jobIds) this.enqueue(id);
+    return this.getBatch(batchId);
+  }
+
+  batchRow(id: string): Record<string, unknown> {
+    const row = this.database.prepare('SELECT * FROM generation_batches WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    if (!row) throw new NotFoundException('批次不存在');
+    return row;
+  }
+
+  getBatch(id: string): Record<string, unknown> {
+    const batch = this.batchRow(id);
+    const jobRows = this.database.prepare('SELECT * FROM generation_jobs WHERE batch_id = ? ORDER BY created_at').all(id) as unknown as JobRow[];
+    const jobs = jobRows.map((row) => this.mapJob(row, false));
+    const status = computeBatchStatus(jobRows.map((row) => row.status));
+    // 状态漂移时惰性回写(含 completed_at)。回写后必须回传新值:batch 行是回写前读的,
+    // 直接用 batch.completed_at 会让「批次刚好在本次请求收敛到终态」的那一次响应
+    // 拿到 status=completed 但 completedAt=undefined(前端看板据此显示耗时/完成时间)。
+    let completedAt = (batch.completed_at as string | null) ?? null;
+    if (status !== batch.status) {
+      completedAt = (status === 'completed' || status === 'failed' || status === 'partial') ? nowIso() : null;
+      this.database.prepare('UPDATE generation_batches SET status=?, completed_at=?, updated_at=? WHERE id=?')
+        .run(status, completedAt, nowIso(), id);
+    }
+    return {
+      id: batch.id,
+      projectId: batch.project_id,
+      name: batch.name,
+      status,
+      totalJobs: batch.total_jobs,
+      createdAt: batch.created_at,
+      completedAt: completedAt ?? undefined,
+      jobs,
+    };
+  }
+
+  listBatches(projectId: string): Record<string, unknown>[] {
+    const rows = this.database.prepare('SELECT id FROM generation_batches WHERE project_id = ? ORDER BY created_at DESC').all(projectId) as Array<{ id: string }>;
+    return rows.map((row) => this.getBatch(row.id));
   }
 
   list(projectId?: string): Record<string, unknown>[] {
@@ -927,6 +995,20 @@ function validationIssueCountHeuristic(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function computeBatchStatus(jobStatuses: string[]): 'queued' | 'running' | 'completed' | 'failed' | 'partial' {
+  if (!jobStatuses.length) return 'completed';
+  const anyActive = jobStatuses.some((s) => s === 'queued' || s === 'running');
+  if (anyActive) {
+    // 全部还没开始 → queued;否则 running
+    return jobStatuses.every((s) => s === 'queued') ? 'queued' : 'running';
+  }
+  const anyOk = jobStatuses.some((s) => s === 'completed');
+  const anyFail = jobStatuses.some((s) => s === 'failed');
+  if (anyOk && anyFail) return 'partial';
+  if (anyFail) return 'failed';
+  return 'completed';
 }
 
 function publicImpacts(report: unknown): Array<Record<string, unknown>> {

@@ -1515,6 +1515,19 @@ export interface GenerationJob {
   };
 }
 
+export type GenerationBatchStatus = "queued" | "running" | "completed" | "failed" | "partial";
+
+export interface GenerationBatch {
+  id: string;
+  projectId: string;
+  name: string;
+  status: GenerationBatchStatus;
+  totalJobs: number;
+  createdAt?: string;
+  completedAt?: string;
+  jobs: GenerationJob[];
+}
+
 export interface OpportunitySelectionAudit {
   selectedOpportunityId?: string;
   selectionMode: "explicit_locked" | "heuristic_ranked" | "default_policy" | "revision_inherited" | string;

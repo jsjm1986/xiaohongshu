@@ -21,6 +21,7 @@ import { ExportService } from './export.service.js';
 import { FormulaController } from './formula.controller.js';
 import { FormulaService } from './formula.service.js';
 import { GenerationController } from './generation.controller.js';
+import { GenerationBatchController } from './generation-batch.controller.js';
 import { GenerationService } from './generation.service.js';
 import { KnowledgeController, ProjectKnowledgeController } from './knowledge.controller.js';
 import { KnowledgeService } from './knowledge.service.js';
@@ -58,6 +59,7 @@ export class AppModule {
         FormulaController,
         ResearchController,
         GenerationController,
+        GenerationBatchController,
         ExportController,
         SettingsController,
         V1Controller,

@@ -16,6 +16,10 @@ interface Props {
   onAnalyzed: (opps: TopicOpportunity[]) => void;
   setOpportunities: (opps: TopicOpportunity[]) => void;
   onOpportunityGone: (id: string) => void;
+  /** 批量:已勾选的选题 id */
+  checkedIds: string[];
+  onToggleCheck: (id: string) => void;
+  onConfigBatch: () => void;
   /** 空态「去知识库」入口(四区结构下由壳提供,跳转②知识库) */
   onGoKnowledge?: () => void;
 }
@@ -26,7 +30,7 @@ const FILTER_CHIPS: Array<{ key: OpportunityFilter; label: string }> = [
   { key: 'archived', label: '已归档' },
 ];
 
-export function TopicTab({ project, opportunities, opportunityId, busy, setBusy, fail, onPickTopic, onAnalyzed, setOpportunities, onOpportunityGone, onGoKnowledge }: Props) {
+export function TopicTab({ project, opportunities, opportunityId, busy, setBusy, fail, onPickTopic, onAnalyzed, setOpportunities, onOpportunityGone, checkedIds, onToggleCheck, onConfigBatch, onGoKnowledge }: Props) {
   const toast = useToast();
   const [guidance, setGuidance] = useState('');
   const [showGuidance, setShowGuidance] = useState(false);
@@ -153,6 +157,14 @@ export function TopicTab({ project, opportunities, opportunityId, busy, setBusy,
       <div className="qc-topic-list">
         {visible.map((o) => (
           <div key={o.id} className={`qc-topic${o.id === opportunityId ? ' selected' : ''}`}>
+            <input
+              type="checkbox"
+              className="qc-topic__check"
+              checked={checkedIds.includes(o.id)}
+              disabled={busy}
+              onChange={() => onToggleCheck(o.id)}
+              aria-label={`勾选「${o.title}」批量生成`}
+            />
             <button type="button" className="qc-topic__main" onClick={() => void pick(o.id)}>
               <span>{o.title}</span>
               {o.id === opportunityId && <small className="qc-topic__hint">已选</small>}
@@ -184,15 +196,40 @@ export function TopicTab({ project, opportunities, opportunityId, busy, setBusy,
         )}
       </div>
 
+      {checkedIds.length > 0 && (
+        <div className="qc-batch-bar">
+          <span>已选 {checkedIds.length} 个选题</span>
+          <Button disabled={busy} onClick={onConfigBatch}>配置批量生成</Button>
+        </div>
+      )}
+
       <details className="qc-advanced" open={showGuidance} onToggle={(e) => setShowGuidance((e.target as HTMLDetailsElement).open)}>
         <summary>换一批（可选填引导词）</summary>
         <div className="qc-advanced-grid">
           <Field label="引导词（可留空）">
             <textarea value={guidance} rows={2} maxLength={600} placeholder="例如：多一些针对术后恢复期的选题" onChange={(e) => setGuidance(e.target.value)} />
           </Field>
-          <div className="qc-project-row">
-            <Button variant="ghost" disabled={busy || !guidance.trim()} onClick={() => setShowSaveTpl(true)}>存为模板</Button>
-          </div>
+          {!showSaveTpl ? (
+            <div className="qc-project-row">
+              <Button variant="ghost" disabled={busy || !guidance.trim()} onClick={() => setShowSaveTpl(true)}>存为模板</Button>
+            </div>
+          ) : (
+            <div className="qc-tpl-inline">
+              <input
+                autoFocus
+                value={tplLabel}
+                onChange={(e) => setTplLabel(e.target.value)}
+                placeholder="模板名，如：术后恢复方向"
+                aria-label="模板名"
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') { setShowSaveTpl(false); setTplLabel(''); }
+                  if (e.key === 'Enter' && tplLabel.trim()) void saveTemplate();
+                }}
+              />
+              <Button loading={busy} disabled={!tplLabel.trim()} onClick={() => void saveTemplate()}>保存</Button>
+              <Button variant="ghost" onClick={() => { setShowSaveTpl(false); setTplLabel(''); }}>取消</Button>
+            </div>
+          )}
           {templates.length > 0 && (
             <div className="qc-tpl-list">
               {templates.map((t) => (
@@ -210,15 +247,6 @@ export function TopicTab({ project, opportunities, opportunityId, busy, setBusy,
       <Modal open={confirmDeleteOpp !== null} title="删除选题" description={`确定删除「${confirmDeleteOpp?.title ?? ''}」？`} onClose={() => setConfirmDeleteOpp(null)}
         footer={<><Button variant="ghost" onClick={() => setConfirmDeleteOpp(null)}>取消</Button><Button loading={busy} onClick={() => void doDeleteOpp()}>确认删除</Button></>}>
         <p className="qc-hint">删除后不可恢复；若它是当前选中的选题，已产生的配置与结果会一并清空。</p>
-      </Modal>
-
-      <Modal open={showSaveTpl} title="存为模板" description="把当前引导词保存下来，下次一键填入。" onClose={() => setShowSaveTpl(false)}
-        footer={<><Button variant="ghost" onClick={() => setShowSaveTpl(false)}>取消</Button><Button loading={busy} disabled={!tplLabel.trim()} onClick={() => void saveTemplate()}>保存</Button></>}>
-        <div className="qc-modal-form">
-          <Field label="模板名">
-            <input value={tplLabel} onChange={(e) => setTplLabel(e.target.value)} placeholder="如：术后恢复方向" />
-          </Field>
-        </div>
       </Modal>
     </div>
   );

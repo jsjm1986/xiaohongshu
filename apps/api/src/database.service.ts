@@ -753,6 +753,30 @@ export class DatabaseService implements OnModuleDestroy {
       `);
     });
     if (version < 11) version = 11;
+
+    if (version < 12) this.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE generation_batches (
+          id           TEXT PRIMARY KEY,
+          project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          name         TEXT NOT NULL DEFAULT '',
+          status       TEXT NOT NULL,
+          total_jobs   INTEGER NOT NULL DEFAULT 0,
+          config_json  TEXT NOT NULL DEFAULT '{}',
+          created_by   TEXT NOT NULL REFERENCES users(id),
+          created_at   TEXT NOT NULL,
+          updated_at   TEXT NOT NULL,
+          completed_at TEXT
+        );
+        CREATE INDEX generation_batches_project_idx ON generation_batches(project_id, created_at);
+
+        ALTER TABLE generation_jobs ADD COLUMN batch_id TEXT REFERENCES generation_batches(id) ON DELETE SET NULL;
+        CREATE INDEX generation_jobs_batch_idx ON generation_jobs(batch_id);
+
+        PRAGMA user_version = 12;
+      `);
+    });
+    if (version < 12) version = 12;
   }
 
   onModuleDestroy(): void {

@@ -1,4 +1,4 @@
-import type { Candidate, CommentThread, GenerateInput, GenerationJob, Project } from '../types';
+import type { Candidate, CommentThread, GenerateInput, GenerationJob, Project, TopicOpportunity } from '../types';
 import { buildSimpleGenerateInput, resolveSimpleGenerationSettings } from './simple-generation';
 import type { SimpleSettingOverrides } from './simple-generation';
 
@@ -126,6 +126,75 @@ const defaultDeps = async (): Promise<AutoDeps> => ({
   resolveSettings: resolveSimpleGenerationSettings,
 });
 
+interface ApproveDeps {
+  api: ApiClient;
+}
+
+/**
+ * 批量/单篇共用的审批段:把一批选题连同其依赖(蓝图、缺口、表达策略、项目情报)
+ * 推到已审批态,并返回定位到的选题对象。
+ *
+ * 后端 selectOpportunity 会校验 project_intelligence 及其蓝图模块已审批,
+ * 因此 intelligence 必须在任何 opportunities.approve 之前完成。
+ */
+export async function approveOpportunitiesForBatch(args: {
+  project: Project;
+  opportunityIds: string[];
+  deps?: ApproveDeps;
+}): Promise<TopicOpportunity[]> {
+  const projectId = args.project.id;
+  const d = args.deps ?? (await defaultDeps());
+
+  // 1. 审批蓝图（仅未审批项，与选题数无关，只做一次）
+  const modules = await d.api.blueprintModules.list(projectId);
+  await Promise.all(
+    modules
+      .filter((m) => m.status !== 'approved')
+      .map((m) => d.api.blueprintModules.approve(projectId, m.id)),
+  );
+
+  // 2. 定位全部目标选题（任一缺失即整批拒绝，不做静默丢弃）
+  const opps = await d.api.opportunities.list(projectId);
+  const targets = args.opportunityIds.map((id) => {
+    const found = opps.items.find((o) => o.id === id);
+    if (!found) throw new Error('选题不存在或已过期，请换一个选题');
+    return found;
+  });
+
+  // 3. 审批全部选题合并后的依赖 gaps / strategies（去重，一轮批准）
+  const [gaps, strategies] = await Promise.all([
+    d.api.informationGaps.list(projectId),
+    d.api.expressionStrategies.list(projectId),
+  ]);
+  const neededGapIds = new Set(targets.flatMap((o) => o.gapIds ?? []));
+  const neededStrategyIds = new Set(
+    targets
+      .flatMap((o) => [o.strategyId, ...(o.compatibleStrategyIds ?? [])])
+      .filter(Boolean) as string[],
+  );
+  await Promise.all([
+    ...gaps.items
+      .filter((g) => neededGapIds.has(g.id) && g.status !== 'approved')
+      .map((g) => d.api.informationGaps.approve(projectId, g.id)),
+    ...strategies.items
+      .filter((s) => neededStrategyIds.has(s.id) && s.status !== 'approved')
+      .map((s) => d.api.expressionStrategies.approve(projectId, s.id)),
+  ]);
+
+  // 4. 审批 intelligence（必须早于任何选题审批）
+  const intelligence = await d.api.intelligence.get(projectId);
+  if (intelligence?.id && intelligence.approvalStatus !== 'approved') {
+    await d.api.intelligence.approve(projectId, intelligence.id);
+  }
+
+  // 5. 逐个审批选题
+  for (const target of targets) {
+    await d.api.opportunities.approve(projectId, target.id);
+  }
+
+  return targets;
+}
+
 export async function autoApproveAndGenerate(args: {
   project: Project;
   opportunityId: string;
@@ -143,47 +212,13 @@ export async function autoApproveAndGenerate(args: {
   const d = args.deps ?? (await defaultDeps());
   const projectId = project.id;
 
-  // 1. 审批蓝图（仅未审批项）
-  const modules = await d.api.blueprintModules.list(projectId);
-  await Promise.all(
-    modules
-      .filter((m) => m.status !== 'approved')
-      .map((m) => d.api.blueprintModules.approve(projectId, m.id)),
-  );
-
-  // 2. 定位机会及其依赖
-  const opps = await d.api.opportunities.list(projectId);
-  const opportunity = opps.items.find((o) => o.id === opportunityId);
+  // 1-5. 审批链（与批量提交共用同一实现，避免两份逻辑漂移）
+  const [opportunity] = await approveOpportunitiesForBatch({
+    project,
+    opportunityIds: [opportunityId],
+    deps: d,
+  });
   if (!opportunity) throw new Error('选题不存在或已过期，请换一个选题');
-
-  // 3. 审批依赖 gaps / strategies
-  const [gaps, strategies] = await Promise.all([
-    d.api.informationGaps.list(projectId),
-    d.api.expressionStrategies.list(projectId),
-  ]);
-  const neededGapIds = new Set(opportunity.gapIds ?? []);
-  const neededStrategyIds = new Set(
-    [opportunity.strategyId, ...(opportunity.compatibleStrategyIds ?? [])].filter(Boolean) as string[],
-  );
-  await Promise.all([
-    ...gaps.items
-      .filter((g) => neededGapIds.has(g.id) && g.status !== 'approved')
-      .map((g) => d.api.informationGaps.approve(projectId, g.id)),
-    ...strategies.items
-      .filter((s) => neededStrategyIds.has(s.id) && s.status !== 'approved')
-      .map((s) => d.api.expressionStrategies.approve(projectId, s.id)),
-  ]);
-
-  // 4. 审批 intelligence（必须在机会之前：selectOpportunity 会校验
-  // project_intelligence 及其蓝图模块已审批，否则拒绝选中机会）。
-  // 注：ProjectIntelligence 的审批态记录在 approvalStatus（status 联合类型不含 'approved'）。
-  const intelligence = await d.api.intelligence.get(projectId);
-  if (intelligence?.id && intelligence.approvalStatus !== 'approved') {
-    await d.api.intelligence.approve(projectId, intelligence.id);
-  }
-
-  // 5. 审批机会（依赖 intelligence 已审批）
-  await d.api.opportunities.approve(projectId, opportunity.id);
 
   // 6. 解析预设 + 构建输入
   let preset;

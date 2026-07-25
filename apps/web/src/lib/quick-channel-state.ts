@@ -93,3 +93,11 @@ export function filterGenerationJobs<T extends { status: string; topic?: string 
     return true;
   });
 }
+
+/**
+ * 选题被归档/删除后收敛批量勾选集：剔除该选题，其余保序。
+ * 未勾选时原样返回同一引用，让调用方的 setState 不触发无意义重渲染。
+ */
+export function pruneCheckedIds(checkedIds: string[], goneId: string): string[] {
+  return checkedIds.includes(goneId) ? checkedIds.filter((id) => id !== goneId) : checkedIds;
+}
