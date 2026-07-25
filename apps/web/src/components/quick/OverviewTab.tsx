@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ArrowRight, FileText, Layers, Lightbulb, Map, Trash2 } from 'lucide-react';
+import { ArrowRight, FileText, Gauge, Layers, Lightbulb, Map, Server, Trash2 } from 'lucide-react';
 import { useProjects } from '../ProjectContext';
 import { Button, Field, Modal, useToast } from '../Ui';
 import { api } from '../../lib/api';
@@ -13,6 +13,8 @@ import {
   type QuickTab,
 } from '../../lib/quick-channel-state';
 import { V2Instrument, V2InstrumentCell, type V2InstrumentTone } from '../V2';
+import { quotaCell, type QuotaSnapshot } from '../../lib/quota-view';
+import { overviewDigest } from '../../lib/overview-digest';
 import type { GenerationJob, Project, ProjectIntelligence, TopicOpportunity } from '../../types';
 
 interface Props {
@@ -40,6 +42,7 @@ export function OverviewTab({ project, busy, setBusy, fail, goTo, onProjectUpdat
   const [intel, setIntel] = useState<ProjectIntelligence | null>(null);
   const [opps, setOpps] = useState<TopicOpportunity[]>([]);
   const [jobs, setJobs] = useState<GenerationJob[]>([]);
+  const [quota, setQuota] = useState<QuotaSnapshot | null>(null);
   const [renaming, setRenaming] = useState('');
   const [domain, setDomain] = useState('');
   const [description, setDescription] = useState('');
@@ -62,6 +65,12 @@ export function OverviewTab({ project, busy, setBusy, fail, goTo, onProjectUpdat
     api.generations.list(project.id)
       .then((r) => { if (!cancelled) setJobs(r.items); })
       .catch(() => { if (!cancelled) setJobs([]); });
+    // 额度:付费用户需要在生成前就知道还剩多少,而不是撞上 403 才发现。
+    // 同样静默回落——额度读不到不该拖垮总览其余读数。
+    setQuota(null);
+    api.settings.quota(project.workspaceId)
+      .then((r) => { if (!cancelled) setQuota(r); })
+      .catch(() => { /* 静默回落:不显示额度格 */ });
     setRenaming(project.name);
     setDomain(project.domain ?? '');
     setDescription(project.description ?? '');
@@ -98,7 +107,8 @@ export function OverviewTab({ project, busy, setBusy, fail, goTo, onProjectUpdat
   });
   const actionNote = analyzing ? '分析进行中' : action.note;
 
-  const recent = jobs.slice(0, 3);
+  const digest = overviewDigest(jobs);
+  const quotaInfo = quotaCell(quota);
   const mapCell = MAP_CELL[analysis];
   const mapNote = analysis === 'stale'
     ? staleReasons.join('；') || '资料有更新'
@@ -146,6 +156,7 @@ export function OverviewTab({ project, busy, setBusy, fail, goTo, onProjectUpdat
 
   return (
     <div className="qc-step">
+      {/* 有额度可显示时扩到 5 格(BYOK 或读取失败时 quotaCell 返回 null,保持 4 格) */}
       <V2Instrument columns={4}>
         <V2InstrumentCell tone={mapCell.tone} icon={<Map size={14} />} label="内容地图" value={mapCell.value} note={mapNote} />
         <V2InstrumentCell tone="brand" icon={<FileText size={14} />} label="知识文件" value={project.knowledgeCount ?? 0} unit="个" />
@@ -153,23 +164,110 @@ export function OverviewTab({ project, busy, setBusy, fail, goTo, onProjectUpdat
         <V2InstrumentCell tone="ok" icon={<Layers size={14} />} label="累计产出" value={jobs.length} unit="篇" />
       </V2Instrument>
 
-      <div className="qc-overview-next">
-        <Button icon={<ArrowRight size={16} />} disabled={analyzing || busy} onClick={() => goTo(action.tab)}>{action.label}</Button>
-        {actionNote && <small className="qc-hint">{actionNote}</small>}
+      {/* 额度单独一行:V2Instrument 是 4 列固定网格,塞第 5 格会让它独占第二行的
+          四分之一宽,排版是坏的。这里另起一行两格:额度 + 计费口径。
+          「各消耗 1 次」是核对过的——consumePlatformQuota 在生成、按意见修改、
+          知识库分析三处各 +1,修改同样计费,不能只说生成。 */}
+      {quotaInfo && (
+        <V2Instrument columns={2}>
+          <V2InstrumentCell
+            tone={quotaInfo.tone}
+            icon={<Gauge size={14} />}
+            label="本月额度"
+            value={quotaInfo.value}
+            unit={quotaInfo.unit}
+            note={quotaInfo.note}
+          />
+          <V2InstrumentCell
+            tone="blue"
+            icon={<Server size={14} />}
+            label="计费方式"
+            value="平台额度"
+            note="生成、按意见修改、知识库分析各消耗 1 次"
+          />
+        </V2Instrument>
+      )}
+
+      {/* 工作台主体:左「产出质量」右「下一步」。原来这里只有一个按钮加三行链接,
+          在放宽后的面板里撑不住,也没回答运营每天真正的问题:哪些能发、还剩什么要处理。 */}
+      <div className="qc-board">
+        <section className="qc-board__card">
+          <h3 className="qc-board__title">产出质量</h3>
+          {digest.settled === 0 ? (
+            <p className="qc-hint">还没有已完成的产出。</p>
+          ) : (
+            <>
+              <div className="qc-quality-bar" role="img"
+                aria-label={`可直接发布 ${digest.publishable} 篇，需人工核对 ${digest.needsReview} 篇，失败 ${digest.failed} 篇`}>
+                <i className="qc-quality-bar__ok" style={{ width: `${digest.publishableRatio * 100}%` }} />
+                <i className="qc-quality-bar__warn" style={{ width: `${digest.needsReviewRatio * 100}%` }} />
+                <i className="qc-quality-bar__err" style={{ width: `${digest.failedRatio * 100}%` }} />
+              </div>
+              {/* 计数为 0 走中性灰:绿色的「0 可直接发布」会被读成好消息,而它相反 */}
+              <ul className="qc-quality-legend">
+                <li><b className={digest.publishable === 0 ? 'is-zero' : undefined}>{digest.publishable}</b><span>可直接发布</span></li>
+                <li><b className={digest.needsReview === 0 ? 'is-zero' : undefined}>{digest.needsReview}</b><span>需人工核对</span></li>
+                <li><b className={digest.failed === 0 ? 'is-zero' : undefined}>{digest.failed}</b><span>失败待重试</span></li>
+              </ul>
+              <p className="qc-board__foot">
+                共 {digest.total} 篇
+                {digest.inFlight > 0 && ` · ${digest.inFlight} 篇进行中`}
+                {/* 「可直接发布」= 至少一个候选通过可发布校验,不是效果判断 */}
+                <small>「可直接发布」指已通过可发布校验，仍建议人工过一遍</small>
+              </p>
+            </>
+          )}
+        </section>
+
+        <section className="qc-board__card">
+          <h3 className="qc-board__title">下一步</h3>
+          <Button icon={<ArrowRight size={16} />} disabled={analyzing || busy} onClick={() => goTo(action.tab)}>{action.label}</Button>
+          {actionNote && <small className="qc-hint">{actionNote}</small>}
+          <ul className="qc-todo">
+            {activeCount > 0 && (
+              <li><button type="button" onClick={() => goTo('create')}>
+                <b>{activeCount}</b> 个选题待处理
+              </button></li>
+            )}
+            {digest.needsReview > 0 && (
+              <li><button type="button" onClick={() => goTo('history')}>
+                <b>{digest.needsReview}</b> 篇需人工核对
+              </button></li>
+            )}
+            {digest.failed > 0 && (
+              <li><button type="button" onClick={() => goTo('history')}>
+                <b>{digest.failed}</b> 篇失败可重试
+              </button></li>
+            )}
+            {activeCount === 0 && digest.needsReview === 0 && digest.failed === 0 && (
+              <li className="qc-todo__clear">没有待处理事项</li>
+            )}
+          </ul>
+        </section>
       </div>
 
-      {recent.length > 0 && (
+      {digest.recent.length > 0 && (
         <div className="qc-overview-recent">
           <span className="qc-overview-recent__label">最近产出</span>
           <ul>
-            {recent.map((job) => (
-              <li key={job.id}>
-                <button type="button" onClick={() => goTo('history')}>
-                  <strong>{job.topic || '未命名选题'}</strong>
-                  <small>{job.createdAt ? new Date(job.createdAt).toLocaleString() : ''}</small>
-                </button>
-              </li>
-            ))}
+            {digest.recent.map((job) => {
+              const state = job.status === 'failed'
+                ? { text: '失败', tone: 'error' as const }
+                : job.status === 'queued' || job.status === 'running'
+                  ? { text: '进行中', tone: 'warn' as const }
+                  : job.qualityStatus === 'passed'
+                    ? { text: '已通过校验', tone: 'ok' as const }
+                    : { text: '需核对', tone: 'warn' as const };
+              return (
+                <li key={job.id}>
+                  <button type="button" onClick={() => goTo('history')}>
+                    <strong>{job.topic || '未命名选题'}</strong>
+                    <span className={`qc-badge qc-badge--${state.tone}`}>{state.text}</span>
+                    <small>{job.createdAt ? new Date(job.createdAt).toLocaleString() : ''}</small>
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}

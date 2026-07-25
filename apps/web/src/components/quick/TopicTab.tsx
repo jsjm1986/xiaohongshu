@@ -3,6 +3,7 @@ import { Star, Archive, Trash2, X, Lightbulb, SearchX } from 'lucide-react';
 import { Button, Field, Modal, useToast } from '../Ui';
 import { api } from '../../lib/api';
 import { filterOpportunities, type OpportunityFilter } from '../../lib/quick-channel-state';
+import { topicCardFields } from '../../lib/topic-card';
 import type { ContentPreset, Project, PromptTemplate, TopicOpportunity } from '../../types';
 
 interface Props {
@@ -155,8 +156,11 @@ export function TopicTab({ project, opportunities, opportunityId, busy, setBusy,
       </div>
 
       <div className="qc-topic-list">
-        {visible.map((o) => (
+        {visible.map((o) => {
+          const card = topicCardFields(o);
+          return (
           <div key={o.id} className={`qc-topic${o.id === opportunityId ? ' selected' : ''}`}>
+            <div className="qc-topic__head">
             <input
               type="checkbox"
               className="qc-topic__check"
@@ -166,20 +170,64 @@ export function TopicTab({ project, opportunities, opportunityId, busy, setBusy,
               aria-label={`勾选「${o.title}」批量生成`}
             />
             <button type="button" className="qc-topic__main" onClick={() => void pick(o.id)}>
-              <span>{o.title}</span>
+              {card.rankText && <em className="qc-topic__rank">{card.rankText}</em>}
+              <span title={o.title}>{o.title}</span>
               {o.id === opportunityId && <small className="qc-topic__hint">已选</small>}
             </button>
+            {/* 操作位只留图标:选题池宽 360px,三个带文字的按钮会占满整行、把标题挤成 0 宽。
+                名称移到 title/aria-label,可读性与无障碍不丢。 */}
             <span className="qc-topic__ops">
-              <Button variant="ghost" icon={<Star size={13} />} disabled={busy} onClick={() => void toggleCollect(o)}>
-                {o.collectionStatus === 'collected' ? '取消收藏' : '收藏'}
-              </Button>
-              <Button variant="ghost" icon={<Archive size={13} />} disabled={busy} onClick={() => void toggleArchive(o)}>
-                {o.collectionStatus === 'archived' ? '恢复' : '归档'}
-              </Button>
-              <Button variant="ghost" icon={<Trash2 size={13} />} disabled={busy} onClick={() => setConfirmDeleteOpp(o)}>删除</Button>
+              {(() => {
+                const collectLabel = o.collectionStatus === 'collected' ? '取消收藏' : '收藏';
+                const archiveLabel = o.collectionStatus === 'archived' ? '恢复' : '归档';
+                return (
+                  <>
+                    <Button variant="ghost" icon={<Star size={13} />} disabled={busy} title={collectLabel} aria-label={`${collectLabel}「${o.title}」`} onClick={() => void toggleCollect(o)} />
+                    <Button variant="ghost" icon={<Archive size={13} />} disabled={busy} title={archiveLabel} aria-label={`${archiveLabel}「${o.title}」`} onClick={() => void toggleArchive(o)} />
+                    <Button variant="ghost" icon={<Trash2 size={13} />} disabled={busy} title="删除" aria-label={`删除「${o.title}」`} onClick={() => setConfirmDeleteOpp(o)} />
+                  </>
+                );
+              })()}
             </span>
+            </div>
+
+            {card.rationale && <p className="qc-topic__reason" title={card.rationale}>{card.rationale}</p>}
+
+            {(card.stageLabel || card.entryLabel || card.evidenceCount > 0 || card.boundaryCount > 0) && (
+              <div className="qc-topic__chips">
+                {card.stageLabel && <span className="qc-topic__chip">读者：{card.stageLabel}</span>}
+                {card.entryLabel && <span className="qc-topic__chip">来源：{card.entryLabel}</span>}
+                {card.evidenceCount > 0 && <span className="qc-topic__chip">证据 {card.evidenceCount}</span>}
+                {card.boundaryCount > 0 && <span className="qc-topic__chip">边界 {card.boundaryCount}</span>}
+              </div>
+            )}
+
+            {/* 分数区:显示数字就必须同屏标注「未校准」——后端把这些分标为
+                ordinal_noncausal_heuristic,不是效果预测。见 topic-card.ts。 */}
+            {(card.scoreText || card.metrics.length > 0) && (
+              <div className="qc-topic__scores">
+                {card.scoreText && (
+                  <span className="qc-topic__score" title="服务端排序分,未校准,仅用于人工复核排序">
+                    排序分 <b>{card.scoreText}</b>
+                  </span>
+                )}
+                {card.metrics.map((m) => (
+                  <span
+                    key={m.key}
+                    className={`qc-topic__metric${m.inverse ? ' qc-topic__metric--inverse' : ''}`}
+                    title={m.inverse ? `${m.label} ${m.value}（越低越好）` : `${m.label} ${m.value}`}
+                  >
+                    {m.label}
+                    <i className="qc-topic__bar"><i style={{ width: `${Math.round(Math.min(1, Math.max(0, m.value)) * 100)}%` }} /></i>
+                    <b>{m.value}</b>
+                  </span>
+                ))}
+                <span className="qc-topic__uncal">未校准 · 仅供人工排序参考，非效果预测</span>
+              </div>
+            )}
           </div>
-        ))}
+          );
+        })}
         {visible.length === 0 && (
           opportunities.length === 0 ? (
             <div className="qc-empty">

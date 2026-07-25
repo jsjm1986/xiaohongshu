@@ -71,6 +71,25 @@ export class SettingsService {
     };
   }
 
+  /**
+   * 额度快照(只读)。供极简创作(SaaS)在界面上显示余量用。
+   *
+   * 刻意不复用 publicSettings:那个方法会连带返回 apiBaseUrl、model、transport、
+   * generationDefaults 等基础设施细节,租户没有理由看到。这里只给额度三件套,
+   * 字段集由 settings-quota.test.ts 逐键锁死。
+   */
+  quotaSnapshot(workspaceId: string, userId?: string): Record<string, unknown> {
+    const row = this.ensure(workspaceId, userId);
+    return {
+      workspaceId,
+      providerMode: row.provider_mode,
+      monthlyQuota: row.monthly_quota,
+      quotaUsed: row.quota_used,
+      // 不为负:配额被下调到低于既有用量时,余量是 0 而不是负数
+      remaining: Math.max(0, row.monthly_quota - row.quota_used),
+    };
+  }
+
   update(workspaceId: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
     const current = this.ensure(workspaceId, principal.userId);
     const providerMode = body.providerMode === 'byok' ? 'byok' : body.providerMode === 'platform' ? 'platform' : current.provider_mode;

@@ -31,6 +31,7 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
   const [topicCount, setTopicCount] = useState(0);
   const [analysisTask, setAnalysisTask] = useState<AnalysisTask | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const [recategorizing, setRecategorizing] = useState<string | null>(null);
 
   useEffect(() => {
     if (!project) { setFiles([]); setIntel(null); setTopicCount(0); return; }
@@ -113,6 +114,24 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
     } catch (e) { fail(e, '删除文件失败'); }
   };
 
+  /**
+   * 就地改分类。原来只能删除后重传,分类填错一次就得把文件删掉重上一遍。
+   * 改完要重取内容地图状态:后端会把已审批的分析链置 stale,界面得跟着提示重新分析。
+   */
+  const changeCategory = async (file: KnowledgeFile, category: string) => {
+    if (!project || category === file.category) return;
+    setRecategorizing(file.id);
+    try {
+      const updated = await api.knowledge.recategorize(file.id, { category });
+      setFiles((cur) => cur.map((f) => (f.id === file.id ? updated : f)));
+      toast.push(`「${file.name}」已改为「${category}」，建议重新分析`);
+      // 分析链已失效,刷新状态让「需要更新」提示立刻出现
+      api.intelligence.get(project.id)
+        .then((r) => { if (r.status !== 'missing') setIntel(r); })
+        .catch(() => { /* 静默:提示晚一步出现不影响改分类本身 */ });
+    } catch (e) { fail(e, '改分类失败'); } finally { setRecategorizing(null); }
+  };
+
   const analyze = async () => {
     if (!project) return;
     setBusy(true);
@@ -172,7 +191,18 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
               {files.map((f) => (
                 <li key={f.id}>
                   <FileText size={14} />
-                  <span className="qc-file-name">{f.name}<small className="qc-hint"> · {f.category ?? '未分类'}</small></span>
+                  <span className="qc-file-name">{f.name}</span>
+                  {/* 分类可以就地改,不必再「删除后重传」。改分类会让内容地图失效,
+                      因为分类决定这份资料怎么参与生成(reference-corpus 会被排除出生成语料)。 */}
+                  <select
+                    className="qc-file-cat"
+                    value={CATEGORIES.includes(f.category ?? '') ? f.category : '未分类'}
+                    disabled={recategorizing === f.id}
+                    aria-label={`「${f.name}」的分类`}
+                    onChange={(e) => void changeCategory(f, e.target.value)}
+                  >
+                    {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
                   <span className="qc-file-ops">
                     <Button variant="ghost" icon={<Eye size={14} />} onClick={() => void previewFile(f)}>预览</Button>
                     <Button variant="ghost" icon={<Trash2 size={14} />} onClick={() => void removeFile(f.id)}>删除</Button>

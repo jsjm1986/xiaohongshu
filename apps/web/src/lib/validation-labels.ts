@@ -129,6 +129,26 @@ export function validationIssueLabel(code?: string) {
   return (code && labels[code]) || null;
 }
 
+/**
+ * 全部未通过项的说明清单(按原顺序、去重)。
+ *
+ * 与 firstValidationIssueLabel 的分工:一句话结论用首条,展开清单用这个。
+ * 只显示首条会让用户改完一处又冒出下一处,始终不知道还剩几个问题。
+ * 不可识别的 code 原样保留——宁可露出英文 code 供人工核对,也不猜译、不丢。
+ */
+export function allValidationIssueLabels(codes?: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const code of codes ?? []) {
+    if (!code) continue;
+    const label = validationIssueLabel(code) ?? code;
+    if (seen.has(label)) continue;
+    seen.add(label);
+    out.push(label);
+  }
+  return out;
+}
+
 /** 返回首个可识别 code 的中文说明;全部不可识别或列表为空时返回 null。 */
 export function firstValidationIssueLabel(codes?: string[]): string | null {
   for (const code of codes ?? []) {

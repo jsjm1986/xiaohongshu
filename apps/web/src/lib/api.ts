@@ -40,6 +40,7 @@ import type {
   WorkspaceApiKey,
 } from "../types";
 import { gapPayload, opportunityPayload } from "./metric-payload";
+import type { QuotaSnapshot } from "./quota-view";
 
 export class ApiError extends Error {
   constructor(
@@ -831,6 +832,15 @@ export const api = {
         total: result.total,
       };
     },
+    /**
+     * 重新归类已有文件。不改内容、不升版本,但会让已审批的分析链失效——
+     * 分类决定这份资料怎么参与生成,不是纯标签。
+     */
+    recategorize: (fileId: string, input: { category?: string; evidenceStatus?: string }) =>
+      request<JsonRecord>(`/api/knowledge/${encodeURIComponent(fileId)}`, {
+        method: "PATCH",
+        body: JSON.stringify(input),
+      }).then(normalizeKnowledge),
     upload: (projectId: string, file: File, category: string, kind: string) => {
       const body = new FormData();
       body.append("projectId", projectId);
@@ -1259,6 +1269,14 @@ export const api = {
     get: (workspaceId?: string) =>
       request<AppSettings>(
         `/api/settings${workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : ""}`,
+      ),
+    /**
+     * 额度余量(只读)。极简创作(SaaS)可调,而 GET /api/settings 对 saas 用户
+     * 是 403——后者会连带返回供应商与配置字段,不在白名单内。
+     */
+    quota: (workspaceId?: string) =>
+      request<QuotaSnapshot>(
+        `/api/settings/quota${workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : ""}`,
       ),
     update: (
       input: Partial<AppSettings> & { apiKey?: string; workspaceId?: string; clearApiKey?: boolean },

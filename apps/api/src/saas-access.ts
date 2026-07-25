@@ -19,6 +19,10 @@ export function isSaasApiAllowed(method: string, path: string): boolean {
     return true;
   }
 
+  // 额度只读:精确路径,不是前缀。裸 /api/settings 与 PATCH 一律不放行——
+  // publicSettings 会连带吐出 apiBaseUrl / model / generationDefaults。
+  if (verb === 'GET' && pathname === '/api/settings/quota') return true;
+
   if (inScope('/api/knowledge')) return true;
   if (inScope('/api/generations')) return true;
   if (inScope('/api/generation-batches')) return true;

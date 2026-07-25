@@ -7,6 +7,7 @@ import {
   Get,
   Inject,
   Param,
+  Patch,
   Post,
   Query,
   Req,
@@ -73,6 +74,18 @@ export class KnowledgeController {
     @UploadedFile() file?: UploadedKnowledgeFile,
   ) {
     return this.handleUpload(rawRequest, body, file);
+  }
+
+  /** 重新归类。与项目内嵌路由同一实现;前端用的是这条扁平路由。 */
+  @Patch(':fileId')
+  recategorize(
+    @Req() rawRequest: Request,
+    @Param('fileId') fileId: string,
+    @Body() body: { category?: string; evidenceStatus?: string },
+  ) {
+    const row = this.knowledge.row(fileId);
+    this.assert(rawRequest, String(row.project_id), 'knowledge.import');
+    return this.knowledge.recategorize(fileId, body ?? {}, this.principal(rawRequest));
   }
 
   @Delete(':fileId')
@@ -206,6 +219,23 @@ export class ProjectKnowledgeController {
     if (row.project_id !== projectId) throw new BadRequestException('文件不属于该项目');
     this.assert(rawRequest, projectId, 'knowledge.read');
     return this.knowledge.getWithContent(fileId);
+  }
+
+  /**
+   * 重新归类:改分类或证据类型,不必删除后重传。
+   * 权限沿用 knowledge.import——它改的是资料如何参与生成,与导入同权重。
+   */
+  @Patch(':fileId')
+  recategorize(
+    @Req() rawRequest: Request,
+    @Param('projectId') projectId: string,
+    @Param('fileId') fileId: string,
+    @Body() body: { category?: string; evidenceStatus?: string },
+  ) {
+    const row = this.knowledge.row(fileId);
+    if (row.project_id !== projectId) throw new BadRequestException('文件不属于该项目');
+    this.assert(rawRequest, projectId, 'knowledge.import');
+    return this.knowledge.recategorize(fileId, body ?? {}, this.principal(rawRequest));
   }
 
   @Delete(':fileId')

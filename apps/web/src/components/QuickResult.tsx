@@ -1,8 +1,8 @@
-import { Copy } from 'lucide-react';
+import { Copy, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
 import { Button, useToast } from './Ui';
 import { quickCandidateToMarkdown, type QuickCandidateView } from '../lib/quick-generation';
-import { firstValidationIssueLabel } from '../lib/validation-labels';
+import { allValidationIssueLabels, firstValidationIssueLabel } from '../lib/validation-labels';
 
 async function copyText(text: string, toast: ReturnType<typeof useToast>) {
   try {
@@ -87,6 +87,7 @@ export function QuickResult({ candidates, onRegenerate, onPickAnotherTopic, onRe
   const [instruction, setInstruction] = useState('');
   const view = candidates[active];
   if (!view) return null;
+  const issueLabels = allValidationIssueLabels(view.issueCodes);
 
   const submitRevise = () => {
     if (!onRevise) return;
@@ -112,10 +113,28 @@ export function QuickResult({ candidates, onRegenerate, onPickAnotherTopic, onRe
         ))}
       </div>
 
-      {!view.publishable && (
-        <p className="qc-issue-line">
-          {firstValidationIssueLabel(view.issueCodes) ?? '未通过校验，可换个预设或用修改意见重生成'}
+      {/* 可发布性要正反两面都说。原来只在未通过时出一行,通过时界面什么也不讲,
+          用户无从判断「能直接发」还是「系统没检查」。 */}
+      {view.publishable ? (
+        <p className="qc-pass-line">
+          <ShieldCheck size={13} />
+          已通过可发布校验
+          <small>标题、正文、标签、证据引用与评论结构均已检查</small>
         </p>
+      ) : (
+        <div className="qc-issue-line">
+          <p>
+            <TriangleAlert size={13} />
+            {firstValidationIssueLabel(view.issueCodes) ?? '未通过校验，可换个预设或用修改意见重生成'}
+          </p>
+          {/* 其余未通过项:只报首条会让用户改完一处又冒出下一处 */}
+          {issueLabels.length > 1 && (
+            <details className="qc-issue-more">
+              <summary>另有 {issueLabels.length - 1} 项未通过</summary>
+              <ul>{issueLabels.map((label) => <li key={label}>{label}</li>)}</ul>
+            </details>
+          )}
+        </div>
       )}
 
       <QuickCandidateCards view={view} />

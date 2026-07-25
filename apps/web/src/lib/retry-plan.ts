@@ -1,0 +1,142 @@
+import type { ContentPreset, GenerationJob, TopicOpportunity } from '../types';
+import type { SimpleSettingOverrides } from './simple-generation';
+import { extractRecipe, resolveRecipeTargets } from './quick-recipe';
+
+/**
+ * 批量重试的规划层。
+ *
+ * 为什么需要它:单条重试(BatchBoard.retry)每次要 4 个请求——选题列表、预设列表、
+ * 审批、建批次。实测有 70 条失败,逐条点就是 ~280 个请求,而且同一配方会被重复提交、
+ * 白烧额度。这里把 N 条失败先规划成一次批次提交,并如实报告哪些重试不了。
+ *
+ * 只做规划,不发请求:请求交给调用方(便于用 node:test 直接测)。
+ */
+
+export interface RetryTarget {
+  opportunityId: string;
+  presetId: string | undefined;
+  overrides: SimpleSettingOverrides;
+  imageAssetIds: string[];
+  /** 归并到这个目标的原任务 id(去重后可能多于一个) */
+  jobIds: string[];
+}
+
+export interface RetrySkip {
+  jobId: string;
+  topic: string;
+  reason: string;
+}
+
+export interface BatchRetryPlan {
+  retryable: RetryTarget[];
+  skipped: RetrySkip[];
+  /** 因配方重复而被合并掉的任务数 */
+  deduped: number;
+  /** 回落提示(如预设已删除),已去重 */
+  warnings: string[];
+}
+
+/** 规划批量重试:只处理 status==='failed' 的任务。 */
+export function planBatchRetry(
+  jobs: GenerationJob[],
+  opportunities: TopicOpportunity[],
+  presets: ContentPreset[],
+): BatchRetryPlan {
+  const byKey = new Map<string, RetryTarget>();
+  const skipped: RetrySkip[] = [];
+  const warnings = new Set<string>();
+  let deduped = 0;
+
+  for (const job of jobs) {
+    if (job.status !== 'failed') continue;
+
+    const targets = resolveRecipeTargets(extractRecipe(job), opportunities, presets);
+    for (const w of targets.warnings) warnings.add(w);
+
+    if (!targets.opportunityId) {
+      // 孤儿任务:选题已从池中删除。必须报出来,不能少重试一条还不说。
+      skipped.push({
+        jobId: job.id,
+        topic: job.topic || '未命名选题',
+        reason: targets.warnings[0] ?? '原选题已不在选题池，无法重试',
+      });
+      continue;
+    }
+
+    // 同选题 + 同预设视为同一配方:批量失败时常常是同一组任务重复失败,
+    // 不去重会把额度花在完全一样的请求上。
+    const key = `${targets.opportunityId}::${targets.presetId ?? ''}`;
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.jobIds.push(job.id);
+      deduped += 1;
+      continue;
+    }
+    byKey.set(key, {
+      opportunityId: targets.opportunityId,
+      presetId: targets.presetId,
+      overrides: targets.overrides,
+      imageAssetIds: targets.imageAssetIds,
+      jobIds: [job.id],
+    });
+  }
+
+  return { retryable: [...byKey.values()], skipped, deduped, warnings: [...warnings] };
+}
+
+// ---- 失败原因汇总 ----
+
+export interface FailureGroup {
+  label: string;
+  count: number;
+  /** true 表示这类问题重试也解决不了,需要先处理外部条件 */
+  blocking: boolean;
+}
+
+export interface FailureDigest {
+  total: number;
+  groups: FailureGroup[];
+  /** 命中 blocking 原因的任务数:这些重试也会再失败,且每次都扣额度 */
+  blockingCount: number;
+}
+
+/**
+ * 错误原文 → 可读原因。原文是英文模型层报错混中文前缀,直接展示给运营没有意义。
+ * blocking=true 的几类重试也没用(余额、密钥),必须先解决外部条件——
+ * 否则用户会反复点重试反复失败。
+ */
+const PATTERNS: Array<{ match: RegExp; label: string; blocking: boolean }> = [
+  // 后端 generation.service.ts:216——启动时把仍在 queued/running 的任务标失败。
+  // 实测这是最主要的失败原因(21 条里 11 条),重试完全可恢复,必须单独归类,
+  // 否则会混进「未归类」里显示成一串原文。
+  { match: /应用重启导致任务中断/, label: '服务重启中断，重试即可恢复', blocking: false },
+  { match: /Insufficient Balance|insufficient_quota|balance/i, label: '模型账户余额不足，充值后再重试', blocking: true },
+  { match: /invalid[_ ]api[_ ]key|unauthorized|401/i, label: '模型密钥无效或已过期', blocking: true },
+  { match: /rate[_ ]limit|429|too many requests/i, label: '被模型服务限流，稍后重试', blocking: false },
+  { match: /response_format/i, label: '模型不支持所需的返回格式，需换模型', blocking: true },
+  { match: /unexpected EOF|ECONNRESET|socket hang up|timeout/i, label: '模型响应中断，重试通常可恢复', blocking: false },
+  { match: /did not contain a complete JSON|JSON/i, label: '模型输出不完整，重试通常可恢复', blocking: false },
+  { match: /expected \d+|returned \d+ threads/i, label: '生成结构不符合编排要求，重试可能仍失败', blocking: false },
+];
+
+export function failureDigest(jobs: GenerationJob[]): FailureDigest {
+  const counts = new Map<string, FailureGroup>();
+
+  for (const job of jobs) {
+    const error = job.error ?? '';
+    const hit = PATTERNS.find((p) => p.match.test(error));
+    // 归不了类的保留原文摘要,不吞掉信息——排查全靠它
+    const label = hit?.label ?? (error.trim() ? `未归类：${error.trim().slice(0, 40)}` : '未记录失败原因');
+    const blocking = hit?.blocking ?? false;
+    const current = counts.get(label);
+    if (current) current.count += 1;
+    else counts.set(label, { label, count: 1, blocking });
+  }
+
+  const groups = [...counts.values()].sort((a, b) => b.count - a.count);
+  return {
+    total: jobs.length,
+    groups,
+    blockingCount: groups.filter((g) => g.blocking).reduce((sum, g) => sum + g.count, 0),
+  };
+}

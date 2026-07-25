@@ -141,6 +141,61 @@ export class KnowledgeService {
     return this.map(this.row(id));
   }
 
+  /**
+   * 重新归类已有文件(分类 / 证据类型),不改内容、不升版本。
+   *
+   * 原来只能「删除后重传」:分类填错一次就得把文件删掉再上传一遍,对运营是纯摩擦。
+   *
+   * 但分类不是标签——它决定这份资料怎么参与生成:reference-corpus 会被排除出
+   * 生成语料、只用于校准校验器(见 selectKnowledgeContext),evidenceStatus 影响
+   * 事实能否被当作依据引用。所以改完必须让已审批的分析链失效,与上传/删除同一处理,
+   * 否则内容地图与实际语料不符还显示「已就绪」。
+   */
+  recategorize(
+    fileId: string,
+    input: { category?: string; evidenceStatus?: string },
+    principal: SessionPrincipal,
+  ): Record<string, unknown> {
+    const row = this.row(fileId);
+    const project = this.resources.projectRow(String(row.project_id));
+
+    const category = typeof input.category === 'string' && input.category.trim()
+      ? input.category.trim().slice(0, 80)
+      : undefined;
+    const evidenceStatus = typeof input.evidenceStatus === 'string' && input.evidenceStatus.trim()
+      ? input.evidenceStatus.trim().slice(0, 80)
+      : undefined;
+    // 不做无声空操作:没有任何可改字段时明确报错,免得调用方以为改成功了
+    if (!category && !evidenceStatus) {
+      throw new BadRequestException('请提供 category 或 evidenceStatus');
+    }
+
+    const now = nowIso();
+    this.database
+      .prepare(
+        `UPDATE knowledge_files
+            SET category = COALESCE(?, category),
+                evidence_status = COALESCE(?, evidence_status),
+                updated_at = ?
+          WHERE id = ?`,
+      )
+      .run(category ?? null, evidenceStatus ?? null, now, fileId);
+
+    this.audit.record({
+      workspaceId: String(project.workspace_id),
+      userId: principal.userId,
+      action: 'knowledge.recategorize',
+      entityType: 'knowledge-file',
+      entityId: fileId,
+      details: {
+        from: { category: row.category, evidenceStatus: row.evidence_status },
+        to: { category: category ?? row.category, evidenceStatus: evidenceStatus ?? row.evidence_status },
+      },
+    });
+    this.intelligence.markProjectStale(String(row.project_id));
+    return this.map(this.row(fileId));
+  }
+
   async remove(fileId: string, principal: SessionPrincipal): Promise<void> {
     const row = this.row(fileId);
     const project = this.resources.projectRow(String(row.project_id));

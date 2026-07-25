@@ -63,9 +63,19 @@ input, textarea, select {
   padding: 10px 12px;
   transition: border-color .18s, box-shadow .18s;
 }
+/* 勾选框/单选框不是文本输入框:上面那条规则的 width:100% + padding 会把它们撑成
+   一个大色块。作为 flex 项时更糟——flex-basis:auto 会采用 width:100%,直接吃满整行
+   把兄弟节点挤成 0 宽(选题卡标题就是这么"消失"的)。这里统一归位,免得每个新增的
+   裸 checkbox 都要各自打补丁。 */
+input[type="checkbox"], input[type="radio"] {
+  width: auto;
+  padding: 0;
+  border-radius: 0;
+  flex: none;
+}
 input::placeholder, textarea::placeholder { color: #a3aba6; }
 input:hover, textarea:hover, select:hover { border-color: #bbc5bf; }
-input:focus, textarea:focus, select:focus { outline: none; border-color: #718e80; box-shadow: 0 0 0 3px rgb(68 112 91 / 10%); }
+input:not([type="checkbox"]):not([type="radio"]):focus, textarea:focus, select:focus { outline: none; border-color: #718e80; box-shadow: 0 0 0 3px rgb(68 112 91 / 10%); }
 textarea { resize: vertical; line-height: 1.7; }
 select { appearance: none; background-image: linear-gradient(45deg, transparent 50%, #69746f 50%), linear-gradient(135deg, #69746f 50%, transparent 50%); background-position: calc(100% - 16px) 50%, calc(100% - 11px) 50%; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; padding-right: 32px; }
 
@@ -2047,8 +2057,12 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   background: var(--v2-surface); border: 1px solid var(--v2-line-dark);
   border-radius: var(--v2-radius-sm); color: var(--v2-ink);
 }
+/* 同上:v2 层的边框/圆角也不该套在勾选框上,否则原生控件被画成小方块 */
+.v2 input[type="checkbox"], .v2 input[type="radio"] {
+  border: 0; border-radius: 0; background: none; accent-color: var(--v2-brand);
+}
 .v2 input::placeholder, .v2 textarea::placeholder { color: #a0a8a2; }
-.v2 input:focus, .v2 textarea:focus, .v2 select:focus {
+.v2 input:not([type="checkbox"]):not([type="radio"]):focus, .v2 textarea:focus, .v2 select:focus {
   border-color: var(--v2-ink-2); box-shadow: 0 0 0 3px rgb(30 41 36 / 8%); outline: none;
 }
 
@@ -2814,7 +2828,8 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .qc-topic { text-align: left; padding: 14px 16px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius); background: var(--v2-surface); cursor: pointer; font-size: var(--v2-fs-md); color: var(--v2-ink); transition: border-color .15s, box-shadow .15s; }
 .qc-topic:hover { border-color: var(--v2-line-dark); box-shadow: var(--v2-shadow-sm); }
 .qc-topic.selected { border-color: var(--v2-brand); box-shadow: var(--v2-shadow-sm); }
-.qc-history-list { display: flex; flex-direction: column; gap: 10px; }
+/* ul 必须归零 list-style 与 padding,否则每条前面挂一个浏览器默认圆点 */
+.qc-history-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .qc-history-item { border: 1px solid var(--v2-line); border-radius: var(--v2-radius); padding: 12px 14px; background: var(--v2-surface); }
 .qc-history-detail { border-top: 1px dashed var(--v2-line); margin-top: 12px; padding-top: 12px; display: flex; flex-direction: column; gap: 14px; }
 
@@ -3040,7 +3055,10 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 @keyframes qc-progress-slide { 0% { left: -40%; } 100% { left: 100%; } }
 .qc-progress--failed { background: var(--v2-error-soft); color: var(--v2-error); }
 
-.qc-topic { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+/* 选题卡由单行改为竖向堆叠:标题行 + 理由 + chip + 分数。
+   原来的横向 flex 移到 .qc-topic__head,勾选框/标题/操作位的相对关系不变。 */
+.qc-topic { display: flex; flex-direction: column; gap: 7px; }
+.qc-topic__head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .qc-topic__hint { color: var(--v2-brand-ink); font-size: var(--v2-fs-micro); white-space: nowrap; }
 
 .qc-badge { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 999px; font-size: var(--v2-fs-micro); font-weight: 600; }
@@ -3083,8 +3101,41 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 /* 选题卡:容器改 div 后,主点击区为内嵌透明按钮,操作位右置 */
 div.qc-topic { cursor: default; }
 .qc-topic__main { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0; border: none; background: none; text-align: left; font-size: var(--v2-fs-md); color: var(--v2-ink); cursor: pointer; }
+/* 标题必须能收缩:选题池只有 360px 宽,少了 min-width:0 与截断,
+   span 的固有最小宽度会把 __main 挤成 0 宽、文字逐字竖排,卡片看起来是空的。 */
+/* 标题允许折到两行:操作位占 89px,单行截断只剩 ~143px,最重要的一行反而字最少
+   (实测被截成「从报名到拿证的真实…」)。改成两行 clamp,仍然收缩、仍然不溢出。 */
+.qc-topic__main > span { min-width: 0; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .qc-topic__ops { flex: none; display: flex; align-items: center; gap: 4px; }
-.qc-topic__ops .button { padding: 4px 8px; font-size: var(--v2-fs-micro); }
+/* 操作位在窄栏里只留图标(名称走 title/aria-label),否则三个带字按钮吃满整行 */
+.qc-topic__ops .button { padding: 4px 6px; font-size: var(--v2-fs-micro); }
+.qc-topic__ops .button > span:empty { display: none; }
+
+/* ---- 选题卡信息层:理由 / chip / 分数 ---- */
+/* 序位标记在标题左侧,不参与收缩 */
+.qc-topic__rank { flex: none; padding: 1px 6px; border-radius: 4px; background: var(--v2-brand-soft); color: var(--v2-brand-ink); font-size: var(--v2-fs-micro); font-style: normal; font-weight: 600; }
+/* 推荐理由:两行截断。min-width:0 同样必要——它和标题在同一个窄栏里。 */
+.qc-topic__reason {
+  min-width: 0; margin: 0; padding-left: 23px;
+  color: var(--v2-muted); font-size: var(--v2-fs-sm); line-height: 1.5;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+/* chip 与分数都必须 wrap:360px 宽栏放不下一行,不 wrap 就会溢出撑破卡片 */
+.qc-topic__chips { display: flex; flex-wrap: wrap; gap: 5px; padding-left: 23px; }
+.qc-topic__chip { padding: 1px 7px; border: 1px solid var(--v2-line); border-radius: 999px; background: var(--v2-canvas); color: var(--v2-muted); font-size: var(--v2-fs-micro); white-space: nowrap; }
+.qc-topic__scores { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 9px; padding-left: 23px; }
+.qc-topic__score { color: var(--v2-muted); font-size: var(--v2-fs-micro); white-space: nowrap; }
+.qc-topic__score b { color: var(--v2-ink); font-variant-numeric: tabular-nums; }
+.qc-topic__metric { display: inline-flex; align-items: center; gap: 4px; color: var(--v2-muted); font-size: var(--v2-fs-micro); white-space: nowrap; }
+.qc-topic__metric b { color: var(--v2-muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+/* 条形用纯 CSS,不引图表库 */
+.qc-topic__bar { position: relative; display: inline-block; width: 26px; height: 3px; border-radius: 2px; background: var(--v2-line); overflow: hidden; }
+.qc-topic__bar > i { display: block; height: 100%; border-radius: inherit; background: var(--v2-brand); }
+/* 认知成本与风险是「越低越好」,和其余五项方向相反。全用品牌色会把
+   「风险 0.9」画成和「相关 0.9」一样的正面信号,等于把坏消息说成好消息。 */
+.qc-topic__metric--inverse .qc-topic__bar > i { background: var(--v2-warn); }
+/* 未校准标注:与分数同屏,占满剩余整行以免被误读成又一项指标 */
+.qc-topic__uncal { flex-basis: 100%; color: var(--v2-muted); font-size: var(--v2-fs-micro); }
 
 /* 知识文件行:预览/删除操作位 */
 .qc-file-ops { flex: none; display: flex; align-items: center; gap: 4px; }
@@ -3104,8 +3155,43 @@ div.qc-topic { cursor: default; }
 .qc-history-filters { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .qc-history-filters input { flex: 1; min-width: 180px; }
 
+/* ---- 产出区概况条:先给结论,再让用户面对一屏任务卡 ---- */
+.qc-history-summary {
+  display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 16px;
+  padding: 16px 18px; border: 1px solid var(--v2-line);
+  border-radius: var(--v2-radius); background: var(--v2-canvas);
+}
+.qc-history-summary__counts { display: flex; flex-wrap: wrap; gap: 6px 20px; }
+.qc-hs-stat { display: inline-flex; align-items: baseline; gap: 5px; font-size: var(--v2-fs-xs); color: var(--v2-muted); }
+.qc-hs-stat b { font-size: var(--v2-fs-lg); font-weight: 700; color: var(--v2-ink); font-variant-numeric: tabular-nums; }
+.qc-history-summary__counts .qc-hs-stat:nth-child(1) b { color: var(--v2-ok); }
+.qc-history-summary__counts .qc-hs-stat:nth-child(2) b { color: var(--v2-warn); }
+.qc-history-summary__counts .qc-hs-stat:nth-child(3) b { color: var(--v2-error); }
+.qc-history-summary__fix { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+/* 失败原因清单:blocking 的(余额/密钥)重试也没用,标红加重,免得用户反复点重试 */
+.qc-fail-reasons { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.qc-fail-reasons li { font-size: var(--v2-fs-xs); color: var(--v2-muted); }
+.qc-fail-reasons li b { color: var(--v2-ink); font-variant-numeric: tabular-nums; }
+.qc-fail-reasons li.is-blocking { color: var(--v2-error); }
+.qc-fail-reasons li.is-blocking b { color: var(--v2-error); }
+/* 阻塞原因下的重试劝阻语:比普通 hint 更醒目,但不做成红色报警 */
+.qc-warn-line { max-width: 340px; color: var(--v2-warn); font-size: var(--v2-fs-micro); line-height: 1.5; }
+
+/* 全失败批次的折叠占位 */
+.qc-batch-card__collapsed {
+  width: 100%; padding: 12px; border: 1px dashed var(--v2-line-dark); border-radius: var(--v2-radius-sm);
+  background: none; color: var(--v2-muted); font-size: var(--v2-fs-sm); cursor: pointer;
+}
+.qc-batch-card__collapsed:hover { border-color: var(--v2-brand); color: var(--v2-brand-ink); }
+
 /* ===== 极简频道 P2:候选未过校验的一句话结论 ===== */
 .qc-issue-line { margin: 0; color: var(--v2-warn); font-size: var(--v2-fs-sm); }
+/* 通过态:与未通过态同一位置、同一字号,只换语气与颜色 */
+.qc-pass-line { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--v2-ok); font-size: var(--v2-fs-sm); }
+.qc-pass-line small { color: var(--v2-muted); }
+.qc-issue-more { margin-top: 4px; }
+.qc-issue-more > summary { color: var(--v2-muted); font-size: var(--v2-fs-micro); cursor: pointer; }
+.qc-issue-more > ul { margin: 4px 0 0; padding-left: 18px; color: var(--v2-warn); font-size: var(--v2-fs-micro); }
 
 /* ===== 生成结果页 · 易用性优化(信息零丢失:诊断默认折叠,内容前置) ===== */
 .validation-summary { margin-bottom: 17px; padding: 14px 16px; border: 1px solid #f0caca; border-radius: 13px; background: #fff; box-shadow: var(--shadow-sm); }
@@ -3195,14 +3281,20 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 /* 用户菜单:复用全站 profile 结构,壳内补 hover 微底色与圆角(不改全站规则) */
 .quick-shell .profile-button { padding: 4px 8px; border-radius: var(--v2-radius-sm); }
 .quick-shell .profile-button:hover { background: var(--v2-canvas); }
-.qs-main { flex: 1; width: 100%; max-width: 1000px; margin: 0 auto; }
-.qs-main .page { max-width: none; padding: 28px 24px 56px; }
+/* 外壳宽度与完整版工作台对齐(1440)。原来锁 1000px,在 1600 宽屏上左右各空
+   300px,是这个频道「显小气」的首要原因——不是配色或字号问题,是只用了 62% 的屏。
+   顶栏本来就是通栏的,内容区跟上即可。 */
+.qs-main { flex: 1; width: 100%; max-width: 1440px; margin: 0 auto; }
+.qs-main .page { max-width: none; padding: 28px 32px 56px; }
 
 /* ---- 首页:欢迎区 + 项目卡墙 ---- */
 .qc-home-hero { margin: 4px 0 24px; padding-bottom: 20px; border-bottom: 1px solid var(--v2-line); }
 .qc-home-hero h1 { margin: 6px 0; font-size: var(--v2-fs-h1); font-weight: 700; letter-spacing: -0.01em; color: var(--v2-ink); }
 .qc-home-hero p { margin: 0; font-size: var(--v2-fs-md); color: var(--v2-muted); }
-.qc-home-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; }
+/* 卡片上限 320px:外壳放宽到 1440 后,原来的 minmax(250px, 1fr) 会把每张卡
+   拉到 340px+,项目名只占一行、剩下全是空白,卡片反而显得空。用固定上限让它
+   横向多排几张,而不是把每张撑大。 */
+.qc-home-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 320px)); gap: 14px; }
 .qc-project-card {
   display: flex; flex-direction: column; gap: 10px;
   padding: 16px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius-lg);
@@ -3268,7 +3360,8 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 
 /* ---- 工作面板:卡片化 + 切 tab 淡入(TSX 用 key={activeTab} 重挂触发) ---- */
 .qc-page .qc-panel {
-  max-width: 760px; padding: 24px 28px;
+  /* 宽度见下方「面板宽度分两级」;这里只管观感与内边距 */
+  padding: 24px 28px;
   border: 1px solid var(--v2-line); border-radius: var(--v2-radius-lg);
   background: var(--v2-surface); box-shadow: var(--v2-shadow-sm);
   animation: qc-panel-in .18s ease;
@@ -3299,6 +3392,13 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .qc-page .qc-file-list li:hover { background: var(--v2-canvas); }
 .qc-page .qc-file-list li > svg { flex: 0 0 auto; color: var(--v2-muted); }
 .qc-page .qc-file-list .qc-file-name { flex: 1; min-width: 0; }
+/* 分类下拉:全局 select 是 width:100%,在这行 flex 里会吃掉整行把文件名挤成 0 宽
+   (与勾选框同一类问题),这里显式收窄并禁止伸缩。 */
+.qc-page .qc-file-cat {
+  flex: 0 0 auto; width: auto; min-width: 104px; margin: 0 10px; padding: 3px 6px;
+  font-size: var(--v2-fs-xs); color: var(--v2-muted);
+}
+.qc-page .qc-file-cat:disabled { opacity: .5; cursor: wait; }
 
 /* ---- 历史卡 hover ---- */
 .qc-page .qc-history-item { transition: border-color .15s, box-shadow .15s; }
@@ -3317,8 +3417,9 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .quick-card .quick-followup { border-left-color: var(--v2-line-dark); }
 .quick-result .qc-revise { background: var(--v2-ai-soft); border-color: color-mix(in srgb, var(--v2-ai) 18%, transparent); }
 .quick-result .qc-revise summary { color: var(--v2-ai-ink); }
-.quick-result .qc-issue-line, .qc-page .qc-issue-line { display: flex; align-items: center; gap: 6px; }
-.quick-result .qc-issue-line::before, .qc-page .qc-issue-line::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--v2-warn); }
+/* 未通过项容器现在是 div(内含一行结论 + 可展开清单),圆点改由内层 p 承担。
+   容器自己不再画点,否则和行内的图标叠成两个标记。 */
+.quick-result .qc-issue-line > p, .qc-page .qc-issue-line > p { display: flex; align-items: center; gap: 6px; margin: 0; }
 
 /* ---- 候选完整内容(结果页与历史页共用) ---- */
 .qc-page .qc-disclaimer, .quick-result .qc-disclaimer { margin: 0 0 10px; padding: 8px 10px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius-sm); background: var(--v2-canvas); color: var(--v2-muted); font-size: var(--v2-fs-sm); }
@@ -3336,16 +3437,27 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
    导航去序号/去锁链;创作区双栏;总览仪表 + 下一步主按钮 + 最近产出
    ========================================================================== */
 
-/* 创作区用更宽面板,其余区维持 760px */
-.qc-page .qc-panel--wide { max-width: 1080px; }
+/* 面板宽度分两级,跟着外壳一起放开:
+   - 默认(总览/知识库/产出):1120px。原来 760px,在放宽后的外壳里会变成一条
+     窄带浮在大片留白中间,比不放宽更难看。
+   - 创作区:通栏。它是双栏工作台(选题池 + 配置),宽度越大越好用。
+   两级都留 --wide 语义,免得以后每加一个区都要重新拍一个数字。 */
+.qc-page .qc-panel { max-width: 1120px; }
+.qc-page .qc-panel--wide { max-width: none; }
 
 /* 创作区双栏:左 360px 选题池 | 右 1fr 生成与结果;窄屏上下堆叠 */
-.qc-page .qc-create { display: grid; grid-template-columns: 360px 1fr; gap: 20px; align-items: start; }
+/* 选题池随外壳一起放宽:固定 360px 时标题会被挤成两行(实测「从报名到拿证的真实记
+   /录:一个学员的45天」),而右栏配置区宽到 940px,主按钮拉成一条巨带。
+   改成 clamp 让池子在 360–460 之间跟着屏宽长,比例才对。 */
+.qc-page .qc-create { display: grid; grid-template-columns: clamp(360px, 30%, 460px) 1fr; gap: 24px; align-items: start; }
 @media (max-width: 960px) {
   .qc-page .qc-create { grid-template-columns: 1fr; }
 }
 .qc-page .qc-create__pool { display: flex; flex-direction: column; gap: 16px; max-height: 70vh; overflow: auto; min-width: 0; }
 .qc-page .qc-create__main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+/* 主操作条:按钮按内容宽靠左,不再被纵向 flex 拉满整栏 */
+.qc-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.qc-actions > .button { flex: 0 0 auto; min-width: 148px; }
 
 /* 总览:下一步主按钮区(按钮大一号) */
 .qc-page .qc-overview-next { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
@@ -3360,6 +3472,54 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .qc-page .qc-overview-recent li > button:hover strong { color: var(--v2-brand-ink); }
 .qc-page .qc-overview-recent strong { font-size: var(--v2-fs-md); font-weight: 500; color: var(--v2-ink); }
 .qc-page .qc-overview-recent small { flex: none; font-size: var(--v2-fs-xs); color: var(--v2-muted); }
+/* 最近产出多了状态徽标:标题占据剩余宽度,徽标与时间不收缩 */
+.qc-page .qc-overview-recent strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qc-page .qc-overview-recent .qc-badge { flex: none; }
+
+/* ---- 总览工作台:产出质量 + 下一步 ---- */
+.qc-page .qc-board { display: grid; grid-template-columns: 1.35fr 1fr; gap: 16px; align-items: start; }
+@media (max-width: 900px) {
+  .qc-page .qc-board { grid-template-columns: 1fr; }
+}
+.qc-page .qc-board__card {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 12px;
+  padding: 18px 20px; border: 1px solid var(--v2-line);
+  border-radius: var(--v2-radius); background: var(--v2-canvas);
+}
+.qc-page .qc-board__title { margin: 0; font-size: var(--v2-fs-sm); font-weight: 600; color: var(--v2-muted); letter-spacing: .03em; }
+.qc-page .qc-board__foot { margin: 0; font-size: var(--v2-fs-xs); color: var(--v2-muted); }
+.qc-page .qc-board__foot small { display: block; margin-top: 3px; color: var(--v2-muted-2); font-size: var(--v2-fs-micro); }
+.qc-page .qc-board .button { padding: 11px 20px; font-size: var(--v2-fs-md); }
+
+/* 质量分布条:三段按比例,零宽度段自动消失(width:0 不占位) */
+.qc-page .qc-quality-bar { display: flex; width: 100%; height: 8px; border-radius: 999px; background: var(--v2-line); overflow: hidden; }
+.qc-page .qc-quality-bar > i { display: block; height: 100%; }
+.qc-page .qc-quality-bar__ok { background: var(--v2-ok); }
+.qc-page .qc-quality-bar__warn { background: var(--v2-warn); }
+.qc-page .qc-quality-bar__err { background: var(--v2-error); }
+.qc-page .qc-quality-legend { list-style: none; display: flex; flex-wrap: wrap; gap: 6px 20px; margin: 0; padding: 0; }
+.qc-page .qc-quality-legend li { display: flex; align-items: baseline; gap: 5px; }
+.qc-page .qc-quality-legend b { font-size: var(--v2-fs-xl); font-weight: 700; color: var(--v2-ink); font-variant-numeric: tabular-nums; }
+.qc-page .qc-quality-legend span { font-size: var(--v2-fs-xs); color: var(--v2-muted); }
+/* 图例色点靠 nth-child 对位,与上面条形三段同序 */
+.qc-page .qc-quality-legend li:nth-child(1) b { color: var(--v2-ok); }
+.qc-page .qc-quality-legend li:nth-child(2) b { color: var(--v2-warn); }
+.qc-page .qc-quality-legend li:nth-child(3) b { color: var(--v2-error); }
+/* 计数为 0 时收成中性灰:绿色的「0 可直接发布」会被读成好消息,而它恰恰相反。
+   同理红色的「0 失败」不该报警。 */
+.qc-page .qc-quality-legend li b.is-zero { color: var(--v2-muted-2); }
+
+/* 待办:每条可点,直达对应区 */
+.qc-page .qc-todo { list-style: none; width: 100%; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.qc-page .qc-todo li + li { border-top: 1px solid var(--v2-line); }
+.qc-page .qc-todo li > button {
+  display: flex; align-items: center; gap: 6px; width: 100%; padding: 9px 2px;
+  border: none; background: none; text-align: left; cursor: pointer;
+  font-size: var(--v2-fs-sm); color: var(--v2-ink);
+}
+.qc-page .qc-todo li > button:hover { color: var(--v2-brand-ink); }
+.qc-page .qc-todo b { font-size: var(--v2-fs-md); font-variant-numeric: tabular-nums; }
+.qc-page .qc-todo__clear { padding: 9px 2px; font-size: var(--v2-fs-sm); color: var(--v2-muted); }
 
 /* 极简创作 · 预设卡片(单选/多选共用) */
 .qc-preset-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
@@ -3375,7 +3535,10 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .qc-preset-card:disabled { opacity: .5; cursor: not-allowed; }
 
 /* 选题池多选 + 批量操作条 */
-.qc-topic__check { margin-right: 8px; flex: 0 0 auto; accent-color: var(--v2-brand); cursor: pointer; }
+/* 全局 `input { width: 100% }`(本文件顶部)会命中复选框:flex-basis auto 取 width,
+   于是复选框在 360px 的选题行里占掉 326px,把标题挤成 0 宽。必须显式定尺寸。 */
+/* 尺寸/flex 归位由全局 input[type=checkbox] 规则统一负责,这里只管品牌色与间距 */
+.qc-topic__check { margin-right: 8px; accent-color: var(--v2-brand); cursor: pointer; }
 .qc-topic__check:disabled { cursor: not-allowed; }
 .qc-batch-bar { position: sticky; bottom: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; margin-top: 8px; background: var(--v2-surface); border: 1px solid var(--v2-brand); border-radius: var(--v2-radius-sm); }
 .qc-batch-bar span { font-size: var(--v2-fs-sm); color: var(--v2-ink); }

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { Button, Field, Modal, useToast } from '../Ui';
 import { api, ApiError } from '../../lib/api';
@@ -41,6 +41,9 @@ interface Props {
   imageAssetIds: string[];
   busy: boolean;
   setBusy: (b: boolean) => void;
+  /** 仅「正在生成文案」为真;收藏/归档等普通操作只动 busy,不驱动生成进度条 */
+  generating: boolean;
+  setGenerating: (b: boolean) => void;
   fail: (e: unknown, fallback: string) => void;
   setPresetId: (id: string | undefined) => void;
   setPresets: (presets: ContentPreset[]) => void;
@@ -56,7 +59,7 @@ interface Props {
   onCancelBatch: () => void;
 }
 
-export function ConfigTab({ project, opportunityId, presets, presetId, overrides, imageAssetIds, busy, setBusy, fail, setPresetId, setPresets, setOverrides, setImageAssetIds, onGenerated, batchMode, batchPresetIds, onToggleBatchPreset, batchTopicCount, onSubmitBatch, onCancelBatch }: Props) {
+export function ConfigTab({ project, opportunityId, presets, presetId, overrides, imageAssetIds, busy, setBusy, generating, setGenerating, fail, setPresetId, setPresets, setOverrides, setImageAssetIds, onGenerated, batchMode, batchPresetIds, onToggleBatchPreset, batchTopicCount, onSubmitBatch, onCancelBatch }: Props) {
   const toast = useToast();
   const [progress, setProgress] = useState<number | undefined>(undefined);
   const [presetWorking, setPresetWorking] = useState(false);
@@ -67,9 +70,30 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
   const patch = (p: Partial<SimpleSettingOverrides>) => setOverrides({ ...overrides, ...p });
   const currentPreset = presets.find((p) => p.id === presetId);
 
+  // 预设原先只在 TopicTab.pick()（点选题）里加载，所以进创作区还没选选题时
+  // 预设区是空的，只剩「存为预设」，用户看不到 10 个内置预设也无从下手。
+  // 这里按需自载一次：仅当项目已选且列表为空时拉，选题仍会带回自己那份。
+  const projectId = project?.id;
+  const presetsEmpty = presets.length === 0;
+  useEffect(() => {
+    if (!projectId || !presetsEmpty) return;
+    let cancelled = false;
+    api.presets.list(projectId)
+      .then((list) => {
+        if (cancelled) return;
+        setPresets(list.items);
+        setPresetId(list.items.find((p) => p.isDefault)?.id ?? list.items[0]?.id);
+      })
+      .catch(() => { /* 静默回落：保持空态，选题时仍会再拉一次 */ });
+    return () => { cancelled = true; };
+    // setPresets/setPresetId 是壳的 setState 包装，每次渲染新引用，不进依赖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, presetsEmpty]);
+
   const generate = async () => {
     if (!project || !opportunityId) return;
     setBusy(true);
+    setGenerating(true);
     setProgress(undefined);
     try {
       const job = await autoApproveAndGenerate({
@@ -83,6 +107,7 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
       const results = (job.candidates ?? []).map(quickCandidateFields);
       onGenerated(results, job.id);
       setBusy(false);
+      setGenerating(false);
     } catch (e) { fail(e, '生成失败'); }
   };
 
@@ -237,7 +262,8 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
       )}
 
       {!batchMode && !opportunityId && <p className="qc-hint">先在左侧选一个选题</p>}
-      {busy && (
+      {/* 只有真的在生成才显示这条;用 busy 会让收藏/归档等操作也弹出「请勿离开」 */}
+      {generating && (
         <div className="qc-progress" role="status">
           <RefreshCw size={15} className="spin" />
           <span>正在生成:{progressStageText(progress)}…</span>
@@ -245,13 +271,19 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
           <i className="qc-progress__track"><b style={{ width: `${progress ?? 0}%`, animation: 'none' }} /></i>
         </div>
       )}
-      {batchMode ? (
-        <Button loading={busy} disabled={busy || batchTopicCount === 0 || batchPresetIds.length === 0} onClick={onSubmitBatch}>
-          提交批量生成 · 共 {batchTopicCount * batchPresetIds.length} 篇
-        </Button>
-      ) : (
-        <Button loading={busy} disabled={!presetId || busy} onClick={() => void generate()}>生成文案</Button>
-      )}
+      {/* 主操作放进 action bar:qc-step 是纵向 flex,按钮作为直接子元素会被拉满整栏,
+          放宽后实测拉成 940px 的巨带。这里靠左收窄,并把前置条件说明并排放在右边。 */}
+      <div className="qc-actions">
+        {batchMode ? (
+          <Button loading={busy} disabled={busy || batchTopicCount === 0 || batchPresetIds.length === 0} onClick={onSubmitBatch}>
+            提交批量生成 · 共 {batchTopicCount * batchPresetIds.length} 篇
+          </Button>
+        ) : (
+          // 必须同时门控 opportunityId:generate() 第一行就 if (!opportunityId) return,
+          // 少了它按钮是亮的但点下去静默无反应。
+          <Button loading={generating} disabled={!presetId || !opportunityId || busy} onClick={() => void generate()}>生成文案</Button>
+        )}
+      </div>
 
       <Modal
         open={saveOpen}

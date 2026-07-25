@@ -86,17 +86,26 @@ export function PageHeader({ eyebrow, title, description, actions }: { eyebrow?:
 
 export function Modal({ open, title, description, children, onClose, footer, size }: { open: boolean; title: string; description?: string; children: ReactNode; onClose: () => void; footer?: ReactNode; size?: "wide" }) {
   const dialogRef = useRef<HTMLElement>(null);
+  // onClose 在所有调用处都是内联箭头函数，每次父组件渲染都是新引用。
+  // 若直接进依赖数组，输入框每敲一个字都会重跑这个 effect，
+  // dialogRef.focus() 会把焦点从输入框抢回弹窗容器，导致只能输入一个字符。
+  const closeRef = useRef(onClose);
+  useEffect(() => {
+    closeRef.current = onClose;
+  }, [onClose]);
   useEffect(() => {
     if (!open) return;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const handleKey = (event: KeyboardEvent) => event.key === 'Escape' && onClose();
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeRef.current();
+    };
     document.addEventListener('keydown', handleKey);
     dialogRef.current?.focus();
     return () => {
       document.removeEventListener('keydown', handleKey);
       previous?.focus();
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
   return (
