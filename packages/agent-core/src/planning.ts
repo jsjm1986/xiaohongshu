@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type {
+  CommentSurfaceRoleCard,
   CommentThreadKind,
   ContentChannel,
   CoverageSignature,
@@ -923,6 +924,8 @@ function buildPersonaScenePlan(
     utteranceMode: role.utteranceModes[Math.floor(hashUnit(seed, `role-mode:${role.id}`) * Math.max(1, role.utteranceModes.length))] ?? "direct_question",
     targetChars: role.targetChars,
     replyDisplayRole: pick(role.replyDisplayRoles, `role-reply:${role.id}`, "发布者"),
+    // 机构侧角色(accountable:机构 IP / 公开助理)标记后只能答复,不能坐读者席。
+    ...(role.accountable ? { orgSide: true } : {}),
   })) : fallbackCommentCast;
   return {
     scenarioFamilyId: selectedFamily?.id ?? `generic_${prototype}`,
@@ -1168,29 +1171,264 @@ function deriveThreadNextStep(gap: InformationGapPlanningCard): string {
   return "先补充可信来源，再形成结论";
 }
 
-/** 双号运营:命中这些营销话头词时,答复分流给公开助理身份(staff)。 */
-export const MARKETING_REPLY_TOPIC_TERMS = ["价格", "多少钱", "地址", "在哪", "预约", "报名", "优惠", "活动", "联系", "客服", "私"] as const;
-
-/** 双号运营:话头命中的受控声明规则属于这些 claimType 时,同样分流给助理。 */
-export const MARKETING_REPLY_CLAIM_TYPES: ReadonlySet<ProjectClaimRule["claimType"]> = new Set([
-  "price", "location", "schedule", "credential",
+/**
+ * 三身份生态合规护栏(强制,不给 AI 自由):gap 命中这些 claimType 的受控声明
+ * 规则时,答复身份必须是公开助理(staff)——价格/地点/档期类动态营销信息只
+ * 允许助理按口径承接。
+ */
+export const STAFF_GUARD_CLAIM_TYPES: ReadonlySet<ProjectClaimRule["claimType"]> = new Set([
+  "price", "location", "schedule",
 ]);
 
 /**
- * 双号运营答复分流:营销承接话头(价格/地址/预约/优惠等词,或命中 price/
- * location/schedule/credential 类受控声明规则)由公开助理身份(staff)回答;
- * 其余话头由发布账号 IP(publisher)解答。纯函数,供规划与单测共用。
+ * AI 身份分配失败/非法时的确定性兜底表:命中这些 claimType 的话头属专业解
+ * 答(资质/效果/适用/因果/身份),兜底给机构 IP(expert);其余兜底给发布账号
+ * (publisher,方法论 ROLE 04 的可追责答复方)。
+ */
+export const EXPERT_FALLBACK_CLAIM_TYPES: ReadonlySet<ProjectClaimRule["claimType"]> = new Set([
+  "credential", "outcome", "suitability", "causality", "identity",
+]);
+
+/** gap 文本(label+question)是否命中指定 claimType 集合的规则术语。 */
+function gapHitsClaimTypes(
+  gap: Pick<InformationGapPlanningCard, "label" | "question">,
+  claimRules: Pick<ProjectClaimRule, "claimType" | "terms">[],
+  claimTypes: ReadonlySet<ProjectClaimRule["claimType"]>,
+): boolean {
+  const topic = `${gap.label}\n${gap.question}`;
+  return claimRules.some((rule) =>
+    claimTypes.has(rule.claimType)
+    && rule.terms.some((term) => term && topic.includes(term)));
+}
+
+/** 合规护栏:命中 price/location/schedule 的 gap 必须 staff(营销承接)。 */
+export function isStaffGuardedGap(
+  gap: Pick<InformationGapPlanningCard, "label" | "question">,
+  claimRules: Pick<ProjectClaimRule, "claimType" | "terms">[] = [],
+): boolean {
+  return gapHitsClaimTypes(gap, claimRules, STAFF_GUARD_CLAIM_TYPES);
+}
+
+/**
+ * 三身份生态答复身份的确定性兜底表(规划层先按它生成计划,引擎阶段 2 再用
+ * AI 分配结果覆盖——护栏线程除外):护栏命中 → staff;专业类 claimType 命中
+ * → expert(机构 IP 专业解答);其余 → publisher(发布账号本人作答)。不再做
+ * 关键词硬匹配路由(身份理解交给 AI,确定性只做护栏与兜底)。纯函数。
  */
 export function routeReplyPostingIdentity(
   gap: Pick<InformationGapPlanningCard, "label" | "question">,
   claimRules: Pick<ProjectClaimRule, "claimType" | "terms">[] = [],
-): "publisher" | "staff" {
-  const topic = `${gap.label}\n${gap.question}`;
-  if (MARKETING_REPLY_TOPIC_TERMS.some((term) => topic.includes(term))) return "staff";
-  const hitsMarketingClaim = claimRules.some((rule) =>
-    MARKETING_REPLY_CLAIM_TYPES.has(rule.claimType)
-    && rule.terms.some((term) => term && topic.includes(term)));
-  return hitsMarketingClaim ? "staff" : "publisher";
+): "publisher" | "staff" | "expert" {
+  if (isStaffGuardedGap(gap, claimRules)) return "staff";
+  if (gapHitsClaimTypes(gap, claimRules, EXPERT_FALLBACK_CLAIM_TYPES)) return "expert";
+  return "publisher";
+}
+
+/** 三身份生态的答复身份(楼主/机构助理/机构 IP)。 */
+export type ReplyPostingIdentity = ReturnType<typeof routeReplyPostingIdentity>;
+
+/**
+ * replyDisplayRole 逐身份强制(根治 host_account/assistant_account/发布者 内部
+ * id 直出):staff→resolveAssistantReplyDisplayRole(缺省角色池 service_answer,
+ * 最后兜"项目助理");expert→resolveIpDisplayRole(缺省"机构 IP");publisher→"楼主"。
+ */
+export function forcedReplyDisplayRole(
+  identity: ReplyPostingIdentity,
+  blueprint?: ProjectCreativeBlueprint,
+  cast: CommentSurfaceRoleCard[] = [],
+): string {
+  if (identity === "staff") {
+    return resolveAssistantReplyDisplayRole(blueprint)
+      ?? cast.find((role) => role.utteranceMode === "service_answer")?.displayRole
+      ?? "项目助理";
+  }
+  if (identity === "expert") return resolveIpDisplayRole(blueprint) ?? "机构 IP";
+  return "楼主";
+}
+
+/** AI 答复身份分配的输出 schema(轻量自定义 JSON;不纳入 prompt contract digest)。 */
+export const REPLY_IDENTITY_ASSIGNMENT_JSON_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["assignments"],
+  properties: {
+    assignments: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "identity", "reason"],
+        properties: {
+          id: { type: "string" },
+          identity: { enum: ["publisher", "staff", "expert"] },
+          reason: { type: "string" },
+        },
+      },
+    },
+  },
+};
+
+/** AI 答复身份分配的输入数据(装配:线程清单 + claimType 命中 + 口径有无 + 护栏标记)。 */
+export interface ReplyIdentityAssignmentBrief {
+  三身份职责: Record<"publisher" | "staff" | "expert", string>;
+  分布要求: string[];
+  线程清单: Array<{
+    id: string;
+    threadKind: CommentThreadKind;
+    gap标签: string;
+    gap问题: string;
+    claimType命中: string[];
+    口径: "有证据口径" | "无证据口径";
+    护栏: "必须助理(staff)" | null;
+  }>;
+}
+
+/** 装配 AI 答复身份分配的输入(纯函数;模型调用由引擎发起)。 */
+export function buildReplyIdentityAssignmentBrief(
+  dialogueThreads: DialogueThreadPlan[],
+  gapCards: InformationGapPlanningCard[],
+  claimRules: ProjectClaimRule[],
+): ReplyIdentityAssignmentBrief {
+  const gapCardById = new Map(gapCards.map((card) => [card.gapId, card]));
+  return {
+    三身份职责: {
+      publisher: "发布账号本人(方法论 ROLE 04,可追责答复方):以真实发布身份给直接回答、适用条件、反例和下一步;延续帖子语气,但不冒充独立消费者、不讲亲历效果。正文细节类与需要发布方给结论的话头归此路。",
+      staff: "机构工作人员:营销承接——价格、地址、预约、优惠、档期类动态信息与到店动作;按口径承接,没有口径转专人确认。",
+      expert: "机构专业人员:专业解答——疼痛、恢复、适用、风险、资质、效果类问题;引用口径并带限定,不营销、不催促、不报价。",
+    },
+    分布要求: [
+      "专业解答类话头给 expert,营销承接类话头给 staff,需要发布方给结论或延续正文的话头给 publisher",
+      "三个身份尽量齐备,同一身份不得包揽全部线程",
+      "护栏标记为“必须工作人员(staff)”的线程不可改派",
+      "任何身份答项目事实都必须落在该线程口径上;落不上就保留未知并给核验方式,不得由任何身份编造",
+    ],
+    线程清单: dialogueThreads.map((thread) => {
+      const gap = gapCardById.get(thread.primaryGapId);
+      const topic = `${gap?.label ?? ""}\n${gap?.question ?? ""}`;
+      return {
+        id: thread.id,
+        threadKind: thread.threadKind ?? "org_answer",
+        gap标签: gap?.label ?? thread.primaryGapId,
+        gap问题: gap?.question ?? "",
+        claimType命中: [...new Set(claimRules
+          .filter((rule) => rule.terms.some((term) => term && topic.includes(term)))
+          .map((rule) => rule.claimType))],
+        口径: (gap?.evidenceIds.length ?? 0) > 0 ? "有证据口径" as const : "无证据口径" as const,
+        护栏: isStaffGuardedGap({ label: gap?.label ?? "", question: gap?.question ?? "" }, claimRules) ? "必须助理(staff)" as const : null,
+      };
+    }),
+  };
+}
+
+export interface ReplyIdentityAssignment {
+  id: string;
+  identity: ReplyPostingIdentity;
+  reason: string;
+}
+
+/** 解析 AI 答复身份分配输出;拿不到合法 assignments 结构时抛错(调用方整体回落兜底表)。 */
+export function parseReplyIdentityAssignments(text: string): ReplyIdentityAssignment[] {
+  const candidates = text.match(/\{[\s\S]*\}/gu) ?? [];
+  for (const candidate of [...candidates].sort((left, right) => right.length - left.length)) {
+    let value: unknown;
+    try {
+      value = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    if (!value || typeof value !== "object" || !Array.isArray((value as { assignments?: unknown }).assignments)) continue;
+    return (value as { assignments: unknown[] }).assignments.map((entry, index) => {
+      if (!entry || typeof entry !== "object") throw new Error(`Invalid reply identity assignment at index ${index}.`);
+      const record = entry as Record<string, unknown>;
+      if (typeof record.id !== "string" || typeof record.identity !== "string") {
+        throw new Error(`Invalid reply identity assignment at index ${index}.`);
+      }
+      return {
+        id: record.id,
+        identity: record.identity as ReplyPostingIdentity,
+        reason: typeof record.reason === "string" ? record.reason : "",
+      };
+    });
+  }
+  throw new Error("Reply identity assignment output did not contain a valid assignments object.");
+}
+
+/**
+ * AI 答复身份分配的护栏校验与合并(纯函数):护栏线程(price/location/
+ * schedule)强制 staff,AI 不可改派;缺线程/非法值的线程回落兜底表。返回
+ * 合并后的线程(写回 postingIdentity/routingReason,并逐身份强制
+ * replyDisplayRole)与逐条 warning(引擎记进 stageIssues)。
+ */
+export function applyReplyIdentityAssignments(
+  dialogueThreads: DialogueThreadPlan[],
+  gapCards: InformationGapPlanningCard[],
+  assignments: ReplyIdentityAssignment[],
+  claimRules: ProjectClaimRule[],
+  blueprint?: ProjectCreativeBlueprint,
+  cast: CommentSurfaceRoleCard[] = [],
+): { threads: DialogueThreadPlan[]; warnings: string[] } {
+  const warnings: string[] = [];
+  const gapCardById = new Map(gapCards.map((card) => [card.gapId, card]));
+  const byId = new Map(assignments.map((item) => [item.id, item]));
+  const threads = dialogueThreads.map((thread) => {
+    const gapCard = gapCardById.get(thread.primaryGapId);
+    const gap = { label: gapCard?.label ?? "", question: gapCard?.question ?? "" };
+    const assigned = byId.get(thread.id);
+    const guarded = isStaffGuardedGap(gap, claimRules);
+    let identity: ReplyPostingIdentity;
+    let routingReason: string;
+    if (guarded) {
+      identity = "staff";
+      if (assigned && assigned.identity !== "staff") {
+        routingReason = `合规护栏:命中 price/location/schedule,AI 分配(${assigned.identity})被覆盖,强制 staff`;
+        warnings.push(`线程 ${thread.id} 命中营销护栏(price/location/schedule),AI 分配的 ${assigned.identity} 被覆盖为 staff。`);
+      } else {
+        routingReason = "合规护栏:命中 price/location/schedule,强制 staff";
+      }
+    } else if (assigned && (["publisher", "staff", "expert"] as const).includes(assigned.identity)) {
+      identity = assigned.identity;
+      routingReason = assigned.reason.trim() || "AI 按话头分配";
+    } else {
+      identity = routeReplyPostingIdentity(gap, claimRules);
+      routingReason = assigned
+        ? `AI 分配身份非法(${String(assigned.identity)}),回落兜底表`
+        : "AI 分配未覆盖该线程,回落兜底表";
+      warnings.push(`线程 ${thread.id} 身份${assigned ? "分配非法" : "未被 AI 分配覆盖"},已按兜底表回落为 ${identity}。`);
+    }
+    return {
+      ...thread,
+      postingIdentity: identity,
+      routingReason,
+      surfaceRoleCard: thread.surfaceRoleCard
+        ? { ...thread.surfaceRoleCard, replyDisplayRole: forcedReplyDisplayRole(identity, blueprint, cast) }
+        : thread.surfaceRoleCard,
+    };
+  });
+  return { threads, warnings };
+}
+
+/**
+ * 三身份生态的机构 IP(专业解答,expert)角色:蓝图中 accountable 且带专业翻译口吻
+ * (knowledge_translation)的角色;缺省取第一个 accountable 角色。
+ * 注意:同一角色(机构 IP 本人)常同时带 service_answer 口吻,不能用它反推助理。
+ */
+export function resolveIpDisplayRole(blueprint?: ProjectCreativeBlueprint): string | undefined {
+  const roles = blueprint?.roleModel.roles ?? [];
+  return roles.find((role) => role.accountable && role.utteranceModes.includes("knowledge_translation"))?.displayRole
+    ?? roles.find((role) => role.accountable)?.displayRole;
+}
+
+/**
+ * 三身份生态的公开助理(营销承接,staff)角色:accountable + service_answer 中**不是
+ * IP 的那一个**。此前直接 find(accountable+service_answer),当 IP 本人也
+ * 带 service_answer 口吻时助理会被错解析成 IP——staff 线程挂 IP 名、
+ * 答复以 IP 身份第三人称提到"助理/客服"。
+ */
+export function resolveAssistantReplyDisplayRole(blueprint?: ProjectCreativeBlueprint): string | undefined {
+  const roles = blueprint?.roleModel.roles ?? [];
+  const ip = resolveIpDisplayRole(blueprint);
+  return roles.find((role) =>
+    role.accountable && role.utteranceModes.includes("service_answer") && role.displayRole !== ip)?.displayRole;
 }
 
 function dialoguePlans(
@@ -1202,7 +1440,7 @@ function dialoguePlans(
   config: ResolvedGenerationConfig,
   seed: number,
   personaScenePlan: PersonaScenePlan,
-  replyRouting: { claimRules: ProjectClaimRule[]; assistantReplyDisplayRole?: string } = { claimRules: [] },
+  replyRouting: { claimRules: ProjectClaimRule[]; projectBlueprint?: ProjectCreativeBlueprint } = { claimRules: [] },
 ): DialogueThreadPlan[] {
   const relevant = gapCards.filter((gap) => opportunity.gapIds.includes(gap.gapId));
   const ordered = [...relevant].sort((left, right) =>
@@ -1285,9 +1523,9 @@ function dialoguePlans(
     const marketingTopic = routeReplyPostingIdentity(gap, replyRouting.claimRules) === "staff";
     return assignCommentThreadKind(seed, `thread-kind:${strategy.id}_thread_${index + 1}`, marketingTopic);
   });
-  // T2 可行性:读者互聊需要两个不同 displayRole 的可见角色,角色池不足时
-  // 确定性退化为 T1 机构问答。
-  const readerExchangeFeasible = new Set(personaScenePlan.commentCast.map((role) => role.displayRole)).size >= 2;
+  // T2 可行性:读者互聊需要两个不同 displayRole 的**读者侧**可见角色(机构
+  // 角色只能答复不能坐读者席),读者角色池不足时确定性退化为 T1 机构问答。
+  const readerExchangeFeasible = new Set(personaScenePlan.commentCast.filter((role) => !role.orgSide).map((role) => role.displayRole)).size >= 2;
   const threadKinds: CommentThreadKind[] = rawThreadKinds.map((kind) =>
     kind === "reader_exchange" && !readerExchangeFeasible ? "org_answer" : kind);
   // T3 规划为 1-3 条:超过 3 条按确定性顺序降级多余条;targetCount>=3 且一条
@@ -1320,20 +1558,29 @@ function dialoguePlans(
       .sort((left, right) => hashUnit(seed, `deep-turn:${left}`) - hashUnit(seed, `deep-turn:${right}`))
       .slice(0, branchingStrength >= 75 ? Math.max(0, visibleLineCapacity - multiTurnCount) : 0),
   );
-  const roleOrder = Array.from(
-    { length: personaScenePlan.commentCast.length },
-    (_, roleIndex) => roleIndex,
-  ).sort((left, right) =>
+  // 读者席角色序:机构侧(orgSide)角色只答复、不坐读者席,开口者 A 与接话
+  // 读者 B 都从读者侧卡池抽取;池为空(退化蓝图)时回退全量,保证不崩。
+  const readerRoleIndexes = personaScenePlan.commentCast
+    .map((role, roleIndex) => ({ role, roleIndex }))
+    .filter(({ role }) => !role.orgSide)
+    .map(({ roleIndex }) => roleIndex);
+  const seatIndexes = readerRoleIndexes.length
+    ? readerRoleIndexes
+    : personaScenePlan.commentCast.map((_, roleIndex) => roleIndex);
+  const roleOrder = [...seatIndexes].sort((left, right) =>
     hashUnit(seed, `role-order:${opportunity.audienceStage}:${left}`)
       - hashUnit(seed, `role-order:${opportunity.audienceStage}:${right}`));
   const usedQuestionIntents = new Set<string>();
   // 展示昵称(纯展示元数据):包内去重,种子确定性;开口者盐 `nickname:${threadId}`,
   // 追问接话人的昵称在引擎绑定时按 `nickname:${threadId}:fu:${index}` 同样分配。
   const usedDisplayNames = new Set<string>();
+  // 开口人物去重(三身份生态):同一 displayRole 每篇至多开口一次,池不足时允许
+  // 重复并在该线程标记 personaRepeated。
+  const usedOpenerDisplayRoles = new Set<string>();
   const constraintStart = constraintPool.length
     ? Math.floor(hashUnit(seed, "constraint-start") * constraintPool.length)
     : 0;
-  return Array.from({ length: targetCount }, (_, index) => {
+  const threads: DialogueThreadPlan[] = Array.from({ length: targetCount }, (_, index) => {
     const threadId = `${strategy.id}_thread_${index + 1}`;
     const threadKind = threadKinds[index]!;
     const gap = primaryOrdered[index % primaryOrdered.length]!;
@@ -1363,18 +1610,27 @@ function dialoguePlans(
     // boundary 与已声明边界）保持原样，只替换模板兜底字面。
     const threadFunction = deriveThreadFunction(gap, counterexampleAllowed && !counterexampleAssigned);
     if (threadFunction === "counterexample") counterexampleAssigned = true;
-    const castSurfaceRoleCard = personaScenePlan.commentCast[roleOrder[index % roleOrder.length]!]!;
-    // T3 漂浮短反应来自围观共鸣型角色:优先 utteranceMode=social_reaction 的
-    // 可见角色,并把公开长度软目标收敛到 4-20 字。
+    // 开口人物去重(三身份生态分布控制):同一 displayRole 每篇至多开口一次,
+    // T3 的 social_reaction 偏好位同样参与去重;读者池小于线程数时允许重复,
+    // 并在该线程标记 personaRepeated(提示词规格里提示换说法)。
+    const seatRoles = roleOrder.map((roleIndex) => personaScenePlan.commentCast[roleIndex]!);
+    const unusedSeatRoles = seatRoles.filter((role) => !usedOpenerDisplayRoles.has(role.displayRole));
+    const openerPool = threadKind === "organic_reaction"
+      ? [
+          ...unusedSeatRoles.filter((role) => role.utteranceMode === "social_reaction"),
+          ...unusedSeatRoles.filter((role) => role.utteranceMode !== "social_reaction"),
+        ]
+      : unusedSeatRoles;
+    const openerCard = openerPool[0]
+      ?? (threadKind === "organic_reaction"
+        ? (seatRoles.find((role) => role.utteranceMode === "social_reaction") ?? seatRoles[index % seatRoles.length]!)
+        : seatRoles[index % seatRoles.length]!);
+    const personaRepeated = usedOpenerDisplayRoles.has(openerCard.displayRole);
+    usedOpenerDisplayRoles.add(openerCard.displayRole);
+    // T3 漂浮短反应来自围观共鸣型角色,公开长度软目标收敛到 4-20 字。
     const surfaceRoleCard = threadKind === "organic_reaction"
-      ? {
-          ...(roleOrder
-            .map((roleIndex) => personaScenePlan.commentCast[roleIndex]!)
-            .find((role) => role.utteranceMode === "social_reaction")
-            ?? castSurfaceRoleCard),
-          targetChars: [4, 20] as [number, number],
-        }
-      : castSurfaceRoleCard;
+      ? { ...openerCard, targetChars: [4, 20] as [number, number] }
+      : openerCard;
     // T2 读者互聊:接话读者 B 必须与开口者 A 不同 displayRole(readerExchangeFeasible
     // 已保证找得到)、不同昵称(类型分配先于昵称分配);B 接话范围限其
     // permittedContribution,在 conversationPlan.replyMove 与 2A 提示词中生效。
@@ -1494,19 +1750,19 @@ function dialoguePlans(
         : evidenceStance === "boundary_sensitive"
           ? `有“${cueCore}”，${gap.label}就能定吗？`
           : `只知道“${cueCore}”，判断${gap.label}还缺什么？`;
-    // 双号运营:营销话头分流给公开助理身份(staff),其余由发布账号 IP
-    // (publisher)解答;staff 线程的 replyDisplayRole 同步指向蓝图里的助理
-    // (accountable + service_answer 角色),没有蓝图助理时退为角色池里的
-    // service_answer 角色,最后兜为通用“项目助理”。
+    // 三身份生态:答复身份规划层先按兜底表(publisher 楼主/staff 助理/expert
+    // 机构 IP)落位,引擎阶段 2 的 AI 分配再覆盖(护栏线程除外);replyDisplayRole
+    // 逐身份强制,根治内部 id 直出。routingReason 先记兜底原因,AI 覆盖时改写。
     const postingIdentity = routeReplyPostingIdentity(gap, replyRouting.claimRules);
-    const assistantReplyRole = postingIdentity === "staff"
-      ? replyRouting.assistantReplyDisplayRole
-        ?? personaScenePlan.commentCast.find((role) => role.utteranceMode === "service_answer")?.displayRole
-        ?? "项目助理"
-      : undefined;
-    const threadSurfaceRoleCard: DialogueThreadPlan["surfaceRoleCard"] = assistantReplyRole
-      ? { ...surfaceRoleCard, replyDisplayRole: assistantReplyRole }
-      : surfaceRoleCard;
+    const routingReason = postingIdentity === "staff"
+      ? "合规护栏:命中 price/location/schedule,兜底 staff"
+      : postingIdentity === "expert"
+        ? "兜底表:命中专业类 claimType,兜底 expert"
+        : "兜底表:未命中护栏与专业类,兜底 publisher(发布账号)";
+    const threadSurfaceRoleCard: DialogueThreadPlan["surfaceRoleCard"] = {
+      ...surfaceRoleCard,
+      replyDisplayRole: forcedReplyDisplayRole(postingIdentity, replyRouting.projectBlueprint, personaScenePlan.commentCast),
+    };
     const surfaceIntent: Record<typeof surfaceRoleCard.utteranceMode, string> = {
       direct_question: `像${surfaceRoleCard.displayRole}一样，只问“${gap.question}”里最现实的一点`,
       shared_concern: `先用一句同款担心接住正文，再自然带出“${gap.label}”`,
@@ -1595,7 +1851,7 @@ function dialoguePlans(
           ? `${replySurfaceRoleCard?.displayRole ?? "另一位读者"}以模拟读者身份接话，只说自己的处境、感受、疑问或轻反应，范围限「${replySurfaceRoleCard?.permittedContribution ?? "自身处境与感受"}」；不讲项目事实、价格数字、效果证词或机构信息`
           : surfaceRoleCard.utteranceMode === "knowledge_translation"
             ? "可追责身份先用人话回答，再留一个会改变答案的条件"
-            : "楼主只接住对方真正关心的一点，延续正文人物声音，不做完整讲座",
+            : "发布账号接住对方真正关心的一点：有口径就给直接回答＋一个会改变答案的条件，没口径就保留未知并指出核验方式；延续正文语气，不做完整讲座，也不讲自己的亲历效果",
       extensionMove: threadKind === "organic_reaction"
         ? "本支为漂浮短反应，不生长"
         : threadKind === "reader_exchange"
@@ -1627,9 +1883,12 @@ function dialoguePlans(
       ],
       followUpIntent: `${strategy.commentMode}；${conversationPlan.extensionMove}`,
       nextStep: deriveThreadNextStep(gap),
-      // 双号运营:营销话头由公开助理身份(staff)承接,其余由发布账号 IP
-      // (publisher)解答(见 routeReplyPostingIdentity);提问侧仍是 simulated_reader。
+      // 三身份生态:答复身份规划层先按兜底表落位(护栏命中→staff,专业类→
+      // expert,其余→publisher 楼主),引擎阶段 2 的 AI 分配再覆盖(护栏除外,
+      // 见 routeReplyPostingIdentity);提问侧仍是 simulated_reader。
       postingIdentity,
+      routingReason,
+      ...(personaRepeated ? { personaRepeated: true } : {}),
       sourceClusterIds: gap.evidenceIds.map((sourceId) => sourceId.replace(/^evidence_/u, "")),
       evidenceIds: [...gap.evidenceIds],
       boundaryRequired: Boolean(gap.boundary),
@@ -1676,6 +1935,9 @@ function dialoguePlans(
       ...(replySurfaceRoleCard ? { replySurfaceRoleCard } : {}),
     };
   });
+  // 方法论《后台状态不是人物》:经历表述走标注制,不设"经历位"名额——逐角色的"禁止代替的
+  // 证据"由读者侧角色卡在提示词里承担,规划层不再指派唯一亲历线程。
+  return threads;
 }
 
 /**
@@ -1854,8 +2116,7 @@ export function planTopicOrchestrations(input: PlanTopicOrchestrationsInput): [O
       personaScenePlan,
       {
         claimRules: input.projectBlueprint?.claimPolicy.rules ?? [],
-        assistantReplyDisplayRole: input.projectBlueprint?.roleModel.roles.find((role) =>
-          role.accountable && role.utteranceModes.includes("service_answer"))?.displayRole,
+        projectBlueprint: input.projectBlueprint,
       },
     );
     const gapCoverageLedger = buildGapCoverageLedger(
