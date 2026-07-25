@@ -31,6 +31,17 @@ export class GenerationController {
     return this.generations.get(id);
   }
 
+  /**
+   * 阅读投影。极简创作「查看」走这条,完整版工作台继续走 :id。
+   * 权限与 :id 完全一致(project.read),只是返回的字段集不同。
+   */
+  @Get(':id/reader')
+  reader(@Req() request: Request, @Param('id') id: string) {
+    const job = this.generations.jobRow(id);
+    this.assert(request, job.project_id, 'project.read');
+    return this.generations.readerView(id);
+  }
+
   @Post()
   create(@Req() request: Request, @Body() rawBody: unknown) {
     const body = requireObject(rawBody);

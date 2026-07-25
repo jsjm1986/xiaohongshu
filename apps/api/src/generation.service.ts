@@ -29,6 +29,7 @@ import {
   normalizeImpactReportForApi,
 } from './diagnostic-contract.js';
 import { FormulaService } from './formula.service.js';
+import { readerView } from './generation-reader-view.js';
 import { IntelligenceService } from './intelligence.service.js';
 import type { SessionPrincipal } from './models.js';
 import { PresetService } from './preset.service.js';
@@ -480,6 +481,34 @@ export class GenerationService implements OnModuleInit {
     const row = this.database.prepare('SELECT * FROM generation_jobs WHERE id = ?').get(id) as unknown as JobRow | undefined;
     if (!row) throw new NotFoundException('生成任务不存在');
     return row;
+  }
+
+  /**
+   * 阅读投影:极简创作「查看」用的轻量视图(字段集见 generation-reader-view.ts)。
+   *
+   * 不是 get() 的裁剪版而是独立一条:完整版工作台要 trace/参数影响报告,极简创作
+   * 要的是判断依据(句子级标注、缺口落地台账、候选表达轴)——后者旧接口压根不返回。
+   * 实测同一任务 1.10 MB → 35 KB。
+   */
+  readerView(jobId: string): Record<string, unknown> {
+    const row = this.jobRow(jobId);
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      topic: row.topic,
+      goal: row.goal,
+      status: row.status,
+      qualityStatus: row.quality_status,
+      createdAt: row.created_at,
+      completedAt: row.completed_at ?? undefined,
+      error: row.error ?? undefined,
+      // 只有 completed 才有候选;其余状态给空数组,前端不用分支判 undefined。
+      candidates: row.status === 'completed'
+        ? this.packageRows(jobId).map((item) =>
+            readerView(normalizeContentPackageForApi(parseJson<ContentPackage>(item.content_json, {} as ContentPackage))),
+          )
+        : [],
+    };
   }
 
   async revise(jobId: string, candidateId: string, instruction: string, principal: SessionPrincipal): Promise<Record<string, unknown>> {
