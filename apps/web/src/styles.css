@@ -3177,6 +3177,40 @@ div.qc-topic { cursor: default; }
 /* 阻塞原因下的重试劝阻语:比普通 hint 更醒目,但不做成红色报警 */
 .qc-warn-line { max-width: 340px; color: var(--v2-warn); font-size: var(--v2-fs-micro); line-height: 1.5; }
 
+/* ---- 导出格式组:四种格式并排,不再只有 Markdown ---- */
+.qc-export-group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px; }
+.qc-export-group__label { display: inline-flex; align-items: center; gap: 4px; margin-right: 4px; color: var(--v2-muted); font-size: var(--v2-fs-xs); }
+.qc-export-group .button { padding: 4px 9px; font-size: var(--v2-fs-xs); }
+
+/* ---- 发布执行方案:摘要 + 可展开 ---- */
+.qc-deploy {
+  margin: 12px 0 0; padding: 14px 16px;
+  border: 1px solid var(--v2-line); border-radius: var(--v2-radius);
+  background: var(--v2-canvas);
+}
+.qc-deploy__head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.qc-deploy__head > svg { color: var(--v2-brand); }
+.qc-deploy__head strong { font-size: var(--v2-fs-sm); color: var(--v2-ink); }
+.qc-deploy__identity { color: var(--v2-muted); font-size: var(--v2-fs-xs); }
+.qc-deploy__sla, .qc-deploy__pin { margin: 0 0 6px; color: var(--v2-muted); font-size: var(--v2-fs-xs); line-height: 1.6; }
+.qc-deploy__pin { display: flex; align-items: center; gap: 5px; }
+.qc-deploy__more > summary { color: var(--v2-brand-ink); font-size: var(--v2-fs-xs); cursor: pointer; }
+.qc-deploy__block { margin-top: 10px; }
+.qc-deploy__block h4 { display: flex; align-items: center; gap: 5px; margin: 0 0 5px; font-size: var(--v2-fs-xs); color: var(--v2-ink); }
+.qc-deploy__routing, .qc-deploy__rules { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.qc-deploy__routing li { display: flex; flex-direction: column; gap: 1px; padding: 7px 9px; border-radius: var(--v2-radius-sm); background: var(--v2-surface); }
+.qc-deploy__routing strong { font-size: var(--v2-fs-xs); color: var(--v2-ink); }
+.qc-deploy__routing em { font-style: normal; font-size: var(--v2-fs-micro); color: var(--v2-muted-2); }
+.qc-deploy__routing span { font-size: var(--v2-fs-xs); color: var(--v2-muted); line-height: 1.5; }
+.qc-deploy__rules li { padding-left: 12px; position: relative; font-size: var(--v2-fs-xs); color: var(--v2-muted); line-height: 1.6; }
+.qc-deploy__rules li::before { content: "·"; position: absolute; left: 3px; }
+/* 仍然未知:直接影响能不能发,用警示底色而不是藏进灰字 */
+.qc-deploy__unknowns { margin-top: 10px; padding: 9px 11px; border-radius: var(--v2-radius-sm); background: var(--v2-warn-soft); }
+.qc-deploy__unknowns > span { display: block; margin-bottom: 4px; color: var(--v2-warn); font-size: var(--v2-fs-xs); }
+.qc-deploy__unknowns ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.qc-deploy__unknowns li { padding-left: 12px; position: relative; color: var(--v2-muted); font-size: var(--v2-fs-xs); line-height: 1.5; }
+.qc-deploy__unknowns li::before { content: "?"; position: absolute; left: 2px; color: var(--v2-warn); }
+
 /* 全失败批次的折叠占位 */
 .qc-batch-card__collapsed {
   width: 100%; padding: 12px; border: 1px dashed var(--v2-line-dark); border-radius: var(--v2-radius-sm);

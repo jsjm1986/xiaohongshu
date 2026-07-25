@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Clock, Copy, Repeat, SearchX, ShieldCheck, TriangleAlert } from 'lucide-react';
+import { Clock, Copy, Download, Repeat, SearchX, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { Button, useToast } from '../Ui';
 import { QuickCandidateCards } from '../QuickResult';
 import { api } from '../../lib/api';
@@ -10,6 +10,7 @@ import { overviewDigest } from '../../lib/overview-digest';
 import { failureDigest, planBatchRetry } from '../../lib/retry-plan';
 import { buildBatchJobs } from '../../lib/quick-batch';
 import { BatchBoard } from './BatchBoard';
+import { DeploymentPlanCard } from './DeploymentPlanCard';
 import type { GenerationJob, Project } from '../../types';
 
 interface Props {
@@ -181,14 +182,26 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
     catch { toast.push('复制失败，请手动选择文本', 'error'); }
   };
 
-  const exportMarkdown = (job: GenerationJob, v: QuickCandidateView) => {
-    const blob = new Blob([quickCandidateToMarkdown(v)], { type: 'text/markdown;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${job.topic || '文案'}-${v.label || v.id}.md`;
-    a.click();
-    URL.revokeObjectURL(url);
+  /**
+   * 导出。markdown 走本地拼装(即时、不占额度、离线可用),docx/pdf/json 必须走后端
+   * ——只有服务端能生成这几种二进制格式。
+   *
+   * 后端一直支持 markdown/json/docx/pdf 四种,完整版工作台四个按钮都给;极简创作
+   * 此前只有一个本地 Markdown Blob,付费用户要交付用的 docx/pdf 拿不到。
+   */
+  const exportAs = (job: GenerationJob, v: QuickCandidateView, format: 'markdown' | 'json' | 'docx' | 'pdf') => {
+    if (format === 'markdown') {
+      const blob = new Blob([quickCandidateToMarkdown(v)], { type: 'text/markdown;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${job.topic || '文案'}-${v.label || v.id}.md`;
+      a.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
+    // 后端按 Content-Disposition 给文件名(含中文标题),这里直接跳转触发下载
+    window.location.assign(api.generations.exportUrl(job.id, v.id, format));
   };
 
   // 候选加载交给上面那个 effect(它同时覆盖「展开时已完成」和「展开后才完成」两路),
@@ -331,9 +344,19 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
                       );
                     })()}
                     <QuickCandidateCards view={current} />
+                    {/* 发布执行方案:摘要在正面,完整方案收进折叠区 */}
+                    <DeploymentPlanCard candidate={details[job.id]?.find((c) => c.id === current.id)} />
                     <div className="quick-result__actions">
                       <Button variant="secondary" icon={<Copy size={15} />} onClick={() => void copy(quickCandidateToMarkdown(current))}>复制全部</Button>
-                      <Button variant="ghost" onClick={() => exportMarkdown(job, current)}>导出 Markdown</Button>
+                      {/* 四种格式都给:docx/pdf 走后端,markdown 本地即时 */}
+                      <span className="qc-export-group">
+                        <span className="qc-export-group__label"><Download size={13} />导出</span>
+                        {(['markdown', 'docx', 'pdf', 'json'] as const).map((fmt) => (
+                          <Button key={fmt} variant="ghost" onClick={() => exportAs(job, current, fmt)}>
+                            {fmt === 'markdown' ? 'Markdown' : fmt.toUpperCase()}
+                          </Button>
+                        ))}
+                      </span>
                     </div>
                   </div>
                 );

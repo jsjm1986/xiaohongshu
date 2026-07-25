@@ -415,3 +415,21 @@ test('reviseCandidate 轮询用尽时同样抛 GenerationStillRunningError', asy
   assert.ok(err instanceof GenerationStillRunningError, '应是 GenerationStillRunningError');
   assert.equal(err.jobId, 'job1');
 });
+
+// 发布执行方案要在创作区就能看到(不只是产出区),所以 view 必须带上它。
+// 原来 quickCandidateFields 把 deploymentPlan 丢了,创作区拿不到。
+test('quickCandidateFields 保留 deploymentPlan 与 unknowns', () => {
+  const view = quickCandidateFields({
+    ...fullCandidate,
+    deploymentPlan: { postingIdentity: 'publisher', sla: '24h 内答复' },
+    unknowns: ['保修范围是什么'],
+  } as any);
+  assert.equal((view.deploymentPlan as any)?.postingIdentity, 'publisher');
+  assert.deepEqual(view.unknowns, ['保修范围是什么']);
+});
+
+test('quickCandidateFields 在缺 deploymentPlan 时不报错', () => {
+  const view = quickCandidateFields({ id: 'c9', title: 't', body: 'b', tags: [], comments: [] } as any);
+  assert.equal(view.deploymentPlan, undefined);
+  assert.equal(view.unknowns, undefined);
+});
