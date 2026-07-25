@@ -210,7 +210,12 @@ export function BatchBoard({ project, activeBatchId, fail, onOpenJob, onReuseRec
                     </span>
                   )}
                   {job.status === 'queued' && (
-                    <span className="qc-jobcell__badge"><Clock size={13} />排队中</span>
+                    // 并发上限 2、批量常提 24 篇:光写「排队中」等于 24 格全一样,
+                    // 带上位次用户才知道自己是第 3 个还是第 20 个。
+                    <span className="qc-jobcell__badge">
+                      <Clock size={13} />
+                      {job.queuePosition ? `排队 第 ${job.queuePosition} 位` : '排队中'}
+                    </span>
                   )}
                   {job.status === 'failed' && (
                     <span className="qc-jobcell__badge qc-jobcell__badge--fail">

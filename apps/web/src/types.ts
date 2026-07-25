@@ -1487,6 +1487,12 @@ export interface GenerationJob {
   status: GenerationStatus;
   qualityStatus?: GenerationQualityStatus;
   progress?: number;
+  /** Batch this job belongs to; absent for single generations. */
+  batchId?: string;
+  /** 1-based position in the server's in-memory queue; absent once running. */
+  queuePosition?: number;
+  /** Total jobs currently queued server-wide, for "第 N/M 位". */
+  queueLength?: number;
   candidates?: Candidate[];
   seed?: string;
   formulaVersion?: string;

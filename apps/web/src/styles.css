@@ -3054,6 +3054,9 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .qc-progress__track b { position: absolute; inset: 0; width: 40%; background: var(--v2-ai); border-radius: 2px; animation: qc-progress-slide 1.2s ease-in-out infinite; }
 @keyframes qc-progress-slide { 0% { left: -40%; } 100% { left: 100%; } }
 .qc-progress--failed { background: var(--v2-error-soft); color: var(--v2-error); }
+/* 长等待提示要整行占满,不能被 flex 挤在小 track 旁边 */
+.qc-progress { flex-wrap: wrap; }
+.qc-progress__note { flex: 1 0 100%; margin: 2px 0 0; font-size: var(--v2-fs-xs); line-height: 1.6; }
 
 /* 选题卡由单行改为竖向堆叠:标题行 + 理由 + chip + 分数。
    原来的横向 flex 移到 .qc-topic__head,勾选框/标题/操作位的相对关系不变。 */
@@ -3154,6 +3157,25 @@ div.qc-topic { cursor: default; }
 /* 历史筛选行 */
 .qc-history-filters { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .qc-history-filters input { flex: 1; min-width: 180px; }
+
+/* ---- 等待卡:替掉那条几十分钟不动的「正在生成 44%」 ---- */
+.qc-wait {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 14px 16px; border: 1px solid var(--v2-line);
+  border-radius: var(--v2-radius); background: var(--v2-canvas);
+}
+.qc-wait__head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.qc-wait__head strong { font-size: var(--v2-fs-sm); }
+.qc-wait__icon { display: inline-flex; color: var(--v2-muted); }
+.qc-wait__bar {
+  height: 6px; border-radius: 999px; background: var(--v2-line); overflow: hidden;
+}
+.qc-wait__bar i { display: block; height: 100%; background: var(--v2-brand); transition: width 0.4s ease; }
+.qc-wait__meta { margin: 0; font-size: var(--v2-fs-xs); color: var(--v2-muted); }
+.qc-wait__note {
+  margin: 0; padding: 8px 10px; font-size: var(--v2-fs-xs); color: var(--v2-ink);
+  border-left: 2px solid var(--v2-warn); background: var(--v2-surface); border-radius: 4px;
+}
 
 /* ---- 产出区概况条:先给结论,再让用户面对一屏任务卡 ---- */
 .qc-history-summary {

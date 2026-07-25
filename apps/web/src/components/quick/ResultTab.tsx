@@ -1,9 +1,8 @@
 import { useState } from 'react';
-import { RefreshCw } from 'lucide-react';
 import { QuickResult } from '../QuickResult';
 import { useToast } from '../Ui';
 import { autoApproveAndGenerate, quickCandidateFields, reviseCandidate, type QuickCandidateView } from '../../lib/quick-generation';
-import { progressStageText } from '../../lib/quick-progress';
+import { InlineProgress } from './InlineProgress';
 import type { SimpleSettingOverrides } from '../../lib/simple-generation';
 import type { Project } from '../../types';
 
@@ -28,6 +27,7 @@ export function ResultTab({ project, opportunityId, presetId, overrides, imageAs
   const toast = useToast();
   const [progress, setProgress] = useState<number | undefined>(undefined);
   const [revisingId, setRevisingId] = useState<string | null>(null);
+
 
   const regenerate = async () => {
     if (!project || !opportunityId) return;
@@ -74,14 +74,11 @@ export function ResultTab({ project, opportunityId, presetId, overrides, imageAs
 
   return (
     <div className="qc-step">
-      {(generating || revisingId) && (
-        <div className="qc-progress" role="status">
-          <RefreshCw size={15} className="spin" />
-          <span>{revisingId ? '正在修改' : '正在生成'}:{progressStageText(progress)}…</span>
-          <small>{progress !== undefined ? `${progress}% · ` : ''}请勿离开或重复点击</small>
-          <i className="qc-progress__track"><b style={{ width: `${progress ?? 0}%`, animation: 'none' }} /></i>
-        </div>
-      )}
+      <InlineProgress
+        active={Boolean(generating || revisingId)}
+        progress={progress}
+        label={revisingId ? '正在修改' : '正在生成'}
+      />
       <QuickResult
         candidates={results}
         onRegenerate={() => void regenerate()}

@@ -464,6 +464,10 @@ export class GenerationService implements OnModuleInit {
       // 一致:前端对这些字段一律用 ?. 读,混着 null 容易多出意外分支。
       completedAt: row.completed_at ?? undefined,
       error: row.error ?? undefined,
+      // 排队位次 + 队列总长:进度条在 queued 阶段恒为 0,这两个值是用户唯一能
+      // 判断"在排队"而非"卡死"的依据。running 及终态天然拿不到位次(不在队列里),
+      // 这时连 queueLength 也不给——已完成的任务带一个全局队列长度只是噪声。
+      ...this.queueView(row.id),
     };
   }
 
@@ -556,6 +560,29 @@ export class GenerationService implements OnModuleInit {
       }
     }
     throw new NotFoundException('候选内容不存在');
+  }
+
+  /**
+   * 任务在排队里的位次(1 起)。不在队列返回 undefined——不是 0 也不是 -1,
+   * 前端一律用 `if (pos)` 判存在,0 会被当成"没有位次"。
+   *
+   * 并发上限 2、单次批量可提 24 篇,实测批量任务平均 56 分钟才收敛。进度条在
+   * queued 阶段恒为 0,用户无法区分"排队中"和"卡死",所以把位次露出来。
+   */
+  queuePosition(jobId: string): number | undefined {
+    const index = this.queue.indexOf(jobId);
+    return index === -1 ? undefined : index + 1;
+  }
+
+  /** 当前排队总数,让前端能说"第 3/24 位"而不是光一个 3。 */
+  queueLength(): number {
+    return this.queue.length;
+  }
+
+  /** 两个映射(列表/详情)共用的排队字段,只在真的排队时出现。 */
+  private queueView(jobId: string): { queuePosition?: number; queueLength?: number } {
+    const position = this.queuePosition(jobId);
+    return position === undefined ? {} : { queuePosition: position, queueLength: this.queue.length };
   }
 
   private enqueue(jobId: string): void {
@@ -821,6 +848,7 @@ export class GenerationService implements OnModuleInit {
       status: row.status,
       qualityStatus: row.quality_status,
       progress: row.progress,
+      ...this.queueView(row.id),
       candidates: includeCandidates && row.status === 'completed' ? this.packageRows(row.id).map((item) => this.mapCandidate(parseJson<ContentPackage>(item.content_json, {} as ContentPackage))) : undefined,
       seed: row.seed,
       formulaVersion: config?.formula.versionId,
