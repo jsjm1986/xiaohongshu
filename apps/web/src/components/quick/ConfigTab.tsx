@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react';
-import { RefreshCw } from 'lucide-react';
 import { Button, Field, Modal, useToast } from '../Ui';
 import { api, ApiError } from '../../lib/api';
 import { autoApproveAndGenerate, quickCandidateFields, type QuickCandidateView } from '../../lib/quick-generation';
-import { progressStageText } from '../../lib/quick-progress';
+import { InlineProgress } from './InlineProgress';
 import { buildPresetValuesFromOverrides } from '../../lib/preset-save';
 import { writeLocalPresets } from '../../lib/presets';
 import type { CommentRichnessLevel, SimpleSettingOverrides } from '../../lib/simple-generation';
@@ -263,14 +262,7 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
 
       {!batchMode && !opportunityId && <p className="qc-hint">先在左侧选一个选题</p>}
       {/* 只有真的在生成才显示这条;用 busy 会让收藏/归档等操作也弹出「请勿离开」 */}
-      {generating && (
-        <div className="qc-progress" role="status">
-          <RefreshCw size={15} className="spin" />
-          <span>正在生成:{progressStageText(progress)}…</span>
-          <small>{progress !== undefined ? `${progress}% · ` : ''}请勿离开或重复点击</small>
-          <i className="qc-progress__track"><b style={{ width: `${progress ?? 0}%`, animation: 'none' }} /></i>
-        </div>
-      )}
+      <InlineProgress active={generating} progress={progress} />
       {/* 主操作放进 action bar:qc-step 是纵向 flex,按钮作为直接子元素会被拉满整栏,
           放宽后实测拉成 940px 的巨带。这里靠左收窄,并把前置条件说明并排放在右边。 */}
       <div className="qc-actions">

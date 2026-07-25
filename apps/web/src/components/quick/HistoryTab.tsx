@@ -8,9 +8,11 @@ import { allValidationIssueLabels, firstValidationIssueLabel } from '../../lib/v
 import { filterGenerationJobs, type GenerationStatusFilter } from '../../lib/quick-channel-state';
 import { overviewDigest } from '../../lib/overview-digest';
 import { failureDigest, planBatchRetry } from '../../lib/retry-plan';
+import { waitStatus } from '../../lib/wait-status';
 import { buildBatchJobs } from '../../lib/quick-batch';
 import { BatchBoard } from './BatchBoard';
 import { DeploymentPlanCard } from './DeploymentPlanCard';
+import { WaitCard } from './WaitCard';
 import type { GenerationJob, Project } from '../../types';
 
 interface Props {
@@ -160,6 +162,15 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, hasInFlight]);
 
+  // 「已等待 N 分钟」要自己走秒,不能只在轮询返回时更新(接口 3s 一拍但可能失败,
+  // 而且等待卡在批次看板里也要走)。一个 tick 驱动所有等待卡,不各自 setInterval。
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!hasInFlight) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [hasInFlight]);
+
   // 展开中的任务跑完时补一次详情。候选只有 GET /api/generations/:id 才带,而原本
   // 只在点击展开的那一刻按 status==='completed' 取过一次;若用户在它还 running 时
   // 就展开(兜底落点的典型路径),轮询把状态刷成 completed 后没人再去取候选,卡片
@@ -304,6 +315,11 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
               <div className="qc-project-row">
                 <strong>{job.topic || '未命名选题'}</strong>
                 {(() => { const s = STATUS_LABEL[job.status] ?? { text: job.status, tone: 'muted' as const }; return <span className={`qc-badge qc-badge--${s.tone}`}>{s.text}</span>; })()}
+                {/* 未完成任务在收起状态也报位次/耗时,不用展开才知道自己排在哪 */}
+                {running && (() => {
+                  const s = waitStatus(job, now);
+                  return <small className="qc-hint">{s.headline}{s.elapsedLabel ? ` · ${s.elapsedLabel}` : ''}</small>;
+                })()}
                 <small className="qc-hint">{job.createdAt ? new Date(job.createdAt).toLocaleString() : ''}</small>
                 <Button variant="ghost" onClick={() => void toggle(job)}>{open ? '收起' : '查看'}</Button>
                 {onReuseRecipe && (
@@ -381,7 +397,7 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
                 );
               })()}
               {open && job.status === 'completed' && loadingId !== job.id && views.length === 0 && <p className="qc-hint">该次生成没有可展示的候选。</p>}
-              {open && running && <p className="qc-hint">正在生成({job.progress ?? 0}%),完成后可查看候选。</p>}
+              {open && running && <WaitCard job={job} now={now} />}
               {open && job.status === 'failed' && <p className="qc-hint">生成失败:{job.error || '未知错误'}</p>}
             </li>
           );
