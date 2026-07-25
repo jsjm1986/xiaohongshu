@@ -65,6 +65,8 @@ interface JobRow {
   release_manifest_id: string | null;
   research_snapshot_json: string;
   quality_status: 'unknown' | 'passed' | 'needs_review';
+  /** 批次归属;单篇生成恒为 null(迁移 v12 加入) */
+  batch_id: string | null;
 }
 
 interface PackageRow {
@@ -403,7 +405,63 @@ export class GenerationService implements OnModuleInit {
     const rows = (projectId
       ? this.database.prepare('SELECT * FROM generation_jobs WHERE project_id = ? ORDER BY created_at DESC').all(projectId)
       : this.database.prepare('SELECT * FROM generation_jobs ORDER BY created_at DESC').all()) as unknown as JobRow[];
-    return rows.map((row) => this.mapJob(row, false));
+    return rows.map((row) => this.mapJobForList(row));
+  }
+
+  /**
+   * 列表投影:只给列表页真正读到的字段。
+   *
+   * mapJob(row, false) 的 includeCandidates=false 只省掉候选,planningContext、
+   * researchSnapshot、configImpact(同一份内容重复三个键)等仍然全量返回。实测
+   * 26 个任务的列表响应 10.5 MB、单条 366 KB,而列表页一个重字段都用不到。
+   *
+   * 字段集是极简创作产出区与完整版历史页两边需求的并集,由
+   * generation-list-projection.test.ts 逐字段锁死——加字段要连测试一起改,
+   * 免得又悄悄长回去。需要完整数据的一律走 GET /api/generations/:id。
+   *
+   * opportunitySnapshot 与 resolvedConfig.task 保留:「再来一篇同款」的配方回填
+   * (extractRecipe)靠它们,而且体积可控。
+   */
+  private mapJobForList(row: JobRow): Record<string, unknown> {
+    const project = this.resources.projectRow(row.project_id);
+    const config = parseJson<ResolvedGenerationConfig | null>(row.config_json, null);
+    const opportunitySnapshot = parseJson<Record<string, unknown>>(row.opportunity_snapshot_json, {});
+    const imageContext = parseJson<Array<Record<string, unknown>>>(row.image_context_json, []);
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      projectName: project.name,
+      topic: row.topic,
+      goal: row.goal,
+      mode: row.mode,
+      status: row.status,
+      qualityStatus: row.quality_status,
+      progress: row.progress,
+      seed: row.seed,
+      // formula 可能缺失(历史任务或异常数据)。原来 mapJob 写的是
+      // config?.formula.versionId——只保护了 config,任何缺 formula 的行都会让
+      // 整个列表接口 500。这里两级都用可选链。
+      formulaVersion: config?.formula?.versionId,
+      presetId: row.preset_id,
+      styleProfileVersion: row.style_profile_version,
+      opportunityId: row.opportunity_id ?? undefined,
+      // 只留 id:整份快照有 37 个字段、单条 14 KB,而消费方(quick-recipe 的
+      // extractRecipe)只在 opportunityId 缺失时用它兜底取一个 id;完整版历史页
+      // 根本不读。保留这两个键是为了不打断老任务的兜底路径。
+      opportunitySnapshot: {
+        id: opportunitySnapshot.id,
+        opportunityId: opportunitySnapshot.opportunityId,
+      },
+      batchId: row.batch_id ?? undefined,
+      // 配方回填只读 resolvedConfig.task,不需要整份 config
+      resolvedConfig: config ? { task: (config as unknown as Record<string, unknown>).task } : undefined,
+      imageContext,
+      createdAt: row.created_at,
+      // 未完成任务用 undefined 而非 null,与同族可选字段(error/batchId/opportunityId)
+      // 一致:前端对这些字段一律用 ?. 读,混着 null 容易多出意外分支。
+      completedAt: row.completed_at ?? undefined,
+      error: row.error ?? undefined,
+    };
   }
 
   get(id: string): Record<string, unknown> {
@@ -1031,12 +1089,16 @@ function publicImpacts(report: unknown): Array<Record<string, unknown>> {
       const instructions = Array.isArray(trace.behaviorInstructions)
         ? trace.behaviorInstructions.map(String)
         : [];
+      // 空转参数不能用"已参与最终配置"兜底——那正是用户反复填了参数却看不出
+      // 差别的原因。有 inertReason 就如实说明它当前为什么不影响产出。
+      const inertReason = typeof trace.inertReason === 'string' && trace.inertReason ? trace.inertReason : undefined;
       return {
         parameterId: String(trace.parameterId ?? trace.path ?? 'parameter'),
         label: String(trace.label ?? trace.path ?? '参数'),
         value: trace.value,
         direction,
-        summary: instructions.join('；') || '该参数已参与最终配置。',
+        summary: inertReason ?? (instructions.join('；') || '该参数已参与最终配置。'),
+        ...(inertReason ? { inertReason, effective: false } : {}),
         affects: Array.isArray(trace.channels) ? trace.channels.map(String) : [],
         risk: typeof trace.evidenceNote === 'string' ? trace.evidenceNote : undefined,
         source: source.sourceId ? `${String(source.source)}:${String(source.sourceId)}` : source.source,
