@@ -1,6 +1,8 @@
 import type {
   ContentChannel,
   ContentDiagnostic,
+  CommentFollowUpLevel,
+  CommentFollowUpStopReason,
   CommentGapCoverageLedger,
   CommentNodeKind,
   ContentPackageContent,
@@ -50,6 +52,21 @@ export const INSTITUTIONAL_NICKNAME_TERMS: readonly string[] = [
 /** Lenient optional-field read: an unrecognised kind means "not recorded", never an error. */
 function commentNodeKind(value: unknown): CommentNodeKind | undefined {
   return commentNodeKinds.has(String(value)) ? value as CommentNodeKind : undefined;
+}
+
+/**
+ * 追问层级与停止原因(方法论《问题—答复—追问的最小结构》)。不可识别一律按
+ * undefined("未记录")处理,不猜默认值——历史包没有这两个字段。
+ */
+const followUpLevels = new Set(["L1", "L2", "L3"]);
+const followUpStopReasons = new Set(["answered", "unknown_pending_evidence", "route_to_professional"]);
+
+function commentFollowUpLevel(value: unknown): CommentFollowUpLevel | undefined {
+  return followUpLevels.has(String(value)) ? value as CommentFollowUpLevel : undefined;
+}
+
+function commentFollowUpStopReason(value: unknown): CommentFollowUpStopReason | undefined {
+  return followUpStopReasons.has(String(value)) ? value as CommentFollowUpStopReason : undefined;
 }
 
 /**
@@ -247,13 +264,19 @@ export function parseStagedCoreCopy(text: string): Pick<ContentPackageContent, "
   };
 }
 
+/**
+ * 阶段化评论的免责声明是确定性常量:按侧+按角色隔离后,模型各调用都只写
+ * 可见文案,不再输出 disclaimer;引擎在合并层统一落这个模板文本(沿用
+ * parseStagedCommentCopy 的历史默认模板,业务文案不变)。
+ */
+export const STAGED_COMMENT_DISCLAIMER = "以下为多角色评论情景演练与发布者答疑参考模板，不代表真实用户发言、亲历口碑或已经发生的互动。";
+
 export interface StagedCommentCopy {
   disclaimer: string;
   /** Optional publisher-owned first comment; carried only when the model produced one. */
   ownedFirstComment?: string;
   threads: Array<{
     id: string;
-    roleIndex?: number;
     question: string;
     answer: string;
     /** Optional Cref contract v1.1 fields; the engine derives positional defaults when absent. */
@@ -269,14 +292,10 @@ export interface StagedCommentCopy {
   }>;
 }
 
-export function parseStagedCommentCopy(text: string): StagedCommentCopy {
-  const value = parseJsonObject(text);
-  const content = isRecord(value.content) ? value.content : undefined;
-  const container = content && isRecord(content.Cref)
-    ? content.Cref
-    : isRecord(value.Cref) ? value.Cref : value;
-  if (!Array.isArray(container.threads)) throw new Error("Staged comment output must include a threads array.");
-  const threads = container.threads.map((thread, index) => {
+/** 阶段化评论线程数组的共用解析:只读可见文案与可选 v1.1 标注字段。 */
+function parseStagedThreadArray(container: Record<string, unknown>, errorLabel: string): StagedCommentCopy["threads"] {
+  if (!Array.isArray(container.threads)) throw new Error(`${errorLabel} must include a threads array.`);
+  return container.threads.map((thread, index) => {
     if (!isRecord(thread)) throw new Error(`Invalid staged comment thread at index ${index}.`);
     const question = typeof thread.question === "string" ? thread.question : thread.q;
     const answer = typeof thread.answer === "string" ? thread.answer : thread.a;
@@ -298,14 +317,12 @@ export function parseStagedCommentCopy(text: string): StagedCommentCopy {
         answer: followAnswer.trim(),
         kind: commentNodeKind(followUp.kind),
         boundary: optionalTrimmedText(followUp.boundary),
+        level: commentFollowUpLevel(followUp.level),
+        stopReason: commentFollowUpStopReason(followUp.stopReason),
       };
     });
-    const roleIndex = typeof thread.roleIndex === "number" && Number.isInteger(thread.roleIndex) && thread.roleIndex >= 0
-      ? thread.roleIndex
-      : undefined;
     return {
       id: thread.id,
-      roleIndex,
       question: question.trim(),
       answer: answer.trim(),
       kind: commentNodeKind(thread.kind),
@@ -315,13 +332,67 @@ export function parseStagedCommentCopy(text: string): StagedCommentCopy {
       followUps,
     };
   });
+}
+
+export function parseStagedCommentCopy(text: string): StagedCommentCopy {
+  const value = parseJsonObject(text);
+  const content = isRecord(value.content) ? value.content : undefined;
+  const container = content && isRecord(content.Cref)
+    ? content.Cref
+    : isRecord(value.Cref) ? value.Cref : value;
+  const threads = parseStagedThreadArray(container, "Staged comment output");
   return {
     disclaimer: typeof container.disclaimer === "string"
       ? container.disclaimer.trim()
-      : "以下为多角色评论情景演练与发布者答疑参考模板，不代表真实用户发言、亲历口碑或已经发生的互动。",
+      : STAGED_COMMENT_DISCLAIMER,
     ownedFirstComment: optionalTrimmedText(container.ownedFirstComment),
     threads,
   };
+}
+
+/**
+ * 2A-R 读者侧输出:全部线程的 question,以及 reader_exchange 线程读者B的
+ * answer(其余线程 answer 为空串,由 2A-O 机构答复填)。人物由规划层分配,
+ * 模型只写可见文案,输出不再携带 roleIndex 等身份选择字段。
+ */
+export interface StagedCommentReadersCopy {
+  threads: StagedCommentCopy["threads"];
+}
+
+export function parseStagedCommentReaders(text: string): StagedCommentReadersCopy {
+  const value = parseJsonObject(text);
+  const container = isRecord(value.content) ? value.content : value;
+  return { threads: parseStagedThreadArray(container, "Staged comment readers output") };
+}
+
+/** 2A-O/2B-O 机构侧输出:本角色线程(或待承接追问)的答复列表。 */
+export interface StagedOrgAnswersCopy {
+  answers: Array<{
+    id: string;
+    answer: string;
+    answerKind?: CommentNodeKind;
+    boundary?: string;
+  }>;
+  /** 仅 publisher 答复调用可能产出;其余角色调用不读该字段。 */
+  ownedFirstComment?: string;
+}
+
+export function parseStagedOrgAnswers(text: string): StagedOrgAnswersCopy {
+  const value = parseJsonObject(text);
+  const container = isRecord(value.content) ? value.content : value;
+  if (!Array.isArray(container.answers)) throw new Error("Staged org answers output must include an answers array.");
+  const answers = container.answers.map((entry, index) => {
+    if (!isRecord(entry) || typeof entry.id !== "string" || typeof entry.answer !== "string") {
+      throw new Error(`Invalid staged org answer at index ${index}.`);
+    }
+    return {
+      id: entry.id,
+      answer: entry.answer.trim(),
+      answerKind: commentNodeKind(entry.answerKind),
+      boundary: optionalTrimmedText(entry.boundary),
+    };
+  });
+  return { answers, ownedFirstComment: optionalTrimmedText(container.ownedFirstComment) };
 }
 
 function parseContent(value: unknown): ContentPackageContent {
@@ -368,6 +439,8 @@ function parseContent(value: unknown): ContentPackageContent {
         evidenceIds: stringArray(followUp.evidenceIds) ?? [],
         kind: commentNodeKind(followUp.kind),
         boundary: optionalTrimmedText(followUp.boundary),
+        level: commentFollowUpLevel(followUp.level),
+        stopReason: commentFollowUpStopReason(followUp.stopReason),
         ...scenarioMetadata(followUp),
       };
     });
@@ -684,6 +757,25 @@ function meaningfulTextOverlap(left: string, right: string, threshold = 0.32): b
 }
 
 /**
+ * 经历类禁语的**唯一真源**:项目蓝图。合并场景家族的
+ * prohibitedUnsupportedHistories 与 claimType=historical_action 的 rule terms。
+ *
+ * 校验层不再自带跨行业词表。复购类身份声明("老用户"这类)算不算不当声明取决于
+ * 项目的服务模型与领域:recurring/mixed 项目里它是需要证据支撑的身份声明;
+ * one_time 项目里这种说法本就不该出现;另一些领域里它只是中性说法。这个判断由
+ * 项目分析阶段按项目资料产出并填进蓝图,不由校验层猜——静态校验层不得内置任何
+ * 单一领域的词表假设。
+ */
+function prohibitedHistoryTerms(blueprint: ProjectCreativeBlueprint): string[] {
+  return [
+    ...blueprint.scenarioModel.families.flatMap((family) => family.prohibitedUnsupportedHistories),
+    ...blueprint.claimPolicy.rules
+      .filter((rule) => rule.claimType === "historical_action")
+      .flatMap((rule) => rule.terms),
+  ].filter(Boolean);
+}
+
+/**
  * Domain-neutral first-person intent vocabulary (generic language patterns
  * only — no industry terms). A body containing one of these marks the host as
  * still intending/undecided rather than reporting a completed experience.
@@ -706,6 +798,11 @@ const firstPersonPerceptionWords = /(?:注意|看到|看见|听到|听说|想到
 function claimsFirstPersonCompletion(text: string): boolean {
   for (const match of text.matchAll(/我(.{0,28}?)(已经|刚|上周|昨天|之前|过|完|了)/gu)) {
     const middle = match[1] ?? "";
+    // 机构第一人称复数("我们/我方")不是顾客亲历:发布账号、工作人员与专业人员
+    // 都以真实公开身份作答,"我们上周已经把当期口径更新了""我们的档期排到下月"
+    // 是正当的组织侧陈述。这里排除的是 我 与 我们 的分词歧义,不是按词表猜语义
+    // ——"我"后紧跟"们/方"时,主语是机构而非说话人自己的消费经历。
+    if (/^[们方]/u.test(middle)) continue;
     if (/[没未不等说问想怕]/u.test(middle)) continue;
     const marker = match[2] ?? "";
     const afterIndex = match.index + match[0].length;
@@ -1261,10 +1358,23 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
   if ((config.parameters?.commentInferenceEffort ?? 35) > 70) {
     add("comment_inference_effort_high", "warning", "Cref", "Comment inference effort is above 70; keep difficulty moderate and reduce every discovery to one easy inference step.");
   }
-  // P4-19: accountable publisher-side identities. Historical values "author"
-  // and "reader_question_template" are not accountable; new packages must use
-  // the publisher identity the contract now produces.
-  const accountablePostingIdentities = new Set(["publisher", "brand", "staff", "expert"]);
+  // 方法论《统一身份协议》:答复方是 accountable_responder,合法 postingIdentity
+  // 为 author|brand|staff|expert;本实现另有 publisher(= ROLE 04 发布账号)。五者
+  // 都是可追责答复身份,只有 reader_question_template(提问侧模板)不是。
+  // 此前漏了 author,与一次性生成 schema(GENERATION_DRAFT_JSON_SCHEMA 的
+  // enum 含 author 却不含 publisher)互相矛盾——模型照 schema 输出 author 会被判
+  // comment_identity_violation 硬错。两处现已对齐到同一份五值集合。
+  const accountablePostingIdentities = new Set(["publisher", "author", "brand", "staff", "expert"]);
+  // 经历类禁语的真源是项目蓝图,不是校验层的跨领域词表:复购类身份声明在
+  // recurring/mixed 项目里需要证据支撑,在 one_time 项目里本就不该出现,而在另一些
+  // 领域里只是中性说法——按项目分化的判断由项目分析阶段产出(见
+  // intelligence.service.ts 的 scenario_model 引导),填进
+  // prohibitedUnsupportedHistories 或 claimType=historical_action 的 rule terms。
+  // 蓝图已就位却两处皆空时,是**项目分析不完整**而非内容违规:报 warning 让空窗
+  // 可见,不用词表静默兜底(那会跨行业误伤或漏判)。
+  if (input.projectBlueprint && !prohibitedHistoryTerms(input.projectBlueprint).length) {
+    add("blueprint_prohibited_history_unspecified", "warning", "Cref", "Project blueprint declares no prohibited unsupported histories (scenarioModel.families[].prohibitedUnsupportedHistories and no historical_action claim rule): experience-claim wording cannot be checked against this industry. Re-run project analysis so the blueprint states them.", false);
+  }
   // displayName(展示昵称)冲突锚点:项目名与蓝图中 accountable 角色(IP/助理名)
   // 的 displayRole;昵称与它们相同或互相包含时,读者无法区分提问侧与机构侧。
   const nicknameIdentityAnchors = [...new Set([
@@ -1317,6 +1427,26 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     // P4-19: the answer side must carry an accountable publisher-side identity.
     if (!accountablePostingIdentities.has(thread.postingIdentity)) {
       add("comment_identity_violation", "error", "Cref", `Thread ${thread.id} posting identity "${thread.postingIdentity}" is not an accountable publisher-side identity (publisher/brand/staff/expert).`);
+    }
+    // 追问层级(方法论《问题—答复—追问的最小结构》L0—L3):只做**结构**判断,
+    // 不判断"这一轮是否真的在补条件"——那是语义,归模型。两条结构规则:
+    //   1) 层级不得倒退或重复(L1→L2→L3 单向递进);模型漂移时按 warning 提示,
+    //      不阻断——层级是可选标注,历史包与未标注的追问一律跳过。
+    //   2) stopReason 只允许出现在最后一轮:它表示"这条线程到此为止",出现在
+    //      中间轮却后面还有追问,等于自称停住又继续说。
+    const leveledFollowUps = thread.followUps
+      .map((followUp, index) => ({ level: followUp.level, index }))
+      .filter((item): item is { level: NonNullable<typeof item.level>; index: number } => Boolean(item.level));
+    for (let position = 1; position < leveledFollowUps.length; position += 1) {
+      const previous = leveledFollowUps[position - 1]!;
+      const current = leveledFollowUps[position]!;
+      if (current.level <= previous.level) {
+        add("comment_follow_up_level_not_ascending", "warning", "Cref", `Thread ${thread.id} follow-up ${current.index + 1} is marked ${current.level} after ${previous.level}; follow-up levels must ascend (L1 condition → L2 counterexample → L3 verification).`, false);
+      }
+    }
+    const earlyStop = thread.followUps.findIndex((followUp) => followUp.stopReason);
+    if (earlyStop >= 0 && earlyStop < thread.followUps.length - 1) {
+      add("comment_follow_up_stop_not_final", "warning", "Cref", `Thread ${thread.id} follow-up ${earlyStop + 1} declares stopReason "${thread.followUps[earlyStop]!.stopReason}" but ${thread.followUps.length - earlyStop - 1} more follow-up(s) continue after it.`, false);
     }
     // displayName 是纯展示昵称(warning 级,不阻断):不得含机构感词,不得与
     // 项目名或蓝图 accountable 角色(IP/助理名)的 displayRole 相同或互相包含。
@@ -1391,12 +1521,19 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
       }
     }
     // P4-19: while the body only declares host intent, the publisher answer
-    // side must not claim a completed first-person action. The question side
-    // of simulated readers is covered by fabricated_operational_experience
-    // (same host-state signal, question-side nodes only). Scoped to the
-    // publisher identity: brand/staff/expert answers speak for the
-    // organization, where first-person completion is a different claim class.
-    // 读者互动层:T2/T3 的 answer 是模拟读者发言(或空串),不按楼主声音校验。
+    // side must not claim a completed *personal* action. The question side of
+    // simulated readers is covered by fabricated_operational_experience (same
+    // host-state signal, question-side nodes only).
+    //
+    // 为什么只管 publisher:三档答复身份都是可追责答复方,都代表机构说话——所以
+    // "代表机构"不是区分理由(旧注释按"publisher=顾客人设"写,已随身份翻转失效)。
+    // 真正的理由是**声音连续性**:publisher 就是这篇帖子的发布账号,它的答复延续
+    // 正文的语气与时序;正文只表达打算时,同一个账号在评论里说"我之前已经做过了"
+    // 就是自相矛盾的时序漂移。staff/expert 是另外的公开身份,不承担正文时序。
+    //
+    // 机构第一人称复数("我们/我方/本店")由 claimsFirstPersonCompletion 排除:
+    // 那是发布账号的正常人称("我们上周已经把当期价目更新了"),不是顾客完成时。
+    // 读者互动层:T2/T3 的 answer 是模拟读者发言(或空串),不按发布账号声音校验。
     if (hostDeclaresIntent && threadKind === "org_answer" && thread.postingIdentity === "publisher") {
       const completionAnswer = [thread.answer, ...thread.followUps.map((followUp) => followUp.answer)]
         .find((answerText) => claimsFirstPersonCompletion(answerText));
@@ -1543,26 +1680,36 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     if (leakedPlan) {
       add("comment_plan_language_surface_leak", "error", "Cref", `A visible comment renders a writing instruction instead of a person speaking: ${leakedPlan}`);
     }
-    const prohibitedHistories = [
-      ...(input.projectBlueprint?.scenarioModel.families.flatMap((family) => family.prohibitedUnsupportedHistories) ?? []),
-      ...(input.projectBlueprint?.claimPolicy.rules
-        .filter((rule) => rule.claimType === "historical_action")
-        .flatMap((rule) => rule.terms) ?? []),
-    ].filter(Boolean);
-    const questionSideNodes = new Set([thread.question, ...thread.followUps.map((item) => item.question)]);
-    const fabricatedAction = visibleNodes.find((node) => {
-      if (/(?:老用户|回购|亲测|亲身经历|我朋友|我同事|朋友说|同事说)/u.test(node)) return true;
-      const firstPersonCompleted = /(?:^|[，。！？!?\s])我.{0,28}(?:已经|刚|上周|昨天|之前|过|完|了)/u.test(node);
-      if (!firstPersonCompleted) return false;
-      if (prohibitedHistories.some((term) => node.includes(term))) return true;
-      // P4-19: when the body only declares host intent, a simulated reader's
-      // first-person completion claim is unsupported by construction. Scoped
-      // to the question side; the publisher answer side is covered by
-      // comment_host_state_inconsistency, so the two never double-fire.
-      return hostDeclaresIntent && questionSideNodes.has(node) && claimsFirstPersonCompletion(node);
-    });
-    if (fabricatedAction) {
-      add("fabricated_operational_experience", "error", "Cref", `A simulated role claims an unsupported completed project action or testimonial: ${fabricatedAction}`);
+    const prohibitedHistories = input.projectBlueprint
+      ? prohibitedHistoryTerms(input.projectBlueprint)
+      : [];
+    // 模拟读者的经历表述走**标注制**,不走名额制——禁的是"被当成证据"
+    // (generated_reference 升级为 observed / 独立口碑),不是"出现几条"。逐角色
+    // 的"禁止代替的证据"(首次调研者不能说"我已经体验过"等)由读者侧角色卡在提
+    // 示词里承担;此处只保留两条不可让位的硬门槛,按**任何可见节点**校验:
+    //   1) 蓝图禁止的未完成经历(prohibitedHistories)——按项目/行业配出来的;
+    //   2) 证词形态(第一人称完成 + 效果背书)——跨行业成立,"我做过效果很好"在
+    //      任何行业都是独立口碑,不是处境。
+    // 两条都覆盖答复侧:可追责身份(publisher/author/brand/staff/expert)同样不得
+    // 冒充独立消费者,comment_host_state_inconsistency 只管 publisher 一档,不足
+    // 以覆盖 staff/expert/brand 的答复。
+    //
+    // 这里**不再**放"老用户/回购/亲测"这类跨行业硬编码词表:那类说法是否构成
+    // 不当身份声明取决于项目的服务模型与领域——recurring/mixed 项目里复购类身份
+    // 声明需要证据支撑;one_time 项目里它本就不该出现;而另一些领域里它只是中性
+    // 说法,一律判 error 就是误伤。判断权归项目分析
+    // 阶段:蓝图按 serviceModel 与行业产出 prohibitedUnsupportedHistories /
+    // claimType=historical_action 的 terms,本校验照真源生效,不另立第二套词表。
+    const prohibitedHit = visibleNodes.find((node) =>
+      prohibitedHistories.some((term) => node.includes(term)));
+    if (prohibitedHit) {
+      add("fabricated_operational_experience", "error", "Cref", `A simulated role claims a prohibited unsupported history: ${prohibitedHit}`);
+    }
+    const testimonialShape = visibleNodes.find((node) =>
+      /(?:我|本人).{0,12}(?:做了|做过|买过了?|用过|体验过).{0,12}(?:效果|恢复|满意|值|靠谱)/u.test(node)
+      || /(?:效果(?:很好|真的不错|超预期)|恢复得(?:很好|很快)|亲测(?:有效|好用|靠谱))/u.test(node));
+    if (testimonialShape) {
+      add("fabricated_operational_experience", "error", "Cref", `A visible comment states a first-person experience as an outcome testimonial (independent word-of-mouth, not a situation): ${testimonialShape}`);
     }
     const auditLeak = visibleNodes.find((node) => /(?:源资料|资料参考|参考资料|可用证据|知识库里|项目资料里)/u.test(node));
     if (auditLeak) {
