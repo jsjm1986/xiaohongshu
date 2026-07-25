@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ArrowRight, FileText, Layers, Lightbulb, Map, Trash2 } from 'lucide-react';
+import { ArrowRight, FileText, Gauge, Layers, Lightbulb, Map, Server, Trash2 } from 'lucide-react';
 import { useProjects } from '../ProjectContext';
 import { Button, Field, Modal, useToast } from '../Ui';
 import { api } from '../../lib/api';
@@ -13,6 +13,7 @@ import {
   type QuickTab,
 } from '../../lib/quick-channel-state';
 import { V2Instrument, V2InstrumentCell, type V2InstrumentTone } from '../V2';
+import { quotaCell, type QuotaSnapshot } from '../../lib/quota-view';
 import type { GenerationJob, Project, ProjectIntelligence, TopicOpportunity } from '../../types';
 
 interface Props {
@@ -40,6 +41,7 @@ export function OverviewTab({ project, busy, setBusy, fail, goTo, onProjectUpdat
   const [intel, setIntel] = useState<ProjectIntelligence | null>(null);
   const [opps, setOpps] = useState<TopicOpportunity[]>([]);
   const [jobs, setJobs] = useState<GenerationJob[]>([]);
+  const [quota, setQuota] = useState<QuotaSnapshot | null>(null);
   const [renaming, setRenaming] = useState('');
   const [domain, setDomain] = useState('');
   const [description, setDescription] = useState('');
@@ -62,6 +64,12 @@ export function OverviewTab({ project, busy, setBusy, fail, goTo, onProjectUpdat
     api.generations.list(project.id)
       .then((r) => { if (!cancelled) setJobs(r.items); })
       .catch(() => { if (!cancelled) setJobs([]); });
+    // 额度:付费用户需要在生成前就知道还剩多少,而不是撞上 403 才发现。
+    // 同样静默回落——额度读不到不该拖垮总览其余读数。
+    setQuota(null);
+    api.settings.quota(project.workspaceId)
+      .then((r) => { if (!cancelled) setQuota(r); })
+      .catch(() => { /* 静默回落:不显示额度格 */ });
     setRenaming(project.name);
     setDomain(project.domain ?? '');
     setDescription(project.description ?? '');
@@ -99,6 +107,7 @@ export function OverviewTab({ project, busy, setBusy, fail, goTo, onProjectUpdat
   const actionNote = analyzing ? '分析进行中' : action.note;
 
   const recent = jobs.slice(0, 3);
+  const quotaInfo = quotaCell(quota);
   const mapCell = MAP_CELL[analysis];
   const mapNote = analysis === 'stale'
     ? staleReasons.join('；') || '资料有更新'
@@ -146,12 +155,37 @@ export function OverviewTab({ project, busy, setBusy, fail, goTo, onProjectUpdat
 
   return (
     <div className="qc-step">
+      {/* 有额度可显示时扩到 5 格(BYOK 或读取失败时 quotaCell 返回 null,保持 4 格) */}
       <V2Instrument columns={4}>
         <V2InstrumentCell tone={mapCell.tone} icon={<Map size={14} />} label="内容地图" value={mapCell.value} note={mapNote} />
         <V2InstrumentCell tone="brand" icon={<FileText size={14} />} label="知识文件" value={project.knowledgeCount ?? 0} unit="个" />
         <V2InstrumentCell tone="ai" icon={<Lightbulb size={14} />} label="选题池" value={opps.length} unit="个" note={`未处理 ${activeCount} · 收藏 ${collectedCount}`} />
         <V2InstrumentCell tone="ok" icon={<Layers size={14} />} label="累计产出" value={jobs.length} unit="篇" />
       </V2Instrument>
+
+      {/* 额度单独一行:V2Instrument 是 4 列固定网格,塞第 5 格会让它独占第二行的
+          四分之一宽,排版是坏的。这里另起一行两格:额度 + 计费口径。
+          「各消耗 1 次」是核对过的——consumePlatformQuota 在生成、按意见修改、
+          知识库分析三处各 +1,修改同样计费,不能只说生成。 */}
+      {quotaInfo && (
+        <V2Instrument columns={2}>
+          <V2InstrumentCell
+            tone={quotaInfo.tone}
+            icon={<Gauge size={14} />}
+            label="本月额度"
+            value={quotaInfo.value}
+            unit={quotaInfo.unit}
+            note={quotaInfo.note}
+          />
+          <V2InstrumentCell
+            tone="blue"
+            icon={<Server size={14} />}
+            label="计费方式"
+            value="平台额度"
+            note="生成、按意见修改、知识库分析各消耗 1 次"
+          />
+        </V2Instrument>
+      )}
 
       <div className="qc-overview-next">
         <Button icon={<ArrowRight size={16} />} disabled={analyzing || busy} onClick={() => goTo(action.tab)}>{action.label}</Button>

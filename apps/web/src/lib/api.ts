@@ -40,6 +40,7 @@ import type {
   WorkspaceApiKey,
 } from "../types";
 import { gapPayload, opportunityPayload } from "./metric-payload";
+import type { QuotaSnapshot } from "./quota-view";
 
 export class ApiError extends Error {
   constructor(
@@ -1259,6 +1260,14 @@ export const api = {
     get: (workspaceId?: string) =>
       request<AppSettings>(
         `/api/settings${workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : ""}`,
+      ),
+    /**
+     * 额度余量(只读)。极简创作(SaaS)可调,而 GET /api/settings 对 saas 用户
+     * 是 403——后者会连带返回供应商与配置字段,不在白名单内。
+     */
+    quota: (workspaceId?: string) =>
+      request<QuotaSnapshot>(
+        `/api/settings/quota${workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : ""}`,
       ),
     update: (
       input: Partial<AppSettings> & { apiKey?: string; workspaceId?: string; clearApiKey?: boolean },
