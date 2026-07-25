@@ -31,14 +31,14 @@ export const ENTRY_LABEL: Record<string, string> = {
  * 这些分是「未校准的排序辅助」,同一项在不同选题间的位置必须一致,
  * 否则用户会以为顺序本身有含义。
  */
-const METRIC_LABELS: Array<{ key: MetricKey; label: string }> = [
+const METRIC_LABELS: Array<{ key: MetricKey; label: string; inverse?: true }> = [
   { key: 'relevance', label: '相关' },
   { key: 'importance', label: '重要' },
   { key: 'proofability', label: '可证' },
   { key: 'decisionLeverage', label: '决策' },
   { key: 'novelty', label: '新颖' },
-  { key: 'cognitiveCost', label: '认知成本' },
-  { key: 'risk', label: '风险' },
+  { key: 'cognitiveCost', label: '认知成本', inverse: true },
+  { key: 'risk', label: '风险', inverse: true },
 ];
 
 type MetricKey =
@@ -50,6 +50,11 @@ export interface TopicCardMetric {
   label: string;
   /** 0..1,已确保非 null */
   value: number;
+  /**
+   * true 表示「越低越好」(认知成本、风险),方向与其余五项相反。
+   * 放在数据层而不是组件里:方向是指标语义的一部分,不是样式选择。
+   */
+  inverse: boolean;
 }
 
 export interface TopicCardView {
@@ -80,9 +85,9 @@ function label(map: Record<string, string>, value?: string): string | null {
 
 export function topicCardFields(o: TopicOpportunity): TopicCardView {
   const metrics: TopicCardMetric[] = [];
-  for (const { key, label: metricLabel } of METRIC_LABELS) {
+  for (const { key, label: metricLabel, inverse } of METRIC_LABELS) {
     const value = o[key];
-    if (typeof value === 'number') metrics.push({ key, label: metricLabel, value });
+    if (typeof value === 'number') metrics.push({ key, label: metricLabel, value, inverse: inverse === true });
   }
 
   return {

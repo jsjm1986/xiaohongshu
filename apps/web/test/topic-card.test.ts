@@ -87,6 +87,19 @@ test('uncalibrated 恒为 true:分数必须带未校准标注', () => {
   assert.equal(topicCardFields({ ...base } as any).uncalibrated, true);
 });
 
+// 认知成本与风险方向相反(越低越好)。这不是样式偏好:全按同一方向着色
+// 会把「风险 0.9」画成和「相关 0.9」一样的正面信号,把坏消息说成好消息。
+test('认知成本与风险标记为 inverse,其余五项不标记', () => {
+  const v = topicCardFields({
+    ...base, relevance: 1, importance: 1, proofability: 1,
+    decisionLeverage: 0.8, novelty: 0.3, cognitiveCost: 0.2, risk: 0.1,
+  } as any);
+  const inverse = v.metrics.filter((m) => m.inverse).map((m) => m.key);
+  assert.deepEqual(inverse, ['cognitiveCost', 'risk']);
+  const normal = v.metrics.filter((m) => !m.inverse).map((m) => m.key);
+  assert.deepEqual(normal, ['relevance', 'importance', 'proofability', 'decisionLeverage', 'novelty']);
+});
+
 test('证据数与边界数如实反映数组长度', () => {
   const v = topicCardFields({ ...base, evidenceIds: ['e1', 'e2'], boundaries: ['b1'] } as any);
   assert.equal(v.evidenceCount, 2);
