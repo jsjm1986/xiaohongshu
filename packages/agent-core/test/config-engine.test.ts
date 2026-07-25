@@ -46,14 +46,23 @@ const knowledge = [
   indexKnowledgeSource({ projectId: "p1", id: "d2", path: "facts.md", content: "# 已知事实\n项目资料只确认这些信息，并要求保留适用边界。" }),
 ];
 
+function requestText(request: ModelGenerationRequest): string {
+  return request.messages.map((message) => {
+    const content = message.content;
+    return Array.isArray(content)
+      ? content.map((part) => (part.type === "text" ? part.text : "")).join("\n")
+      : content;
+  }).join("\n");
+}
+
+/** 按侧+按角色隔离后,提示词不再有 task_data;线程 id 直接从提示词全文的规格/清单/根评论 JSON 中提取。 */
+function stagedThreadIds(request: ModelGenerationRequest): string[] {
+  return [...new Set([...requestText(request).matchAll(/"id"\s*:\s*"([^"]*_thread_\d+)"/gu)].map((match) => match[1]!))];
+}
+
 function stagedCommentThreads(request: ModelGenerationRequest, answer: string) {
-  const content = request.messages[1]!.content;
-  const text = Array.isArray(content) ? content.find((part) => part.type === "text")?.text ?? "" : content;
-  const match = text.match(/<task_data>\s*([\s\S]*?)\s*<\/task_data>/u);
-  const taskData = match ? JSON.parse(match[1]!) : {};
-  return (taskData.orchestrationPlan?.dialogueThreads ?? []).map((thread: { id: string }, index: number) => ({
-    id: thread.id,
-    roleIndex: index % Math.max(1, taskData.orchestrationPlan?.personaScenePlan?.commentCast?.length ?? 1),
+  return stagedThreadIds(request).map((id, index) => ({
+    id,
     question: `第${index + 1}项应该核实什么？`,
     answer,
     followUps: [],
@@ -228,7 +237,15 @@ describe("three-candidate content generation engine", () => {
       async generate(request) {
         calls.push(request);
         if (request.metadata?.purpose === "repair") return { text: JSON.stringify({ N: { body: validBody } }), raw: {} };
-        if (["generate_comments", "generate_comment_growth"].includes(String(request.metadata?.purpose))) return {
+        if (String(request.metadata?.purpose) === "generate_comment_readers") return {
+          text: JSON.stringify({ threads: stagedCommentThreads(request, "按资料逐项核实。") }),
+          raw: {},
+        };
+        if (String(request.metadata?.purpose) === "generate_org_answers") return {
+          text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "按资料逐项核实。" })) }),
+          raw: {},
+        };
+        if (String(request.metadata?.purpose) === "generate_comment_growth") return {
           text: JSON.stringify({ disclaimer: "评论区问答参考模板", threads: stagedCommentThreads(request, "按资料逐项核实。") }),
           raw: {},
         };
@@ -246,7 +263,8 @@ describe("three-candidate content generation engine", () => {
     const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-07-12T00:00:00Z") })
       .generate({ jobId: "repair-job", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge: [knowledge[0]!] });
     expect(calls.filter((item) => item.metadata?.purpose === "generate_core")).toHaveLength(3);
-    expect(calls.filter((item) => item.metadata?.purpose === "generate_comments")).toHaveLength(3);
+    // 按侧+按角色隔离后,评论读者侧调用取代原合并评论调用(purpose 更名)。
+    expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_readers")).toHaveLength(3);
     // Task 7.3: multi-turn comment growth (stage 2B) is opt-in and conservative by
     // default, so with the default config it never fires the extra LLM growth call.
     // The pipeline still produces valid root comments and fails closed as expected.
@@ -264,7 +282,17 @@ describe("three-candidate content generation engine", () => {
     const provider: ModelProvider = {
       async generate(request) {
         if (request.metadata?.candidateIndex === 1) throw new Error("temporary upstream failure");
-        if (["generate_comments", "generate_comment_growth"].includes(String(request.metadata?.purpose))) return {
+        if (String(request.metadata?.purpose) === "generate_comment_readers") return {
+          text: JSON.stringify({
+            threads: stagedCommentThreads(request, "先确认问题类型，再核实适用边界。"),
+          }),
+          raw: {},
+        };
+        if (String(request.metadata?.purpose) === "generate_org_answers") return {
+          text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "先确认问题类型，再核实适用边界。" })) }),
+          raw: {},
+        };
+        if (String(request.metadata?.purpose) === "generate_comment_growth") return {
           text: JSON.stringify({
             disclaimer: "多角色情景演练参考模板",
             threads: stagedCommentThreads(request, "先确认问题类型，再核实适用边界。"),
@@ -341,7 +369,17 @@ describe("three-candidate content generation engine", () => {
     const provider: ModelProvider = {
       async generate(request) {
         calls.push(request);
-        if (["generate_comments", "generate_comment_growth"].includes(String(request.metadata?.purpose))) return {
+        if (String(request.metadata?.purpose) === "generate_comment_readers") return {
+          text: JSON.stringify({
+            threads: stagedCommentThreads(request, "按资料来源逐项核验。"),
+          }),
+          raw: {},
+        };
+        if (String(request.metadata?.purpose) === "generate_org_answers") return {
+          text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "按资料来源逐项核验。" })) }),
+          raw: {},
+        };
+        if (String(request.metadata?.purpose) === "generate_comment_growth") return {
           text: JSON.stringify({
             disclaimer: "以下为评论区问答参考模板，不代表真实用户发言。",
             threads: stagedCommentThreads(request, "按资料来源逐项核验。"),
@@ -430,17 +468,31 @@ describe("three-candidate content generation engine", () => {
         imageAnalyses: approvedImageAnalyses,
       },
     });
-    // 3 candidates x 4 staged calls (core + comments + comment_growth + ledger);
-    // comment_growth is present because it was explicitly opted in above.
-    expect(calls).toHaveLength(12);
+    // 按侧+按角色隔离后,每候选 6 次阶段调用:core + assign_reply_identities
+    // (1.9,答复身份分配) + comment_readers(2A-R) + org_answers(2A-O,本测试线程
+    // 全部同一身份路由,1 次) + comment_growth(2B,显式开启) + ledger;growth mock
+    // 不留空答复追问,故不触发 2B-O 补答。
+    expect(calls).toHaveLength(18);
+    expect(calls.filter((item) => item.metadata?.purpose === "assign_reply_identities")).toHaveLength(3);
+    expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_readers")).toHaveLength(3);
+    expect(calls.filter((item) => item.metadata?.purpose === "generate_org_answers")).toHaveLength(3);
     expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_growth")).toHaveLength(3);
-    const promptTexts = calls.map((call) => {
+    const promptTextOf = (call: ModelGenerationRequest): string => {
       const content = call.messages[1]!.content;
-      expect(Array.isArray(content)).toBe(true);
       return Array.isArray(content) ? content.find((part) => part.type === "text")?.text ?? "" : content;
-    });
-    expect(promptTexts.every((text) => text.includes("指定选题") && text.includes("orchestrationPlan"))).toBe(true);
-    expect(promptTexts.every((text) => text.includes("image-analysis:img1") && text.includes("inferredSignals and unknowns are not factual evidence"))).toBe(true);
+    };
+    const fullContractCalls = calls.filter((call) => ["generate_core", "generate_ledger"].includes(String(call.metadata?.purpose)));
+    const isolatedCalls = calls.filter((call) => ["generate_comment_readers", "generate_org_answers", "generate_comment_growth"].includes(String(call.metadata?.purpose)));
+    // stage1/stage3 仍注入全量生产合同(含图片);按侧隔离的评论调用只带精简
+    // 上下文——不含编排元信息,也不再随附图片(图片只影响 stage1 图文)。
+    for (const call of fullContractCalls) expect(Array.isArray(call.messages[1]!.content)).toBe(true);
+    expect(fullContractCalls.map(promptTextOf).every((text) => text.includes("指定选题") && text.includes("orchestrationPlan"))).toBe(true);
+    expect(fullContractCalls.map(promptTextOf).every((text) => text.includes("image-analysis:img1") && text.includes("inferredSignals and unknowns are not factual evidence"))).toBe(true);
+    expect(isolatedCalls.map(promptTextOf).every((text) => !text.includes("orchestrationPlan") && !text.includes("image-analysis:img1"))).toBe(true);
+    // 读者侧上下文含任务基本信息(主题);机构侧上下文含本角色身份卡(项目名)。
+    const readerSideCalls = calls.filter((call) => ["generate_comment_readers", "generate_comment_growth"].includes(String(call.metadata?.purpose)));
+    expect(readerSideCalls.map(promptTextOf).every((text) => text.includes("方案选择"))).toBe(true);
+    expect(calls.filter((call) => call.metadata?.purpose === "generate_org_answers").map(promptTextOf).every((text) => text.includes("测试项目"))).toBe(true);
     expect(new Set(result.packages.map((item) => item.orchestrationSnapshot?.strategy.id)).size).toBe(3);
     expect(result.packages.every((item) => item.orchestrationSnapshot?.opportunitySelectionAudit?.selectionMode === "explicit_locked"
       && item.orchestrationSnapshot.opportunitySelectionAudit.rankStatus === "not_applied"
@@ -458,10 +510,24 @@ describe("three-candidate content generation engine", () => {
     expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => Boolean(thread.roleCard && thread.replyPlan && thread.primaryGapId)))).toBe(true);
     expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => thread.followUps.length <= 2))).toBe(true);
     expect(result.packages.some((item) => item.content.Cref.threads.some((thread) => thread.followUps.length === 0))).toBe(true);
-    expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => thread.answer === "按资料来源逐项核验。"))).toBe(true);
+    // 按侧+按角色隔离:T1 答复来自机构调用,T2 来自读者侧(同一 mock 文案);
+    // T3 漂浮短反应的 answer 由合并层确定性置空(旧流程由模型一次写全部,
+    // mock 文案会覆盖 T3;新流程 T3 恒空是设计语义)。
+    expect(result.packages.every((item) => item.content.Cref.threads.every((thread) =>
+      (thread.threadKind ?? "org_answer") === "organic_reaction"
+        ? thread.answer === ""
+        : thread.answer === "按资料来源逐项核验。"))).toBe(true);
     expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => !/直接回答\s*[：:]|NextQuestion\s*[：:]/u.test(thread.answer)))).toBe(true);
     expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => !thread.question.includes("…")))).toBe(true);
-    expect(promptTexts.every((text) => text.includes("个体适用性需要核验"))).toBe(true);
+    // 缺口边界流入 stage1/stage3 全量上下文(task_data)与机构侧逐 gap 口径;
+    // 读者侧精简上下文按设计不含边界口径。机构调用的口径在线程清单(messages[3]),
+    // 这里按提示词全文判定。
+    const fullTextOf = (call: ModelGenerationRequest): string => call.messages.map((message) => {
+      const content = message.content;
+      return Array.isArray(content) ? content.map((part) => (part.type === "text" ? part.text : "")).join("\n") : content;
+    }).join("\n");
+    expect([...fullContractCalls, ...calls.filter((call) => call.metadata?.purpose === "generate_org_answers")]
+      .map(fullTextOf).every((text) => text.includes("个体适用性需要核验"))).toBe(true);
 
     const revised = await engine.revise({
       package: result.packages[0],

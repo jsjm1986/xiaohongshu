@@ -11,8 +11,12 @@ import {
   parseGenerationPatch,
   parseJsonObject,
   parseStagedCommentCopy,
+  parseStagedCommentReaders,
   parseStagedCoreCopy,
+  parseStagedOrgAnswers,
+  STAGED_COMMENT_DISCLAIMER,
   type StagedCommentCopy,
+  type StagedOrgAnswersCopy,
   validateGenerationDraft,
 } from "./content.js";
 import { buildProductionArtifacts } from "./artifacts.js";
@@ -46,7 +50,10 @@ import {
 import type { ModelProvider } from "./model.js";
 import { buildParameterDiagnostics, compileGenerationParameters } from "./parameters.js";
 import {
+  applyReplyIdentityAssignments,
   assignCommentDisplayName,
+  buildReplyIdentityAssignmentBrief,
+  parseReplyIdentityAssignments,
   planTopicOrchestrations,
   rankTopicOpportunities,
   createCoverageSignature,
@@ -55,10 +62,13 @@ import {
   buildClaimJudgePrompt,
   buildKnowledgeAnchorReviewPrompt,
   buildRepairPrompt,
+  buildReplyIdentityAssignmentPrompt,
   buildStagedCommentGrowthPrompt,
-  buildStagedCommentsPrompt,
+  buildStagedCommentReadersPrompt,
   buildStagedCorePrompt,
   buildStagedLedgerPrompt,
+  buildStagedOrgAnswersPrompt,
+  buildStagedOrgFollowUpAnswersPrompt,
   renderFormulaInstructions,
 } from "./prompt.js";
 import { analyzeRevisionDependencies, mergeContentByChannels } from "./revision.js";
@@ -985,6 +995,7 @@ function deterministicDraft(
         ? pickDistinct(answers, usedNaturalAnswers, "姐妹我也是，还在纠结要不要去问问")
         : pickDistinct(ungroundedGap ? unknownAnswerVariants : answers, usedNaturalAnswers, rawAnswer);
     usedNaturalAnswers.add(comparable(answer));
+    if (process.env.PROBE && answer.includes("我也是想先把这个问明白")) console.log("[PROBE natural]", threadKind, planned?.postingIdentity, surface.utteranceMode);
     const plannedFollowUps = planned?.conversationPlan?.targetFollowUps ?? 0;
     const fallbackFollowUpLines = [
       { question: "等等，你说的是紧接着就有重要安排吗", answer: "对，我最怕的就是现实时间对不上" },
@@ -1338,6 +1349,28 @@ function deterministicDraft(
   };
 }
 
+/**
+ * 线程答复的确定性兜底口径。读者互动层:T3 漂浮短反应无回答需求(空串);
+ * T2 读者互聊由读者 B 接话。模块级函数:bindDialogueProvenance 的缺文案兜
+ * 底与 2A-O 机构答复失败/缺 id 时的回落共用同一套口径。
+ */
+function answerFromPlan(planned: OrchestrationPlan["dialogueThreads"][number]): string {
+  if (planned.threadKind === "organic_reaction") return "";
+  // T2 的 answer 本就是读者 B 接话,路人腔在这里是正确的。
+  if (planned.threadKind === "reader_exchange") return "姐妹我也是，还在纠结要不要去问问";
+  // T1(org_answer)是可追责答复位:三档身份都是发布方,不是路人。此前这里按
+  // utteranceMode 发路人话术("我也是想先把这个问明白"/"我还在看，确定了来回你"),
+  // 那等于自有账号冒充独立消费者(《ROLE 04 · 发布账号》明令禁止),而 2A-O 失败
+  // 只记 warning 不阻断,兜底文案会直接进包。改为回落规划层已有的口径:
+  // directAnswer＋condition 是规划算出来的答复要点,没有则退到保留未知＋转核验,
+  // 不编造具体说法。
+  const plan = planned.replyPlan;
+  const spoken = [plan?.directAnswer, plan?.condition].map((part) => part?.trim()).filter(Boolean);
+  if (spoken.length) return `${spoken.join("；")}。`;
+  if (process.env.PROBE) console.log("[PROBE fromPlan-unknown]", planned.postingIdentity);
+  return "这一项我先不下结论，我帮你跟专人确认后再回你。";
+}
+
 function bindDialogueProvenance(
   draft: GenerationDraft,
   plan: OrchestrationPlan,
@@ -1374,19 +1407,6 @@ function bindDialogueProvenance(
     .replace(/。{2,}/gu, "。")
     .replace(/；。/gu, "。")
     .trim();
-  const answerFromPlan = (planned: OrchestrationPlan["dialogueThreads"][number]): string => {
-    // 读者互动层:T3 漂浮短反应无回答需求(空串);T2 读者互聊由读者 B 接话。
-    if (planned.threadKind === "organic_reaction") return "";
-    if (planned.threadKind === "reader_exchange") return "姐妹我也是，还在纠结要不要去问问";
-    const surface = planned.surfaceRoleCard;
-    if (surface?.utteranceMode === "social_reaction") return "哈哈我也是今天才注意到";
-    if (surface?.utteranceMode === "detail_spotter") return "对，我也是看照片才注意到这个";
-    if (surface?.utteranceMode === "knowledge_translation") return "简单说得看具体情况，我先不替你定";
-    if (surface?.utteranceMode === "identity_route") return "我还在看，确定了来回你";
-    if (surface?.utteranceMode === "experience_fragment") return "那我还是多留点时间保险";
-    if (surface?.utteranceMode === "counterexample") return "对，所以我也不敢只按一个人的情况算";
-    return "我也是想先把这个问明白";
-  };
   const threads = plan.dialogueThreads.map((planned, index) => {
     const existing = remappedDraft.content.Cref.threads[index];
     const fallbackId = planned.id;
@@ -1854,7 +1874,7 @@ export class ContentGenerationAgent implements GenerationEngine {
     impactReport: ParameterImpactReport,
     useProvider = true,
   ): Promise<ContentPackage> {
-    const orchestrationPlan = planning.plans[candidateIndex];
+    let orchestrationPlan = planning.plans[candidateIndex];
     const seed = orchestrationPlan.seed;
     const variation = variationFor(seed, candidateIndex);
     const availableEvidence = generationEvidenceReferences(input.config, input.knowledge, context, input.planningContext);
@@ -1901,21 +1921,147 @@ export class ContentGenerationAgent implements GenerationEngine {
         metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_core", stage: 1 },
       });
       const core = parseStagedCoreCopy(coreResponse.text);
-      const commentsPrompt = buildStagedCommentsPrompt(promptInput, core);
-      const commentsResponse = await this.provider.generate({
-        messages: commentsPrompt.messages,
-        responseSchema: commentsPrompt.responseSchema,
-        schemaName: "content_candidate_comments",
+      // 三身份生态:阶段 2 开头先做 AI 答复身份分配(每候选 1 次轻量调用,
+      // seed 可复现)。规划层已按兜底表落位;AI 结果经护栏校验(price/
+      // location/schedule 线程强制 staff,缺失/非法回落兜底表)后覆盖
+      // postingIdentity,并逐身份强制 replyDisplayRole。调用失败/输出非法时
+      // 整体保留兜底表,记 warning 进 stageIssues,不阻断候选。
+      try {
+        const claimRules = input.planningContext?.projectBlueprint?.claimPolicy.rules ?? [];
+        const assignmentPrompt = buildReplyIdentityAssignmentPrompt(
+          buildReplyIdentityAssignmentBrief(orchestrationPlan.dialogueThreads, orchestrationPlan.gapPlanningCards ?? [], claimRules),
+        );
+        const assignmentResponse = await this.provider.generate({
+          messages: assignmentPrompt.messages,
+          responseSchema: assignmentPrompt.responseSchema,
+          schemaName: "reply_identity_assignment",
+          model: input.config.model.model,
+          seed: seed + 6,
+          temperature: Math.min(input.config.model.temperature, 0.2),
+          maxOutputTokens: Math.min(input.config.model.maxOutputTokens, 2_000),
+          metadata: { jobId: input.jobId, candidateIndex, purpose: "assign_reply_identities", stage: 1.9 },
+        });
+        const applied = applyReplyIdentityAssignments(
+          orchestrationPlan.dialogueThreads,
+          orchestrationPlan.gapPlanningCards ?? [],
+          parseReplyIdentityAssignments(assignmentResponse.text),
+          claimRules,
+          input.planningContext?.projectBlueprint,
+          orchestrationPlan.personaScenePlan?.commentCast ?? [],
+        );
+        for (const message of applied.warnings) {
+          stageIssues.push({ code: "reply_identity_assignment_adjusted", severity: "warning", channel: "Cref", message, repairable: false });
+        }
+        orchestrationPlan = { ...orchestrationPlan, dialogueThreads: applied.threads };
+      } catch (error) {
+        stageIssues.push({
+          code: "reply_identity_assignment_failed",
+          severity: "warning",
+          channel: "Cref",
+          message: `AI 答复身份分配失败，全部线程按确定性兜底表落位：${error instanceof Error ? error.message : String(error)}`,
+          repairable: false,
+        });
+      }
+      // 阶段2A-R 读者侧(1 次):全部线程的 question 与 T2 读者互聊的 answer。
+      // 读者上下文与机构身份整体隔离——不含助理/IP 定义、路由逻辑、证据原文
+      // 与编排元信息;开口人物由规划层分配,模型不选角(无 roleIndex)。
+      const readersPrompt = buildStagedCommentReadersPrompt(promptInput, core);
+      const readersResponse = await this.provider.generate({
+        messages: readersPrompt.messages,
+        responseSchema: readersPrompt.responseSchema,
+        schemaName: "content_candidate_comment_readers",
         model: input.config.model.model,
         seed: seed + 1,
         temperature: input.config.model.temperature,
         maxOutputTokens: input.config.model.maxOutputTokens,
-        metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_comments", stage: 2 },
+        metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_comment_readers", stage: 2 },
       });
-      const roots = parseStagedCommentCopy(commentsResponse.text);
-      if (roots.threads.length !== orchestrationPlan.dialogueThreads.length) {
-        throw new Error(`Staged comment output returned ${roots.threads.length} threads; expected ${orchestrationPlan.dialogueThreads.length}.`);
+      const readerSide = parseStagedCommentReaders(readersResponse.text);
+      if (readerSide.threads.length !== orchestrationPlan.dialogueThreads.length) {
+        throw new Error(`Staged comment output returned ${readerSide.threads.length} threads; expected ${orchestrationPlan.dialogueThreads.length}.`);
       }
+      // 阶段2A-O 机构答复(三身份:publisher 楼主/staff 助理/expert 机构 IP,
+      // 各≤1 次,该身份无线程则跳过):每次调用只见本角色身份卡与逐 gap 口径
+      // scope,其他身份的任何信息不出现。每个调用独立 try/catch:失败或缺 id
+      // 的线程回落 answerFromPlan 并记 warning(沿用 stageIssues 通道,不阻断候选)。
+      const orgAnswersById = new Map<string, StagedOrgAnswersCopy["answers"][number]>();
+      let ownedFirstComment: string | undefined;
+      const orgAnswerThreads = orchestrationPlan.dialogueThreads
+        .map((planned, index) => ({ planned, reader: readerSide.threads[index]! }))
+        .filter(({ planned }) => (planned.threadKind ?? "org_answer") === "org_answer");
+      const orgAnswerSeeds = { publisher: 11, staff: 12, expert: 15 } as const;
+      for (const identity of ["publisher", "staff", "expert"] as const) {
+        const identityThreads = orgAnswerThreads.filter(({ planned }) => planned.postingIdentity === identity);
+        if (!identityThreads.length) continue;
+        try {
+          const orgPrompt = buildStagedOrgAnswersPrompt(
+            promptInput,
+            core,
+            identity,
+            identityThreads.map(({ planned, reader }) => ({ planned, question: reader.question })),
+          );
+          const orgResponse = await this.provider.generate({
+            messages: orgPrompt.messages,
+            responseSchema: orgPrompt.responseSchema,
+            schemaName: "content_candidate_org_answers",
+            model: input.config.model.model,
+            seed: seed + orgAnswerSeeds[identity],
+            temperature: input.config.model.temperature,
+            maxOutputTokens: input.config.model.maxOutputTokens,
+            metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_org_answers", stage: 2.1, identity },
+          });
+          const orgSide = parseStagedOrgAnswers(orgResponse.text);
+          if (identity === "publisher") ownedFirstComment = orgSide.ownedFirstComment;
+          for (const { planned } of identityThreads) {
+            const found = orgSide.answers.find((answer) => answer.id === planned.id);
+            if (found) {
+              orgAnswersById.set(planned.id, found);
+            } else {
+              stageIssues.push({
+                code: "model_org_answer_failed",
+                severity: "warning",
+                channel: "Cref",
+                message: `机构答复（${identity}）未覆盖线程 ${planned.id}，该线程答复已回落规划口径。`,
+                repairable: false,
+              });
+            }
+          }
+        } catch (error) {
+          stageIssues.push({
+            code: "model_org_answer_failed",
+            severity: "warning",
+            channel: "Cref",
+            message: `机构答复（${identity}）阶段失败，该角色线程答复已回落规划口径：${error instanceof Error ? error.message : String(error)}`,
+            repairable: false,
+          });
+        }
+      }
+      // 合并层确定性:surfaceRoleCard/postingIdentity/threadKind 一律以规划层
+      // 为准;模型输出只取可见文案。disclaimer 用确定性常量,不再由模型输出。
+      const roots: StagedCommentCopy = {
+        disclaimer: STAGED_COMMENT_DISCLAIMER,
+        ownedFirstComment,
+        threads: orchestrationPlan.dialogueThreads.map((planned, index) => {
+          const reader = readerSide.threads[index]!;
+          const threadKind = planned.threadKind ?? "org_answer";
+          const orgAnswer = threadKind === "org_answer" ? orgAnswersById.get(planned.id) : undefined;
+          return {
+            id: reader.id,
+            question: reader.question,
+            // T3 恒空;T2 读者B接话来自读者侧;T1 机构答复,缺失时回落规划口径。
+            answer: threadKind === "organic_reaction"
+              ? ""
+              : threadKind === "reader_exchange"
+                ? reader.answer
+                : (orgAnswer?.answer ?? answerFromPlan(planned)),
+            kind: reader.kind,
+            answerKind: orgAnswer?.answerKind ?? reader.answerKind,
+            boundary: orgAnswer?.boundary ?? reader.boundary,
+            function: reader.function,
+            followUps: [],
+          };
+        }),
+      };
       const normalizedRoots: StagedCommentCopy = {
         ...roots,
         threads: roots.threads.map((thread) => ({ ...thread, followUps: [] })),
@@ -1972,6 +2118,87 @@ export class ContentGenerationAgent implements GenerationEngine {
           });
         }
       }
+      // 阶段2B-O 机构补答(条件触发):仅当 2B 后仍存在 answer 为空的
+      // org_answer followUp 时,按角色各 1 次(通常 0-1 次)。上下文隔离规则同
+      // 2A-O;失败或未补答的追问确定性丢弃(不保留空答复),并记 warning。
+      const pendingOrgFollowUps = comments.threads.flatMap((thread, threadIndex) => {
+        const planned = orchestrationPlan.dialogueThreads[threadIndex]!;
+        if ((planned.threadKind ?? "org_answer") !== "org_answer") return [];
+        return thread.followUps
+          .map((followUp, followUpIndex) => ({ planned, thread, followUp, followUpIndex }))
+          .filter(({ followUp }) => !followUp.answer.trim() && followUp.question.trim());
+      });
+      if (pendingOrgFollowUps.length) {
+        const filledAnswers = new Map<string, string>();
+        const orgFollowUpSeeds = { publisher: 13, staff: 14, expert: 16 } as const;
+        for (const identity of ["publisher", "staff", "expert"] as const) {
+          const items = pendingOrgFollowUps.filter(({ planned }) => planned.postingIdentity === identity);
+          if (!items.length) continue;
+          try {
+            const followUpPrompt = buildStagedOrgFollowUpAnswersPrompt(
+              promptInput,
+              core,
+              identity,
+              items.map(({ planned, thread, followUp, followUpIndex }) => ({
+                planned,
+                rootQuestion: thread.question,
+                rootAnswer: thread.answer,
+                followUpId: `${thread.id}:fu:${followUpIndex}`,
+                question: followUp.question,
+              })),
+            );
+            const followUpResponse = await this.provider.generate({
+              messages: followUpPrompt.messages,
+              responseSchema: followUpPrompt.responseSchema,
+              schemaName: "content_candidate_org_followup_answers",
+              model: input.config.model.model,
+              seed: seed + orgFollowUpSeeds[identity],
+              temperature: input.config.model.temperature,
+              maxOutputTokens: input.config.model.maxOutputTokens,
+              metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_org_followup_answers", stage: 2.3, identity },
+            });
+            const followUpSide = parseStagedOrgAnswers(followUpResponse.text);
+            for (const { thread, followUpIndex } of items) {
+              const requestId = `${thread.id}:fu:${followUpIndex}`;
+              const found = followUpSide.answers.find((answer) => answer.id === requestId);
+              if (found?.answer.trim()) {
+                filledAnswers.set(requestId, found.answer);
+              } else {
+                stageIssues.push({
+                  code: "model_org_answer_failed",
+                  severity: "warning",
+                  channel: "Cref",
+                  message: `机构补答（${identity}）未覆盖线程 ${thread.id} 的第 ${followUpIndex + 1} 条追问，该追问已确定性丢弃。`,
+                  repairable: false,
+                });
+              }
+            }
+          } catch (error) {
+            stageIssues.push({
+              code: "model_org_answer_failed",
+              severity: "warning",
+              channel: "Cref",
+              message: `机构补答（${identity}）阶段失败，待承接追问已确定性丢弃：${error instanceof Error ? error.message : String(error)}`,
+              repairable: false,
+            });
+          }
+        }
+        comments = {
+          ...comments,
+          threads: comments.threads.map((thread, threadIndex) => {
+            const planned = orchestrationPlan.dialogueThreads[threadIndex]!;
+            if ((planned.threadKind ?? "org_answer") !== "org_answer") return thread;
+            return {
+              ...thread,
+              followUps: thread.followUps.flatMap((followUp, followUpIndex) => {
+                if (followUp.answer.trim() || !followUp.question.trim()) return [followUp];
+                const filled = filledAnswers.get(`${thread.id}:fu:${followUpIndex}`);
+                return filled ? [{ ...followUp, answer: filled }] : [];
+              }),
+            };
+          }),
+        };
+      }
       const maxVisibleCommentLines = orchestrationPlan.personaScenePlan?.surfaceTargets.visibleCommentLines[1]
         ?? comments.threads.length * 2 + input.config.content.followUpDepth * 2;
       let remainingFollowUps = Math.max(0, Math.floor((maxVisibleCommentLines - comments.threads.length * 2) / 2));
@@ -1992,9 +2219,11 @@ export class ContentGenerationAgent implements GenerationEngine {
               : visible.followUps.slice(0, Math.min(input.config.content.followUpDepth, remainingFollowUps));
             remainingFollowUps -= followUps.length;
             const rootAnswer = root.answer.split(/\n\s*(?:追问|Q\d*)[：:]/iu)[0]?.trim() || root.answer.trim();
-            const cast = orchestrationPlan.personaScenePlan?.commentCast ?? [];
-            const selectedRoleIndex = root.roleIndex ?? threadIndex % Math.max(1, cast.length);
-            const selectedSurface = cast[selectedRoleIndex] ?? base.surfaceRoleCard;
+            if (process.env.PROBE && rootAnswer.includes("我也是想先把这个问明白")) console.log("[PROBE staged]", base.threadKind, orchestrationPlan.dialogueThreads[threadIndex]?.postingIdentity);
+            // 身份以规划层为准:不再用模型输出的 roleIndex 选卡——按侧+按角色
+            // 隔离后模型只做分配好的人物开口,surfaceRoleCard 直接取规划值
+            // (base.surfaceRoleCard 仅作历史兜底)。
+            const selectedSurface = orchestrationPlan.dialogueThreads[threadIndex]?.surfaceRoleCard ?? base.surfaceRoleCard;
             // 读者互动层:T2/T3 线程的对话拓扑由线程形态决定,不随接话数漂移。
             const topology = base.threadKind === "organic_reaction"
               ? "organic_reaction" as const
@@ -2025,7 +2254,7 @@ export class ContentGenerationAgent implements GenerationEngine {
                 topology,
                 targetFollowUps: Math.min(2, followUps.length) as 0 | 1 | 2,
                 openingMove: "由模型根据正文话头和缺口现场选择社会位置",
-                replyMove: "楼主或可追责身份自然承接当前评论",
+                replyMove: "可追责发布身份自然承接当前评论",
                 extensionMove: followUps.length ? "从已出现的具体词或现实条件继续生长" : "当前话头自然停住",
               },
               followUps: followUps.map((visibleFollowUp, followUpIndex) => ({
