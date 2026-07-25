@@ -7,7 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "test": "node --import tsx --test test/presets.test.ts test/formula-ui.test.ts test/reader-state.test.ts test/generation-fallback.test.ts test/research-governance.test.ts test/metric-payload.property.test.ts test/comment-cref.test.ts test/gap-evidence.test.ts test/quick-generation.test.ts test/quick-channel-state.test.ts test/quick-progress.test.ts test/preset-save.test.ts test/validation-labels.test.ts test/saas-access.test.ts test/quick-batch.test.ts test/quick-recipe.test.ts test/batch-polling.test.ts test/topic-card.test.ts test/quota-view.test.ts test/overview-digest.test.ts",
+    "test": "node --import tsx --test test/presets.test.ts test/formula-ui.test.ts test/reader-state.test.ts test/generation-fallback.test.ts test/research-governance.test.ts test/metric-payload.property.test.ts test/comment-cref.test.ts test/gap-evidence.test.ts test/quick-generation.test.ts test/quick-channel-state.test.ts test/quick-progress.test.ts test/preset-save.test.ts test/validation-labels.test.ts test/saas-access.test.ts test/quick-batch.test.ts test/quick-recipe.test.ts test/batch-polling.test.ts test/topic-card.test.ts test/quota-view.test.ts test/overview-digest.test.ts test/retry-plan.test.ts",
     "typecheck": "tsc --noEmit --pretty false"
   },
   "dependencies": {

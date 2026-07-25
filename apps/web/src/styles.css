@@ -2828,7 +2828,8 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .qc-topic { text-align: left; padding: 14px 16px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius); background: var(--v2-surface); cursor: pointer; font-size: var(--v2-fs-md); color: var(--v2-ink); transition: border-color .15s, box-shadow .15s; }
 .qc-topic:hover { border-color: var(--v2-line-dark); box-shadow: var(--v2-shadow-sm); }
 .qc-topic.selected { border-color: var(--v2-brand); box-shadow: var(--v2-shadow-sm); }
-.qc-history-list { display: flex; flex-direction: column; gap: 10px; }
+/* ul 必须归零 list-style 与 padding,否则每条前面挂一个浏览器默认圆点 */
+.qc-history-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .qc-history-item { border: 1px solid var(--v2-line); border-radius: var(--v2-radius); padding: 12px 14px; background: var(--v2-surface); }
 .qc-history-detail { border-top: 1px dashed var(--v2-line); margin-top: 12px; padding-top: 12px; display: flex; flex-direction: column; gap: 14px; }
 
@@ -3153,6 +3154,35 @@ div.qc-topic { cursor: default; }
 /* 历史筛选行 */
 .qc-history-filters { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .qc-history-filters input { flex: 1; min-width: 180px; }
+
+/* ---- 产出区概况条:先给结论,再让用户面对一屏任务卡 ---- */
+.qc-history-summary {
+  display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 16px;
+  padding: 16px 18px; border: 1px solid var(--v2-line);
+  border-radius: var(--v2-radius); background: var(--v2-canvas);
+}
+.qc-history-summary__counts { display: flex; flex-wrap: wrap; gap: 6px 20px; }
+.qc-hs-stat { display: inline-flex; align-items: baseline; gap: 5px; font-size: var(--v2-fs-xs); color: var(--v2-muted); }
+.qc-hs-stat b { font-size: var(--v2-fs-lg); font-weight: 700; color: var(--v2-ink); font-variant-numeric: tabular-nums; }
+.qc-history-summary__counts .qc-hs-stat:nth-child(1) b { color: var(--v2-ok); }
+.qc-history-summary__counts .qc-hs-stat:nth-child(2) b { color: var(--v2-warn); }
+.qc-history-summary__counts .qc-hs-stat:nth-child(3) b { color: var(--v2-error); }
+.qc-history-summary__fix { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+/* 失败原因清单:blocking 的(余额/密钥)重试也没用,标红加重,免得用户反复点重试 */
+.qc-fail-reasons { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.qc-fail-reasons li { font-size: var(--v2-fs-xs); color: var(--v2-muted); }
+.qc-fail-reasons li b { color: var(--v2-ink); font-variant-numeric: tabular-nums; }
+.qc-fail-reasons li.is-blocking { color: var(--v2-error); }
+.qc-fail-reasons li.is-blocking b { color: var(--v2-error); }
+/* 阻塞原因下的重试劝阻语:比普通 hint 更醒目,但不做成红色报警 */
+.qc-warn-line { max-width: 340px; color: var(--v2-warn); font-size: var(--v2-fs-micro); line-height: 1.5; }
+
+/* 全失败批次的折叠占位 */
+.qc-batch-card__collapsed {
+  width: 100%; padding: 12px; border: 1px dashed var(--v2-line-dark); border-radius: var(--v2-radius-sm);
+  background: none; color: var(--v2-muted); font-size: var(--v2-fs-sm); cursor: pointer;
+}
+.qc-batch-card__collapsed:hover { border-color: var(--v2-brand); color: var(--v2-brand-ink); }
 
 /* ===== 极简频道 P2:候选未过校验的一句话结论 ===== */
 .qc-issue-line { margin: 0; color: var(--v2-warn); font-size: var(--v2-fs-sm); }

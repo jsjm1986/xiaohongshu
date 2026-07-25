@@ -3,9 +3,12 @@ import { Clock, Copy, Repeat, SearchX, ShieldCheck, TriangleAlert } from 'lucide
 import { Button, useToast } from '../Ui';
 import { QuickCandidateCards } from '../QuickResult';
 import { api } from '../../lib/api';
-import { quickCandidateFields, quickCandidateToMarkdown, type QuickCandidateView } from '../../lib/quick-generation';
+import { approveOpportunitiesForBatch, quickCandidateFields, quickCandidateToMarkdown, type QuickCandidateView } from '../../lib/quick-generation';
 import { allValidationIssueLabels, firstValidationIssueLabel } from '../../lib/validation-labels';
 import { filterGenerationJobs, type GenerationStatusFilter } from '../../lib/quick-channel-state';
+import { overviewDigest } from '../../lib/overview-digest';
+import { failureDigest, planBatchRetry } from '../../lib/retry-plan';
+import { buildBatchJobs } from '../../lib/quick-batch';
 import { BatchBoard } from './BatchBoard';
 import type { GenerationJob, Project } from '../../types';
 
@@ -51,9 +54,70 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
   // 本地加载态:以前这里置壳的 busy,但本组件并不读 busy,所以自己没有加载提示,
   // 只是让创作区残留「正在生成」进度条。改为自持状态,壳的 busy 不再被搭便车。
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [retryingAll, setRetryingAll] = useState(false);
   const projectId = project?.id;
 
   const visible = filterGenerationJobs(history, { status: statusFilter, keyword });
+  const digest = overviewDigest(history);
+  const failedJobs = history.filter((j) => j.status === 'failed');
+  const failures = failureDigest(failedJobs);
+
+  /**
+   * 批量重试:把所有失败任务规划成「一次」批次提交。
+   *
+   * 逐条点单条重试是 N×4 个请求(实测 70 条失败 ≈ 280 个),而且同一配方会被重复
+   * 提交、白烧额度。这里先 planBatchRetry 去重与筛掉孤儿任务,再一次性建批次。
+   */
+  const retryAllFailed = async () => {
+    if (!project || failedJobs.length === 0) return;
+    setRetryingAll(true);
+    try {
+      const [opps, presets] = await Promise.all([
+        api.opportunities.list(project.id),
+        api.presets.list(project.id),
+      ]);
+      const plan = planBatchRetry(failedJobs, opps.items, presets.items);
+      if (plan.retryable.length === 0) {
+        toast.push(plan.skipped.length > 0 ? '这些失败的原选题都已不在选题池，无法重试' : '没有可重试的任务', 'error');
+        return;
+      }
+
+      // 审批链一次过:同一批次里的选题必须都已审批,否则建批次会被后端拒绝
+      const approved = await approveOpportunitiesForBatch({
+        project,
+        opportunityIds: plan.retryable.map((t) => t.opportunityId),
+      });
+
+      // 每个目标各自带 overrides/预设,不能用一次 buildBatchJobs 笛卡尔积覆盖,
+      // 否则会把 A 选题的覆盖项套到 B 选题上。
+      const jobs = plan.retryable.flatMap((target) => {
+        const opportunity = approved.find((o) => o.id === target.opportunityId);
+        if (!opportunity) return [];
+        return buildBatchJobs({
+          project,
+          opportunities: [opportunity],
+          presets: presets.items.filter((p) => p.id === target.presetId),
+          overrides: target.overrides,
+          imageAssetIds: target.imageAssetIds,
+        });
+      });
+      if (jobs.length === 0) throw new Error('原预设均已不存在，请回创作区重新配置');
+
+      await api.generationBatches.create({
+        projectId: project.id,
+        name: `重试失败 · ${jobs.length} 篇`,
+        jobs,
+      });
+
+      const notes = [`已提交 ${jobs.length} 篇重试`];
+      if (plan.deduped > 0) notes.push(`合并重复配方 ${plan.deduped} 篇`);
+      if (plan.skipped.length > 0) notes.push(`${plan.skipped.length} 篇因原选题已删除跳过`);
+      toast.push(notes.join('，'));
+      for (const w of plan.warnings) toast.push(w, 'info');
+
+      if (projectId) setHistory((await api.generations.list(projectId)).items);
+    } catch (e) { fail(e, '批量重试失败'); } finally { setRetryingAll(false); }
+  };
 
   // 创作区把「还在后台跑」的任务交接过来时,直接展开那一条,别让用户在列表里自己找。
   // 状态筛选同时回到「全部」:兜底落点进来的任务多半是 running,若上次筛的是
@@ -150,6 +214,49 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
 
   return (
     <div className="qc-step">
+      {/* 概况条:70 条失败平铺在页面上时,用户第一眼只看到一墙红色,不知道
+          「哪些能用、失败为什么、能不能一次修好」。这条先给结论。 */}
+      {digest.total > 0 && (
+        <div className="qc-history-summary">
+          <div className="qc-history-summary__counts">
+            <span className="qc-hs-stat"><b>{digest.publishable}</b>可直接发布</span>
+            <span className="qc-hs-stat"><b>{digest.needsReview}</b>需人工核对</span>
+            <span className="qc-hs-stat"><b>{digest.failed}</b>失败</span>
+            {digest.inFlight > 0 && <span className="qc-hs-stat"><b>{digest.inFlight}</b>进行中</span>}
+          </div>
+          {digest.failed > 0 && (
+            <div className="qc-history-summary__fix">
+              <ul className="qc-fail-reasons">
+                {failures.groups.slice(0, 3).map((g) => (
+                  <li key={g.label} className={g.blocking ? 'is-blocking' : undefined}>
+                    <b>{g.count}</b> {g.label}
+                  </li>
+                ))}
+              </ul>
+              <div className="qc-actions">
+                <Button
+                  variant="secondary"
+                  loading={retryingAll}
+                  disabled={retryingAll || !project}
+                  onClick={() => void retryAllFailed()}
+                >
+                  重试全部失败 · {digest.failed} 篇
+                </Button>
+                {/* 明说重试要花额度:这是付费产品,一次点掉几十次额度必须先告知。
+                    有 blocking 原因时更要劝阻——那些重试必然再失败,额度照扣。 */}
+                {failures.blockingCount > 0 ? (
+                  <small className="qc-warn-line">
+                    其中 {failures.blockingCount} 篇因上述阻塞原因重试仍会失败，建议先解决再重试（每篇消耗 1 次额度）
+                  </small>
+                ) : (
+                  <small className="qc-hint">每篇重试消耗 1 次额度</small>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {project && (
         <BatchBoard
           project={project} activeBatchId={activeBatchId} fail={fail}

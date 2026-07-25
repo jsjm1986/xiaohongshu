@@ -25,6 +25,10 @@ export function BatchBoard({ project, activeBatchId, fail, onOpenJob, onReuseRec
   const [batches, setBatches] = useState<GenerationBatch[]>([]);
   const [jobsByBatch, setJobsByBatch] = useState<Record<string, GenerationJob[]>>({});
   const [retrying, setRetrying] = useState<string | null>(null);
+  // 用户手动展开过的全失败批次
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggleExpanded = (id: string) =>
+    setExpanded((cur) => { const next = new Set(cur); next.has(id) ? next.delete(id) : next.add(id); return next; });
 
   const loadBatches = useCallback(async () => {
     try {
@@ -80,6 +84,7 @@ export function BatchBoard({ project, activeBatchId, fail, onOpenJob, onReuseRec
     <div className="qc-batch-board">
       {batches.map((batch) => {
         const jobs = jobsByBatch[batch.id] ?? [];
+        const allFailed = jobs.length > 0 && jobs.every((j) => j.status === 'failed');
         return (
           <div key={batch.id} className={`qc-batch-card${batch.id === activeBatchId ? ' qc-batch-card--active' : ''}`}>
             <div className="qc-batch-card__head">
@@ -89,6 +94,13 @@ export function BatchBoard({ project, activeBatchId, fail, onOpenJob, onReuseRec
                 {jobs.length > 0 && <span className="qc-batch-card__count">{batchProgressText(jobs)}</span>}
               </span>
             </div>
+            {/* 全失败的批次默认折叠:实测三个批次全是 0/10,展开后就是一墙红色卡片,
+                把还能用的产出挤到屏幕外。折叠后仍可点开逐条重试。 */}
+            {allFailed && !expanded.has(batch.id) ? (
+              <button type="button" className="qc-batch-card__collapsed" onClick={() => toggleExpanded(batch.id)}>
+                展开查看 {jobs.length} 篇失败任务
+              </button>
+            ) : (
             <div className="qc-batch-card__grid">
               {jobs.map((job) => (
                 <div key={job.id} className={`qc-jobcell qc-jobcell--${job.status}`}>
@@ -135,6 +147,7 @@ export function BatchBoard({ project, activeBatchId, fail, onOpenJob, onReuseRec
                 </div>
               ))}
             </div>
+            )}
           </div>
         );
       })}
