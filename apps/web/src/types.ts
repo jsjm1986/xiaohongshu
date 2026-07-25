@@ -934,6 +934,112 @@ export interface OrchestrationSnapshot {
   opportunitySelectionAudit?: OpportunitySelectionAudit;
 }
 
+/**
+ * 阅读投影(GET /api/generations/:id/reader)。极简创作「查看」用这个,
+ * 字段集由 apps/api/test/generation-reader-view.test.ts 白名单锁死。
+ *
+ * 与 Candidate 的分工:Candidate 是完整版工作台的全量视图(含 trace、参数影响报告、
+ * 编排快照,单候选 234 KB);ReaderCandidate 只留阅读与决策要用的字段(约 12 KB),
+ * 但反过来带上了 Candidate 没有的 reasoning / gapLedger / strategy。
+ */
+export interface ReaderReasoningEntry {
+  statement: string;
+  status: string;
+  location?: string;
+  /** 落在哪个具体字段:title / body / question / answer / imageBrief / hashtags / nextStep */
+  field?: string;
+  threadId?: string;
+  followUpIndex?: number;
+  evidenceIds: string[];
+}
+
+export interface ReaderComment {
+  id?: string;
+  question: string;
+  answer: string;
+  function?: string;
+  postingIdentity?: string;
+  personaRole?: string;
+  stage?: string;
+  gap?: string;
+  boundary?: string;
+  nextStep?: string;
+  simulated?: boolean;
+  displayName?: string;
+  followUps: Array<{ question: string; answer: string; boundary?: string }>;
+}
+
+/** 候选表达轴。prototype 是封闭枚举;其余是开放词表(含模型产出的中文自由文本),原样显示。 */
+export interface ReaderStrategy {
+  label?: string;
+  prototype?: string;
+  openingMode?: string;
+  narrativeMode?: string;
+  bodyRole?: string;
+  commentMode?: string;
+  voice?: string;
+}
+
+export interface ReaderGapLedgerEntry {
+  gapId: string;
+  label: string;
+  status: string;
+  required: boolean;
+  plannedPlacements: string[];
+  reason?: string;
+  requiredInput?: string;
+  verificationPath?: string;
+  realizations: Array<{ channel: string; threadId?: string; resolved: boolean; missing: string[] }>;
+}
+
+export interface ReaderCandidate {
+  id: string;
+  packageId: string;
+  candidateIndex: number;
+  seed: number;
+  title: string;
+  body: string;
+  tags: string[];
+  imageBrief?: string;
+  commentDisclaimer?: string;
+  commentOwnedFirstComment?: string;
+  commentUncoveredGaps?: string[];
+  comments: ReaderComment[];
+  validation?: {
+    valid: boolean;
+    repairAttempts: number;
+    issues: Array<{ code?: string; severity: "error" | "warning"; channel?: string; message: string }>;
+  };
+  reasoning: ReaderReasoningEntry[];
+  gapLedger?: { entries: ReaderGapLedgerEntry[]; realizationStatus?: string };
+  gapCards: Array<{
+    gapId: string;
+    label: string;
+    question: string;
+    required: boolean;
+    priority?: string;
+    boundary?: string;
+    plannedPlacements: string[];
+  }>;
+  sources: Array<{ name: string; kind?: string; evidenceStatus?: string; section?: string }>;
+  unknowns: Array<{ question: string; impact?: string; reason?: string }>;
+  strategy?: ReaderStrategy;
+  deploymentPlan?: DeploymentPlan;
+}
+
+export interface ReaderJob {
+  id: string;
+  projectId: string;
+  topic: string;
+  goal?: string;
+  status: GenerationStatus;
+  qualityStatus?: GenerationQualityStatus;
+  createdAt?: string;
+  completedAt?: string;
+  error?: string;
+  candidates: ReaderCandidate[];
+}
+
 export interface Candidate {
   id: string;
   label?: string;

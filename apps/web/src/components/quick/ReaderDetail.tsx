@@ -1,0 +1,184 @@
+import { useState } from 'react';
+import { Copy, Download, RotateCcw } from 'lucide-react';
+import { Button, useToast } from '../Ui';
+import { CandidateDiffBar } from './CandidateDiffBar';
+import { CommentSection } from './CommentSection';
+import { DeploymentPlanCard } from './DeploymentPlanCard';
+import { FactLedgerCard } from './FactLedgerCard';
+import { GapCoverageCard } from './GapCoverageCard';
+import { ValidationVerdict } from './ValidationVerdict';
+import { issueVerdict, exportBlockReason } from '../../lib/issue-verdict';
+import { publishOrderText } from '../../lib/publish-copy';
+import type { ReaderCandidate, ReaderJob } from '../../types';
+
+/**
+ * 「查看」的完整详情。
+ *
+ * 分三段读:成品(能直接用的东西)→ 判断依据(凭什么这么写、哪些没答上)→
+ * 发布方案(下一步做什么)。原来只有第一段的一半,而且校验结论会挑错重点。
+ */
+
+const EXPORT_FORMATS = ['markdown', 'docx', 'pdf', 'json'] as const;
+export type ExportFormat = (typeof EXPORT_FORMATS)[number];
+
+interface Props {
+  job: ReaderJob;
+  /** 导出:markdown 本地拼装,其余走后端 */
+  onExport: (candidate: ReaderCandidate, format: ExportFormat) => void;
+  /** 按意见修改;未接通时不显示该区块 */
+  onRevise?: (candidate: ReaderCandidate, instruction: string) => Promise<void>;
+  revisingId?: string | null;
+  /** 重新生成一批(重试) */
+  onRetry?: () => void;
+  retrying?: boolean;
+}
+
+function CopyCard({ title, text, children }: { title: string; text: string; children: React.ReactNode }) {
+  const toast = useToast();
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(text); toast.push('已复制'); }
+    catch { toast.push('复制失败，请手动选择文本', 'error'); }
+  };
+  return (
+    <section className="quick-card">
+      <header>
+        <h3>{title}</h3>
+        <Button variant="ghost" icon={<Copy size={14} />} onClick={() => void copy()}>复制</Button>
+      </header>
+      <div className="quick-card__body">{children}</div>
+    </section>
+  );
+}
+
+export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, retrying }: Props) {
+  const toast = useToast();
+  const [index, setIndex] = useState(0);
+  const [instruction, setInstruction] = useState('');
+  const candidates = job.candidates;
+  if (candidates.length === 0) return null;
+  const current = candidates[Math.min(index, candidates.length - 1)]!;
+  const verdict = issueVerdict(current.validation);
+  const blockReason = exportBlockReason(verdict);
+
+  const copyText = async (text: string) => {
+    try { await navigator.clipboard.writeText(text); toast.push('已复制'); }
+    catch { toast.push('复制失败，请手动选择文本', 'error'); }
+  };
+
+  const submitRevise = () => {
+    if (!onRevise) return;
+    const text = instruction.trim();
+    if (!text) return;
+    void onRevise(current, text).then(() => setInstruction('')).catch(() => undefined);
+  };
+
+  return (
+    <div className="qc-reader">
+      <CandidateDiffBar candidates={candidates} activeIndex={index} onPick={setIndex} />
+
+      <ValidationVerdict validation={current.validation} />
+
+      {/* 第一段:成品 */}
+      <div className="qc-reader__section">
+        <CopyCard title="标题" text={current.title}><p>{current.title}</p></CopyCard>
+        <CopyCard title="正文" text={current.body}><p className="quick-body">{current.body}</p></CopyCard>
+        {current.tags.length > 0 && (
+          <CopyCard title="标签" text={current.tags.join(' ')}>
+            <div className="quick-tag-row">
+              {current.tags.map((t) => <span key={t} className="quick-tag">{t}</span>)}
+            </div>
+          </CopyCard>
+        )}
+        {current.imageBrief && (
+          <CopyCard title="配图说明" text={current.imageBrief}><p>{current.imageBrief}</p></CopyCard>
+        )}
+        <CommentSection candidate={current} />
+      </div>
+
+      {/* 第二段:判断依据 */}
+      <div className="qc-reader__section">
+        <h4 className="qc-reader__label">判断依据</h4>
+        <GapCoverageCard candidate={current} />
+        <FactLedgerCard candidate={current} />
+        {current.sources.length > 0 && (
+          <details className="qc-sources">
+            <summary>本次用到的来源（{current.sources.length}）</summary>
+            <ul>
+              {current.sources.map((s, i) => (
+                <li key={`${s.name}-${i}`}>
+                  {s.name}
+                  {s.section && <small>{s.section}</small>}
+                  {s.evidenceStatus && <small>{s.evidenceStatus}</small>}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </div>
+
+      {/* 第三段:发布方案 */}
+      <div className="qc-reader__section">
+        <h4 className="qc-reader__label">发布与执行</h4>
+        <DeploymentPlanCard candidate={{ deploymentPlan: current.deploymentPlan, unknowns: current.unknowns.map((u) => u.question) }} />
+      </div>
+
+      {/* 动作 */}
+      <div className="qc-reader__actions">
+        <Button variant="secondary" icon={<Copy size={15} />} onClick={() => void copyText(publishOrderText(current))}>
+          按发布顺序复制
+        </Button>
+        <span className="qc-export-group">
+          <span className="qc-export-group__label"><Download size={13} />导出</span>
+          {EXPORT_FORMATS.map((fmt) => {
+            // 后端三种格式对未通过校验的候选一律 400(export.service.ts 的发布门槛),
+            // 禁用并说明原因;本地 Markdown 不经后端,始终可用。
+            const blocked = fmt !== 'markdown' && !verdict.publishable;
+            return (
+              <Button
+                key={fmt}
+                variant="ghost"
+                disabled={blocked}
+                title={blocked ? blockReason ?? undefined : undefined}
+                onClick={() => onExport(current, fmt)}
+              >
+                {fmt === 'markdown' ? 'Markdown' : fmt.toUpperCase()}
+              </Button>
+            );
+          })}
+          {!verdict.publishable && <small className="qc-hint">仅 Markdown 可导出（未通过校验）</small>}
+        </span>
+        {onRetry && (
+          <Button variant="ghost" icon={<RotateCcw size={13} />} loading={retrying} disabled={retrying} onClick={onRetry}>
+            按同款重新生成
+          </Button>
+        )}
+      </div>
+
+      {onRevise && (
+        <details className="qc-revise">
+          <summary>按意见修改这一版</summary>
+          <textarea
+            rows={3}
+            value={instruction}
+            placeholder={verdict.blocking.length > 0
+              ? `例：补上「${verdict.blocking[0]?.label}」涉及的依据，没有依据就改成不确定的说法`
+              : '例：标题再口语化一点'}
+            onChange={(e) => setInstruction(e.target.value)}
+          />
+          <div className="qc-actions">
+            <Button
+              variant="secondary"
+              loading={revisingId === current.id}
+              disabled={!instruction.trim() || Boolean(revisingId)}
+              onClick={submitRevise}
+            >
+              {revisingId === current.id ? '修改中…' : '提交修改'}
+            </Button>
+            {/* 付费产品:动模型就要花钱,先说清 */}
+            <small className="qc-hint">修改会重跑写作与校验，消耗 1 次额度</small>
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}

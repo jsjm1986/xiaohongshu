@@ -22,6 +22,7 @@ import type {
   ProjectBlueprintModule,
   ProjectIntelligence,
   RegistrationRequest,
+  ReaderJob,
   ResolvedConfigPreview,
   ResearchCalibrationProposal,
   ResearchClaim,
@@ -1238,6 +1239,11 @@ export const api = {
         ),
       ),
     get: (id: string) => request<GenerationJob>(`/api/generations/${id}`),
+    /**
+     * 阅读投影:极简创作「查看」用。比 get() 轻两个数量级(实测 1.05 MB → 36 KB),
+     * 但反过来带上 get() 没有的 reasoning / gapLedger / strategy。
+     */
+    reader: (id: string) => request<ReaderJob>(`/api/generations/${id}/reader`),
     create: (input: GenerateInput) =>
       request<GenerationJob>("/api/generations", {
         method: "POST",

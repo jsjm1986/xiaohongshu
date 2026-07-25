@@ -3,9 +3,9 @@ import { CheckCircle2, Clock, Download, RefreshCw, RotateCcw, XCircle } from 'lu
 import { Button, useToast } from '../Ui';
 import { api } from '../../lib/api';
 import { mergeJobUpdates, pendingJobIds } from '../../lib/batch-polling';
-import { batchProgressText, batchStatusLabel, buildBatchJobs, liveBatchStatus } from '../../lib/quick-batch';
-import { extractRecipe, resolveRecipeTargets } from '../../lib/quick-recipe';
-import { approveOpportunitiesForBatch, quickCandidateFields, quickCandidateToMarkdown } from '../../lib/quick-generation';
+import { batchProgressText, batchStatusLabel, liveBatchStatus } from '../../lib/quick-batch';
+import { quickCandidateFields, quickCandidateToMarkdown } from '../../lib/quick-generation';
+import { retryJobOnce } from '../../lib/single-retry';
 import { planBatchExport, type ExportFormat } from '../../lib/batch-export';
 import type { GenerationBatch, GenerationJob, Project } from '../../types';
 
@@ -118,26 +118,17 @@ export function BatchBoard({ project, activeBatchId, fail, onOpenJob, onReuseRec
     return () => { cancelled = true; clearTimeout(timer); };
   }, [jobsByBatch]);
 
-  // 重试:按原任务的配方(选题+预设+覆盖项)重投一个单任务批次,失败卡不改写、结果并入看板
+  // 重试:按原任务的配方(选题+预设+覆盖项)重投一个单任务批次,失败卡不改写、结果并入看板。
+  // 配方回填那段抽到 lib/single-retry,与产出区列表里的单篇重试共用同一份实现——
+  // 原来只有看板有这个能力,列表里的失败条目没有入口。
   const retry = async (job: GenerationJob) => {
     setRetrying(job.id);
     try {
-      const [opps, presets] = await Promise.all([
-        api.opportunities.list(project.id),
-        api.presets.list(project.id),
-      ]);
-      const targets = resolveRecipeTargets(extractRecipe(job), opps.items, presets.items);
-      if (!targets.opportunityId) throw new Error(targets.warnings[0] ?? '原选题已不在选题池，无法重试');
-      const approved = await approveOpportunitiesForBatch({ project, opportunityIds: [targets.opportunityId] });
-      const jobs = buildBatchJobs({
+      await retryJobOnce({
         project,
-        opportunities: approved,
-        presets: presets.items.filter((p) => p.id === targets.presetId),
-        overrides: targets.overrides,
-        imageAssetIds: targets.imageAssetIds,
+        job,
+        deps: { opportunities: api.opportunities, presets: api.presets, generationBatches: api.generationBatches },
       });
-      if (jobs.length === 0) throw new Error('原预设已不存在，请回创作区重新配置');
-      await api.generationBatches.create({ projectId: project.id, name: `重试 · ${job.topic || '选题'}`, jobs });
       await loadBatches();
     } catch (e) { fail(e, '重试失败'); } finally { setRetrying(null); }
   };

@@ -1,19 +1,19 @@
 import { useEffect, useState } from 'react';
-import { Clock, Copy, Download, Repeat, SearchX, ShieldCheck, TriangleAlert } from 'lucide-react';
+import { Clock, Repeat, RotateCcw, SearchX } from 'lucide-react';
 import { Button, useToast } from '../Ui';
-import { QuickCandidateCards } from '../QuickResult';
 import { api } from '../../lib/api';
-import { approveOpportunitiesForBatch, quickCandidateFields, quickCandidateToMarkdown, type QuickCandidateView } from '../../lib/quick-generation';
-import { allValidationIssueLabels, firstValidationIssueLabel } from '../../lib/validation-labels';
+import { approveOpportunitiesForBatch } from '../../lib/quick-generation';
 import { filterGenerationJobs, type GenerationStatusFilter } from '../../lib/quick-channel-state';
 import { overviewDigest } from '../../lib/overview-digest';
+import { readerCandidateToMarkdown } from '../../lib/publish-copy';
 import { failureDigest, planBatchRetry } from '../../lib/retry-plan';
+import { retryJobOnce } from '../../lib/single-retry';
 import { waitStatus } from '../../lib/wait-status';
 import { buildBatchJobs } from '../../lib/quick-batch';
 import { BatchBoard } from './BatchBoard';
-import { DeploymentPlanCard } from './DeploymentPlanCard';
+import { ReaderDetail, type ExportFormat } from './ReaderDetail';
 import { WaitCard } from './WaitCard';
-import type { GenerationJob, Project } from '../../types';
+import type { GenerationJob, Project, ReaderCandidate, ReaderJob } from '../../types';
 
 interface Props {
   project: Project | null;
@@ -50,10 +50,15 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
   const [expanded, setExpanded] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<GenerationStatusFilter>('all');
   const [keyword, setKeyword] = useState('');
-  // list 接口不返回候选(后端 mapJob(row,false) 刻意轻量),展开时按需取详情并缓存
-  const [details, setDetails] = useState<Record<string, GenerationJob['candidates']>>({});
+  /**
+   * 展开时按需取详情并缓存。走阅读投影接口(:id/reader)而不是 :id ——
+   * 后者单任务 1.05 MB(trace/参数影响报告/编排快照占 90%,这里一个都不渲染),
+   * 而前者 36 KB 且反过来带上了 reasoning / gapLedger / strategy。
+   */
+  const [details, setDetails] = useState<Record<string, ReaderJob>>({});
   const [loadingId, setLoadingId] = useState<string | null>(null);
-  const [candidateIdx, setCandidateIdx] = useState(0);
+  const [revisingId, setRevisingId] = useState<string | null>(null);
+  const [retryingId, setRetryingId] = useState<string | null>(null);
   // 本地加载态:以前这里置壳的 busy,但本组件并不读 busy,所以自己没有加载提示,
   // 只是让创作区残留「正在生成」进度条。改为自持状态,壳的 busy 不再被搭便车。
   const [loadingHistory, setLoadingHistory] = useState(false);
@@ -128,7 +133,6 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
   useEffect(() => {
     if (!focusJobId) return;
     setExpanded(focusJobId);
-    setCandidateIdx(0);
     setStatusFilter('all');
     setKeyword('');
   }, [focusJobId]);
@@ -180,17 +184,43 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
     if (!expanded || expandedStatus !== 'completed' || details[expanded]) return;
     let cancelled = false;
     setLoadingId(expanded);
-    api.generations.get(expanded)
-      .then((full) => { if (!cancelled) setDetails((cur) => ({ ...cur, [full.id]: full.candidates ?? [] })); })
+    api.generations.reader(expanded)
+      .then((full) => { if (!cancelled) setDetails((cur) => ({ ...cur, [full.id]: full })); })
       .catch(() => { /* 静默:再次点击折叠/展开仍可重试 */ })
       .finally(() => { if (!cancelled) setLoadingId(null); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expanded, expandedStatus]);
 
-  const copy = async (text: string) => {
-    try { await navigator.clipboard.writeText(text); toast.push('已复制'); }
-    catch { toast.push('复制失败，请手动选择文本', 'error'); }
+  /**
+   * 按意见修改。后端 revise 就地替换该候选的内容包,所以修改后要重取详情——
+   * 否则界面还显示旧文案。每次消耗 1 次额度(后端 revise 路径会 consumePlatformQuota),
+   * 该提示在 ReaderDetail 里明写。
+   */
+  const revise = async (jobId: string, candidateId: string, instruction: string) => {
+    setRevisingId(candidateId);
+    try {
+      await api.generations.revise(jobId, candidateId, instruction);
+      const fresh = await api.generations.reader(jobId);
+      setDetails((cur) => ({ ...cur, [jobId]: fresh }));
+      toast.push('已按意见修改');
+    } catch (e) { fail(e, '修改失败'); } finally { setRevisingId(null); }
+  };
+
+  /** 单篇重试:与批次看板共用同一段配方回填逻辑(lib/single-retry)。 */
+  const retryOne = async (job: GenerationJob) => {
+    if (!project) return;
+    setRetryingId(job.id);
+    try {
+      const result = await retryJobOnce({
+        project,
+        job,
+        deps: { opportunities: api.opportunities, presets: api.presets, generationBatches: api.generationBatches },
+      });
+      for (const w of result.warnings) toast.push(w, 'info');
+      toast.push('已按同款重新提交，消耗 1 次额度');
+      if (projectId) setHistory((await api.generations.list(projectId)).items);
+    } catch (e) { fail(e, '重试失败'); } finally { setRetryingId(null); }
   };
 
   /**
@@ -205,13 +235,13 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
    * 而本地 Markdown 不经后端,不受此限。所以只门控后端三种格式,
    * 本地 Markdown 始终可用——待核对的稿子仍然要能拿出来给人看。
    */
-  const exportAs = (job: GenerationJob, v: QuickCandidateView, format: 'markdown' | 'json' | 'docx' | 'pdf') => {
+  const exportAs = (job: GenerationJob, v: ReaderCandidate, format: ExportFormat) => {
     if (format === 'markdown') {
-      const blob = new Blob([quickCandidateToMarkdown(v)], { type: 'text/markdown;charset=utf-8' });
+      const blob = new Blob([readerCandidateToMarkdown(v)], { type: 'text/markdown;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${job.topic || '文案'}-${v.label || v.id}.md`;
+      a.download = `${job.topic || '文案'}-${v.candidateIndex + 1}.md`;
       a.click();
       URL.revokeObjectURL(url);
       return;
@@ -225,7 +255,6 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
   const toggle = (job: GenerationJob) => {
     if (expanded === job.id) { setExpanded(null); return; }
     setExpanded(job.id);
-    setCandidateIdx(0);
   };
 
   // 看板子卡 → 展开下方列表里的同一任务。批次里刚完成的任务可能还不在 history
@@ -234,7 +263,6 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
   // 否则任务还在 running 时会把空候选写进 details,反而把 effect 的重试条件堵死。
   const openJobFromBoard = async (jobId: string) => {
     setExpanded(jobId);
-    setCandidateIdx(0);
     if (!history.some((j) => j.id === jobId) && projectId) {
       try { setHistory((await api.generations.list(projectId)).items); }
       catch { /* 静默:状态刷新失败,下一拍轮询会再补 */ }
@@ -307,9 +335,7 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
         {visible.map((job) => {
           const open = expanded === job.id;
           const running = job.status === 'running' || job.status === 'queued';
-          const views = open && job.status === 'completed'
-            ? (details[job.id] ?? []).map(quickCandidateFields)
-            : [];
+          const detail = open && job.status === 'completed' ? details[job.id] : undefined;
           return (
             <li key={job.id} className="qc-history-item">
               <div className="qc-project-row">
@@ -327,78 +353,40 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
                 )}
               </div>
               {open && loadingId === job.id && <p className="qc-hint">正在加载候选…</p>}
-              {open && job.status === 'completed' && loadingId !== job.id && views.length > 0 && (() => {
-                const current = views[Math.min(candidateIdx, views.length - 1)];
-                return (
-                  <div className="qc-history-detail">
-                    {views.length > 1 && (
-                      <div className="quick-tabs">
-                        {views.map((v, i) => (
-                          <button key={v.id} type="button" className={i === candidateIdx ? 'active' : ''} onClick={() => setCandidateIdx(i)}>
-                            {v.label || `版本${i + 1}`}
-                            {!v.publishable && <i className="quick-tab-dot" title="该版本未通过可发布校验" />}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    {/* 与创作区结果卡同一套结论行:通过要明说,未通过要给全部项 */}
-                    {current.publishable ? (
-                      <p className="qc-pass-line">
-                        <ShieldCheck size={13} />
-                        已通过可发布校验
-                      </p>
-                    ) : (() => {
-                      const labels = allValidationIssueLabels(current.issueCodes);
-                      return (
-                        <div className="qc-issue-line">
-                          <p>
-                            <TriangleAlert size={13} />
-                            {firstValidationIssueLabel(current.issueCodes) ?? '未通过校验,引用时请人工核对'}
-                          </p>
-                          {labels.length > 1 && (
-                            <details className="qc-issue-more">
-                              <summary>另有 {labels.length - 1} 项未通过</summary>
-                              <ul>{labels.map((label) => <li key={label}>{label}</li>)}</ul>
-                            </details>
-                          )}
-                        </div>
-                      );
-                    })()}
-                    <QuickCandidateCards view={current} />
-                    {/* 发布执行方案:摘要在正面,完整方案收进折叠区 */}
-                    <DeploymentPlanCard candidate={details[job.id]?.find((c) => c.id === current.id)} />
-                    <div className="quick-result__actions">
-                      <Button variant="secondary" icon={<Copy size={15} />} onClick={() => void copy(quickCandidateToMarkdown(current))}>复制全部</Button>
-                      {/* 四种格式都给:docx/pdf 走后端,markdown 本地即时 */}
-                      <span className="qc-export-group">
-                        <span className="qc-export-group__label"><Download size={13} />导出</span>
-                        {(['markdown', 'docx', 'pdf', 'json'] as const).map((fmt) => {
-                          // 后端三种格式对未通过校验的候选会 400,禁用并说明原因;
-                          // 本地 Markdown 不经后端,始终可用。
-                          const blocked = fmt !== 'markdown' && !current.publishable;
-                          return (
-                            <Button
-                              key={fmt}
-                              variant="ghost"
-                              disabled={blocked}
-                              title={blocked ? '未通过可发布校验的稿子不能导出为该格式，可先导出 Markdown 人工核对' : undefined}
-                              onClick={() => exportAs(job, current, fmt)}
-                            >
-                              {fmt === 'markdown' ? 'Markdown' : fmt.toUpperCase()}
-                            </Button>
-                          );
-                        })}
-                        {!current.publishable && (
-                          <small className="qc-hint">仅 Markdown 可导出（未通过校验）</small>
-                        )}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })()}
-              {open && job.status === 'completed' && loadingId !== job.id && views.length === 0 && <p className="qc-hint">该次生成没有可展示的候选。</p>}
+              {open && detail && loadingId !== job.id && detail.candidates.length > 0 && (
+                <div className="qc-history-detail">
+                  <ReaderDetail
+                    job={detail}
+                    onExport={(candidate, format) => exportAs(job, candidate, format)}
+                    onRevise={(candidate, instruction) => revise(job.id, candidate.id, instruction)}
+                    revisingId={revisingId}
+                    onRetry={() => void retryOne(job)}
+                    retrying={retryingId === job.id}
+                  />
+                </div>
+              )}
+              {open && detail && loadingId !== job.id && detail.candidates.length === 0 && (
+                <p className="qc-hint">该次生成没有可展示的候选。</p>
+              )}
               {open && running && <WaitCard job={job} now={now} />}
-              {open && job.status === 'failed' && <p className="qc-hint">生成失败:{job.error || '未知错误'}</p>}
+              {open && job.status === 'failed' && (
+                <div className="qc-history-detail">
+                  <p className="qc-hint">生成失败：{job.error || '未知错误'}</p>
+                  {/* 失败条目原本只能去批次看板重试;这里直接给入口 */}
+                  <div className="qc-actions">
+                    <Button
+                      variant="secondary"
+                      icon={<RotateCcw size={13} />}
+                      loading={retryingId === job.id}
+                      disabled={retryingId !== null || !project}
+                      onClick={() => void retryOne(job)}
+                    >
+                      按同款重试
+                    </Button>
+                    <small className="qc-hint">重试消耗 1 次额度</small>
+                  </div>
+                </div>
+              )}
             </li>
           );
         })}

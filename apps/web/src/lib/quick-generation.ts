@@ -32,6 +32,11 @@ export interface QuickCandidateView {
   /** 校验未通过项的 code 列表(仅 code,不带系统原文 message),用于一句话结论 */
   issueCodes?: string[];
   /**
+   * 完整校验结论。必须带 severity——只留 issueCodes 会把 error/warning 的区别丢掉,
+   * 而实测 129 个未通过候选里 110 个的首条 code 是 warning,据此下结论必然报错重点。
+   */
+  validation?: Candidate['validation'];
+  /**
    * 发布执行方案与仍然未知。原样透传,不在这里整理——展示层由
    * deploymentPlanView 负责。带上它们是为了创作区生成完就能看到「下一步做什么」,
    * 不必先去产出区。
@@ -70,6 +75,7 @@ export function quickCandidateFields(candidate: Candidate): QuickCandidateView {
     issueCodes: candidate.validation?.issues
       .map((issue) => issue.code)
       .filter((code): code is string => Boolean(code)),
+    validation: candidate.validation,
     deploymentPlan: candidate.deploymentPlan,
     unknowns: candidate.unknowns,
   };

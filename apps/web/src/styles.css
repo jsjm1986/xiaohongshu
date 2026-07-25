@@ -3158,6 +3158,126 @@ div.qc-topic { cursor: default; }
 .qc-history-filters { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .qc-history-filters input { flex: 1; min-width: 180px; }
 
+/* ---- 「查看」详情:成品 / 判断依据 / 发布方案 三段 ---- */
+.qc-reader { display: flex; flex-direction: column; gap: 18px; }
+.qc-reader__section { display: flex; flex-direction: column; gap: 12px; }
+.qc-reader__label {
+  margin: 0; font-size: var(--v2-fs-xs); color: var(--v2-muted);
+  text-transform: none; letter-spacing: .02em;
+  padding-bottom: 6px; border-bottom: 1px solid var(--v2-line);
+}
+.qc-reader__actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+
+/* 校验结论:须处理与可核对分开,不再混成一句 */
+.qc-verdict {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px 14px; border-radius: var(--v2-radius); border: 1px solid var(--v2-line);
+}
+.qc-verdict--ok { border-color: color-mix(in srgb, var(--v2-ok) 35%, var(--v2-line)); background: var(--v2-ok-soft); }
+.qc-verdict--blocked { border-color: color-mix(in srgb, var(--v2-error) 30%, var(--v2-line)); background: var(--v2-error-soft); }
+.qc-verdict__head { display: flex; align-items: center; gap: 7px; margin: 0; font-size: var(--v2-fs-sm); }
+.qc-verdict--ok .qc-verdict__head { color: var(--v2-ok); }
+.qc-verdict--blocked .qc-verdict__head { color: var(--v2-error); }
+.qc-verdict__group h5, .qc-verdict__group > summary {
+  margin: 0; font-size: var(--v2-fs-xs); color: var(--v2-ink-2); cursor: default;
+}
+.qc-verdict__group > summary { cursor: pointer; }
+.qc-verdict__group ul { margin: 4px 0 0; padding-left: 18px; font-size: var(--v2-fs-xs); line-height: 1.7; }
+.qc-verdict__group--blocking ul { color: var(--v2-error); }
+.qc-verdict__group--advisory ul { color: var(--v2-muted); }
+.qc-verdict__group li b { margin-left: 4px; font-weight: 600; opacity: .75; }
+
+/* 缺口落地台账:这篇打算答什么、实际答到没有 */
+.qc-gaps {
+  border: 1px solid var(--v2-line); border-radius: var(--v2-radius);
+  background: var(--v2-surface); padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.qc-gaps__head { display: flex; align-items: center; gap: 7px; font-size: var(--v2-fs-sm); }
+.qc-gaps__count { margin-left: auto; font-size: var(--v2-fs-xs); color: var(--v2-muted); }
+.qc-gaps__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.qc-gap {
+  padding: 10px 12px; border-radius: var(--v2-radius-sm);
+  background: var(--v2-canvas); border-left: 3px solid var(--v2-line);
+}
+.qc-gap--ok { border-left-color: var(--v2-ok); }
+.qc-gap--warn { border-left-color: var(--v2-warn); }
+.qc-gap--error { border-left-color: var(--v2-error); }
+.qc-gap__top { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: var(--v2-fs-sm); }
+.qc-gap__status { margin-left: auto; font-size: var(--v2-fs-micro); }
+.qc-gap__status--ok { color: var(--v2-ok); }
+.qc-gap__status--warn { color: var(--v2-warn); }
+.qc-gap__status--error { color: var(--v2-error); }
+.qc-gap p { margin: 4px 0 0; font-size: var(--v2-fs-xs); color: var(--v2-ink-2); line-height: 1.6; }
+.qc-gap__plan { color: var(--v2-muted) !important; }
+.qc-gap__missing { margin: 6px 0 0; padding-left: 18px; font-size: var(--v2-fs-xs); color: var(--v2-error); line-height: 1.7; }
+.qc-gap__boundary, .qc-gap__path { color: var(--v2-muted) !important; }
+
+/* 逐句依据:哪句有证据,哪句是假设 */
+.qc-facts {
+  border: 1px solid var(--v2-line); border-radius: var(--v2-radius);
+  background: var(--v2-surface); padding: 12px 14px;
+}
+.qc-facts__head { display: flex; align-items: center; gap: 7px; font-size: var(--v2-fs-sm); cursor: pointer; }
+.qc-facts__count { margin-left: auto; font-size: var(--v2-fs-xs); color: var(--v2-muted); }
+.qc-facts__count--warn { color: var(--v2-warn); }
+.qc-facts__group { margin-top: 12px; }
+.qc-facts__group h5 { margin: 0 0 6px; font-size: var(--v2-fs-xs); display: flex; align-items: center; gap: 8px; }
+.qc-facts__group h5 small { color: var(--v2-muted); font-weight: 400; }
+.qc-facts__group ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.qc-fact {
+  display: flex; align-items: baseline; gap: 8px;
+  font-size: var(--v2-fs-xs); line-height: 1.6;
+}
+.qc-fact__status {
+  flex: 0 0 auto; padding: 1px 6px; border-radius: 3px;
+  font-size: var(--v2-fs-micro); background: var(--v2-canvas); color: var(--v2-muted);
+}
+.qc-fact--ok .qc-fact__status { background: var(--v2-ok-soft); color: var(--v2-ok); }
+.qc-fact--warn .qc-fact__status { background: var(--v2-warn-soft); color: var(--v2-warn); }
+.qc-fact__text { color: var(--v2-ink-2); }
+.qc-fact__ev { flex: 0 0 auto; margin-left: auto; color: var(--v2-muted); }
+
+/* 评论区:补上谁在说、这条补哪个缺口 */
+.qc-comments__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; counter-reset: qc-c; }
+.qc-comment {
+  padding: 10px 12px; border-radius: var(--v2-radius-sm);
+  background: var(--v2-canvas); border: 1px solid var(--v2-line);
+}
+.qc-comment--owned { border-color: color-mix(in srgb, var(--v2-ok) 30%, var(--v2-line)); }
+.qc-comment__meta { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin-bottom: 6px; }
+.qc-comment__meta > button { margin-left: auto; }
+.qc-comment__fn, .qc-comment__gap {
+  padding: 1px 6px; border-radius: 3px; font-size: var(--v2-fs-micro);
+  background: var(--v2-surface); color: var(--v2-muted); border: 1px solid var(--v2-line);
+}
+.qc-comment__q { margin: 0; font-size: var(--v2-fs-sm); color: var(--v2-ink); }
+.qc-comment__a { display: flex; align-items: baseline; gap: 8px; margin-top: 6px; }
+.qc-comment__a p { margin: 0; font-size: var(--v2-fs-sm); color: var(--v2-ink-2); line-height: 1.7; }
+.qc-comment__side { display: block; margin-top: 4px; font-size: var(--v2-fs-micro); color: var(--v2-muted); }
+.qc-comment__follow {
+  list-style: none; margin: 8px 0 0; padding-left: 12px;
+  border-left: 2px solid var(--v2-line); display: flex; flex-direction: column; gap: 6px;
+}
+.qc-comment__follow li { display: flex; flex-direction: column; font-size: var(--v2-fs-xs); color: var(--v2-muted); }
+
+/* 候选差异表 */
+.qc-cdiff { display: flex; flex-direction: column; gap: 8px; }
+.qc-cdiff__axes > summary { font-size: var(--v2-fs-xs); color: var(--v2-muted); cursor: pointer; }
+.qc-cdiff__axes table { width: 100%; margin-top: 8px; border-collapse: collapse; font-size: var(--v2-fs-xs); }
+.qc-cdiff__axes th, .qc-cdiff__axes td {
+  padding: 6px 8px; text-align: left; vertical-align: top;
+  border-bottom: 1px solid var(--v2-line); color: var(--v2-ink-2);
+}
+.qc-cdiff__axes thead th { color: var(--v2-muted); font-weight: 500; }
+.qc-cdiff__axes th[scope="row"] { color: var(--v2-muted); font-weight: 400; white-space: nowrap; }
+.qc-cdiff__axes .is-active { background: var(--v2-brand-soft); color: var(--v2-brand-ink); }
+
+/* 来源清单 */
+.qc-sources > summary { font-size: var(--v2-fs-xs); color: var(--v2-muted); cursor: pointer; }
+.qc-sources ul { margin: 6px 0 0; padding-left: 18px; font-size: var(--v2-fs-xs); color: var(--v2-ink-2); line-height: 1.7; }
+.qc-sources li small { margin-left: 6px; color: var(--v2-muted); }
+
 /* ---- 等待卡:替掉那条几十分钟不动的「正在生成 44%」 ---- */
 .qc-wait {
   display: flex; flex-direction: column; gap: 8px;
@@ -3503,7 +3623,9 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
      窄带浮在大片留白中间,比不放宽更难看。
    - 创作区:通栏。它是双栏工作台(选题池 + 配置),宽度越大越好用。
    两级都留 --wide 语义,免得以后每加一个区都要重新拍一个数字。 */
-.qc-page .qc-panel { max-width: 1120px; }
+/* 产出区详情现在有三段(成品/判断依据/发布方案)与候选差异表,1120 太窄:
+   差异表三列 + 台账的缺项清单会被挤成竖条。放到 1320。 */
+.qc-page .qc-panel { max-width: 1320px; }
 .qc-page .qc-panel--wide { max-width: none; }
 
 /* 创作区双栏:左 360px 选题池 | 右 1fr 生成与结果;窄屏上下堆叠 */
