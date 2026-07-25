@@ -4,8 +4,9 @@ import {
   buildKnowledgeLedger,
   buildRepairPrompt,
   buildStagedCommentGrowthPrompt,
-  buildStagedCommentsPrompt,
+  buildStagedCommentReadersPrompt,
   buildStagedLedgerPrompt,
+  buildStagedOrgAnswersPrompt,
   ContentGenerationAgent,
   createDefaultGenerationConfig,
   DEFAULT_FORMULA_VERSION,
@@ -15,9 +16,11 @@ import {
   planTopicOrchestrations,
   PROMPT_CONTRACT_VERSION,
   selectKnowledgeContext,
+  STAGED_COMMENT_READERS_JSON_SCHEMA,
   STAGED_COMMENTS_JSON_SCHEMA,
+  STAGED_ORG_ANSWERS_JSON_SCHEMA,
 } from "../src/index.js";
-import type { InformationGap, ModelGenerationRequest, ModelProvider, TopicOpportunity } from "../src/index.js";
+import type { CommentSurfaceRoleCard, DialogueThreadPlan, InformationGap, ModelGenerationRequest, ModelProvider, TopicOpportunity } from "../src/index.js";
 
 const project = {
   id: "p1",
@@ -79,14 +82,23 @@ function legacyDraftJson() {
   };
 }
 
+function requestText(request: ModelGenerationRequest): string {
+  return request.messages.map((message) => {
+    const content = message.content;
+    return Array.isArray(content)
+      ? content.map((part) => (part.type === "text" ? part.text : "")).join("\n")
+      : content;
+  }).join("\n");
+}
+
+/** 按侧+按角色隔离后,提示词不再有 task_data;线程 id 从提示词全文的规格/清单/根评论 JSON 中提取。 */
+function stagedThreadIds(request: ModelGenerationRequest): string[] {
+  return [...new Set([...requestText(request).matchAll(/"id"\s*:\s*"([^"]*_thread_\d+)"/gu)].map((match) => match[1]!))];
+}
+
 function stagedThreadSkeletons(request: ModelGenerationRequest) {
-  const content = request.messages[1]!.content;
-  const text = Array.isArray(content) ? content.find((part) => part.type === "text")?.text ?? "" : content;
-  const match = text.match(/<task_data>\s*([\s\S]*?)\s*<\/task_data>/u);
-  const taskData = match ? JSON.parse(match[1]!) : {};
-  return (taskData.orchestrationPlan?.dialogueThreads ?? []).map((thread: { id: string }, index: number) => ({
-    id: thread.id,
-    roleIndex: index % Math.max(1, taskData.orchestrationPlan?.personaScenePlan?.commentCast?.length ?? 1),
+  return stagedThreadIds(request).map((id, index) => ({
+    id,
     question: `第${index + 1}项应该核实什么？`,
     answer: "按资料逐项核实。",
     followUps: [] as Array<Record<string, unknown>>,
@@ -157,18 +169,21 @@ describe("Cref contract v1.1 binding", () => {
     const provider: ModelProvider = {
       async generate(request) {
         const purpose = String(request.metadata?.purpose);
-        if (purpose === "generate_comments") {
+        if (purpose === "generate_comment_readers") {
           const threads = stagedThreadSkeletons(request).map((thread, index) => ({
             ...thread,
             // Only the first thread states the v1.1 fields; the rest omit them
             // so the engine must apply the positional/planned defaults.
             ...(index === 0 ? { kind: "follow_up", answerKind: "clarification", boundary: "模特声明的边界" } : {}),
           }));
+          return { text: JSON.stringify({ threads }), raw: {} };
+        }
+        if (purpose === "generate_org_answers") {
+          // 机构答复调用只回可见答复;首评仅 publisher 调用产出。
           return {
             text: JSON.stringify({
-              disclaimer: "评论区问答参考模板",
-              ownedFirstComment: "置顶：价格以当期为准，详见 evidence_d1。",
-              threads,
+              answers: stagedThreadIds(request).map((id) => ({ id, answer: "按资料逐项核实。" })),
+              ...(request.metadata?.identity === "publisher" ? { ownedFirstComment: "置顶：价格以当期为准，详见 evidence_d1。" } : {}),
             }),
             raw: {},
           };
@@ -220,8 +235,16 @@ describe("Cref contract v1.1 binding", () => {
       expect(first.kind).toBe("follow_up");
       expect(first.answerKind).toBe("clarification");
       expect(first.boundary).toBe("模特声明的边界");
-      // Owned first comment is kept, cleaned like any other visible copy.
-      expect(pkg.content.Cref.ownedFirstComment).toBe("置顶：价格以当期为准，详见 资料原文。");
+      // Owned first comment is kept, cleaned like any other visible copy. 按角色
+      // 隔离后首评只可能由 publisher 答复调用产出:该候选没有 publisher 机构线程
+      // 时(全部线程落在读者侧)跳过该角色调用,首评自然缺省,不凭空合成。
+      const hasPublisherOrgThread = (pkg.dialogueThreads ?? [])
+        .some((thread) => (thread.threadKind ?? "org_answer") === "org_answer" && thread.postingIdentity === "publisher");
+      if (hasPublisherOrgThread) {
+        expect(pkg.content.Cref.ownedFirstComment).toBe("置顶：价格以当期为准，详见 资料原文。");
+      } else {
+        expect(pkg.content.Cref.ownedFirstComment).toBeUndefined();
+      }
       for (const [threadIndex, thread] of threads.entries()) {
         if (threadIndex > 0) {
           const planned = (pkg.dialogueThreads ?? []).find((candidate) => candidate.id === thread.id);
@@ -249,7 +272,7 @@ describe("Cref contract v1.1 binding", () => {
     const provider: ModelProvider = {
       async generate(request) {
         const purpose = String(request.metadata?.purpose);
-        if (purpose === "generate_comments") {
+        if (purpose === "generate_comment_readers") {
           const threads = stagedThreadSkeletons(request).map((thread, index) => ({
             ...thread,
             // Thread 0 states a legal function; thread 1 states an illegal one
@@ -257,10 +280,10 @@ describe("Cref contract v1.1 binding", () => {
             ...(index === 0 ? { function: "counterexample" } : {}),
             ...(index === 1 ? { function: "opinion" } : {}),
           }));
-          return {
-            text: JSON.stringify({ disclaimer: "评论区问答参考模板", threads }),
-            raw: {},
-          };
+          return { text: JSON.stringify({ threads }), raw: {} };
+        }
+        if (purpose === "generate_org_answers") {
+          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "按资料逐项核实。" })) }), raw: {} };
         }
         if (purpose === "generate_ledger") {
           return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
@@ -370,7 +393,10 @@ describe("Cref contract v1.1 parse compatibility", () => {
 
 describe("Cref contract v1.1 prompt contract", () => {
   it("bumps the prompt contract version and exposes the new optional staged-schema fields", () => {
-    expect(PROMPT_CONTRACT_VERSION).toBe("2.1.0");
+    // 2.3.0: postingIdentity enum 补齐方法论 §1744 的四档并加入 publisher
+    // (原 enum 少 publisher、校验层又不认 author,模型照 schema 输出 author
+    // 必吃 comment_identity_violation)。digest 覆盖 generationSchema,版本随之移动。
+    expect(PROMPT_CONTRACT_VERSION).toBe("2.3.0");
     const properties = STAGED_COMMENTS_JSON_SCHEMA.properties as Record<string, any>;
     expect(STAGED_COMMENTS_JSON_SCHEMA.required).toEqual(["disclaimer", "threads"]);
     expect(properties.ownedFirstComment).toEqual({ type: "string" });
@@ -382,9 +408,26 @@ describe("Cref contract v1.1 prompt contract", () => {
     expect(threadProperties.function).toEqual({ enum: ["surface_gap", "answer", "clarify", "counterexample", "verification", "next_step"] });
     expect(properties.threads.items.required).not.toContain("kind");
     expect(properties.threads.items.required).not.toContain("function");
+    // 2.2.0: 人物由规划层分配,模型不再输出 roleIndex。
+    expect(properties.threads.items.required).not.toContain("roleIndex");
+    expect(threadProperties.roleIndex).toBeUndefined();
     const followUpProperties = properties.threads.items.properties.followUps.items.properties;
     expect(followUpProperties.kind).toEqual({ enum: ["question", "answer", "follow_up", "clarification"] });
     expect(followUpProperties.boundary).toEqual({ type: "string" });
+    // 读者侧 schema:不要 disclaimer/roleIndex,answer 允许空串(T1 留待 2A-O、T3 恒空)。
+    const readersProperties = STAGED_COMMENT_READERS_JSON_SCHEMA.properties as Record<string, any>;
+    expect(STAGED_COMMENT_READERS_JSON_SCHEMA.required).toEqual(["threads"]);
+    expect(readersProperties.disclaimer).toBeUndefined();
+    expect(readersProperties.threads.items.required).toEqual(["id", "question", "answer", "followUps"]);
+    expect(readersProperties.threads.items.properties.roleIndex).toBeUndefined();
+    expect(readersProperties.threads.items.properties.answer).toEqual({ type: "string" });
+    // 机构侧 schema:答复列表 + 可选首评。
+    const orgProperties = STAGED_ORG_ANSWERS_JSON_SCHEMA.properties as Record<string, any>;
+    expect(STAGED_ORG_ANSWERS_JSON_SCHEMA.required).toEqual(["answers"]);
+    expect(orgProperties.ownedFirstComment).toEqual({ type: "string" });
+    expect(orgProperties.answers.items.required).toEqual(["id", "answer"]);
+    expect(orgProperties.answers.items.properties.answerKind).toEqual({ enum: ["question", "answer", "follow_up", "clarification"] });
+    expect(orgProperties.answers.items.properties.boundary).toEqual({ type: "string" });
   });
 
   it("exposes the same optional fields on the repair Cref schema", () => {
@@ -427,50 +470,134 @@ describe("Cref contract v1.1 staged prompt text", () => {
     variation: { opening: "问题", pacing: "短句", structure: "问答", phrasing: "克制" },
   });
 
-  it("2A binds the publisher identity, the three reply paths and the cast dedup rule", () => {
-    const prompt = buildStagedCommentsPrompt(stagedPromptInput(), {
+  function promptFullText(bundle: { messages: ModelGenerationRequest["messages"] }): string {
+    return bundle.messages.map((message) => {
+      const content = message.content;
+      return Array.isArray(content)
+        ? content.map((part) => (part.type === "text" ? part.text : "")).join("\n")
+        : content;
+    }).join("\n");
+  }
+
+  function fakeSurfaceRoleCard(replyDisplayRole: string): CommentSurfaceRoleCard {
+    return {
+      displayRole: "同城比较者",
+      relationToHost: "同城读者",
+      identityCue: "同城",
+      situationCue: "在比较",
+      motive: "确认条件",
+      knowledgePosition: "只知道正文公开的信息",
+      speechPattern: "短句",
+      lexicalCues: [],
+      interactionHook: "补一个条件",
+      permittedContribution: "一个窄问题",
+      utteranceMode: "direct_question",
+      targetChars: [8, 28],
+      replyDisplayRole,
+    };
+  }
+
+  function fakeThreadPlan(overrides: Partial<DialogueThreadPlan> & { id: string; postingIdentity: "publisher" | "staff" }): DialogueThreadPlan {
+    return {
+      gapId: "g1",
+      stage: "comparing",
+      function: "verification",
+      questionIntent: "哪些条件影响适用性？",
+      answerRequirements: [],
+      followUpIntent: "",
+      nextStep: "按证据来源核验自己的适用条件",
+      sourceClusterIds: [],
+      evidenceIds: [],
+      boundaryRequired: false,
+      personaRole: "information_collector",
+      speakerType: "simulated_reader",
+      claimStatus: "bounded",
+      replyTo: null,
+      threadDepth: 0,
+      simulated: true,
+      simulationLabel: "模拟潜在读者情景",
+      roleCard: { stage: "comparing", knowledge: [], constraints: [], decisionTask: "哪些条件影响适用性？", evidenceStance: "verification_seeking" },
+      primaryGapId: "g1",
+      auxiliaryGapIds: [],
+      densityProxy: { primaryGapCount: 1, auxiliaryDimensionCount: 0, roleDimensionCount: 4, constraintCount: 0, expectedReplyComponents: 5, questionTargetChars: 22 },
+      replyPlan: { directAnswer: "按资料逐项核实", condition: "仅已披露条件", boundary: "不代填个人情况", unknown: "个体差异未知", nextQuestion: "核实个人条件" },
+      threadKind: "org_answer",
+      ...overrides,
+    };
+  }
+
+  it("2A-R binds planner-assigned personas and the reader-side contract", () => {
+    const prompt = buildStagedCommentReadersPrompt(stagedPromptInput(), {
       H: { hashtags: ["方案选择"] },
       N: { imageBrief: "", title: "先核实信息", body: "正文。" },
     });
     const phase = String(prompt.messages[3]?.content);
-    // Identity layer: the answering side is the publishing account speaking in
-    // the host voice; the question side stays an explicitly labelled proxy.
-    expect(phase).toContain("publisher");
-    expect(phase).toContain("personaScenePlan.host");
-    expect(phase).toContain("模拟读者代理");
-    expect(phase).toContain("replyDisplayRole");
-    expect(phase).toContain("accountable=true");
-    // Three reply paths: knowledge-backed → routed verification → kept unknown.
-    expect(phase).toContain("usableEvidenceReferences直接支持");
-    expect(phase).toContain("以当期确认为准");
-    expect(phase).toContain("路由式回答");
-    expect(phase).toContain("保留未知");
-    // Per-thread function/kind/answerKind/boundary annotation duties.
+    // 人物由规划层分配:模型只用分配好的人物声音开口,不选角、不写 roleIndex。
+    expect(phase).toContain("已由规划分配");
+    expect(phase).toContain("不得换人");
+    expect(phase).not.toContain("roleIndex");
+    // 读者互动层三形态规则保留:T2 读者B接话、T3 短共鸣、其余 answer 留空。
+    expect(phase).toContain("reader_exchange");
+    expect(phase).toContain("permittedContribution");
+    expect(phase).toContain("organic_reaction");
+    expect(phase).toContain("空字符串");
+    // Per-thread function/kind/boundary annotation duties.
     expect(phase).toContain("function六选一");
     expect(phase).toContain("surface_gap");
-    expect(phase).toContain("answerKind");
     expect(phase).toContain("boundary");
-    // Cast dedup coexists with the no-rotating-assignment rule.
-    expect(phase).toContain("不按角色池顺序轮流填空");
-    expect(phase).toContain("同一个displayRole不得重复选用");
-    // The publisher-owned first comment is requested but optional.
-    expect(phase).toContain("ownedFirstComment");
-    // The no-followUps and same-thread-reveal rules survive the rewrite.
+    // The no-followUps rule survives the rewrite.
     expect(phase).toContain("followUps必须为空数组");
-    expect(phase).toContain("禁止故意留悬念");
   });
 
-  it("2A requires answer-skeleton and closing-line dedup across threads", () => {
-    const prompt = buildStagedCommentsPrompt(stagedPromptInput(), {
+  it("2A-O publisher binds the host voice, the three reply paths and the optional first comment", () => {
+    const threads = [{
+      planned: fakeThreadPlan({ id: "s1_thread_1", postingIdentity: "publisher", surfaceRoleCard: fakeSurfaceRoleCard("发布者") }),
+      question: "适用条件怎么判断？",
+    }];
+    const prompt = buildStagedOrgAnswersPrompt(stagedPromptInput(), {
       H: { hashtags: ["方案选择"] },
       N: { imageBrief: "", title: "先核实信息", body: "正文。" },
-    });
-    const phase = String(prompt.messages[3]?.content);
-    // Diversity contract: no shared answer skeleton between adjacent threads and
-    // no repeated one-size-fits-all closing line across the comment section.
-    expect(phase).toContain("应答骨架去重");
-    expect(phase).toContain("不得同序同词");
-    expect(phase).toContain("最多出现一次");
+    }, "publisher", threads);
+    const text = promptFullText(prompt);
+    // 方法论 ROLE 04:publisher = 发布账号本人(accountable_responder),给
+    // 直接回答＋条件＋反例＋下一步;三条答复路径:有口径→引口径、无口径可核验
+    // →路由式回答、完全未知→保留未知。不是顾客人设(§1738)。
+    expect(text).toContain("发布账号本人");
+    expect(text).toContain("不冒充独立消费者");
+    expect(text).toContain("以当期确认为准");
+    expect(text).toContain("路由式回答");
+    expect(text).toContain("保留未知");
+    expect(text).toContain("禁止故意留悬念");
+    expect(text).toContain("你只知道下方列出的口径");
+    // 应答骨架去重约束保留:禁止把答复要点全套展开。
+    expect(text).toContain("禁止每条都写");
+    // The publisher-owned first comment is requested but optional.
+    expect(text).toContain("ownedFirstComment");
+    // 另一个角色(助理)的任何定义不出现。
+    expect(text).not.toContain("助理");
+    expect(text).not.toContain("staff");
+  });
+
+  it("2A-O staff binds the service tone and the scope-anchoring contract", () => {
+    const threads = [{
+      planned: fakeThreadPlan({ id: "s1_thread_2", postingIdentity: "staff", surfaceRoleCard: fakeSurfaceRoleCard("拾光助理") }),
+      question: "价格是多少、怎么预约？",
+    }];
+    const prompt = buildStagedOrgAnswersPrompt(stagedPromptInput(), {
+      H: { hashtags: ["方案选择"] },
+      N: { imageBrief: "", title: "先核实信息", body: "正文。" },
+    }, "staff", threads);
+    const text = promptFullText(prompt);
+    // 话术自由,但价格数字承诺锚定口径;无口径转人工;动态信息带限定。
+    expect(text).toContain("拾光助理");
+    expect(text).toContain("我帮你跟专人确认");
+    expect(text).toContain("以当期确认为准");
+    expect(text).toContain("你只知道下方列出的口径");
+    expect(text).toContain("禁止每条都写");
+    // 另一个角色(IP/楼主)的任何定义不出现。
+    expect(text).not.toContain("楼主");
+    expect(text).not.toContain("发布者");
+    expect(text).not.toContain("publisher");
   });
 
   it("2B injects the planned followUpIntent only for multi-turn threads", () => {

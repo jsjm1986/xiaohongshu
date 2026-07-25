@@ -9,6 +9,7 @@ import {
   createDefaultGenerationConfig,
   DEFAULT_FORMULA_VERSION,
   indexKnowledgeSource,
+  normalizeProjectCreativeBlueprint,
   parseGenerationDraft,
   planTopicOrchestrations,
   validateGenerationDraft,
@@ -200,11 +201,33 @@ describe("dialoguePlans threadKind assignment", () => {
     }
   });
 
-  it("营销话头 gap(价格/预约)的线程 T1 概率自然偏高", () => {
+  it("营销话头 gap(命中 price 护栏)的线程 T1 概率自然偏高", () => {
+    // 三身份生态:营销 T1 偏置由 claimRules 护栏命中驱动(关键词硬路由已删除),
+    // 测试显式提供 price 规则使 price_gap 命中护栏。
     const plans = planTopicOrchestrations({
       opportunity: opportunity("topic-kind-marketing"),
       gaps,
       config: config(),
+      projectBlueprint: normalizeProjectCreativeBlueprint({
+        projectId: "p1",
+        sourceFingerprint: "thread-kind-guard",
+        moduleRevisions: {},
+        modules: {
+          claim_policy: {
+            rules: [{
+              id: "price_rule",
+              label: "价格声明",
+              claimType: "price",
+              terms: ["价格", "多少钱"],
+              requiresEvidence: true,
+              allowedEvidenceStatuses: ["user_supplied"],
+              dynamic: true,
+              handling: "verify",
+              source: { status: "inference", evidenceIds: [] },
+            }],
+          },
+        },
+      }),
       seeds: [11, 22, 33],
     });
     const marketingThreads = plans.flatMap((plan) =>

@@ -100,6 +100,10 @@ export function validationIssueLabel(code?: string) {
     forbidden_phrase: "出现了被禁止的表述",
     conflict_as_fact: "把未解决的冲突信息当成了定论",
     knowledge_backed_claim_unrecorded: "知识型说法没有在事实账本登记",
+    blueprint_prohibited_history_unspecified: "项目分析未给出禁止声称的经历(建议重跑分析)",
+    // 追问层级(L1 补条件 → L2 反例 → L3 核验)
+    comment_follow_up_level_not_ascending: "追问层级没有递进(应 L1→L2→L3)",
+    comment_follow_up_stop_not_final: "标了停止理由却还在继续追问",
     // 缺口与覆盖
     comment_gap_coverage_ledger_missing: "缺少缺口覆盖台账(历史内容)",
     comment_coverage_capacity_mismatch: "覆盖台账与编排线程数不一致",

@@ -36,6 +36,7 @@ import {
   commentNodeKindLabel,
   commentThreadKindLabel,
   commentThreadKindOf,
+  orgAnswerIdentityBadge,
   deploymentSla,
   liveRoutingLines,
   uncoveredGapLabels,
@@ -124,8 +125,6 @@ export function GenerationResultPage() {
   const isFallback = recordSource === "fallback";
   const recordNotice = generationRecordNotice(isFallback);
   const publishable = selected?.validation?.valid === true;
-  // 双号运营：评论区出现 staff 线程即按双身份呈现徽标(IP 专业解答 / 机构助理)
-  const dualIdentity = Boolean(selected?.comments?.some((comment) => comment.postingIdentity === "staff"));
   const impactDetails = useMemo(
     () => {
       const normalized = normalizeImpactReport(
@@ -563,7 +562,7 @@ export function GenerationResultPage() {
                   <div className="comment-question">
                     <span className="comment-avatar">评</span>
                     <div>
-                      <div className="comment-meta">{comment.displayName && <Badge tone="blue">{comment.displayName}</Badge>}{comment.simulated && <Badge tone="warning">{comment.simulationLabel || "模拟潜在读者"}</Badge>}{comment.postingIdentity && threadKind === "org_answer" && <Badge tone={comment.postingIdentity === "staff" ? "blue" : "positive"}>{comment.postingIdentity === "staff" ? "机构助理 · 营销承接" : dualIdentity ? "机构 IP · 专业解答" : `${identityLabel(comment.postingIdentity)}可追责答复`}</Badge>}</div>
+                      <div className="comment-meta">{comment.displayName && <Badge tone="blue">{comment.displayName}</Badge>}{comment.simulated && <Badge tone="warning">{comment.simulationLabel || "模拟潜在读者"}</Badge>}{comment.postingIdentity && threadKind === "org_answer" && (() => { const badge = orgAnswerIdentityBadge(comment.postingIdentity); return <Badge tone={badge?.tone ?? "positive"}>{badge?.text ?? `${identityLabel(comment.postingIdentity)}可追责答复`}</Badge>; })()}</div>
                       <strong>{comment.question}</strong>
                       {comment.purpose && (
                         <small className="comment-purpose">信息任务：{comment.purpose}</small>
@@ -906,14 +905,20 @@ function identityLabel(value?: string) {
 }
 
 /**
- * 答复侧机构名:surfaceRoleCard.replyDisplayRole 原样显示;assistant_account /
- * host_account 这类内部 id 形态只显示「机构助理/机构 IP」通用文案,不裸露内部
- * id;历史包没有 surfaceRoleCard 时不显示(不出空徽标)。
+ * 答复侧展示名:surfaceRoleCard.replyDisplayRole 原样显示;host_account /
+ * assistant_account 这类内部 id 形态按 postingIdentity 显示通用文案
+ * (publisher 楼主 / staff 机构助理 / expert 机构 IP),不裸露内部 id;历史包
+ * 没有 surfaceRoleCard 时不显示(不出空徽标)。"楼主"是平台语境下"发帖账号"
+ * 的事实用语,不表示顾客身份——身份性质由 orgAnswerIdentityBadge 表达。
  */
 function replyOrgDisplayName(comment: Candidate["comments"][number]) {
   const raw = comment.surfaceRoleCard?.replyDisplayRole?.trim();
   if (!raw) return undefined;
-  if (/^[a-z][a-z0-9_]*$/.test(raw)) return comment.postingIdentity === "staff" ? "机构助理" : "机构 IP";
+  if (/^[a-z][a-z0-9_]*$/.test(raw)) {
+    return comment.postingIdentity === "staff" ? "机构助理"
+      : comment.postingIdentity === "publisher" ? "楼主"
+      : "机构 IP";
+  }
   return raw;
 }
 

@@ -147,12 +147,16 @@ describe("P4 comment identity and host-state validators", () => {
       parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({ postingIdentity })]))),
       config,
     );
-    expect(codes(byIdentity("author"))).toContain("comment_identity_violation");
-    expect(byIdentity("author").find((issue) => issue.code === "comment_identity_violation")?.severity).toBe("error");
+    // 只有 reader_question_template(提问模板)不是可追责答复身份。
     const templateIssues = byIdentity("reader_question_template");
     expect(codes(templateIssues)).toEqual(expect.arrayContaining(["comment_identity_violation", "unaccountable_answer_identity"]));
-    for (const accountable of ["publisher", "brand", "staff", "expert"]) {
-      expect(codes(byIdentity(accountable))).not.toContain("comment_identity_violation");
+    expect(templateIssues.find((issue) => issue.code === "comment_identity_violation")?.severity).toBe("error");
+    // 方法论 §1744 的四档 postingIdentity(author/brand/staff/expert)全部可追责,
+    // publisher 是本实现的发布账号档。此前 author 被判违规,而一次性生成 schema
+    // (GENERATION_DRAFT_JSON_SCHEMA)恰恰要求模型输出 author——同一个值被同时
+    // 要求和禁止,遵守 schema 的输出必然吃 comment_identity_violation。
+    for (const accountable of ["author", "brand", "staff", "expert", "publisher"]) {
+      expect(codes(byIdentity(accountable)), `${accountable} 应为可追责答复身份`).not.toContain("comment_identity_violation");
     }
   });
 
@@ -187,14 +191,52 @@ describe("P4 comment identity and host-state validators", () => {
     expect(codes(staffIssues)).not.toContain("comment_host_state_inconsistency");
   });
 
-  it("routes question-side completion claims to fabricated_operational_experience, never double-firing", () => {
+  it("放行发布账号的组织第一人称复数(我们/我方),只拦顾客口吻的第一人称完成", () => {
+    // publisher 语义翻转后它代表发布账号,"我们"是它的正常人称。此前
+    // claimsFirstPersonCompletion 用 /我(...)（已经|...)/ 匹配,"我们"的"我"同样
+    // 命中,把正当的组织侧陈述判成顾客亲历——分词错误,不是语义放宽。
     const config = validationConfig();
-    const issues = validate(
+    for (const answer of [
+      "我们上周已经把当期价目更新了，以当期确认为准。",
+      "我们的档期已经排到下月了。",
+      "我方已经确认过这个口径。",
+    ]) {
+      const issues = validate(
+        parseGenerationDraft(JSON.stringify(draftJson(intentBody, [thread({ postingIdentity: "publisher", answer })]))),
+        config,
+      );
+      expect(codes(issues), `组织第一人称复数不应被拦: ${answer}`)
+        .not.toContain("comment_host_state_inconsistency");
+    }
+    // 顾客口吻的单数第一人称完成仍是 error。
+    const consumerVoice = validate(
+      parseGenerationDraft(JSON.stringify(draftJson(intentBody, [thread({ postingIdentity: "publisher", answer: "我上周已经去看过一次了。" })]))),
+      config,
+    );
+    expect(consumerVoice).toContainEqual(expect.objectContaining({
+      code: "comment_host_state_inconsistency", severity: "error",
+    }));
+  });
+
+  it("lets a vague question-side experience mention pass, and only errors on testimonial shape", () => {
+    // 方法论 §1594:「职业、城市、经历等创作细节可以作为明确的拟人情境」——模糊
+    // 的第一人称经历本身不违规,禁的是把它冒充项目事实、消费者证词或独立口碑。
+    // 逐角色的「禁止代替的证据」由读者侧提示词按 personaRole 承担(标注制),
+    // 校验层只守证词形态这条硬门槛,不再按「经历位」名额判定第一人称完成时。
+    const config = validationConfig();
+    const vague = validate(
       parseGenerationDraft(JSON.stringify(draftJson(intentBody, [thread({ question: "我之前试过一次，想问问大家？" })]))),
       config,
     );
-    expect(codes(issues)).toContain("fabricated_operational_experience");
-    expect(codes(issues)).not.toContain("comment_host_state_inconsistency");
+    expect(codes(vague)).not.toContain("fabricated_operational_experience");
+    expect(codes(vague)).not.toContain("comment_host_state_inconsistency");
+
+    // 证词形态(第一人称完成 + 效果背书)仍是硬 error:那是独立口碑,不是处境。
+    const testimonial = validate(
+      parseGenerationDraft(JSON.stringify(draftJson(intentBody, [thread({ question: "我做过一次，效果真的不错，你们呢？" })]))),
+      config,
+    );
+    expect(codes(testimonial)).toContain("fabricated_operational_experience");
 
     // A question side that only voices uncertainty stays clean.
     const cautious = validate(
@@ -542,12 +584,14 @@ describe("P4 repair loop end-to-end", () => {
     }).join("\n");
   }
 
+  // 按侧+按角色隔离后,提示词不再有 task_data;线程 id 从提示词全文的规格/清单 JSON 提取。
+  function stagedThreadIds(request: ModelGenerationRequest): string[] {
+    return [...new Set([...requestText(request).matchAll(/"id"\s*:\s*"([^"]*_thread_\d+)"/gu)].map((match) => match[1]!))];
+  }
+
   function stagedThreads(request: ModelGenerationRequest) {
-    const match = requestText(request).match(/<task_data>\s*([\s\S]*?)\s*<\/task_data>/u);
-    const taskData = match ? JSON.parse(match[1]!) : {};
-    return ((taskData.orchestrationPlan?.dialogueThreads ?? []) as Array<{ id: string }>).map((item, index) => ({
-      id: item.id,
-      roleIndex: index,
+    return stagedThreadIds(request).map((id, index) => ({
+      id,
       question: `第${index + 1}项应该怎么选？`,
       answer: "先看自己的情况。",
       followUps: [] as Array<Record<string, unknown>>,
@@ -571,8 +615,11 @@ describe("P4 repair loop end-to-end", () => {
     const provider: ModelProvider = {
       async generate(request) {
         const purpose = String(request.metadata?.purpose);
-        if (purpose === "generate_comments") {
-          return { text: JSON.stringify({ disclaimer: "以下为模拟情景问答参考模板，不代表真实评论。", threads: stagedThreads(request) }), raw: {} };
+        if (purpose === "generate_comment_readers") {
+          return { text: JSON.stringify({ threads: stagedThreads(request) }), raw: {} };
+        }
+        if (purpose === "generate_org_answers") {
+          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "先看自己的情况。" })) }), raw: {} };
         }
         if (purpose === "generate_ledger") {
           return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
@@ -614,8 +661,11 @@ describe("P4 repair loop end-to-end", () => {
     const provider: ModelProvider = {
       async generate(request) {
         const purpose = String(request.metadata?.purpose);
-        if (purpose === "generate_comments") {
-          return { text: JSON.stringify({ disclaimer: "以下为模拟情景问答参考模板，不代表真实评论。", threads: stagedThreads(request) }), raw: {} };
+        if (purpose === "generate_comment_readers") {
+          return { text: JSON.stringify({ threads: stagedThreads(request) }), raw: {} };
+        }
+        if (purpose === "generate_org_answers") {
+          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "先看自己的情况。" })) }), raw: {} };
         }
         if (purpose === "generate_ledger") {
           return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
@@ -640,5 +690,67 @@ describe("P4 repair loop end-to-end", () => {
       expect(pkg.validation.issues.map((issue) => issue.code)).toContain("missing_required_phrase");
       expect(pkg.content.N.body).toBe(brokenBody);
     }
+  });
+});
+
+/**
+ * 追问层级(L1 补条件 → L2 反例/冲突 → L3 核验与下一步)与 stopWhen 的**结构**
+ * 校验。方法论「追问层级不是越深越好」给的是层级语义与停止条件,不是深度配额:
+ * 因此校验只判层级是否递进、停止声明是否落在末轮,不判「这条追问是不是真的在
+ * 补条件」——那是语义判断,归模型(2B 提示词按层级下发),不归校验层词表。
+ * 两条都是 warning:标注缺失或错序不该阻断可发布文案。
+ */
+describe("追问层级阶梯(结构校验,不做语义判断)", () => {
+  const withFollowUps = (followUps: Array<Record<string, unknown>>) => validate(
+    parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({ followUps })]))),
+    validationConfig(),
+  );
+
+  it("层级递进(L1→L2→L3)与全部缺省都不报", () => {
+    const ascending = withFollowUps([
+      { question: "那我这种情况呢？", answer: "看你的具体条件。", level: "L1" },
+      { question: "可我听说有人不适合？", answer: "确实有例外。", level: "L2" },
+      { question: "那我该先确认什么？", answer: "带上你的情况去核实。", level: "L3", stopReason: "answered" },
+    ]);
+    expect(codes(ascending)).not.toContain("comment_follow_up_level_not_ascending");
+    expect(codes(ascending)).not.toContain("comment_follow_up_stop_not_final");
+
+    // 历史包没有 level/stopReason:缺省即"未记录",不得因此报错。
+    const legacy = withFollowUps([
+      { question: "那我这种情况呢？", answer: "看你的具体条件。" },
+      { question: "还要注意什么？", answer: "先确认这两项。" },
+    ]);
+    expect(codes(legacy)).not.toContain("comment_follow_up_level_not_ascending");
+    expect(codes(legacy)).not.toContain("comment_follow_up_stop_not_final");
+  });
+
+  it("层级倒退或重复 → warning(不阻断)", () => {
+    const descending = withFollowUps([
+      { question: "有没有反例？", answer: "有。", level: "L2" },
+      { question: "那我这种情况呢？", answer: "看条件。", level: "L1" },
+    ]);
+    expect(descending).toContainEqual(expect.objectContaining({
+      code: "comment_follow_up_level_not_ascending", severity: "warning",
+    }));
+    // 同级重复同样不算递进。
+    expect(withFollowUps([
+      { question: "那我这种情况呢？", answer: "看条件。", level: "L1" },
+      { question: "我朋友那种情况呢？", answer: "也看条件。", level: "L1" },
+    ]).map((issue) => issue.code)).toContain("comment_follow_up_level_not_ascending");
+  });
+
+  it("停止声明出现在中途 → warning:声明停了却还在继续追问", () => {
+    const earlyStop = withFollowUps([
+      { question: "那我这种情况呢？", answer: "这个得让专人跟你确认。", level: "L1", stopReason: "route_to_professional" },
+      { question: "那大概多久？", answer: "还是得看专人怎么说。", level: "L2" },
+    ]);
+    expect(earlyStop).toContainEqual(expect.objectContaining({
+      code: "comment_follow_up_stop_not_final", severity: "warning",
+    }));
+    // 落在末轮就不报。
+    expect(codes(withFollowUps([
+      { question: "那我这种情况呢？", answer: "看条件。", level: "L1" },
+      { question: "那我该先确认什么？", answer: "我帮你跟专人确认。", level: "L3", stopReason: "route_to_professional" },
+    ]))).not.toContain("comment_follow_up_stop_not_final");
   });
 });

@@ -511,6 +511,13 @@ export interface GenerationParameterDefinition {
   changeEffect?: string;
   formulaIds: Array<`F${string}`>;
   channels: ContentChannel[];
+  /**
+   * 评论生成阶段归属(单一真源):仅对 channels 含 "Cref" 的参数有意义。
+   * reader=只注入读者提问侧(2A-R);answer=只注入机构答复侧(2A-O/2B-O);
+   * both=两侧都注入。缺省表示该参数不参与评论侧的分阶段行为注入。
+   * 注入的只是 behaviorInstructions 纯写作文本,绝不携带角色身份/口径信息。
+   */
+  commentStage?: "reader" | "answer" | "both";
   evidenceStatus: ParameterEvidenceStatus;
   evidenceNote: string;
 }
@@ -674,8 +681,29 @@ export type CommentPersonaRole =
   | "local_action_seeker"
   | "skeptical_returning_reader";
 
+/**
+ * 节点说话人类型。本实现用**线程级双字段**表达方法论《统一身份协议》的两类
+ * 角色,而不是"一个节点一个 roleType":
+ *   speakerType     → 提问侧说话人,恒为 simulated_reader(校验层对任何其他值
+ *                     判 invalid_scenario_speaker,见 content.ts)。
+ *   postingIdentity → 答复侧的可追责身份(publisher/author/brand/staff/expert),
+ *                     即方法论的 accountable_responder。
+ * 因此 accountable_responder 这个字面值在运行时不会被赋出——它的职责由
+ * postingIdentity 承载。枚举保留该值只为兼容历史包解析,不是待接线的缺口。
+ */
 export type CommentSpeakerType = "simulated_reader" | "accountable_responder";
 
+/**
+ * 线程答复的**结论强度**,与证据来源等级(EvidenceStatus)是两个不同的轴:
+ *   EvidenceStatus(observed/user_supplied/inferred/unknown) = 这条证据从哪来,
+ *     由知识台账定,claim_judge / knowledge_anchor_review 用它筛证据池。
+ *   CommentClaimStatus = 给定证据后这条线程的答复能站到多硬,由规划层按 gap
+ *     派生(有答案+有证据→verified;只有答案或框架→bounded;都没有→unknown)。
+ *
+ * hypothetical 承担方法论 generated_reference 的职责:T2 读者互聊与 T3 漂浮反应
+ * 一律 hypothetical(见 planning.ts),且派生路径上**没有**通往 verified 的分支
+ * ——这就是"generated_reference 不得升级为 observed"的结构性保证,不靠校验兜。
+ */
 export type CommentClaimStatus = "verified" | "bounded" | "unknown" | "hypothetical";
 
 export type CommentEvidenceStance = "evidence_first" | "verification_seeking" | "boundary_sensitive" | "unknown_aware";
@@ -764,6 +792,13 @@ export interface CommentSurfaceRoleCard {
   utteranceMode: CommentUtteranceMode;
   targetChars: [number, number];
   replyDisplayRole: string;
+  /**
+   * 机构侧角色标记(双号运营):蓝图 roleModel 中 accountable=true 的角色
+   * (机构 IP / 公开助理)在投影进 commentCast 时置 true。机构角色只能答复,
+   * 不能坐在读者席——规划层分配开口者 A / 接话读者 B 时必须排除。
+   * 历史包没有该字段,按读者侧处理(向后兼容)。
+   */
+  orgSide?: boolean;
 }
 
 export interface PersonaScenePlan {
@@ -861,6 +896,27 @@ export interface CommentScenarioMetadata {
 export type CommentNodeKind = "question" | "answer" | "follow_up" | "clarification";
 
 /**
+ * 追问层级（方法论《问题—答复—追问的最小结构》的 followUp.level）。
+ * L0 初问＝根评论本身，L1 补改变答案的条件，L2 处理反例或矛盾，L3 给核验与
+ * 下一步。方法论原话是「追问层级不是越深越好…没有新增缺口就停止；不得用
+ * 循环追问制造热闹感」——所以这是**功能标注**，不是必须走满四级的深度要求：
+ * 层级只说明这一轮追问承担什么，不代表允许更深。
+ *
+ * 可见行数预算独立约束实际轮数：追问容量按
+ * `(visibleCommentLines[1] - threadCount*2)/2` 计算（见 planning/content），
+ * 各原型上限 12–15 行、线程 3–5 条时本就只剩 1–2 轮，因此深度上限不随层级
+ * 放开。可选字段，历史包没有该标注。
+ */
+export type CommentFollowUpLevel = "L1" | "L2" | "L3";
+
+/**
+ * 追问停止原因（方法论同一结构里的 stopWhen：已回答、证据不足需标 unknown、
+ * 或应转专业核验）。标注为什么这一支停在这里，供审计区分"自然收束"与
+ * "缺证据被迫停"——两者都合法，但后者必须能被看见。可选，历史包没有。
+ */
+export type CommentFollowUpStopReason = "answered" | "unknown_pending_evidence" | "route_to_professional";
+
+/**
  * 评论互动类型(读者互动层),标记整条线程的互动形态:
  * - `org_answer` 机构问答(T1,缺省值):读者开口 → 可追责身份(IP/助理)答复;
  *   涉项目事实的问题必须此型。
@@ -885,6 +941,16 @@ export interface CommentFollowUp extends CommentScenarioMetadata {
   kind?: CommentNodeKind;
   /** Optional node-level boundary note (e.g. what this exchange must not assert). */
   boundary?: string;
+  /**
+   * 本轮追问承担的层级功能（方法论《问题—答复—追问的最小结构》）。位置默认按
+   * 深度推导（第 1 轮 L1、第 2 轮 L2…），显式值优先。可选，历史包没有该字段。
+   */
+  level?: CommentFollowUpLevel;
+  /**
+   * 本轮追问后为什么停（方法论 stopWhen）。只在该追问是本线程最后一轮时有意义；
+   * 可选，历史包没有该字段。
+   */
+  stopReason?: CommentFollowUpStopReason;
   /**
    * Backend display nickname for this follow-up speaker (纯展示元数据).
    * Assigned deterministically from the package seed so readers can tell the
@@ -1534,6 +1600,16 @@ export interface DialogueThreadPlan {
   replyDisplayName?: string;
   /** T2 接话读者 B 的可见角色卡,displayRole 与开口者不同;B 接话范围限其 permittedContribution。 */
   replySurfaceRoleCard?: CommentSurfaceRoleCard;
+  /**
+   * AI 答复身份分配的一句理由(三身份生态,可审计):引擎阶段 2 的 AI 分配调用
+   * 产出,随包落库;兜底/护栏接管时记录确定性原因。可选,历史包没有该字段。
+   */
+  routingReason?: string;
+  /**
+   * 开口人物去重标记:读者角色池小于线程数时允许同一 displayRole 重复开口,
+   * 重复线程置 true,提示词规格里提示换说法。可选,历史计划快照没有该字段。
+   */
+  personaRepeated?: boolean;
 }
 
 export type CommentGapCoverageStatus =

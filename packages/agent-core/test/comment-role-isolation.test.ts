@@ -1,0 +1,849 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  buildKnowledgeLedger,
+  buildOrgThreadScope,
+  buildStagedCommentGrowthPrompt,
+  buildStagedCommentReadersPrompt,
+  buildStagedOrgAnswersPrompt,
+  buildStagedOrgFollowUpAnswersPrompt,
+  commentStageInstructions,
+  compileGenerationParameters,
+  GENERATION_PARAMETER_REGISTRY,
+  ContentGenerationAgent,
+  createDefaultGenerationConfig,
+  DEFAULT_FORMULA_VERSION,
+  indexKnowledgeSource,
+  normalizeProjectCreativeBlueprint,
+  parseStagedCommentReaders,
+  parseStagedOrgAnswers,
+  planTopicOrchestrations,
+  selectKnowledgeContext,
+  STAGED_COMMENT_DISCLAIMER,
+  STAGED_COMMENT_READERS_JSON_SCHEMA,
+} from "../src/index.js";
+import type {
+  DialogueThreadPlan,
+  EvidenceReference,
+  GenerationPromptInput,
+  InformationGap,
+  ModelGenerationRequest,
+  ModelProvider,
+  OrchestrationPlan,
+  ProjectBlueprintModuleKey,
+  PromptBundle,
+  TopicOpportunity,
+} from "../src/index.js";
+
+const project = {
+  id: "p1",
+  name: "测试项目",
+  domain: "健康信息",
+  productPoints: [],
+  organizationPoints: [],
+  cities: ["上海"],
+  doctors: [],
+};
+
+function config() {
+  const value = createDefaultGenerationConfig(project, DEFAULT_FORMULA_VERSION);
+  value.task.theme = "方案选择";
+  value.task.city = "上海";
+  value.content.commentThreadMax = 3;
+  return value;
+}
+
+const knowledge = [
+  indexKnowledgeSource({ projectId: "p1", id: "d1", path: "INDEX.md", content: "# 索引\n- facts.md" }),
+  indexKnowledgeSource({ projectId: "p1", id: "d2", path: "facts.md", content: "# 已知事实\n项目资料只确认这些信息，并要求保留适用边界。" }),
+];
+
+const blueprintRevisions = Object.fromEntries([
+  "knowledge_map", "domain_model", "audience_model", "scenario_model",
+  "role_model", "claim_policy", "surface_language",
+].map((key) => [key, `${key}-v1`])) as Record<ProjectBlueprintModuleKey, string>;
+
+/** 双号蓝图:IP(知肤研究所)+ 助理(知肤研究所助理)都是 accountable,会进入全量 commentCast。 */
+function isolationBlueprint() {
+  return normalizeProjectCreativeBlueprint({
+    projectId: "p1",
+    sourceFingerprint: "comment-role-isolation-test",
+    moduleRevisions: blueprintRevisions,
+    modules: {
+      knowledge_map: { entries: [] },
+      domain_model: {
+        projectNoun: "皮肤管理",
+        industry: "医美",
+        domain: "医美",
+        objects: ["皮肤管理"],
+        actions: ["比较", "核验"],
+        concepts: ["适用条件"],
+        decisionTasks: ["核验适用条件"],
+        vocabulary: ["适用条件"],
+      },
+      audience_model: {
+        states: [{
+          id: "comparer",
+          label: "正在比较的人",
+          stages: ["comparing"],
+          goals: ["减少选择成本"],
+          constraints: ["时间有限"],
+          knowledgeState: "知道基本名词",
+          hesitationReasons: ["口径不一致"],
+          actionConditions: ["边界可核验"],
+          source: { status: "inference", evidenceIds: [] },
+        }],
+      },
+      scenario_model: {
+        families: [{
+          id: "compare_scene",
+          label: "比较场景",
+          prototype: "option_comparison",
+          applicableStages: ["comparing"],
+          hostIdentityCues: ["手里已有两个选项的人"],
+          lifeContexts: ["午休时继续做功课"],
+          timeAnchors: ["今天午休"],
+          settings: ["办公室"],
+          triggers: ["两种说法对不上"],
+          observableActions: ["把差异记进备忘录"],
+          frictions: ["只能再问一个问题"],
+          emotionalAftertastes: ["有点纠结"],
+          imageMoments: ["备忘录里的比较项"],
+          prohibitedUnsupportedHistories: ["购买过本项目服务"],
+          source: { status: "hypothesis", evidenceIds: [] },
+        }],
+      },
+      role_model: {
+        hostVoiceTraits: ["克制", "具体"],
+        hostSpeechMarkers: ["短句"],
+        roles: [
+          {
+            id: "ip",
+            displayRole: "知肤研究所",
+            relationToHost: "发布账号本人",
+            identityCues: ["机构IP"],
+            situationCues: ["回答专业问题"],
+            motives: ["把条件讲清楚"],
+            knowledgePosition: "只使用已核验项目知识",
+            speechPatterns: ["一句结论一个条件"],
+            lexicalCues: [],
+            interactionHooks: ["留下适用条件"],
+            permittedContributions: ["已核验说明"],
+            utteranceModes: ["knowledge_translation", "direct_question"],
+            replyDisplayRoles: ["知肤研究所"],
+            targetChars: [8, 40],
+            accountable: true,
+            source: { status: "hypothesis", evidenceIds: [] },
+          },
+          {
+            id: "assistant",
+            displayRole: "知肤研究所助理",
+            relationToHost: "机构公开助理",
+            identityCues: ["机构助理"],
+            situationCues: ["承接价格预约类问题"],
+            motives: ["把营销问题接到人工"],
+            knowledgePosition: "只引用知识库营销口径",
+            speechPatterns: ["先答口径再确认"],
+            lexicalCues: [],
+            interactionHooks: ["引导留下联系方式"],
+            permittedContributions: ["价格、预约、地址、活动承接"],
+            utteranceModes: ["service_answer", "identity_route"],
+            replyDisplayRoles: ["知肤研究所助理"],
+            targetChars: [8, 40],
+            accountable: true,
+            source: { status: "hypothesis", evidenceIds: [] },
+          },
+          {
+            id: "peer",
+            displayRole: "谨慎比较者",
+            relationToHost: "处境相近的读者",
+            identityCues: ["也在比较"],
+            situationCues: ["带着现实限制"],
+            motives: ["确认一个边界"],
+            knowledgePosition: "只知道公开信息",
+            speechPatterns: ["先说处境再问"],
+            lexicalCues: [],
+            interactionHooks: ["追问适用条件"],
+            permittedContributions: ["提出条件化问题"],
+            utteranceModes: ["direct_question", "shared_concern", "counterexample"],
+            replyDisplayRoles: ["知肤研究所"],
+            targetChars: [6, 30],
+            accountable: false,
+            source: { status: "hypothesis", evidenceIds: [] },
+          },
+        ],
+      },
+      claim_policy: {
+        rules: [{
+          id: "price_rule",
+          label: "价格声明",
+          claimType: "price",
+          terms: ["价格", "费用"],
+          requiresEvidence: true,
+          allowedEvidenceStatuses: ["user_supplied"],
+          dynamic: true,
+          handling: "verify",
+          source: { status: "inference", evidenceIds: [] },
+        }],
+        prohibitedClaims: [],
+        dynamicInformation: ["价格以当期确认为准"],
+        unknownHandling: ["保持未知并转人工"],
+      },
+      surface_language: {
+        registerDescription: "自然、具体",
+        preferredTerms: ["适用条件"],
+        optionalColloquialisms: [],
+        prohibitedCliches: ["闭眼入"],
+        antiCopyRules: ["不复刻样本句子"],
+      },
+    },
+  });
+}
+
+/** 三个 required gap:价格/地址(staff 路由)+ 适用条件(publisher 路由),保证两角色都有线程。
+ *  preferredChannels 钉到 Cref:只有规划进 Cref 渠道的缺口卡才会成为线程主缺口。 */
+const isolationGaps: InformationGap[] = [
+  {
+    id: "price_gap", label: "价格", question: "做这个多少钱？", category: "decision",
+    audienceStages: ["comparing"], importance: 0.9, decisionLeverage: 0.9, proofability: 0.8,
+    evidenceIds: ["evidence_d1"], required: true, preferredChannels: ["Cref"],
+  },
+  {
+    id: "address_gap", label: "门店地址", question: "你们店在哪？", category: "decision",
+    audienceStages: ["comparing"], importance: 0.85, decisionLeverage: 0.85, proofability: 0.8,
+    evidenceIds: [], required: true, preferredChannels: ["Cref"],
+  },
+  {
+    id: "fit_gap", label: "适用条件", question: "哪些条件会改变适用性？", category: "decision",
+    audienceStages: ["comparing"], importance: 0.8, decisionLeverage: 0.85, proofability: 0.8,
+    evidenceIds: [], required: true, preferredChannels: ["Cref"],
+  },
+];
+
+function isolationOpportunity(): TopicOpportunity {
+  return {
+    id: "topic-isolation",
+    topic: "方案选择",
+    angle: "先核验再比较",
+    gapIds: ["price_gap", "address_gap", "fit_gap"],
+    audienceStage: "comparing",
+    entry: "search",
+    relevance: 0.9,
+    importance: 0.8,
+    proofability: 0.8,
+    novelty: 0.6,
+    decisionLeverage: 0.8,
+    cognitiveCost: 0.3,
+    risk: 0.2,
+    evidenceIds: ["evidence_d1"],
+    boundaries: ["个体适用性需要单独核验"],
+    tags: ["比较方法"],
+    imageAssetIds: [],
+    status: "eligible",
+  };
+}
+
+const evidenceReferences: EvidenceReference[] = [{
+  id: "evidence_d1",
+  documentId: "d1",
+  path: "facts.md",
+  section: "价格口径",
+  quote: "单次体验 680 起，以当期确认为准",
+  kind: "fact",
+  evidenceStatus: "user_supplied",
+  scope: [],
+  caveats: ["以当期确认为准"],
+}];
+
+function isolationPlan(): OrchestrationPlan {
+  return planTopicOrchestrations({
+    opportunity: isolationOpportunity(),
+    gaps: isolationGaps,
+    config: config(),
+    projectBlueprint: isolationBlueprint(),
+    seeds: [11, 22, 33],
+  })[0]!;
+}
+
+function promptInput(plan: OrchestrationPlan): GenerationPromptInput {
+  return {
+    config: config(),
+    formulaVersion: DEFAULT_FORMULA_VERSION,
+    knowledge: selectKnowledgeContext({
+      documents: knowledge,
+      query: "资料",
+      budget: { maxInputTokens: 5000, systemPromptTokens: 10, formulaPromptTokens: 10, outputReserveTokens: 100, safetyMarginTokens: 0 },
+    }),
+    ledger: buildKnowledgeLedger([]),
+    candidateIndex: 0,
+    seed: 1,
+    variation: { opening: "问题", pacing: "短句", structure: "问答", phrasing: "克制" },
+    orchestrationPlan: plan,
+    projectBlueprint: isolationBlueprint(),
+    evidenceReferences,
+  };
+}
+
+/** 带编译参数的提示词输入:滑杆值真正参与生成的前提是 impactReport 到位。 */
+function promptInputWithParameters(
+  plan: OrchestrationPlan,
+  selection: Parameters<typeof compileGenerationParameters>[2],
+): GenerationPromptInput {
+  const compiled = compileGenerationParameters(config(), DEFAULT_FORMULA_VERSION, selection);
+  return { ...promptInput(plan), config: compiled.config, impactReport: compiled.impactReport };
+}
+
+const core = {
+  H: { hashtags: ["方案选择"] },
+  N: { imageBrief: "", title: "先核实信息", body: "正文。" },
+};
+
+function promptFullText(bundle: PromptBundle): string {
+  return bundle.messages.map((message) => {
+    const content = message.content;
+    return Array.isArray(content)
+      ? content.map((part) => (part.type === "text" ? part.text : "")).join("\n")
+      : content;
+  }).join("\n");
+}
+
+function requestText(request: ModelGenerationRequest): string {
+  return request.messages.map((message) => {
+    const content = message.content;
+    return Array.isArray(content)
+      ? content.map((part) => (part.type === "text" ? part.text : "")).join("\n")
+      : content;
+  }).join("\n");
+}
+
+/** 按侧+按角色隔离后,提示词不再有 task_data;线程 id 从提示词全文的规格/清单/根评论 JSON 中提取。 */
+function stagedThreadIds(request: ModelGenerationRequest): string[] {
+  return [...new Set([...requestText(request).matchAll(/"id"\s*:\s*"([^"]*_thread_\d+)"/gu)].map((match) => match[1]!))];
+}
+
+describe("评论参数分侧注入(滑杆真正参与生成)", () => {
+  // 归属表的单元级断言:reader 侧拿到 reader+both,answer 侧拿到 answer+both,
+  // 两侧互不串。用高档位保证 explicitBehavior 产出可断言的确定文本。
+  const highDensity = {
+    overrides: {
+      comment_constraint_density: 85,
+      comment_gap_multiplexing: 85,
+      comment_conditionality: 85,
+      comment_reply_increment: 85,
+    },
+  } as const;
+
+  it("commentStageInstructions 按 commentStage 分侧,both 两侧都给,另一侧的不给", () => {
+    const compiled = compileGenerationParameters(config(), DEFAULT_FORMULA_VERSION, highDensity);
+    const reader = commentStageInstructions(compiled.impactReport, "reader").join("\n");
+    const answer = commentStageInstructions(compiled.impactReport, "answer").join("\n");
+    // reader 侧:提问侧参数到位,答复侧参数缺席。
+    expect(reader).toContain("每个问题优先带入一至两个已披露且会改变答案的现实约束");
+    expect(reader).toContain("Gap=1×PrimaryGap");
+    expect(reader).not.toContain("单条回复只承担一个主要增量");
+    expect(reader).not.toContain("先问澄清条件");
+    // answer 侧:答复侧参数到位,提问侧参数缺席。
+    expect(answer).toContain("单条回复只承担一个主要增量");
+    expect(answer).toContain("先问澄清条件");
+    expect(answer).not.toContain("每个问题优先带入一至两个已披露且会改变答案的现实约束");
+    // both:假闭合硬约束两侧都必须在(方法论 §1726 独立硬约束,任何档位不降低)。
+    expect(reader).toContain("假闭合硬约束：发现感≠证据");
+    expect(answer).toContain("假闭合硬约束：发现感≠证据");
+  });
+
+  it("2A-R 读者侧提示词带上读者侧参数指令,不带答复侧指令", () => {
+    const plan = isolationPlan();
+    const text = promptFullText(buildStagedCommentReadersPrompt(promptInputWithParameters(plan, highDensity), core));
+    expect(text).toContain("参数行为指令");
+    expect(text).toContain("每个问题优先带入一至两个已披露且会改变答案的现实约束");
+    expect(text).not.toContain("单条回复只承担一个主要增量");
+  });
+
+  it("2A-O 答复侧提示词带上答复侧参数指令,不带提问侧指令", () => {
+    const plan = isolationPlan();
+    const staffThreads = plan.dialogueThreads.filter((thread) => thread.postingIdentity === "staff");
+    const text = promptFullText(buildStagedOrgAnswersPrompt(
+      promptInputWithParameters(plan, highDensity), core, "staff",
+      staffThreads.map((planned) => ({ planned, question: "这个多少钱？" })),
+    ));
+    expect(text).toContain("答复侧写作行为参数");
+    expect(text).toContain("单条回复只承担一个主要增量");
+    expect(text).not.toContain("每个问题优先带入一至两个已披露且会改变答案的现实约束");
+  });
+
+  it("只注入 trace 级指令:preset/style 散文不下放,不把另一侧角色概念漏进单一身份调用", () => {
+    // search_decision 预设散文含“避免单个楼主回复包办全部信息”——它是整篇作文
+    // 的编排口径,天然跨身份;漏进 staff 调用就是旧串台根因。
+    const plan = isolationPlan();
+    const input = promptInputWithParameters(plan, { presetId: "search_decision" });
+    expect(input.impactReport!.behaviorInstructions.join("\n")).toContain("楼主");
+    const staffThreads = plan.dialogueThreads.filter((thread) => thread.postingIdentity === "staff");
+    const staffText = promptFullText(buildStagedOrgAnswersPrompt(
+      input, core, "staff", staffThreads.map((planned) => ({ planned, question: "这个多少钱？" })),
+    ));
+    expect(staffText).not.toContain("避免单个楼主回复包办全部信息");
+    expect(staffText).not.toContain("楼主");
+    // 读者侧同理:机构概念整体不出现。
+    const readerText = promptFullText(buildStagedCommentReadersPrompt(input, core));
+    expect(readerText).not.toContain("避免单个楼主回复包办全部信息");
+    expect(readerText).not.toContain("助理");
+  });
+
+  it("无 impactReport 时不注入,提示词形状不变(向后兼容)", () => {
+    const plan = isolationPlan();
+    const text = promptFullText(buildStagedCommentReadersPrompt(promptInput(plan), core));
+    expect(text).not.toContain("参数行为指令");
+  });
+
+  it("展示型诊断参数只排序不注入:trace 的 behaviorInstructions 恒空,且不归任何评论侧", () => {
+    // 直接钉机制本身:诊断参数既没有可注入文本,也没有 commentStage 归属。
+    // 只断言提示词里没有 "comment_diagnostic_" 是空转的——那串字面量在全部
+    // 参数指令语料里压根不存在,过滤逻辑整个删掉测试照样绿。
+    const diagnosticIds = GENERATION_PARAMETER_REGISTRY
+      .filter((definition) => definition.id.startsWith("comment_diagnostic_")
+        || definition.id.startsWith("body_diagnostic_"))
+      .map((definition) => definition.id);
+    expect(diagnosticIds.length).toBeGreaterThan(0);
+    for (const id of diagnosticIds) {
+      expect(GENERATION_PARAMETER_REGISTRY.find((item) => item.id === id)!.commentStage,
+        `${id} 不应归属任何评论侧`).toBeUndefined();
+    }
+    const compiled = compileGenerationParameters(config(), DEFAULT_FORMULA_VERSION, {
+      overrides: Object.fromEntries(diagnosticIds.map((id) => [id, 100])) as never,
+    });
+    // 诊断参数即使拉满也没有可注入文本:这是"只排序不生成"的机制保证。
+    for (const id of diagnosticIds) {
+      const trace = compiled.impactReport.parameterTraces.find((item) => item.parameterId === id);
+      expect(trace?.behaviorInstructions ?? [], `${id} 不应产出可注入指令`).toEqual([]);
+    }
+  });
+
+  it("用户自定义禁词(task.forbidden)必须到达两侧评论阶段——校验层按全文拦 error", () => {
+    // forbidden_phrase 校验 fullText(含 Cref)且是 error 级;禁词只注入 stage1/3
+    // 时,评论侧模型看不见却要吃 error,白烧修复轮次。
+    const plan = isolationPlan();
+    const withForbidden = () => {
+      const value = config();
+      value.task.forbidden = ["无痛", "包好"];
+      return value;
+    };
+    const input = { ...promptInput(plan), config: withForbidden() };
+    const readerText = promptFullText(buildStagedCommentReadersPrompt(input, core));
+    expect(readerText).toContain("无痛");
+    expect(readerText).toContain("包好");
+    const staffThreads = plan.dialogueThreads.filter((thread) => thread.postingIdentity === "staff");
+    const staffText = promptFullText(buildStagedOrgAnswersPrompt(
+      input, core, "staff", staffThreads.map((planned) => ({ planned, question: "这个多少钱？" })),
+    ));
+    expect(staffText).toContain("无痛");
+    expect(staffText).toContain("包好");
+  });
+
+  it("参数指令注入评论阶段时脱敏内部字段名:计划语言不下放给模型照抄", () => {
+    // state_information_strength / question_compression 等指令原文含
+    // personaScenePlan / surfaceRoleCard;它们正是 comment_plan_language_surface_
+    // leak 与 internal_audit_artifact_visible 要拦的计划语言,不能进隔离调用。
+    const compiled = compileGenerationParameters(config(), DEFAULT_FORMULA_VERSION, {
+      overrides: { state_information_strength: 85, question_compression: 85, experience_information_strength: 85 },
+    });
+    // 前提:未脱敏的原始 trace 文本确实含内部字段名(否则本测试空转)。
+    const rawTraceText = compiled.impactReport.parameterTraces
+      .filter((trace) => ["state_information_strength", "question_compression", "experience_information_strength"].includes(trace.parameterId))
+      .flatMap((trace) => trace.behaviorInstructions).join("\n");
+    expect(rawTraceText).toMatch(/personaScenePlan|surfaceRoleCard/u);
+    // 脱敏后:进评论阶段的指令不再含字段名,但语义词仍在。
+    const readerInstructions = commentStageInstructions(compiled.impactReport, "reader").join("\n");
+    expect(readerInstructions).not.toContain("personaScenePlan");
+    expect(readerInstructions).not.toContain("surfaceRoleCard");
+    expect(readerInstructions).toContain("人物");
+    const plan = isolationPlan();
+    const text = promptFullText(buildStagedCommentReadersPrompt(
+      { ...promptInput(plan), impactReport: compiled.impactReport }, core));
+    expect(text).not.toContain("personaScenePlan");
+    expect(text).not.toContain("surfaceRoleCard");
+  });
+});
+
+describe("buildOrgThreadScope (逐 gap 口径)", () => {
+  const thread = {
+    primaryGapId: "price_gap",
+    replyPlan: { directAnswer: "单次 680 起", condition: "以当期为准", boundary: "不承诺效果", unknown: "个人差异未知", nextQuestion: "核实预算" },
+  };
+  const gapCard = { gapId: "price_gap", label: "价格", evidenceIds: ["evidence_d1"] };
+
+  it("有证据的 gap 输出钉到该 gap 的 quote(id/section/quote/caveats),不带硬约束", () => {
+    const scope = buildOrgThreadScope(thread, gapCard, evidenceReferences);
+    expect(scope.gap标签).toBe("价格");
+    expect(scope.口径).toEqual({ 直接回答: "单次 680 起", 适用条件: "以当期为准", 边界: "不承诺效果", 仍未知: "个人差异未知", 下一项核验: "核实预算" });
+    expect(scope.证据原文).toEqual([{ id: "evidence_d1", section: "价格口径", quote: "单次体验 680 起，以当期确认为准", caveats: ["以当期确认为准"] }]);
+    expect(scope.硬约束).toBeUndefined();
+  });
+
+  it("无证据的 gap 输出显式硬约束", () => {
+    const scope = buildOrgThreadScope({ ...thread, primaryGapId: "fit_gap" }, { gapId: "fit_gap", label: "适用条件", evidenceIds: [] }, evidenceReferences);
+    expect(scope.证据原文).toHaveLength(0);
+    expect(scope.硬约束).toBe("你手里没有适用条件的信息口径，只能走转人工（“我帮你跟专人确认”）或保留未知；禁止承诺提供、禁止编具体说法、禁止“发定位/发详细地址/加微信发你”类具体交付");
+  });
+
+  it("缺口卡缺失时标签回落 primaryGapId,无证据即硬约束", () => {
+    const scope = buildOrgThreadScope(thread, undefined, evidenceReferences);
+    expect(scope.gap标签).toBe("price_gap");
+    expect(scope.硬约束).toContain("只能走转人工（“我帮你跟专人确认”）或保留未知；禁止承诺提供");
+  });
+
+  it("只钉 gap 卡列出的证据,不夹带其他证据", () => {
+    const scope = buildOrgThreadScope(thread, gapCard, [...evidenceReferences, { ...evidenceReferences[0]!, id: "evidence_other" }]);
+    expect(scope.证据原文.map((quote) => quote.id)).toEqual(["evidence_d1"]);
+  });
+});
+
+describe("按侧+按角色隔离的评论提示词", () => {
+  it("2A-R 读者侧:不含助理/机构/答复规则/证据原文/编排元信息", () => {
+    const prompt = buildStagedCommentReadersPrompt(promptInput(isolationPlan()), core);
+    const text = promptFullText(prompt);
+    for (const banned of ["助理", "机构", "postingIdentity", "replyPlan", "contentAnchor", "usableEvidenceReferences", "orchestrationPlan", "楼主", "publisher", "staff", "host", "evidence_", "单次体验 680 起"]) {
+      expect(text, `读者侧不应出现: ${banned}`).not.toContain(banned);
+    }
+    expect(text).toContain("已由规划分配");
+    expect(text).toContain("模拟读者");
+    // 禁讲清单来自 claimPolicy 的受控类型与术语(不含答复身份)。
+    expect(text).toContain("价格");
+    expect(text).toContain("费用");
+    expect(text).toContain("购买过本项目服务");
+    // 读者侧角色池剔除了机构身份角色(IP/助理),只留读者人物。
+    expect(text).toContain("谨慎比较者");
+    expect(text).not.toContain("知肤研究所");
+    expect(prompt.responseSchema).toBe(STAGED_COMMENT_READERS_JSON_SCHEMA);
+    const itemProperties = (STAGED_COMMENT_READERS_JSON_SCHEMA.properties as Record<string, any>).threads.items.properties;
+    expect(itemProperties.roleIndex).toBeUndefined();
+  });
+
+  it("2A-O staff:只见助理身份卡与本角色线程口径,不见 IP/host 定义与其他线程", () => {
+    const plan = isolationPlan();
+    const staffThreads = plan.dialogueThreads.filter((thread) => thread.postingIdentity === "staff");
+    const publisherThreads = plan.dialogueThreads.filter((thread) => thread.postingIdentity === "publisher");
+    expect(staffThreads.length).toBeGreaterThan(0);
+    expect(publisherThreads.length).toBeGreaterThan(0);
+    const prompt = buildStagedOrgAnswersPrompt(promptInput(plan), core, "staff", staffThreads.map((planned) => ({ planned, question: "这个多少钱？" })));
+    const text = promptFullText(prompt);
+    expect(text).toContain("知肤研究所助理");
+    expect(text).toContain("你只知道下方列出的口径");
+    expect(text).toContain("我帮你跟专人确认");
+    expect(text).toContain("以当期确认为准");
+    // 逐 gap 口径:有证据的 gap 钉 quote。护栏只认 price/location/schedule 三类
+    // claimType,本蓝图仅有 price 规则,所以只有价格 gap 路由到 staff——地址/适用
+    // 条件 gap 不在此调用里,不能断言它们的硬约束文本。
+    expect(text).toContain("单次体验 680 起，以当期确认为准");
+    // 无证据的 gap 一律走硬约束(此处按实际路由到 staff 的线程逐条核对)。
+    for (const planned of staffThreads) {
+      const card = plan.gapPlanningCards.find((item) => item.gapId === planned.primaryGapId);
+      if ((card?.evidenceIds.length ?? 0) === 0) {
+        expect(text).toContain(`你手里没有${card?.label ?? planned.primaryGapId}的信息口径，只能走转人工（“我帮你跟专人确认”）或保留未知；禁止承诺提供`);
+      }
+    }
+    // 另一个角色(IP/楼主)的任何定义不出现。
+    for (const banned of ["楼主", "发布者", "publisher", "host", "voiceTraits"]) {
+      expect(text, `staff 调用不应出现: ${banned}`).not.toContain(banned);
+    }
+    for (const thread of publisherThreads) expect(text).not.toContain(thread.id);
+  });
+
+  it("2A-O publisher:只见 host 声音与本角色线程,不见助理定义", () => {
+    const plan = isolationPlan();
+    const staffThreads = plan.dialogueThreads.filter((thread) => thread.postingIdentity === "staff");
+    const publisherThreads = plan.dialogueThreads.filter((thread) => thread.postingIdentity === "publisher");
+    const prompt = buildStagedOrgAnswersPrompt(promptInput(plan), core, "publisher", publisherThreads.map((planned) => ({ planned, question: "哪些条件影响适用性？" })));
+    const text = promptFullText(prompt);
+    // 方法论 ROLE 04:publisher 是发布账号本人(可追责答复方),不是顾客人设;
+    // §1738「自有账号不能冒充独立消费者」。host 声音只用于延续语气。
+    expect(text).toContain("发布账号本人");
+    expect(text).toContain("叙述声音");
+    expect(text).toContain("不冒充独立消费者");
+    expect(text).toContain("你只知道下方列出的口径");
+    // 无证据的适用条件 gap 走硬约束。
+    expect(text).toContain("你手里没有适用条件的信息口径，只能走转人工（“我帮你跟专人确认”）或保留未知；禁止承诺提供");
+    for (const banned of ["助理", "staff"]) {
+      expect(text, `publisher 调用不应出现: ${banned}`).not.toContain(banned);
+    }
+    for (const thread of staffThreads) expect(text).not.toContain(thread.id);
+  });
+
+  it("2B 生长:精简读者上下文,不含双号契约与机构概念", () => {
+    const plan = isolationPlan();
+    const roots = {
+      disclaimer: STAGED_COMMENT_DISCLAIMER,
+      threads: plan.dialogueThreads.map((thread, index) => ({ id: thread.id, question: `根评论${index + 1}`, answer: "根回复", followUps: [] })),
+    };
+    const prompt = buildStagedCommentGrowthPrompt(promptInput(plan), core, roots);
+    const text = promptFullText(prompt);
+    for (const banned of ["助理", "机构", "postingIdentity", "双号"]) {
+      expect(text, `2B 读者侧不应出现: ${banned}`).not.toContain(banned);
+    }
+    // 需要项目方口径的追问留空、由能回答的一方后续补的规则保留。
+    expect(text).toContain("空字符串");
+    expect(text).toContain("followUpIntent");
+  });
+
+  it("2B-O 机构补答:同 2A-O 隔离规则,输入追问与所在线程上下文", () => {
+    const plan = isolationPlan();
+    const staffThread = plan.dialogueThreads.find((thread) => thread.postingIdentity === "staff")!;
+    const prompt = buildStagedOrgFollowUpAnswersPrompt(promptInput(plan), core, "staff", [{
+      planned: staffThread,
+      rootQuestion: "这个多少钱？",
+      rootAnswer: "单次 680 起，以当期为准。",
+      followUpId: `${staffThread.id}:fu:0`,
+      question: "能便宜点吗？",
+    }]);
+    const text = promptFullText(prompt);
+    expect(text).toContain("待承接追问");
+    expect(text).toContain("能便宜点吗？");
+    expect(text).toContain("你手里的口径");
+    expect(text).toContain("单次体验 680 起，以当期确认为准");
+    expect(text).not.toContain("楼主");
+    expect(text).not.toContain("publisher");
+  });
+});
+
+describe("阶段化解析器(按侧拆分)", () => {
+  it("parseStagedCommentReaders 只读可见文案,忽略 roleIndex 等漂移字段", () => {
+    const parsed = parseStagedCommentReaders(JSON.stringify({
+      disclaimer: "模型自编免责声明",
+      threads: [{
+        id: "t1",
+        roleIndex: 3,
+        postingIdentity: "staff",
+        question: "怎么判断？",
+        answer: "",
+        kind: "question",
+        function: "verification",
+        followUps: [],
+      }],
+    }));
+    expect(parsed.threads[0]).toMatchObject({ id: "t1", question: "怎么判断？", answer: "", function: "verification" });
+    expect("roleIndex" in parsed.threads[0]!).toBe(false);
+    expect("disclaimer" in parsed).toBe(false);
+  });
+
+  it("parseStagedOrgAnswers 读答复列表与可选首评", () => {
+    const parsed = parseStagedOrgAnswers(JSON.stringify({
+      answers: [{ id: "t1", answer: "按口径答。", answerKind: "answer", boundary: "边界" }, { id: "t2", answer: "转人工。" }],
+      ownedFirstComment: "置顶：常见问题整理。",
+    }));
+    expect(parsed.answers).toHaveLength(2);
+    expect(parsed.answers[0]).toMatchObject({ id: "t1", answer: "按口径答。", answerKind: "answer", boundary: "边界" });
+    expect(parsed.answers[1]!.answerKind).toBeUndefined();
+    expect(parsed.ownedFirstComment).toBe("置顶：常见问题整理。");
+  });
+});
+
+describe("按侧+按角色隔离的引擎合并", () => {
+  function engineConfig() {
+    const value = config();
+    value.content.bodyMinChars = 20;
+    value.generation.maxRepairAttempts = 0;
+    return value;
+  }
+  const planningContext = { informationGaps: isolationGaps, projectBlueprint: isolationBlueprint() };
+  const coreResponse = () => JSON.stringify({
+    content: {
+      H: { hashtags: ["方案选择", "信息", "核验"] },
+      N: { imageBrief: "信息清单封面", title: "先核实信息", body: "先核实适用边界，再决定下一步。细节我还在整理，确认后再补充。" },
+      Cref: { disclaimer: "x", threads: [] },
+    },
+    evidenceIds: [],
+    reasoning: [],
+    unknowns: [],
+  });
+
+  it("模型输出携带漂移字段时,surfaceRoleCard/postingIdentity/线程形态仍以规划层为准", async () => {
+    const provider: ModelProvider = {
+      async generate(request) {
+        const purpose = String(request.metadata?.purpose);
+        if (purpose === "generate_comment_readers") {
+          // 漂移字段:全部线程冒充同一 roleIndex、自称 staff、自写免责声明;
+          // 这些字段在解析与合并层都不应生效。
+          return {
+            text: JSON.stringify({
+              disclaimer: "模型自编免责声明",
+              threads: stagedThreadIds(request).map((id, index) => ({
+                id,
+                roleIndex: 0,
+                postingIdentity: "staff",
+                question: `第${index + 1}项应该核实什么？`,
+                answer: "姐妹我也蹲一个",
+                followUps: [],
+              })),
+            }),
+            raw: {},
+          };
+        }
+        if (purpose === "generate_org_answers") {
+          const answer = request.metadata?.identity === "staff" ? "这个我让专人跟你确认。" : "这个得看个人条件，我先不乱说。";
+          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer })) }), raw: {} };
+        }
+        if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
+        return { text: coreResponse(), raw: {} };
+      },
+    };
+    const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-07-12T12:00:00Z") })
+      .generate({ jobId: "role-isolation-merge", config: engineConfig(), formulaVersion: DEFAULT_FORMULA_VERSION, knowledge, planningContext });
+    expect(result.packages).toHaveLength(3);
+    for (const pkg of result.packages) {
+      const planned = pkg.dialogueThreads ?? [];
+      const threads = pkg.content.Cref.threads;
+      // 形状回归:线程数与规划一致,免责声明为确定性常量(模型自编文本不生效)。
+      expect(threads.length).toBe(planned.length);
+      expect(pkg.content.Cref.disclaimer).toBe(STAGED_COMMENT_DISCLAIMER);
+      for (const [index, thread] of threads.entries()) {
+        const plan = planned[index]!;
+        const kind = plan.threadKind ?? "org_answer";
+        expect(thread.threadKind ?? "org_answer").toBe(kind);
+        // 身份与人物卡以规划层为准:漂移的 roleIndex/postingIdentity 不生效。
+        expect(thread.postingIdentity).toBe(plan.postingIdentity);
+        expect(thread.surfaceRoleCard).toEqual(plan.surfaceRoleCard);
+        // 答复来源:T3 恒空;T2 来自读者侧;T1 来自对应角色的机构调用。
+        if (kind === "organic_reaction") expect(thread.answer).toBe("");
+        else if (kind === "reader_exchange") expect(thread.answer).toBe("姐妹我也蹲一个");
+        else if (plan.postingIdentity === "staff") expect(thread.answer).toBe("这个我让专人跟你确认。");
+        else expect(thread.answer).toBe("这个得看个人条件，我先不乱说。");
+      }
+    }
+  });
+
+  it("机构答复调用失败或缺 id 时,该角色线程回落规划口径并记 model_org_answer_failed", async () => {
+    const provider: ModelProvider = {
+      async generate(request) {
+        const purpose = String(request.metadata?.purpose);
+        if (purpose === "generate_comment_readers") {
+          return {
+            text: JSON.stringify({
+              threads: stagedThreadIds(request).map((id, index) => ({ id, question: `第${index + 1}项应该核实什么？`, answer: "姐妹我也蹲一个", followUps: [] })),
+            }),
+            raw: {},
+          };
+        }
+        if (purpose === "generate_org_answers") {
+          // publisher 调用整体失败;staff 调用缺一个线程 id(该线程必须回落)。
+          if (request.metadata?.identity === "publisher") throw new Error("upstream 500");
+          return {
+            text: JSON.stringify({ answers: stagedThreadIds(request).slice(1).map((id) => ({ id, answer: "MOCK机构答复文本XYZ。" })) }),
+            raw: {},
+          };
+        }
+        if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
+        return { text: coreResponse(), raw: {} };
+      },
+    };
+    const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-07-12T12:00:00Z") })
+      .generate({ jobId: "role-isolation-fallback", config: engineConfig(), formulaVersion: DEFAULT_FORMULA_VERSION, knowledge, planningContext });
+    expect(result.packages).toHaveLength(3);
+    // publisher 调用整体失败、staff 调用缺一个 id:任何含机构线程的候选都必须
+    // 有 warning 且受影响答复回落规划口径(不是模型文本)。
+    for (const pkg of result.packages) {
+      const planned = pkg.dialogueThreads ?? [];
+      const orgThreads = planned.filter((thread) => (thread.threadKind ?? "org_answer") === "org_answer");
+      const warnings = pkg.validation.issues.filter((issue) => issue.code === "model_org_answer_failed" && issue.severity === "warning");
+      if (orgThreads.length) expect(warnings.length).toBeGreaterThan(0);
+      for (const [index, thread] of pkg.content.Cref.threads.entries()) {
+        const plan = planned[index]!;
+        if ((plan.threadKind ?? "org_answer") !== "org_answer") continue;
+        // publisher 线程整体回落(调用失败),staff 首线程缺 id 回落:都不是模型文本。
+        if (plan.postingIdentity === "publisher") expect(thread.answer).not.toBe("这个得看个人条件，我先不乱说。");
+        expect(thread.answer).not.toBe("");
+        // 兜底话术必须是可追责答复方的声音:org_answer 位上说话的是真实发布身份
+        // (publisher/staff/expert)。此前兜底是路人腔("我也是想先把这个问明白"
+        // "我还在看,确定了来回你"),等于让发布账号冒充普通消费者,而该回落只记
+        // warning 不阻断,会直接进可发布文案。
+        for (const readerVoice of [
+          "我也是想先把这个问明白",
+          "那我还是多留点时间保险",
+          "我还在看，确定了来回你",
+          "姐妹我也是",
+          "哈哈我也是今天才注意到",
+        ]) {
+          expect(thread.answer, `org_answer 兜底不应是路人腔: ${thread.answer}`).not.toContain(readerVoice);
+        }
+      }
+    }
+    // 三个 required gap 且营销话头偏 T1:全 run 至少一个候选命中失败/缺 id 回落。
+    expect(result.packages.some((pkg) => pkg.validation.issues.some((issue) => issue.code === "model_org_answer_failed"))).toBe(true);
+  });
+
+  it("2B 后空答复的机构追问由 2B-O 补答;未覆盖的追问确定性丢弃并记 warning", async () => {
+    const calls: ModelGenerationRequest[] = [];
+    const provider: ModelProvider = {
+      async generate(request) {
+        calls.push(request);
+        const purpose = String(request.metadata?.purpose);
+        if (purpose === "generate_comment_readers") {
+          return {
+            text: JSON.stringify({
+              threads: stagedThreadIds(request).map((id, index) => ({ id, question: `第${index + 1}项应该核实什么？`, answer: "姐妹我也蹲一个", followUps: [] })),
+            }),
+            raw: {},
+          };
+        }
+        if (purpose === "generate_org_answers") {
+          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "按口径回答。" })) }), raw: {} };
+        }
+        if (purpose === "generate_comment_growth") {
+          // 每条线程长出一个 answer 为空的追问(机构承接类)。
+          return {
+            text: JSON.stringify({
+              disclaimer: STAGED_COMMENT_DISCLAIMER,
+              threads: stagedThreadIds(request).map((id, index) => ({
+                id,
+                question: `第${index + 1}项应该核实什么？`,
+                answer: "按口径回答。",
+                followUps: [{ question: "那这个适合我吗？", answer: "" }],
+              })),
+            }),
+            raw: {},
+          };
+        }
+        if (purpose === "generate_org_followup_answers") {
+          // staff 的追问全部补答(追问 id 形如 thread:fu:N);publisher 的追问不覆盖(应确定性丢弃)。
+          const followUpIds = [...new Set([...requestText(request).matchAll(/"id"\s*:\s*"([^"]*_thread_\d+:fu:\d+)"/gu)].map((match) => match[1]!))];
+          if (request.metadata?.identity === "staff") {
+            return { text: JSON.stringify({ answers: followUpIds.map((id) => ({ id, answer: "专人跟你确认。" })) }), raw: {} };
+          }
+          return { text: JSON.stringify({ answers: [] }), raw: {} };
+        }
+        if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
+        return { text: coreResponse(), raw: {} };
+      },
+    };
+    const value = engineConfig();
+    value.content.commentMultiTurnGrowthEnabled = true;
+    value.content.followUpDepth = 2;
+    // 线程上限放大,给 followUps 留足可见行数预算(否则合并层按预算确定性截空)。
+    value.content.commentThreadMin = 2;
+    value.content.commentThreadMax = 5;
+    const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-07-12T12:00:00Z") })
+      .generate({ jobId: "role-isolation-2bo", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge, planningContext });
+    expect(result.packages).toHaveLength(3);
+    const followUpAnswerCalls = calls.filter((call) => call.metadata?.purpose === "generate_org_followup_answers");
+    expect(followUpAnswerCalls.length).toBeGreaterThan(0);
+    for (const pkg of result.packages) {
+      const planned = pkg.dialogueThreads ?? [];
+      for (const [index, thread] of pkg.content.Cref.threads.entries()) {
+        const plan = planned[index]!;
+        const kind = plan.threadKind ?? "org_answer";
+        if (kind === "organic_reaction") {
+          // T3 不生长:模型多写了也确定性截空。
+          expect(thread.followUps).toHaveLength(0);
+          continue;
+        }
+        if (kind === "reader_exchange") continue; // 读者侧追问不在本用例断言范围
+        if (plan.postingIdentity === "staff") {
+          expect(thread.followUps[0]?.answer).toBe("专人跟你确认。");
+        } else {
+          // publisher 补答未覆盖:追问确定性丢弃,不保留空答复,并记 warning。
+          expect(thread.followUps.every((followUp) => followUp.answer.trim())).toBe(true);
+        }
+      }
+    }
+    // publisher 补答未覆盖的 warning 至少出现一次。
+    expect(result.packages.some((pkg) => pkg.validation.issues.some((issue) => issue.code === "model_org_answer_failed"))).toBe(true);
+  });
+});

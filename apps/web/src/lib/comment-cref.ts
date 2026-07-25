@@ -47,6 +47,26 @@ export const postingIdentityText = (value?: string): string => {
   return value === "publisher" ? "发布账号（publisher）" : value;
 };
 
+/**
+ * 答复徽标:org_answer 线程按 postingIdentity 分路。三者都是方法论里的
+ * accountable_responder(可追责答复方),差别只在承接什么话头——
+ * publisher 发布账号本人(直接回答＋条件＋边界＋下一步)、staff 营销承接
+ * (价格/预约/地址)、expert 专业解答。publisher 不是顾客人设:方法论
+ * 《ROLE 04 · 发布账号》「自有账号不能冒充独立消费者」。历史/其他 postingIdentity
+ * (author/brand/reader_question_template)返回 undefined,由调用方走
+ * identityLabel 兜底,不裸露也不误标。
+ */
+export const orgAnswerIdentityBadge = (
+  postingIdentity?: string,
+): { text: string; tone: "blue" | "positive" | "neutral" } | undefined => {
+  switch (postingIdentity) {
+    case "staff": return { text: "机构助理 · 营销承接", tone: "blue" };
+    case "expert": return { text: "机构 IP · 专业解答", tone: "positive" };
+    case "publisher": return { text: "发布账号 · 可追责答复", tone: "neutral" };
+    default: return undefined;
+  }
+};
+
 type LiveRoutingEntry = NonNullable<DeploymentPlan["liveRouting"]>[number];
 
 /**
