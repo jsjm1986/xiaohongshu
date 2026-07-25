@@ -3251,14 +3251,20 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 /* 用户菜单:复用全站 profile 结构,壳内补 hover 微底色与圆角(不改全站规则) */
 .quick-shell .profile-button { padding: 4px 8px; border-radius: var(--v2-radius-sm); }
 .quick-shell .profile-button:hover { background: var(--v2-canvas); }
-.qs-main { flex: 1; width: 100%; max-width: 1000px; margin: 0 auto; }
-.qs-main .page { max-width: none; padding: 28px 24px 56px; }
+/* 外壳宽度与完整版工作台对齐(1440)。原来锁 1000px,在 1600 宽屏上左右各空
+   300px,是这个频道「显小气」的首要原因——不是配色或字号问题,是只用了 62% 的屏。
+   顶栏本来就是通栏的,内容区跟上即可。 */
+.qs-main { flex: 1; width: 100%; max-width: 1440px; margin: 0 auto; }
+.qs-main .page { max-width: none; padding: 28px 32px 56px; }
 
 /* ---- 首页:欢迎区 + 项目卡墙 ---- */
 .qc-home-hero { margin: 4px 0 24px; padding-bottom: 20px; border-bottom: 1px solid var(--v2-line); }
 .qc-home-hero h1 { margin: 6px 0; font-size: var(--v2-fs-h1); font-weight: 700; letter-spacing: -0.01em; color: var(--v2-ink); }
 .qc-home-hero p { margin: 0; font-size: var(--v2-fs-md); color: var(--v2-muted); }
-.qc-home-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; }
+/* 卡片上限 320px:外壳放宽到 1440 后,原来的 minmax(250px, 1fr) 会把每张卡
+   拉到 340px+,项目名只占一行、剩下全是空白,卡片反而显得空。用固定上限让它
+   横向多排几张,而不是把每张撑大。 */
+.qc-home-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 320px)); gap: 14px; }
 .qc-project-card {
   display: flex; flex-direction: column; gap: 10px;
   padding: 16px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius-lg);
@@ -3324,7 +3330,8 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 
 /* ---- 工作面板:卡片化 + 切 tab 淡入(TSX 用 key={activeTab} 重挂触发) ---- */
 .qc-page .qc-panel {
-  max-width: 760px; padding: 24px 28px;
+  /* 宽度见下方「面板宽度分两级」;这里只管观感与内边距 */
+  padding: 24px 28px;
   border: 1px solid var(--v2-line); border-radius: var(--v2-radius-lg);
   background: var(--v2-surface); box-shadow: var(--v2-shadow-sm);
   animation: qc-panel-in .18s ease;
@@ -3393,16 +3400,27 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
    导航去序号/去锁链;创作区双栏;总览仪表 + 下一步主按钮 + 最近产出
    ========================================================================== */
 
-/* 创作区用更宽面板,其余区维持 760px */
-.qc-page .qc-panel--wide { max-width: 1080px; }
+/* 面板宽度分两级,跟着外壳一起放开:
+   - 默认(总览/知识库/产出):1120px。原来 760px,在放宽后的外壳里会变成一条
+     窄带浮在大片留白中间,比不放宽更难看。
+   - 创作区:通栏。它是双栏工作台(选题池 + 配置),宽度越大越好用。
+   两级都留 --wide 语义,免得以后每加一个区都要重新拍一个数字。 */
+.qc-page .qc-panel { max-width: 1120px; }
+.qc-page .qc-panel--wide { max-width: none; }
 
 /* 创作区双栏:左 360px 选题池 | 右 1fr 生成与结果;窄屏上下堆叠 */
-.qc-page .qc-create { display: grid; grid-template-columns: 360px 1fr; gap: 20px; align-items: start; }
+/* 选题池随外壳一起放宽:固定 360px 时标题会被挤成两行(实测「从报名到拿证的真实记
+   /录:一个学员的45天」),而右栏配置区宽到 940px,主按钮拉成一条巨带。
+   改成 clamp 让池子在 360–460 之间跟着屏宽长,比例才对。 */
+.qc-page .qc-create { display: grid; grid-template-columns: clamp(360px, 30%, 460px) 1fr; gap: 24px; align-items: start; }
 @media (max-width: 960px) {
   .qc-page .qc-create { grid-template-columns: 1fr; }
 }
 .qc-page .qc-create__pool { display: flex; flex-direction: column; gap: 16px; max-height: 70vh; overflow: auto; min-width: 0; }
 .qc-page .qc-create__main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+/* 主操作条:按钮按内容宽靠左,不再被纵向 flex 拉满整栏 */
+.qc-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.qc-actions > .button { flex: 0 0 auto; min-width: 148px; }
 
 /* 总览:下一步主按钮区(按钮大一号) */
 .qc-page .qc-overview-next { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
