@@ -3156,6 +3156,12 @@ div.qc-topic { cursor: default; }
 
 /* ===== 极简频道 P2:候选未过校验的一句话结论 ===== */
 .qc-issue-line { margin: 0; color: var(--v2-warn); font-size: var(--v2-fs-sm); }
+/* 通过态:与未通过态同一位置、同一字号,只换语气与颜色 */
+.qc-pass-line { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--v2-ok); font-size: var(--v2-fs-sm); }
+.qc-pass-line small { color: var(--v2-muted); }
+.qc-issue-more { margin-top: 4px; }
+.qc-issue-more > summary { color: var(--v2-muted); font-size: var(--v2-fs-micro); cursor: pointer; }
+.qc-issue-more > ul { margin: 4px 0 0; padding-left: 18px; color: var(--v2-warn); font-size: var(--v2-fs-micro); }
 
 /* ===== 生成结果页 · 易用性优化(信息零丢失:诊断默认折叠,内容前置) ===== */
 .validation-summary { margin-bottom: 17px; padding: 14px 16px; border: 1px solid #f0caca; border-radius: 13px; background: #fff; box-shadow: var(--shadow-sm); }
@@ -3367,8 +3373,9 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .quick-card .quick-followup { border-left-color: var(--v2-line-dark); }
 .quick-result .qc-revise { background: var(--v2-ai-soft); border-color: color-mix(in srgb, var(--v2-ai) 18%, transparent); }
 .quick-result .qc-revise summary { color: var(--v2-ai-ink); }
-.quick-result .qc-issue-line, .qc-page .qc-issue-line { display: flex; align-items: center; gap: 6px; }
-.quick-result .qc-issue-line::before, .qc-page .qc-issue-line::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--v2-warn); }
+/* 未通过项容器现在是 div(内含一行结论 + 可展开清单),圆点改由内层 p 承担。
+   容器自己不再画点,否则和行内的图标叠成两个标记。 */
+.quick-result .qc-issue-line > p, .qc-page .qc-issue-line > p { display: flex; align-items: center; gap: 6px; margin: 0; }
 
 /* ---- 候选完整内容(结果页与历史页共用) ---- */
 .qc-page .qc-disclaimer, .quick-result .qc-disclaimer { margin: 0 0 10px; padding: 8px 10px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius-sm); background: var(--v2-canvas); color: var(--v2-muted); font-size: var(--v2-fs-sm); }
