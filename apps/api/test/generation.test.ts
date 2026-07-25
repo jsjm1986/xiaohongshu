@@ -99,6 +99,11 @@ before(async () => {
     adminPassword: 'Admin-bootstrap-123!',
     masterEncryptionKey: 'integration-test-master-encryption-key',
     logger: false,
+    // 显式关掉模型供应商:本用例断言离线确定性生成(hasApiKey=false、稿件可复现)。
+    // 不写这行,resolveOptions 会捡起环境里的 OPENAI_API_KEY / ANTHROPIC_AUTH_TOKEN,
+    // 用例就会打到真实中继并随对端状态飘红。
+    platformApiKey: '',
+    platformBaseUrl: 'http://127.0.0.1:1/v1',
   });
   await app.listen(0, '127.0.0.1');
   baseUrl = await app.getUrl();

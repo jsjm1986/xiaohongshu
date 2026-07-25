@@ -92,6 +92,14 @@ before(async () => {
     adminPassword: ADMIN_PASSWORD,
     secureCookies: false,
     logger: false,
+    // 显式关掉模型供应商:本用例断言的是离线确定性生成路径
+    // (generation.service.ts 的 modelProvider() 在没有 apiKey 时返回 undefined)。
+    // 不写这行的话,resolveOptions 会捡起环境里的 OPENAI_API_KEY /
+    // ANTHROPIC_AUTH_TOKEN 把用例打到真实中继上——本机 shell 里残留一个
+    // ANTHROPIC_BASE_URL=http://127.0.0.1:8990(少了 /v1)就让这条用例常红,
+    // 而 --env-file 不覆盖已存在的环境变量,所以连 .env 也救不回来。
+    platformApiKey: '',
+    platformBaseUrl: 'http://127.0.0.1:1/v1',
   });
   await app.listen(0, '127.0.0.1');
   baseUrl = await app.getUrl();
