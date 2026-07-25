@@ -38,6 +38,15 @@ const cases: Array<[string, string, boolean]> = [
   // generation-parameters schema 仅 GET
   ['GET', '/api/generation-parameters/schema', true],
   ['POST', '/api/generation-parameters/schema', false],
+  // 额度只读:仅这一条精确路径放行。裸 /api/settings 仍拒——它的 publicSettings
+  // 会连带吐出 apiBaseUrl / model / generationDefaults,租户不该看到基础设施细节。
+  ['GET', '/api/settings/quota', true],
+  ['POST', '/api/settings/quota', false],
+  ['PATCH', '/api/settings/quota', false],
+  ['DELETE', '/api/settings/quota', false],
+  // 前缀陷阱:放行的是精确路径,不是前缀
+  ['GET', '/api/settings/quota/anything', false],
+  ['GET', '/api/settings/quotaX', false],
   // 其他全部拒绝
   ['GET', '/api/admin/users', false],
   ['GET', '/api/audit', false],

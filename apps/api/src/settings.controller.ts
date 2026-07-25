@@ -25,6 +25,21 @@ export class SettingsController {
     return this.settings.publicSettings(workspaceId, principal.userId);
   }
 
+  /**
+   * 额度余量(只读)。极简创作用它在总览显示余量,避免用户毫无预告地撞上
+   * consumePlatformQuota 抛的「平台测试额度已用完」403。
+   * 权限与 GET / 一致(project.read);返回体不含任何供应商或密钥字段。
+   */
+  @Get('quota')
+  quota(@Req() request: Request, @Query('workspaceId') requested?: string) {
+    const principal = this.principal(request);
+    const workspaceId = this.resources.inferWorkspace(principal, requested);
+    if (principal.systemRole !== 'admin' && !this.permissions.hasPermission(principal.userId, workspaceId, 'project.read')) {
+      throw new ForbiddenException('无权读取该工作区额度');
+    }
+    return this.settings.quotaSnapshot(workspaceId, principal.userId);
+  }
+
   @Patch()
   update(@Req() request: Request, @Body() rawBody: unknown) {
     const principal = this.principal(request);
