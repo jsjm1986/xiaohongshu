@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
 import { ProjectProvider } from '../ProjectContext';
-import { isSaasUser } from '../../lib/saas-access';
+import { isSaasUser, SAAS_ACCOUNT_PATH } from '../../lib/saas-access';
 
 /**
  * 极简创作 · 独立产品壳:无专家侧边栏,顶栏 + 居中内容区。
@@ -60,7 +60,9 @@ function QuickShellContent() {
                 <button
                   onClick={() => {
                     setProfileOpen(false);
-                    navigate('/settings');
+                    // SaaS 用户去极简创作自己的账户页;专家用户(从这个壳进来的
+                    // 只有他们点了「极简创作」)回专家版设置。
+                    navigate(isSaasUser(user) ? SAAS_ACCOUNT_PATH : '/settings');
                   }}
                 >
                   <Settings size={16} />

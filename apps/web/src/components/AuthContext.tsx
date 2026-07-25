@@ -1,7 +1,7 @@
 import { createContext, type FormEvent, type ReactNode, useContext, useEffect, useState } from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
 import { api } from '../lib/api';
-import { isSaasUser, saasPageAllowed } from '../lib/saas-access';
+import { fallbackPath, isSaasUser, passwordChangePath, saasPageAllowed, SAAS_HOME_PATH } from '../lib/saas-access';
 import type { User } from '../types';
 
 interface AuthContextValue {
@@ -44,16 +44,34 @@ export function useAuth() {
   return value;
 }
 
-export function ProtectedRoute({ children }: { children: ReactNode }) {
+/**
+ * expertOnly:该分支是专家版工作台(AppShell)。SaaS 用户在**壳挂载之前**就被
+ * 弹回 /quick —— 改前是先渲染 AppShell 再由内部判断,实测付费客户首次登录稳定
+ * 停在专家壳里,整条 9 个入口的侧边栏可见可点。
+ */
+export function ProtectedRoute({ children, expertOnly }: { children: ReactNode; expertOnly?: boolean }) {
   const { user, loading } = useAuth();
   const location = useLocation();
   if (loading) return <div className="app-loading"><span className="spinner" /><p>正在读取工作区…</p></div>;
   if (!user) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
-  if (user.mustChangePassword && location.pathname !== '/settings') return <Navigate to="/settings" replace />;
-  // SaaS 用户只允许 /quick 与 /settings(及各自子路径),其余一律弹回 /quick。
-  // 顺序:mustChangePassword 强制 /settings 在前,/settings 本来就在白名单内,不冲突。
-  if (isSaasUser(user) && !saasPageAllowed(location.pathname)) return <Navigate to="/quick" replace />;
+  // 强制改密的落点按用户类型分叉:SaaS → /quick/account,专家 → /settings。
+  // 改前这里硬编码 /settings,是「SaaS 用户必然落进专家壳」的直接原因。
+  const changePath = passwordChangePath(user);
+  if (user.mustChangePassword && location.pathname !== changePath) {
+    return <Navigate to={changePath} replace />;
+  }
+  if (expertOnly && isSaasUser(user)) return <Navigate to={SAAS_HOME_PATH} replace />;
+  // SaaS 用户只允许 /quick 及子路径,其余一律弹回 /quick
+  if (isSaasUser(user) && !saasPageAllowed(location.pathname)) return <Navigate to={SAAS_HOME_PATH} replace />;
   return children;
+}
+
+/** 未匹配路由的兜底:按用户类型回各自的首页,而不是统一去 /。 */
+export function RootRedirect() {
+  const { user, loading } = useAuth();
+  if (loading) return <div className="app-loading"><span className="spinner" /><p>正在读取工作区…</p></div>;
+  if (!user) return <Navigate to="/login" replace />;
+  return <Navigate to={fallbackPath(user)} replace />;
 }
 
 export function LoginForm({ onSubmit }: { onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {

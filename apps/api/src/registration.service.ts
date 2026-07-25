@@ -102,6 +102,10 @@ export class RegistrationService {
         username: req.username,
         passwordHash: req.password_hash,
         systemRole: 'user',
+        // /register 是极简创作的自助开通入口,审批通过的是付费 SaaS 客户。
+        // 这里原来不传 userKind,落到列默认值 'research',等于把完整专家版权限
+        // 发给了每一个从注册进来的客户(saas 白名单与 guard 都只对 'saas' 生效)。
+        userKind: 'saas',
         mustChangePassword: false,
         workspaceName: req.organization_name,
       });
