@@ -3,8 +3,8 @@ import { type FormEvent, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ApiError, api } from '../lib/api';
 import { useToast } from '../components/Ui';
+import { SUPPORT_WECHAT } from '../lib/support';
 
-const SUPPORT_WECHAT = 'wjyy5035';
 const PHONE_RE = /^1[3-9]\d{9}$/;
 
 export function RegisterPage() {
