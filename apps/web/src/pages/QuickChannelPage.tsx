@@ -10,7 +10,7 @@ import { approveOpportunitiesForBatch, type QuickCandidateView } from '../lib/qu
 import { api } from '../lib/api';
 import { buildBatchJobs } from '../lib/quick-batch';
 import { extractRecipe, resolveRecipeTargets } from '../lib/quick-recipe';
-import { clearDownstreamOfProject, clearResults, type QuickTab } from '../lib/quick-channel-state';
+import { clearDownstreamOfProject, clearResults, pruneCheckedIds, type QuickTab } from '../lib/quick-channel-state';
 import type { ContentPreset, GenerationJob, Project, TopicOpportunity } from '../types';
 import type { SimpleSettingOverrides } from '../lib/simple-generation';
 
@@ -115,8 +115,10 @@ export function QuickChannelPage() {
     setPresetId(loadedPresets.find((p) => p.isDefault)?.id ?? loadedPresets[0]?.id);
   };
 
-  // 归档/删除选题后调用:若它是当前选中项,级联清选中与结果(同 onPickTopic 的清法)
+  // 归档/删除选题后调用:先收敛批量勾选(勾了但没选中的也得剔,否则批量提交会打到幽灵选题),
+  // 再看它是否是当前选中项,级联清选中与结果(同 onPickTopic 的清法)
   const onOpportunityGone = (id: string) => {
+    setCheckedIds((cur) => pruneCheckedIds(cur, id));
     if (id !== opportunityId) return;
     setOpportunityId('');
     setResults(clearResults().results);
