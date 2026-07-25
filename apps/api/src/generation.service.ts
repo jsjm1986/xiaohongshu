@@ -373,9 +373,12 @@ export class GenerationService implements OnModuleInit {
     const jobRows = this.database.prepare('SELECT * FROM generation_jobs WHERE batch_id = ? ORDER BY created_at').all(id) as unknown as JobRow[];
     const jobs = jobRows.map((row) => this.mapJob(row, false));
     const status = computeBatchStatus(jobRows.map((row) => row.status));
-    // 状态漂移时惰性回写(含 completed_at)
+    // 状态漂移时惰性回写(含 completed_at)。回写后必须回传新值:batch 行是回写前读的,
+    // 直接用 batch.completed_at 会让「批次刚好在本次请求收敛到终态」的那一次响应
+    // 拿到 status=completed 但 completedAt=undefined(前端看板据此显示耗时/完成时间)。
+    let completedAt = (batch.completed_at as string | null) ?? null;
     if (status !== batch.status) {
-      const completedAt = (status === 'completed' || status === 'failed' || status === 'partial') ? nowIso() : null;
+      completedAt = (status === 'completed' || status === 'failed' || status === 'partial') ? nowIso() : null;
       this.database.prepare('UPDATE generation_batches SET status=?, completed_at=?, updated_at=? WHERE id=?')
         .run(status, completedAt, nowIso(), id);
     }
@@ -386,7 +389,7 @@ export class GenerationService implements OnModuleInit {
       status,
       totalJobs: batch.total_jobs,
       createdAt: batch.created_at,
-      completedAt: batch.completed_at ?? undefined,
+      completedAt: completedAt ?? undefined,
       jobs,
     };
   }
