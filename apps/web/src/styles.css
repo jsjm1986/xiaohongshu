@@ -4061,8 +4061,14 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .quick-shell .xhs-note__head .button { margin-left: auto; }
 
 /* 配图位:虚线框 + 拍摄说明。放占位图会让人以为配图已经有了 */
+/* 宽度铺满卡片,高度直接给值,不用 aspect-ratio。
+   原来写的是 aspect-ratio: 3/4 + max-height: 380px,浏览器会反过来用被夹住的高度
+   去推宽度(380 × 3/4 = 285px),配图位缩成卡片左侧一条窄框、右边一大片空白——
+   实测 560px 卡片下正是这个症状。改成 width:100% + aspect-ratio 又会算出 744px 高,
+   把标题和正文全顶到首屏之外。配图位是「待拍摄」的提示而不是真图,不需要占满 3:4,
+   给一个固定高度即可。 */
 .quick-shell .xhs-note__cover {
-  aspect-ratio: 3 / 4; max-height: 380px; display: flex; flex-direction: column;
+  width: 100%; height: 240px; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 8px; text-align: center;
   padding: 22px; border-bottom: 1px solid var(--v2-line);
   background: var(--v2-canvas); border-radius: 0;
