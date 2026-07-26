@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, ForbiddenException, Get, Inject, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Inject, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
 import type { Request } from 'express';
 import { GenerationService } from './generation.service.js';
 import { CsrfGuard, PermissionGuard, SessionAuthGuard } from './guards.js';
@@ -48,6 +48,27 @@ export class GenerationController {
     if (typeof body.projectId !== 'string') throw new BadRequestException('projectId 不能为空');
     this.assert(request, body.projectId, 'generation.run');
     return this.generations.create(body, this.principal(request));
+  }
+
+  /**
+   * 软删一条产出。
+   *
+   * 权限用 generation.edit(ContentEditor 就有),而不是 project.delete——删的是自己
+   * 的一篇产出,不是整个项目;要求项目级删除权会把普通创作者挡在外面。
+   */
+  @Delete(':id')
+  remove(@Req() request: Request, @Param('id') id: string) {
+    const job = this.generations.jobRow(id);
+    this.assert(request, job.project_id, 'generation.edit');
+    return this.generations.softDelete(id);
+  }
+
+  /** 撤销软删(「删错了」的退路)。 */
+  @Post(':id/restore')
+  restore(@Req() request: Request, @Param('id') id: string) {
+    const job = this.generations.jobRow(id);
+    this.assert(request, job.project_id, 'generation.edit');
+    return this.generations.restore(id);
   }
 
   @Post(':id/revise')

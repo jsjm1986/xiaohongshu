@@ -6,6 +6,15 @@ import { APP_OPTIONS, type ApiOptions } from './config.js';
 
 export type SqlValue = string | number | bigint | Uint8Array | null;
 
+/**
+ * 当前 schema 版本(PRAGMA user_version 迁移完之后的值)。
+ *
+ * 加迁移时改这里一处。原来有四个测试各自硬编码 `=== 12`,于是每加一次迁移就有四条
+ * 无关的测试变红——那不是回归信号,是维护噪声。测试断言这个常量,真正想验的
+ * 「迁移到最新且表结构对得上」不变。
+ */
+export const SCHEMA_VERSION = 13;
+
 @Injectable()
 export class DatabaseService implements OnModuleDestroy {
   readonly db: DatabaseSync;
@@ -777,6 +786,35 @@ export class DatabaseService implements OnModuleDestroy {
       `);
     });
     if (version < 12) version = 12;
+
+    if (version < 13) this.transaction(() => {
+      /*
+       * 产出的软删除。
+       *
+       * 实测缺口:极简创作的产出区没有任何删除入口,单个项目跑到 33 条之后列表只增
+       * 不减——失败的、试错的、重复的全部堆在一起,用户无法整理自己的工作区。
+       *
+       * 用 deleted_at 软删而不是物理删:
+       *  - 内容包、事件、批次都靠 job_id 外键挂着,物理删会连带清掉审计痕迹;
+       *  - 误删可撤销(付费产品里"删错了"必须有退路);
+       *  - 已扣的额度不因删除退还,记录还在才解释得清账。
+       */
+      this.db.exec(`
+        ALTER TABLE generation_jobs ADD COLUMN deleted_at TEXT;
+        /*
+         * 索引只建在 deleted_at 上,不做 (project_id, deleted_at) 复合索引。
+         *
+         * 从 v2/v3 升上来的老库里 generation_jobs 只有 id 一列(project_id 是 v1 建表
+         * 时才有的,跳过 v1 的库没有它),复合索引会让整条迁移以
+         * 「no such column: project_id」失败——实测两条迁移测试就是这样红的。
+         * 列表查询已有 v1 的 generation_jobs_project_idx 顶住项目维度。
+         */
+        CREATE INDEX generation_jobs_deleted_idx ON generation_jobs(deleted_at);
+
+        PRAGMA user_version = 13;
+      `);
+    });
+    if (version < 13) version = 13;
   }
 
   onModuleDestroy(): void {

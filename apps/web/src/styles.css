@@ -153,6 +153,12 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .toast { min-width: 290px; max-width: 390px; display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 10px; background: #fff; padding: 11px 12px; box-shadow: var(--shadow-md); font-size: 13px; }
 .toast > span { flex: 1; }
 .toast button { border: 0; background: none; color: var(--muted); cursor: pointer; }
+/* 行内动作(撤销):要看得出可点,和右侧那个关闭叉区分开 */
+.toast__action {
+  flex: none; padding: 3px 10px; border: 1px solid var(--line) !important; border-radius: 999px;
+  color: var(--ink) !important; font: inherit; font-weight: 600;
+}
+.toast__action:hover { border-color: var(--coral) !important; color: var(--coral) !important; }
 .toast--success > svg { color: var(--green); }
 .toast--error > svg { color: var(--red); }
 .toast--info > svg { color: var(--blue); }
@@ -211,6 +217,13 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .login-submit:hover:not(:disabled) { background: var(--coral-dark); transform: translateY(-1px); }
 .login-submit:disabled { opacity: .65; }
 .login-help { text-align: center; margin: 24px 0 0; }
+.login-help + .login-help { margin-top: 8px; }
+/* 客服微信做成可点复制:忘记密码是 SaaS 用户唯一能自救的入口,不能只是一串灰字 */
+.login-help__copy {
+  padding: 1px 6px; border: 1px solid var(--line); border-radius: 6px;
+  background: #fff; color: var(--ink); font: inherit; cursor: pointer;
+}
+.login-help__copy:hover { border-color: var(--coral); color: var(--coral); }
 .login-panel > footer { position: absolute; bottom: 24px; color: #a0a9a4; font-size: 10px; }
 .spinner { width: 24px; height: 24px; display: inline-block; border: 2px solid #dce2de; border-top-color: var(--coral); border-radius: 50%; animation: spin .8s linear infinite; }
 .spinner--small { width: 16px; height: 16px; border-color: rgb(255 255 255 / 30%); border-top-color: #fff; }

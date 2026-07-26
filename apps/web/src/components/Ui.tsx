@@ -17,17 +17,30 @@ import {
 } from 'react';
 
 type ToastKind = 'success' | 'error' | 'info';
-interface ToastItem { id: number; message: string; kind: ToastKind }
-interface ToastContextValue { push: (message: string, kind?: ToastKind) => void }
+/**
+ * 可选的行内动作。为「删除 · 撤销」而加:删一条产出弹一个确认弹窗太重
+ * (整理列表要连删好几条),而删完无声无息又让人不敢下手。撤销放在提示里,
+ * 代价最低。点击后提示自动收起。
+ */
+interface ToastAction { label: string; run: () => void }
+interface ToastItem { id: number; message: string; kind: ToastKind; action?: ToastAction }
+interface ToastContextValue { push: (message: string, kind?: ToastKind, action?: ToastAction) => void }
 
 const ToastContext = createContext<ToastContextValue | null>(null);
 
+/** 带动作的提示多给一点停留时间:3.6 秒不够读完再决定要不要撤销 */
+const TOAST_MS = 3600;
+const TOAST_WITH_ACTION_MS = 7000;
+
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
-  const push = (message: string, kind: ToastKind = 'success') => {
+  const push = (message: string, kind: ToastKind = 'success', action?: ToastAction) => {
     const id = Date.now() + Math.random();
-    setItems((current) => [...current, { id, message, kind }]);
-    window.setTimeout(() => setItems((current) => current.filter((item) => item.id !== id)), 3600);
+    setItems((current) => [...current, { id, message, kind, action }]);
+    window.setTimeout(
+      () => setItems((current) => current.filter((item) => item.id !== id)),
+      action ? TOAST_WITH_ACTION_MS : TOAST_MS,
+    );
   };
 
   return (
@@ -38,6 +51,18 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           <div className={`toast toast--${item.kind}`} key={item.id}>
             {item.kind === 'success' ? <CheckCircle2 size={18} /> : item.kind === 'error' ? <XCircle size={18} /> : <Info size={18} />}
             <span>{item.message}</span>
+            {item.action && (
+              <button
+                type="button"
+                className="toast__action"
+                onClick={() => {
+                  item.action?.run();
+                  setItems((current) => current.filter((currentItem) => currentItem.id !== item.id));
+                }}
+              >
+                {item.action.label}
+              </button>
+            )}
             <button type="button" onClick={() => setItems((current) => current.filter((currentItem) => currentItem.id !== item.id))} aria-label="关闭提示"><X size={15} /></button>
           </div>
         ))}

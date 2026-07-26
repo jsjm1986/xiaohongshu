@@ -22,7 +22,7 @@ import {
 import sharp from 'sharp';
 import { createApplication } from '../src/app.js';
 import { resolveOptions } from '../src/config.js';
-import { DatabaseService } from '../src/database.service.js';
+import { DatabaseService, SCHEMA_VERSION } from '../src/database.service.js';
 import { IntelligenceService } from '../src/intelligence.service.js';
 import type { SessionPrincipal } from '../src/models.js';
 import { seedApprovedProjectBlueprint } from './project-blueprint-fixture.js';
@@ -152,7 +152,7 @@ test('migrates a v3 database to the current schema with source-image boundaries'
 
   const migrated = new DatabaseService(resolveOptions({ dataDir, databasePath, logger: false }));
   try {
-    assert.equal(Number(migrated.prepare('PRAGMA user_version').get()?.user_version), 12);
+    assert.equal(Number(migrated.prepare('PRAGMA user_version').get()?.user_version), SCHEMA_VERSION);
     const tables = new Set((migrated.prepare(
       "SELECT name FROM sqlite_master WHERE type='table'",
     ).all() as Array<{ name: string }>).map((row) => row.name));

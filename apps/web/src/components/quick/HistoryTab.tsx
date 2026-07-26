@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { BookOpen, Clock, Repeat, RotateCcw, SearchX } from 'lucide-react';
+import { BookOpen, Clock, Repeat, RotateCcw, SearchX, Trash2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { Button, useToast } from '../Ui';
 import { api } from '../../lib/api';
@@ -56,6 +56,7 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
   const [statusFilter, setStatusFilter] = useState<GenerationStatusFilter>('all');
   const [keyword, setKeyword] = useState('');
   const [retryingId, setRetryingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   // 本地加载态:以前这里置壳的 busy,但本组件并不读 busy,所以自己没有加载提示,
   // 只是让创作区残留「正在生成」进度条。改为自持状态,壳的 busy 不再被搭便车。
   const [loadingHistory, setLoadingHistory] = useState(false);
@@ -191,6 +192,35 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
     } catch (e) { fail(e, '重试失败'); } finally { setRetryingId(null); }
   };
 
+  /**
+   * 删除一条产出(软删,可撤销)。
+   *
+   * 本地先摘掉再打接口?不。删除是写操作,失败了要能把行放回去;先等接口回来再改
+   * 列表,状态永远和服务端一致,代价只是一次点击后的短暂 loading。
+   */
+  const removeJob = async (job: GenerationJob) => {
+    if (deletingId) return;
+    setDeletingId(job.id);
+    try {
+      await api.generations.remove(job.id);
+      setHistory(history.filter((j) => j.id !== job.id));
+      if (expanded === job.id) setExpanded(null);
+      toast.push(`已删除「${job.topic || '未命名选题'}」`, 'info', {
+        label: '撤销',
+        run: () => {
+          void api.generations.restore(job.id)
+            .then(async () => {
+              // 重新拉列表而不是把本地那条塞回去:期间可能有别的任务完成,
+              // 塞回去会让顺序和状态与服务端不一致。
+              if (projectId) setHistory((await api.generations.list(projectId)).items);
+              toast.push('已恢复');
+            })
+            .catch((e) => fail(e, '撤销失败'));
+        },
+      });
+    } catch (e) { fail(e, '删除失败'); } finally { setDeletingId(null); }
+  };
+
   /** 已完成 → 去独立阅读页;未完成 → 行内展开进度(收起再点即折叠)。 */
   const open = (job: GenerationJob) => {
     if (job.status === 'completed') { navigate(readerPath(job.id)); return; }
@@ -289,6 +319,21 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
                 {onReuseRecipe && (
                   <Button variant="ghost" icon={<Repeat size={13} />} onClick={() => onReuseRecipe(job)}>再来一篇同款</Button>
                 )}
+                {/*
+                  删除:产出区原来只增不减,单个项目跑到 33 条之后失败的、试错的、
+                  重复的全堆在一起,用户没法整理自己的工作区。软删 + 提示里撤销:
+                  逐条弹确认弹窗在"连删几条"时太重,而删完无声无息又让人不敢下手。
+                */}
+                <Button
+                  variant="ghost"
+                  icon={<Trash2 size={13} />}
+                  title="从列表中删除（可撤销）"
+                  loading={deletingId === job.id}
+                  disabled={deletingId !== null}
+                  onClick={() => void removeJob(job)}
+                >
+                  删除
+                </Button>
               </div>
               {isOpen && running && <WaitCard job={job} now={now} />}
               {isOpen && job.status === 'failed' && (

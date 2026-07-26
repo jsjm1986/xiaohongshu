@@ -2,16 +2,22 @@ import { ArrowRight, BookOpenText, Check, Eye, EyeOff, Layers3, Sparkles } from 
 import { type FormEvent, useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../components/AuthContext';
+import { useToast } from '../components/Ui';
 import { ApiError } from '../lib/api';
 import { isSaasUser, loginLandingPath } from '../lib/saas-access';
+import { SUPPORT_WECHAT } from '../lib/support';
 
 export function LoginPage() {
-  const [username, setUsername] = useState('admin');
+  // 用户名不预填:预填「admin」对付费客户是错的默认值,他得先清空再输入自己的账号
+  // (自动化里实测三击选中都清不干净,真人同样容易输成 "adminxxx" 然后被判密码错)。
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [revealWechat, setRevealWechat] = useState(false);
   const { user, login } = useAuth();
+  const toast = useToast();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -25,6 +31,16 @@ export function LoginPage() {
     }
     navigate((location.state as { from?: string } | null)?.from || '/', { replace: true });
   }, [user, navigate, location.state]);
+
+  /** 复制客服微信;剪贴板不可用(非 https / 无权限)时退化成明文展示,不能让人拿不到 */
+  const copyWechat = async () => {
+    try {
+      await navigator.clipboard.writeText(SUPPORT_WECHAT);
+      toast.push('客服微信已复制,去微信添加即可');
+    } catch {
+      setRevealWechat(true);
+    }
+  };
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
@@ -71,7 +87,19 @@ export function LoginPage() {
             {error && <div className="form-error">{error}</div>}
             <button type="submit" className="login-submit" disabled={submitting}>{submitting ? <><span className="spinner spinner--small" />正在登录…</> : <><span>登录</span><ArrowRight size={18} /></>}</button>
           </form>
-          <p className="login-help">无法登录？请联系工作区管理员重置密码。</p>
+          {/*
+            登录页对**两类用户**同时开放,但「联系工作区管理员重置密码」只对科研用户
+            成立:付费的 SaaS 客户既不知道管理员是谁,也没有任何站内途径找到他——
+            密码忘了就等于被锁在门外,而这是他唯一能自救的页面。给可复制的客服微信。
+          */}
+          <p className="login-help">
+            忘记密码？请添加客服微信{' '}
+            <button type="button" className="login-help__copy" onClick={() => void copyWechat()}>
+              {SUPPORT_WECHAT}
+            </button>{' '}
+            重置。
+          </p>
+          {revealWechat && <p className="login-help">客服微信:{SUPPORT_WECHAT}(请手动复制)</p>}
           <p className="login-help">还没有账号?<Link to="/register">申请开通 →</Link></p>
         </div>
         <footer>© 2026 内容智造台 · 你的知识始终属于你</footer>
