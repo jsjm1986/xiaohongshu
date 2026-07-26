@@ -110,6 +110,12 @@ const PATTERNS: Array<{ match: RegExp; label: string; blocking: boolean }> = [
   // 实测这是最主要的失败原因(21 条里 11 条),重试完全可恢复,必须单独归类,
   // 否则会混进「未归类」里显示成一串原文。
   { match: /应用重启导致任务中断/, label: '服务重启中断，重试即可恢复', blocking: false },
+  // 后端快失败写入的中文原因(provider-outage.ts)。必须排在英文余额规则**之前**:
+  // 「无可用账号」「凭据冷却」这两条不含 balance 字样,若靠下面的英文规则兜不住,
+  // 会掉进「未归类」显示成一长串原文。
+  { match: /余额不足/, label: '模型账户余额不足，充值后再重试', blocking: true },
+  { match: /暂无可用账号/, label: '模型服务暂无可用账号，稍后重试', blocking: false },
+  { match: /凭据全部在冷却中/, label: '模型服务凭据冷却中，稍后重试', blocking: false },
   { match: /Insufficient Balance|insufficient_quota|balance/i, label: '模型账户余额不足，充值后再重试', blocking: true },
   { match: /invalid[_ ]api[_ ]key|unauthorized|401/i, label: '模型密钥无效或已过期', blocking: true },
   { match: /rate[_ ]limit|429|too many requests/i, label: '被模型服务限流，稍后重试', blocking: false },

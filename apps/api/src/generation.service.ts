@@ -30,6 +30,7 @@ import {
 } from './diagnostic-contract.js';
 import { FormulaService } from './formula.service.js';
 import { readerView } from './generation-reader-view.js';
+import { detectProviderOutage } from './provider-outage.js';
 import { IntelligenceService } from './intelligence.service.js';
 import type { SessionPrincipal } from './models.js';
 import { PresetService } from './preset.service.js';
@@ -619,6 +620,40 @@ export class GenerationService implements OnModuleInit {
     this.drainQueue();
   }
 
+  /**
+   * 供应商级故障时,把同项目仍在排队的任务直接判失败。
+   *
+   * 实测:42 篇失败是同一个 Insufficient Balance,集中在 4 个批次(各 10 篇全灭),
+   * 每篇要先跑完知识加载/规划/写作、平均 983 秒才撞上那个错误。余额既然已经耗尽,
+   * 后面每一篇都注定失败,没有理由各花 16 分钟去证明一次。
+   *
+   * 只清同一个项目:多租户下另一个项目可能用的是自己的 BYOK 密钥,不该被牵连。
+   * 已扣的配额保持不变(创建时计费),用户充值后到产出区批量重试即可 —— 那条路
+   * 已经存在(retry-plan / planBatchRetry)。
+   *
+   * 返回被清掉的任务数,供调用方写审计。
+   */
+  private failQueuedForOutage(projectId: string, reason: string): number {
+    const remaining: string[] = [];
+    const cleared: string[] = [];
+    for (const queuedId of this.queue) {
+      let row: JobRow | undefined;
+      try { row = this.jobRow(queuedId); } catch { row = undefined; }
+      // 读不到行的一律留在队列里:宁可多跑一篇,也不要凭猜测判死任务
+      if (row?.project_id === projectId) cleared.push(queuedId);
+      else remaining.push(queuedId);
+    }
+    if (cleared.length === 0) return 0;
+    // 原地替换队列内容(queue 是 readonly 引用,位次计算依赖同一个数组)
+    this.queue.length = 0;
+    this.queue.push(...remaining);
+    for (const clearedId of cleared) {
+      this.updateJob(clearedId, { status: 'failed', error: reason, progress: 100, completedAt: nowIso() });
+      this.event(clearedId, 'failed', { message: reason, providerOutage: true });
+    }
+    return cleared.length;
+  }
+
   private drainQueue(): void {
     while (this.activeJobs < this.maxConcurrentJobs && this.queue.length) {
       const jobId = this.queue.shift();
@@ -750,6 +785,15 @@ export class GenerationService implements OnModuleInit {
       const message = error instanceof Error ? error.message.slice(0, 1_000) : String(error).slice(0, 1_000);
       this.updateJob(jobId, { status: 'failed', error: message, progress: 100, completedAt: nowIso() });
       this.event(jobId, 'failed', { message });
+      // 供应商级故障(余额不足/无可用账号/凭据冷却):后面排队的注定同样失败,
+      // 立刻判掉而不是每篇再花 16 分钟撞一次同一面墙。单篇级错误不触发。
+      const outage = detectProviderOutage(message);
+      if (outage) {
+        const cleared = this.failQueuedForOutage(job.project_id, outage.reason);
+        if (cleared > 0) {
+          this.event(jobId, 'provider_outage', { kind: outage.kind, clearedQueuedJobs: cleared });
+        }
+      }
     }
   }
 
