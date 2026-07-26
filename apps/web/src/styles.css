@@ -1380,6 +1380,8 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   .login-panel { padding: 28px 20px; }
   .login-panel > footer { display: none; }
   .topbar__right { gap: 3px; }
+  /* 窄屏顶栏挤:切换器收紧内边距,但两个版本名都保留——省掉一个就没法切回来了 */
+  .edition-switch button { padding: 5px 9px; }
   .project-switcher { min-width: 120px; max-width: 145px; }
   .project-switcher select { font-size: 10px; }
   .mode-switch button { padding: 8px; }
@@ -3477,13 +3479,26 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .qs-brand__text strong { font-size: var(--v2-fs-md); color: var(--v2-ink); }
 .qs-brand__text small { font-size: var(--v2-fs-xs); color: var(--v2-muted); }
 .qs-topbar__right { display: flex; align-items: center; gap: 14px; }
-.qs-full-link {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 6px 12px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius-sm);
-  background: var(--v2-surface); color: var(--v2-ink-2);
-  font-size: var(--v2-fs-sm); text-decoration: none;
+
+/* ---- 版本切换器:基础版 ⇄ 科研版 ----
+   两个壳共用(.qs-topbar 与 .v2 .topbar 都放在 __right 首位),所以规则不带壳前缀。
+   分段控件形态,而不是链接:切换是在两个同级状态之间选,当前态必须一眼可见。 */
+.edition-switch {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px; border: 1px solid var(--v2-line); border-radius: 999px;
+  background: var(--v2-canvas);
 }
-.qs-full-link:hover { border-color: var(--v2-line-dark); color: var(--v2-brand-ink); }
+.edition-switch button {
+  padding: 5px 13px; border: 0; border-radius: 999px;
+  background: transparent; color: var(--v2-muted);
+  font-size: var(--v2-fs-xs); font-weight: 550; line-height: 1.4;
+  white-space: nowrap; cursor: pointer;
+}
+.edition-switch button:hover:not(.active) { color: var(--v2-ink-2); }
+.edition-switch button.active {
+  background: var(--v2-surface); color: var(--v2-ink);
+  box-shadow: var(--v2-shadow-sm); cursor: default;
+}
 /* 顶栏常驻额度:原来只在总览页有一格,而额度是在创作页花掉的 */
 .qs-quota {
   display: inline-flex; align-items: baseline; gap: 5px;
