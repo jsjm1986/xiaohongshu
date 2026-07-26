@@ -3917,16 +3917,17 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .quick-shell .qc-crumb h1 { font-size: var(--v2-fs-h1); font-weight: 680; letter-spacing: -0.015em; }
 .quick-shell .qc-crumb small { font-size: var(--v2-fs-sm); }
 
-/* ---- 7. 内容宽度:一根居中的内容柱 ----
+/* ---- 7. 内容宽度:自适应铺开的内容柱 ----
    面板原来硬顶 720px 且左对齐,而壳给到 1440px。实测(1512px 视口)产出区左边距
-   61px、右边距 372px——内容挤在左边一条窄柱里,右边一大片空,这是"小气"最直接的
-   空间来源。
+   61px、右边距 372px——内容挤在左边一条窄柱里,右边一大片空。
 
-   改成三者共用同一根居中内容柱:面包屑、步骤条、面板左右边界对齐,整体居中。
-   创作区是双栏(选题池 + 配置),需要更宽,用 :has() 把这一柱整体放宽——只切一个
-   变量,三者仍然对齐。不支持 :has 的浏览器退化为窄一档,不会错位。 */
-.quick-shell .qc-page { --qc-col: 1080px; }
-.quick-shell .qc-page:has(.qc-panel--wide) { --qc-col: 1440px; }
+   三者共用同一根内容柱(面包屑、步骤条、面板左右边界对齐),宽度**跟着视口走**
+   而不是钉死像素:100% 铺满壳的内容区,只在超宽屏由壳自己收口(见下条)。固定
+   1080px 在 1600px+ 的屏上还是一条窄柱,而这些页面(读数卡、任务列表、批次网格)
+   都是越宽越好用——多一列就少一次滚动。
+
+   例外是阅读页:正文有易读行宽上限(880px),它自己另设,不吃这个变量。 */
+.quick-shell .qc-page { --qc-col: 100%; }
 .quick-shell .qc-crumb,
 .quick-shell .qc-page .qc-tabs,
 .quick-shell .qc-page .qc-panel {
@@ -3935,6 +3936,29 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 /* margin-inline: auto 会覆盖上面 tabs 的 margin 简写,竖向间距要补回来 */
 .quick-shell .qc-page .qc-tabs { margin-top: 8px; margin-bottom: 18px; }
 .quick-shell .qc-page .qc-panel--wide { max-width: var(--qc-col); }
+
+/* 壳的收口:1440 → 1680px。桌面主流已到 1512—1728px 逻辑宽,1440 的上限在这些屏上
+   两侧各留 100px+ 空白。1680 之后不再长——再宽读数卡会摊成一条,任务行的标题和
+   右侧时间之间拉出一大片空白,反而更难扫读。 */
+.qs-main { max-width: 1680px; }
+
+/* ---- 7b. 铺开之后:约束"被拉长就变糟"的元素 ----
+   宽度放开会暴露两类问题,都在总览页:
+   - 「产出质量」与「下一步」两栏等高,而前者内容少,底部空出一大片
+   - 「最近产出」标题贴左、时间贴右,中间隔着 1500px 空白,眼睛要横扫一整行 */
+
+/* 左栏在宽屏下过宽,把 1.35fr 收到 1fr:两块内容量本来相当,1.35 是窄屏时代的配比。
+   窄屏塌成单栏的断点必须一起重申——这条规则在原 @media(max-width:900px) 之后,
+   源顺序会把它盖掉,实测 768px 下两栏各 334px,挤到没法读。 */
+.quick-shell .qc-page .qc-board { grid-template-columns: 1fr 1fr; gap: 20px; }
+@media (max-width: 900px) {
+  .quick-shell .qc-page .qc-board { grid-template-columns: 1fr; }
+}
+
+/* 任务行给一个可读上限:超过这个宽度,标题与右侧元信息之间的空白就成了噪声。
+   靠 max-width 而不是缩窄整柱——列表窄一点,上面的读数卡仍然铺满。 */
+.quick-shell .qc-page .qc-overview-recent ul,
+.quick-shell .qc-page .qc-todo { max-width: 1100px; }
 
 /* ---- 8. 按钮:主动作要有份量 ----
    38px 高的主按钮在放大后的版面里偏小。主按钮 44px,次级维持 40px 一档。 */
