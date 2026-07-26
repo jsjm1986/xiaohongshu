@@ -1,5 +1,7 @@
+import { Fragment } from 'react';
 import { ClipboardCheck } from 'lucide-react';
 import { commentSectionView, gapNameMap } from '../../lib/comment-view';
+import { uncoveredGapLabels } from '../../lib/comment-cref';
 import type { ReaderCandidate } from '../../types';
 
 type Source = Pick<
@@ -21,9 +23,21 @@ export function CommentPlanCard({ candidate }: { candidate: Source }) {
   );
   if (!view) return null;
 
+  // 追问的 boundary 也算「有可核对内容」:一条线程可能主线程五字段全空、只有追问带边界,
+  // 漏掉它就等于新增的追问边界分支永远进不去。
   const rows = view.rows.filter(
-    (row) => row.stageLabel || row.functionLabel || row.gapLabel || row.boundary || row.nextStep,
+    (row) =>
+      row.stageLabel ||
+      row.functionLabel ||
+      row.gapLabel ||
+      row.boundary ||
+      row.nextStep ||
+      row.followUps.some((f) => f.boundary?.trim()),
   );
+
+  // 未展开缺口存的是 gap id(gap_1、gap_aftercare 这类),同一张卡上 gapLabel 走了名称映射,
+  // 这里再摆原始 id 就自相矛盾;查不到的 id 由 uncoveredGapLabels 原样透传,不编名称。
+  const uncovered = uncoveredGapLabels(candidate.commentUncoveredGaps, candidate.gapCards);
 
   return (
     <section className="quick-card">
@@ -47,15 +61,26 @@ export function CommentPlanCard({ candidate }: { candidate: Source }) {
                   {row.gapLabel && <><dt>承担缺口</dt><dd>{row.gapLabel}</dd></>}
                   {row.boundary && <><dt>边界要求</dt><dd>{row.boundary}</dd></>}
                   {row.nextStep && <><dt>下一步核验</dt><dd>{row.nextStep}</dd></>}
+                  {/* 追问自带的边界要求。字段端到端是通的(生成侧 → reader 视图 → comment-view),
+                      只是当前库里 168 条追问无一填写;不在这里列出,它就随旧 CommentSection
+                      一起从阅读页消失,而这张卡的职责就是内部核对字段一个不丢。 */}
+                  {row.followUps.map((f, j) =>
+                    f.boundary?.trim() ? (
+                      <Fragment key={`fu-${j}`}>
+                        <dt>追问 {j + 1} 边界要求</dt>
+                        <dd>{f.boundary}</dd>
+                      </Fragment>
+                    ) : null,
+                  )}
                 </dl>
               </li>
             ))}
           </ol>
         )}
 
-        {candidate.commentUncoveredGaps?.length ? (
-          <small className="qc-uncovered">评论区未展开：{candidate.commentUncoveredGaps.join('、')}</small>
-        ) : null}
+        {uncovered.length > 0 && (
+          <small className="qc-uncovered">评论区未展开：{uncovered.join('、')}</small>
+        )}
       </div>
     </section>
   );
