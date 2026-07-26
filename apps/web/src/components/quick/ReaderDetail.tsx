@@ -41,7 +41,9 @@ export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, ret
   const [instruction, setInstruction] = useState('');
   const candidates = job.candidates;
   if (candidates.length === 0) return null;
-  const current = candidates[Math.min(activeIndex, candidates.length - 1)]!;
+  // 两头都夹:下标从页面传进来之后,负数或 NaN 会让下面的非空断言直接崩。
+  // 原来它是内部 useState(0),只夹上界是安全的;提升出去就不是了。
+  const current = candidates[Math.min(Math.max(0, activeIndex || 0), candidates.length - 1)]!;
   const verdict = issueVerdict(current.validation);
   const blockReason = exportBlockReason(verdict);
 
