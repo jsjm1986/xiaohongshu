@@ -15,6 +15,29 @@ export interface NoteCommentsProps {
   accountLabel: string;
 }
 
+/** 默认免责声明:候选没带 commentDisclaimer 时兜底,声明本身不允许缺席。 */
+export const COMMENT_DISCLAIMER_FALLBACK = '情景演练与答复参考，不代表真实用户发言。';
+
+/**
+ * 追问答复的署名由所属线程的 threadKind 决定,不看 answererLabel。
+ *
+ * org_answer 线程里追问的 answer 是机构补充(实测「只要是教练私下额外收费…一样是
+ * 换教练、全额退」这类补充口径),必须带可追责身份;reader_exchange 的追问答复是
+ * 另一位模拟读者接话,标成机构发言就是假冒机构表态。threadKind 缺失的历史包按
+ * org_answer 处理,与 comment-view 的 answererLabelFor 保持同一套兜底。
+ *
+ * 抽成纯函数是为了让这个判定可被测试覆盖——它是本组件唯一有真假之分的分支,
+ * 其余都是排版。
+ */
+export function followUpReplyIdentity(
+  threadKind: string | undefined,
+  accountLabel: string,
+): { name: string; badge?: string } {
+  return (threadKind ?? 'org_answer') === 'org_answer'
+    ? { name: accountLabel, badge: '作者' }
+    : { name: '读者' };
+}
+
 /**
  * 仿真评论区。
  *
@@ -46,11 +69,13 @@ export function NoteComments({ candidate, accountLabel }: NoteCommentsProps) {
     <section className="xhs-comments">
       <header className="xhs-comments__head">
         <span>共 {total} 条评论</span>
-        {/* 声明挂在 ⓘ 的 title 上而不是常驻一行:预览区要沉浸,但这句必须可达。 */}
+        {/* 声明挂在 ⓘ 上而不是常驻一行:预览区要沉浸,但这句必须可达。
+            aria-label 放声明全文而非「关于这些评论」——后者会把声明从无障碍树里
+            盖掉,屏幕阅读器读不到就等于对读屏用户没有声明。 */}
         <span
           className="xhs-comments__note"
-          title={candidate.commentDisclaimer || '情景演练与答复参考，不代表真实用户发言。'}
-          aria-label="关于这些评论"
+          title={candidate.commentDisclaimer || COMMENT_DISCLAIMER_FALLBACK}
+          aria-label={candidate.commentDisclaimer || COMMENT_DISCLAIMER_FALLBACK}
         >
           <Info size={12} />
         </span>
@@ -86,11 +111,7 @@ export function NoteComments({ candidate, accountLabel }: NoteCommentsProps) {
           }
           followUps={row.followUps.filter((f) => f.question?.trim())}
           onCopyFollow={(text) => void copyOne(text)}
-          followReply={
-            row.answererLabel && row.answererLabel !== '模拟读者接话'
-              ? { name: accountLabel, badge: '作者' }
-              : { name: '读者' }
-          }
+          followReply={followUpReplyIdentity(row.threadKind, accountLabel)}
         />
       ))}
     </section>
