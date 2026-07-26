@@ -23,15 +23,17 @@ test('avatarTone 空名字不崩，给兜底字', () => {
   assert.equal(avatarTone('').initial, '号');
 });
 
+// 下面两条的 fixture 一律挑当日正午(UTC 12:00):noteDate 按本地时区格式化,
+// 若用 UTC 午夜做 fixture,在西半球会跨回前一天,测试就变成跟机器时区绑定的假绿。
 test('noteDate 优先用 completedAt', () => {
   assert.equal(
-    noteDate({ completedAt: '2026-07-25T08:45:27.000Z', createdAt: '2026-07-01T00:00:00.000Z' }),
+    noteDate({ completedAt: '2026-07-25T12:00:00.000Z', createdAt: '2026-07-01T12:00:00.000Z' }),
     '2026-07-25',
   );
 });
 
 test('noteDate 只有 createdAt 时退到它', () => {
-  assert.equal(noteDate({ createdAt: '2026-07-01T00:00:00.000Z' }), '2026-07-01');
+  assert.equal(noteDate({ createdAt: '2026-07-01T12:00:00.000Z' }), '2026-07-01');
 });
 
 test('noteDate 两者皆缺返回 undefined', () => {
