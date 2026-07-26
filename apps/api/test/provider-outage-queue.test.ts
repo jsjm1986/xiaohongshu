@@ -1,0 +1,175 @@
+import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { after, before, test } from 'node:test';
+import type { NestExpressApplication } from '@nestjs/platform-express';
+import { createApplication } from '../src/app.js';
+import { DatabaseService } from '../src/database.service.js';
+import { GenerationService } from '../src/generation.service.js';
+
+/**
+ * 供应商级故障时清空同项目队列。
+ *
+ * provider-outage.test.ts 锁的是"哪些错误算 outage"这个纯判断;这里锁真正的行为:
+ * 队列里的任务被判失败、跨项目不牵连、单篇级错误不触发。
+ *
+ * 直接调私有的 failQueuedForOutage 而不是跑真实生成——真实触发需要一个余额耗尽的
+ * 模型供应商,不可复现;而这一层的逻辑(选哪些任务、怎么改状态)是可以钉死的。
+ */
+
+let app: NestExpressApplication;
+let baseUrl = '';
+let dataDir = '';
+let cookie = '';
+let csrf = '';
+let projectA = '';
+let projectB = '';
+
+const PASSWORD = 'Outage-bootstrap-123!';
+const NEW_PASSWORD = 'Outage-rotated-456!';
+
+async function request(path: string, options: RequestInit = {}) {
+  const headers = new Headers(options.headers);
+  if (cookie) headers.set('cookie', cookie);
+  if (csrf && !['GET', 'HEAD'].includes(options.method ?? 'GET')) headers.set('x-csrf-token', csrf);
+  if (typeof options.body === 'string') headers.set('content-type', 'application/json');
+  const response = await fetch(`${baseUrl}${path}`, { ...options, headers });
+  const body = await response.json().catch(() => ({}));
+  return { response, body: body as any };
+}
+
+function seedQueued(id: string, projectId: string) {
+  const db = app.get(DatabaseService);
+  const admin = db.prepare("SELECT id FROM users WHERE username='admin'").get() as { id: string };
+  db.prepare(
+    `INSERT INTO generation_jobs
+       (id, project_id, status, config_json, seed, created_by, created_at, updated_at,
+        topic, goal, mode, progress, knowledge_context_json, style_profile_version,
+        resolution_snapshot_json, config_impact_json, opportunity_snapshot_json,
+        planning_context_json, image_context_json, research_snapshot_json, quality_status)
+     VALUES (?, ?, 'queued', '{"formula":{"versionId":"fv"},"knowledge":{"mode":"auto","selectedFileIds":[]}}',
+        's', ?, datetime('now'), datetime('now'), ?, 'g', 'simple', 0, '{}', 1,
+        '{}', '{}', '{}', '{}', '[]', '{}', 'unknown')`,
+  ).run(id, projectId, admin.id, `选题-${id}`);
+}
+
+function statusOf(id: string) {
+  const db = app.get(DatabaseService);
+  return db.prepare('SELECT status, error, progress FROM generation_jobs WHERE id=?').get(id) as
+    { status: string; error: string | null; progress: number };
+}
+
+/** 私有方法:测试要验的正是它的行为,公开它只为了摆样子反而更差。 */
+function failQueued(projectId: string, reason: string): number {
+  const service = app.get(GenerationService) as unknown as {
+    failQueuedForOutage: (p: string, r: string) => number;
+  };
+  return service.failQueuedForOutage(projectId, reason);
+}
+
+function queueRef(): string[] {
+  return (app.get(GenerationService) as unknown as { queue: string[] }).queue;
+}
+
+before(async () => {
+  dataDir = await mkdtemp(join(tmpdir(), 'content-agent-outage-'));
+  app = await createApplication({
+    dataDir, adminUsername: 'admin', adminPassword: PASSWORD,
+    masterEncryptionKey: 'outage-test-master-encryption-key', logger: false,
+    platformApiKey: '', platformBaseUrl: 'http://127.0.0.1:1/v1',
+  });
+  await app.listen(0, '127.0.0.1');
+  baseUrl = await app.getUrl();
+  const login = await request('/api/auth/login', {
+    method: 'POST', body: JSON.stringify({ username: 'admin', password: PASSWORD }),
+  });
+  cookie = login.response.headers.get('set-cookie')!.split(';', 1)[0]!;
+  csrf = login.body.csrfToken;
+  await request('/api/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ currentPassword: PASSWORD, newPassword: NEW_PASSWORD }),
+  });
+  const a = await request('/api/projects', { method: 'POST', body: JSON.stringify({ name: '项目A', domain: '住宅装修' }) });
+  const b = await request('/api/projects', { method: 'POST', body: JSON.stringify({ name: '项目B', domain: '口腔正畸' }) });
+  projectA = a.body.id;
+  projectB = b.body.id;
+  assert.ok(projectA && projectB, '两个项目都要建出来');
+});
+
+after(async () => {
+  await app?.close();
+  if (dataDir) await rm(dataDir, { recursive: true, force: true });
+});
+
+test('余额不足时同项目排队任务全部判失败,并写明原因与出路', () => {
+  const queue = queueRef();
+  queue.length = 0;
+  for (const id of ['a1', 'a2', 'a3']) { seedQueued(id, projectA); queue.push(id); }
+
+  const reason = '模型账户余额不足，本项目排队中的任务已停止，充值后可在产出区批量重试';
+  assert.equal(failQueued(projectA, reason), 3);
+
+  for (const id of ['a1', 'a2', 'a3']) {
+    const row = statusOf(id);
+    assert.equal(row.status, 'failed', `${id} 应判失败`);
+    assert.equal(row.error, reason);
+    // progress 置 100 与既有失败路径一致,前端不会显示成"还在跑"
+    assert.equal(Number(row.progress), 100);
+  }
+  assert.equal(queue.length, 0, '队列应被清空');
+});
+
+test('跨项目不牵连:另一个项目可能用自己的 BYOK 密钥', () => {
+  const queue = queueRef();
+  queue.length = 0;
+  seedQueued('x1', projectA);
+  seedQueued('y1', projectB);
+  seedQueued('x2', projectA);
+  queue.push('x1', 'y1', 'x2');
+
+  assert.equal(failQueued(projectA, '余额不足'), 2);
+  assert.equal(statusOf('x1').status, 'failed');
+  assert.equal(statusOf('x2').status, 'failed');
+  // B 项目的任务既不改状态,也要留在队列里继续跑
+  assert.equal(statusOf('y1').status, 'queued');
+  assert.deepEqual(queue, ['y1']);
+});
+
+test('队列里没有该项目的任务时返回 0,不误伤别人', () => {
+  const queue = queueRef();
+  queue.length = 0;
+  seedQueued('z1', projectB);
+  queue.push('z1');
+  assert.equal(failQueued(projectA, '余额不足'), 0);
+  assert.equal(statusOf('z1').status, 'queued');
+  assert.deepEqual(queue, ['z1']);
+});
+
+test('队列为空时安全返回 0', () => {
+  queueRef().length = 0;
+  assert.equal(failQueued(projectA, '余额不足'), 0);
+});
+
+test('队列里有读不到的任务 id 时保留它,不凭猜测判死', () => {
+  const queue = queueRef();
+  queue.length = 0;
+  seedQueued('k1', projectA);
+  // 'ghost' 在库里不存在(例如已被清理);jobRow 会抛 NotFound
+  queue.push('ghost', 'k1');
+  assert.equal(failQueued(projectA, '余额不足'), 1);
+  assert.equal(statusOf('k1').status, 'failed');
+  assert.deepEqual(queue, ['ghost'], '读不到的 id 留在队列里');
+});
+
+test('已扣的配额不退:计费在创建时发生,重试走产出区', async () => {
+  const db = app.get(DatabaseService);
+  const before = db.prepare('SELECT quota_used FROM workspace_settings LIMIT 1').get() as { quota_used: number } | undefined;
+  const queue = queueRef();
+  queue.length = 0;
+  seedQueued('q1', projectA);
+  queue.push('q1');
+  failQueued(projectA, '余额不足');
+  const afterRow = db.prepare('SELECT quota_used FROM workspace_settings LIMIT 1').get() as { quota_used: number } | undefined;
+  assert.equal(afterRow?.quota_used, before?.quota_used, '快失败不该改动配额');
+});

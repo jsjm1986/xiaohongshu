@@ -92,6 +92,26 @@ test('failureDigest 按错误类型归并,给出可读原因与条数', () => {
   assert.equal(d.groups[1].count, 1);
 });
 
+test('后端快失败写入的中文原因要能归类,不掉进「未归类」', () => {
+  // 这三句是 apps/api 的 provider-outage.ts 写进 job.error 的原文。
+  // 其中后两句不含 balance 字样,若没有专门的中文规则会显示成一长串原文。
+  const d = failureDigest([
+    job({ id: 'a', error: '模型账户余额不足，本项目排队中的任务已停止，充值后可在产出区批量重试' }),
+    job({ id: 'b', error: '模型服务暂无可用账号，本项目排队中的任务已停止，稍后可在产出区批量重试' }),
+    job({ id: 'c', error: '模型服务的凭据全部在冷却中，本项目排队中的任务已停止，稍后可在产出区批量重试' }),
+  ]);
+  assert.equal(d.groups.length, 3);
+  for (const g of d.groups) {
+    assert.equal(g.label.startsWith('未归类'), false, `应归类:${g.label}`);
+  }
+  // 余额不足是阻塞的(重试必然再失败);无可用账号/冷却是暂时的,重试可能成功
+  const byLabel = new Map(d.groups.map((g) => [g.label, g]));
+  assert.equal(byLabel.get('模型账户余额不足，充值后再重试')?.blocking, true);
+  assert.equal(byLabel.get('模型服务暂无可用账号，稍后重试')?.blocking, false);
+  assert.equal(byLabel.get('模型服务凭据冷却中，稍后重试')?.blocking, false);
+  assert.equal(d.blockingCount, 1);
+});
+
 test('failureDigest 按条数倒序,最主要的原因排最前', () => {
   const d = failureDigest([
     job({ id: 'a', error: 'Model output did not contain a complete JSON object.' }),
