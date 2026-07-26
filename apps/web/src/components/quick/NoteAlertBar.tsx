@@ -17,11 +17,17 @@ interface Props {
  *
  * 分级直接用 issueVerdict:它已经处理了「按数组顺序取首条会把 warning 当结论」
  * 这个实测过的坑(129 个未通过候选里 110 个首条是 warning)。
+ *
+ * 三态而不是两态:能不能导出看 publishable,不看 warning 数。实测 229 个候选里 46 个
+ * 是 valid=true 且带 warning——这些可以直接发,拿黄条写「N 项建议核对」会被读成没过校验。
  */
 export function NoteAlertBar({ validation, onSeeDetail }: Props) {
   const verdict = issueVerdict(validation);
+  const blocking = verdict.blocking.length;
+  const advisory = verdict.advisory.length;
 
-  if (verdict.publishable && verdict.advisory.length === 0) {
+  // 一态:干净通过。
+  if (verdict.publishable && advisory === 0) {
     return (
       <div className="xhs-alert xhs-alert--ok">
         <CheckCircle2 size={13} />
@@ -30,17 +36,25 @@ export function NoteAlertBar({ validation, onSeeDetail }: Props) {
     );
   }
 
-  const blocking = verdict.blocking.length;
-  const advisory = verdict.advisory.length;
-  const tone = blocking > 0 ? 'error' : 'warn';
+  // 二态:通过了但有建议项。先说结论(可发布),再说还有什么可看,配中性信息色。
+  if (verdict.publishable) {
+    return (
+      <div className="xhs-alert xhs-alert--info">
+        <Info size={13} />
+        <span>{`可直接发布 · ${advisory} 项建议核对`}</span>
+        <button type="button" className="xhs-alert__link" onClick={onSeeDetail}>看详情</button>
+      </div>
+    );
+  }
 
+  // 三态:未通过。有 error 时点明是硬门槛;没 error 也要说清导不出,别只说「建议」。
   return (
-    <div className={`xhs-alert xhs-alert--${tone}`}>
+    <div className={`xhs-alert xhs-alert--${blocking > 0 ? 'error' : 'warn'}`}>
       {blocking > 0 ? <AlertTriangle size={13} /> : <Info size={13} />}
       <span>
         {blocking > 0
           ? `${blocking} 项需核对才能导出`
-          : `${advisory} 项建议核对`}
+          : `未通过校验 · ${advisory} 项待核对`}
         {blocking > 0 && advisory > 0 && `，另有 ${advisory} 项建议核对`}
       </span>
       <button type="button" className="xhs-alert__link" onClick={onSeeDetail}>看详情</button>

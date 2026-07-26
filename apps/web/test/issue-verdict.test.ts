@@ -124,6 +124,15 @@ test("publishable 认后端 valid,不按 error 数自己推断", () => {
   assert.equal(issueVerdict({ valid: true, issues: [{ code: "x", severity: "warning" }] }).publishable, true);
 });
 
+test("可发布且带建议项是主路径:advisory 不能算进 blocking", () => {
+  // 库里 229 个候选有 46 个是这一态。细条据此走「可直接发布 · N 项建议核对」,
+  // 不是黄色的未通过条,所以这三个值要钉住。
+  const verdict = issueVerdict({ valid: true, issues: [{ severity: "warning", code: "x" }] });
+  assert.equal(verdict.publishable, true);
+  assert.equal(verdict.advisory.length, 1);
+  assert.equal(verdict.blocking.length, 0);
+});
+
 test("导出门槛理由:可发布返回 null,不可发布点明能先导 Markdown", () => {
   assert.equal(exportBlockReason(issueVerdict({ valid: true, issues: [] })), null);
   const reason = exportBlockReason(
