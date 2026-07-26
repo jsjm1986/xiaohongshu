@@ -1564,7 +1564,10 @@ test('project analysis is cached and failed retries do not create intelligence f
   const before = await request(`/api/projects/${project.body.id}/intelligence`);
   fail = true;
   const failed = await request(path, { method: 'POST', body: JSON.stringify({ force: true }) });
-  assert.equal(failed.response.status, 500);
+  // 上游 500 现在对客户端报 503 + 可行动话术(原来是裸的 500 Internal server error,
+  // 用户看不出发生了什么、要不要重试);分类见 analysis-failure-message.test.ts
+  assert.equal(failed.response.status, 503);
+  assert.match(String(failed.body.message), /模型服务暂时不可用/);
   assert.equal(calls, 9);
   const after = await request(`/api/projects/${project.body.id}/intelligence`);
   assert.equal(after.body.length, before.body.length);

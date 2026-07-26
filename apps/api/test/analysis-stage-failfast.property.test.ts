@@ -247,7 +247,11 @@ test('Property 8: three-stage analysis fails fast on missing required stage cont
 
         // (a) 缺必需内容时恒以错误终止。
         assert.ok(error instanceof Error, '缺必需内容时 analyzeProject 必须以错误终止，而非正常返回');
-        const message = (error as Error).message;
+        // 抛给接口的是翻译过的用户话术(「模型返回的结果不完整…」),技术原文挂在
+        // cause 上——本用例验的是**契约细节**(缺了哪个模块 / informationGaps 为空),
+        // 所以读 cause;用户可见文本另有 analysis-failure-message.test.ts 锁。
+        const cause = (error as { cause?: unknown }).cause;
+        const message = cause instanceof Error ? cause.message : (error as Error).message;
 
         if (scenario.kind === 'stage1-missing') {
           // (a) 错误信息指明缺失内容：含标识短语且逐一指明缺失的蓝图模块名。
