@@ -41,6 +41,27 @@ export function identityLabel(value?: string): string | undefined {
   return IDENTITY_LABEL[value] ?? value;
 }
 
+/**
+ * 回答方标签按线程形态决定。
+ *
+ * 规划层把 postingIdentity 统一赋给每个线程（含读者互聊与漂浮短反应），所以它
+ * 不能单独作为「谁在答」的依据：reader_exchange 的 answer 是另一位模拟读者接话，
+ * organic_reaction 按设计根本没有机构答复（answer 恒空）。无条件套 identityLabel
+ * 会把读者说的「我也这么觉得」标成机构 IP 发言。
+ */
+export function answererLabelFor(comment: {
+  threadKind?: string;
+  postingIdentity?: string;
+  answer?: string;
+}): string | undefined {
+  const kind = comment.threadKind ?? 'org_answer';
+  if (kind === 'organic_reaction') return undefined;
+  if (kind === 'reader_exchange') {
+    return comment.answer?.trim() ? '模拟读者接话' : undefined;
+  }
+  return identityLabel(comment.postingIdentity);
+}
+
 export function commentFunctionLabel(value?: string): string | undefined {
   if (!value) return undefined;
   return FUNCTION_LABEL[value] ?? value;
@@ -55,9 +76,15 @@ export interface CommentRow {
   id?: string;
   question: string;
   answer: string;
+  /** 线程互动形态:决定 answererLabel 与 identitySummary 的口径。 */
+  threadKind?: string;
   /** 提问方标签:模拟读者(全部线程实测 simulated=true) */
   askerLabel: string;
-  /** 回答方标签:可追责身份 */
+  /**
+   * 回答方标签:仅 org_answer 线程才是可追责身份。reader_exchange/
+   * organic_reaction 的 answer 是模拟读者接话,标成机构身份会把读者说的
+   * 「我也这么觉得」「同好，我打算先打电话问问」渲染成员工发言。
+   */
   answererLabel?: string;
   /** 开放文本,原样显示 */
   personaRole?: string;
@@ -94,9 +121,14 @@ export function commentSectionView(
     id: c.id,
     question: c.question,
     answer: c.answer,
+    threadKind: c.threadKind,
     // simulated 缺失的历史包不能默认成"真实读者"——那是更强的断言。
     askerLabel: c.simulated === false ? '未标记为模拟' : '模拟读者',
-    answererLabel: identityLabel(c.postingIdentity),
+    // 只有 org_answer 的 answer 出自可追责身份。reader_exchange/organic_reaction
+    // 的 answer 是模拟读者接话,却同样带着 postingIdentity(规划层按线程统一赋值),
+    // 无条件打标签会把读者发言渲染成员工/机构发言——实测三篇 20/20 条全部错标。
+    // threadKind 缺失的历史包按 org_answer 处理,保持旧行为。
+    answererLabel: answererLabelFor(c),
     personaRole: c.personaRole,
     functionLabel: commentFunctionLabel(c.function),
     stageLabel: stageLabel(c.stage),
@@ -107,7 +139,14 @@ export function commentSectionView(
     followUps: c.followUps ?? [],
   }));
 
-  const identities = [...new Set(rows.map((r) => r.answererLabel).filter((v): v is string => Boolean(v)))];
+  // identitySummary 回答的是「答复都由哪些可追责身份发」,所以只统计 org_answer
+  // 线程的身份;把「模拟读者接话」混进去会让这份声明失真。
+  const identities = [...new Set(
+    rows
+      .filter((row) => (row.threadKind ?? 'org_answer') === 'org_answer')
+      .map((row) => row.answererLabel)
+      .filter((value): value is string => Boolean(value)),
+  )];
   return {
     rows,
     withFollowUps: rows.filter((r) => r.followUps.length > 0).length,
