@@ -3185,6 +3185,32 @@ div.qc-topic { cursor: default; }
 .qc-account__form { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px 16px; }
 .qc-account__form .qc-actions { grid-column: 1 / -1; }
 
+/* ---- 独立阅读页 /quick/read/:jobId ----
+   阅读原来是产出列表里的手风琴(两千多像素,上下还挂着别的任务行)。这里是一整页
+   只读一篇:正文列宽收到易读区间,顶栏常驻返回与翻页。 */
+/* 选择器必须比 `.qs-main .page { max-width: none }`(0,2,0)更强,否则正文一路铺到
+   1440px:实测每行 110+ 字,读一段要横向扫视。收到 880px 约 45 字/行。 */
+.qs-main .page.qc-reader-page { display: flex; flex-direction: column; gap: 18px; max-width: 880px; margin: 0 auto; }
+.qc-reader-page__bar {
+  position: sticky; top: 56px; z-index: 20;
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 0; margin-bottom: 2px;
+  background: var(--v2-canvas); border-bottom: 1px solid var(--v2-line);
+}
+.qc-reader-page__title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.qc-reader-page__title h1 {
+  margin: 0; font-size: var(--v2-fs-lg); line-height: 1.35;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.qc-reader-page__title small { color: var(--v2-muted); font-size: var(--v2-fs-xs); }
+.qc-reader-page__pager { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+
+@media (max-width: 720px) {
+  /* 窄屏顶栏换行:标题独占一行,翻页与返回各自成组,别把标题挤成两个字 */
+  .qc-reader-page__bar { flex-wrap: wrap; }
+  .qc-reader-page__title { order: -1; flex-basis: 100%; }
+}
+
 /* ---- 「查看」详情:成品 / 判断依据 / 发布方案 三段 ---- */
 .qc-reader { display: flex; flex-direction: column; gap: 18px; }
 .qc-reader__section { display: flex; flex-direction: column; gap: 12px; }
