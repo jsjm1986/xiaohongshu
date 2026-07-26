@@ -226,11 +226,43 @@ export function normalizeProjectCreativeBlueprint(input: {
   };
 }
 
+/**
+ * 双号运营的两个可追责公开身份(IP 本人 + 公开助理)。
+ *
+ * 规格要求 `exactly 2 accountable=true public identities`,且其他角色的
+ * replyDisplayRoles 必须指向其中之一。但完整性检查此前只看 roles 非空,于是
+ * 不合规的 role_model 能一路通过审批进入生成,直到 forcedReplyDisplayRole
+ * 兜底成通用「项目助理」才在产物里暴露。
+ *
+ * 实测 12 份 role_model:5 份 accountable 数量不达标(0 个或 1 个)、8 份的
+ * replyDisplayRoles 指向未定义角色且多为内部 id(host_account / role_IP /
+ * assistant_account / role_01)。后果是同一账号在评论区出现多个名字,
+ * 且 IP 与助理身份塌缩(实测毛毛驿站 11 条 org_answer 全部落在 staff)。
+ */
+const ACCOUNTABLE_PUBLIC_IDENTITY_COUNT = 2;
+
 export function projectBlueprintCompleteness(blueprint: ProjectCreativeBlueprint): { complete: boolean; missing: string[] } {
   const missing: string[] = PROJECT_BLUEPRINT_MODULE_KEYS.filter((key) => blueprint.moduleRevisions[key] === "missing");
   if (!blueprint.domainModel.projectNoun) missing.push("domain_model.projectNoun");
   if (!blueprint.audienceModel.states.length) missing.push("audience_model.states");
   if (!blueprint.scenarioModel.families.length) missing.push("scenario_model.families");
   if (!blueprint.roleModel.roles.length) missing.push("role_model.roles");
+  const roles = blueprint.roleModel.roles;
+  if (roles.length) {
+    const accountable = roles.filter((role) => role.accountable && role.displayRole);
+    const accountableNames = new Set(accountable.map((role) => role.displayRole));
+    if (accountableNames.size !== ACCOUNTABLE_PUBLIC_IDENTITY_COUNT) {
+      missing.push(
+        `role_model.accountable（双号运营需要恰好 ${ACCOUNTABLE_PUBLIC_IDENTITY_COUNT} 个可追责公开身份：IP 本人与公开助理，当前 ${accountableNames.size} 个）`,
+      );
+    }
+    // replyDisplayRoles 必须是 accountable 的 displayRole,不能是内部 id。
+    const dangling = [...new Set(
+      roles.flatMap((role) => role.replyDisplayRoles ?? []).filter((name) => name && !accountableNames.has(name)),
+    )];
+    if (dangling.length) {
+      missing.push(`role_model.replyDisplayRoles（指向未定义的可追责身份：${dangling.slice(0, 4).join("、")}）`);
+    }
+  }
   return { complete: missing.length === 0, missing };
 }

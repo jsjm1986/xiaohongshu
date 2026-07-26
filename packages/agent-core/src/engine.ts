@@ -52,6 +52,7 @@ import { buildParameterDiagnostics, compileGenerationParameters } from "./parame
 import {
   applyReplyIdentityAssignments,
   assignCommentDisplayName,
+  diagnoseAccountableIdentities,
   buildReplyIdentityAssignmentBrief,
   parseReplyIdentityAssignments,
   planTopicOrchestrations,
@@ -1970,6 +1971,11 @@ export class ContentGenerationAgent implements GenerationEngine {
         metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_core", stage: 1 },
       });
       const core = parseStagedCoreCopy(coreResponse.text);
+      // 存量蓝图的可追责身份体检:审批层校验只挡新模块,已批准的不合规
+      // role_model 会让答复展示名静默回落到通用兜底名。这里显性记 warning。
+      for (const message of diagnoseAccountableIdentities(input.planningContext?.projectBlueprint)) {
+        stageIssues.push({ code: "accountable_identity_incomplete", severity: "warning", channel: "Cref", message, repairable: false });
+      }
       // 三身份生态:阶段 2 开头先做 AI 答复身份分配(每候选 1 次轻量调用,
       // seed 可复现)。规划层已按兜底表落位;AI 结果经护栏校验(price/
       // location/schedule 线程强制 staff,缺失/非法回落兜底表)后覆盖

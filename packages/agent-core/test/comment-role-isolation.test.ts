@@ -893,4 +893,67 @@ describe("按侧+按角色隔离的引擎合并", () => {
     // publisher 补答未覆盖的 warning 至少出现一次。
     expect(result.packages.some((pkg) => pkg.validation.issues.some((issue) => issue.code === "model_org_answer_failed"))).toBe(true);
   });
+
+  /**
+   * 存量不合规 role_model 的可见性接线。线上 8 个项目的最新 role_model 里有 5 个
+   * 属于这两种形态(只有 1 个 accountable / replyDisplayRoles 写内部 id),此前
+   * 生成结果里完全没有信号,答复展示名静默回落到通用兜底名。
+   */
+  function plainProvider(): ModelProvider {
+    return {
+      async generate(request) {
+        const purpose = String(request.metadata?.purpose);
+        if (purpose === "generate_comment_readers") {
+          return {
+            text: JSON.stringify({
+              threads: stagedThreadIds(request).map((id, index) => ({ id, question: `第${index + 1}项应该核实什么？`, answer: "", followUps: [] })),
+            }),
+            raw: {},
+          };
+        }
+        if (purpose === "generate_org_answers") {
+          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "得看条件，我先不乱说。" })) }), raw: {} };
+        }
+        if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
+        return { text: coreResponse(), raw: {} };
+      },
+    };
+  }
+
+  async function issuesFor(blueprint: unknown, jobId: string) {
+    const result = await new ContentGenerationAgent({ modelProvider: plainProvider(), now: () => new Date("2026-07-12T12:00:00Z") })
+      .generate({
+        jobId,
+        config: engineConfig(),
+        formulaVersion: DEFAULT_FORMULA_VERSION,
+        knowledge,
+        planningContext: { informationGaps: isolationGaps, projectBlueprint: blueprint as never },
+      });
+    return result.packages.map((pkg) => pkg.validation.issues.filter((issue) => issue.code === "accountable_identity_incomplete"));
+  }
+
+  it("合规蓝图不产生 accountable_identity_incomplete", async () => {
+    const perCandidate = await issuesFor(isolationBlueprint(), "accountable-ok");
+    expect(perCandidate.every((issues) => issues.length === 0)).toBe(true);
+  });
+
+  it("存量只有 1 个可追责身份 + replyDisplayRoles 写内部 id 时,每个候选都记 warning", async () => {
+    // 复刻线上「毛毛驿站」形态:助理角色 accountable=false,读者路由指向内部 id。
+    const drifted = isolationBlueprint();
+    const roles = drifted.roleModel.roles.map((role) => {
+      if (role.id === "assistant") return { ...role, accountable: false };
+      if (role.id === "peer") return { ...role, replyDisplayRoles: ["host_account"] };
+      return role;
+    });
+    const perCandidate = await issuesFor({ ...drifted, roleModel: { ...drifted.roleModel, roles } }, "accountable-drift");
+    expect(perCandidate).toHaveLength(3);
+    for (const issues of perCandidate) {
+      expect(issues).toHaveLength(2);
+      expect(issues.every((issue) => issue.severity === "warning" && issue.channel === "Cref")).toBe(true);
+      expect(issues[0]!.message).toContain("只有 1 个可追责公开身份");
+      expect(issues[1]!.message).toContain("host_account");
+    }
+    // warning 不阻断:候选照旧产出,不因体检失败而丢稿。
+    expect(perCandidate.every((issues) => issues.length === 2)).toBe(true);
+  });
 });
