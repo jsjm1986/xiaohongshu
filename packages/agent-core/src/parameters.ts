@@ -339,6 +339,16 @@ const EXTRA_PARAMETERS: GenerationParameterDefinition[] = [
     control: { kind: "toggle", simpleMode: false, advanced: true }, defaultValue: false,
     noviceExplanation: "这是一个额外的多轮接龙生成步骤：先写根评论，再让被上一句具体词真正触发的少数线程长出追问；关闭时根评论直接成稿，同样是有效输出。",
     increaseEffect: "开启后评论区可出现有触发原因的多轮接话；仍受追问深度与总行数约束。", decreaseEffect: "关闭后所有线程停在一问一答，多轮目标按零计算，不会再产生欠生长提示。",
+    costNotice: {
+      headline: "开启会增加生成开销，且实际接话条数由评论行数预算决定，不由本开关或接话比例决定。",
+      extraModelCalls: "多 1 次接龙生成调用（阶段 2.2），若长出的追问落在机构问答线程上，再按答复身份追加最多 3 次答复调用（阶段 2.3）。",
+      measuredImpact: "实测：开启后单篇 10–14 分钟，关闭时 10–18 分钟，同项目同预设下未见明显变慢（样本 4 篇，不足以定论）。",
+      dependsOn: [
+        "追问深度（follow_up_depth）必须大于 0，否则本开关不生效。",
+        "评论接话比例（comment_conversation_rate）必须大于 0，否则本开关不生效。",
+        "实际条数受可见评论行数上限约束：行数上限 13、根评论 5 条时只容得下 1 条追问，此时把接话比例从 48 调到 75 不会产生更多接话。",
+      ],
+    },
     formulaIds: ["F09", "F10", "F33"], channels: ["Cref"], evidenceStatus: "operational_default",
     evidenceNote: "M7 决策：多轮生长无效果证据，作为保守默认可选步骤保留，默认开启与否由运营选择；形态动机是描述性结构（真实评论区同时存在单轮与多轮），不是效果承诺。",
   },
@@ -457,6 +467,60 @@ const COMMENT_STAGE_BY_ID: Record<string, GenerationParameterDefinition["comment
   information_gaps: "both",
 };
 
+/**
+ * 逐参数执行强度(单一真源)。语义见 GenerationParameterDefinition.enforcement。
+ *
+ * 这张表是**按代码实际消费路径**逐个核对得出的,不是按参数名猜的:
+ *  - validated: 有确定性推导 + content.ts 校验(违反可进 repair)
+ *  - derived:   planning/engine 真的读值改结构,但校验层不复核结果
+ *  - guidance:  只有 explicitBehavior 一句提示词,无任何代码消费
+ * 未列出的参数缺省按 guidance 理解;诊断强调滑杆在下方统一置 display。
+ *
+ * 维护约定:给某个参数新增推导或校验时,同步更新这里——否则 UI 会对用户说谎。
+ */
+const ENFORCEMENT_BY_ID: Record<string, NonNullable<GenerationParameterDefinition["enforcement"]>> = {
+  // 结构硬约束:推导 + 校验
+  body_min_chars: "validated", body_max_chars: "validated",
+  hashtag_count_min: "validated", hashtag_count_max: "validated",
+  comment_thread_min: "validated", comment_thread_max: "validated",
+  must_mention: "validated", forbidden_phrases: "validated",
+  image_brief_enabled: "validated",
+  information_gaps: "validated", information_boundaries: "validated",
+  information_answers: "validated",
+  comment_gap_multiplexing: "validated", comment_inference_effort: "validated",
+  require_evidence_references: "validated", reject_unknown_as_fact: "validated",
+  reject_prohibited_claims: "validated", warn_duplicate_information: "validated",
+  // 确定性推导,无校验复核
+  audience_stage: "derived", entry_route: "derived",
+  follow_up_depth: "derived", comment_multi_turn_growth: "derived",
+  information_breadth: "derived", decision_information_depth: "derived",
+  comment_expansion: "derived", comment_conditionality: "derived",
+  comment_role_diversity: "derived", comment_constraint_density: "derived",
+  comment_reply_increment: "derived", question_compression: "derived",
+  comment_platform_register: "derived", comment_conversation_rate: "derived",
+  comment_branching_strength: "derived", comment_organic_variation: "derived",
+  comment_discovery_strength: "derived", comment_self_verification: "derived",
+  comment_false_closure_guard: "derived", question_naturalness: "derived",
+  title_target_chars: "derived", paragraph_target: "derived",
+  reusable_frameworks: "derived",
+  // enabled_channels 在 parameters.ts channelAllocation 与 planning.ts 都真的
+  // 按值改变通道分配,但校验层不因这个值本身报错,故为 derived 而非 validated。
+  enabled_channels: "derived",
+  knowledge_mode: "derived", model_temperature: "derived",
+  max_output_tokens: "derived", repair_attempts: "derived",
+  // 仅提示词引导:系统不做结构性保证(逐个实测确认无代码消费)
+  state_information_strength: "guidance", experience_information_strength: "guidance",
+  body_completeness: "guidance", redundancy_tolerance: "guidance",
+  evidence_strictness: "guidance", boundary_visibility: "guidance",
+  route_specificity: "guidance", novelty_angle: "guidance",
+  evidence_requirements: "guidance", information_priorities: "guidance",
+  thread_style: "guidance",
+  // expressionWindow 的这三项只出现在 explicitBehavior 的提示词文本里,
+  // planning/engine/content 都不读 config.expressionWindow.{voice,forms,sequence}
+  // ——注意别被 strategy.voice / strategy.sequence 误导,那是规划层自己的字段。
+  expression_voice: "guidance", expression_forms: "guidance", expression_sequence: "guidance",
+};
+
 export const GENERATION_PARAMETER_REGISTRY: readonly GenerationParameterDefinition[] = Object.freeze(
   [
     ...CORE_PARAMETERS,
@@ -464,7 +528,14 @@ export const GENERATION_PARAMETER_REGISTRY: readonly GenerationParameterDefiniti
     ...DIAGNOSTIC_PARAMETERS,
   ].map((definition) => {
     const commentStage = COMMENT_STAGE_BY_ID[definition.id];
-    return Object.freeze(commentStage ? { ...definition, commentStage } : definition);
+    const enforcement = definition.id.startsWith("body_diagnostic_") || definition.id.startsWith("comment_diagnostic_")
+      ? "display" as const
+      : ENFORCEMENT_BY_ID[definition.id] ?? "guidance" as const;
+    return Object.freeze({
+      ...definition,
+      ...(commentStage ? { commentStage } : {}),
+      enforcement,
+    });
   }),
 );
 
@@ -490,6 +561,21 @@ export const CONFIRMED_REFERENCE_SAMPLE_BASELINE: ConfirmedSampleBaseline = {
 };
 
 const COMMENT_METHOD_PRESET_BASE = {
+  /**
+   * 十个可见预设统一开启多轮生长(stage 2B)。
+   *
+   * 该开关的 registry 默认值保持 false(保守默认,给不需要额外一次模型调用的调用
+   * 方),但**预设是"这张卡承诺什么形态"的声明**:卡片文案写着「评论区自然接住细
+   * 节」「承担可查找的长尾分支」「评论展开条件分支」,而 comment_conversation_rate
+   * 的全部读取路径都在这个开关之后——关着它,10 个预设精心设置的 48–75 接话比例
+   * 全是死值,multiTurnTarget 恒为 [0,0],评论永远停在一问一答,文案成了兑现不了
+   * 的承诺(实测 26 篇持久化数据 followUps 全空)。
+   *
+   * 代价是每篇多一次生长模型调用。欠生长只作 warning、不触发 repair(见
+   * content.ts comment_network_under_grown),所以"没有可接的话头就不接"仍是合法
+   * 输出,不会逼模型机械凑配额。
+   */
+  comment_multi_turn_growth: true,
   comment_role_diversity: 65,
   comment_constraint_density: 60,
   comment_gap_multiplexing: 55,
@@ -579,7 +665,11 @@ const GENERATION_PRESET_DATA: BuiltInGenerationPreset[] = [
   {
     id: "balanced_information", label: "均衡信息补全", description: "正文保留共同主线，评论展开条件分支。",
     noviceExplanation: "不知道怎么选时用它：先写清大家都要知道的，再把因人而异的问题放进问答。",
-    parameterValues: { ...COMMENT_METHOD_PRESET_BASE, comment_role_diversity: 85, comment_reply_increment: 58, question_compression: 78, information_breadth: 65, decision_information_depth: 70, state_information_strength: 75, experience_information_strength: 72, body_completeness: 45, comment_expansion: 78, comment_conditionality: 75, evidence_strictness: 90, boundary_visibility: 90, title_target_chars: 10, paragraph_target: 2, body_min_chars: 40, body_max_chars: 140, comment_thread_min: 3, comment_thread_max: 5 },
+    // 其余 9 张卡都显式声明阶段/入口,这张原先漏了 audience_stage、entry_route、
+    // question_naturalness、redundancy_tolerance、novelty_angle、route_specificity
+    // 六项,静默落到 registry 默认并与 real_minimal 阶段撞车。「均衡」的定位是
+    // 收集期 + 搜索入口的中间档,各项取十卡中位,不走任何极端。
+    parameterValues: { ...COMMENT_METHOD_PRESET_BASE, comment_role_diversity: 85, comment_reply_increment: 58, question_compression: 78, audience_stage: "collecting", entry_route: "search", information_breadth: 65, decision_information_depth: 70, state_information_strength: 75, experience_information_strength: 72, body_completeness: 45, comment_expansion: 78, comment_conditionality: 75, redundancy_tolerance: 15, evidence_strictness: 90, boundary_visibility: 90, route_specificity: 70, novelty_angle: 45, question_naturalness: 90, title_target_chars: 10, paragraph_target: 2, body_min_chars: 40, body_max_chars: 140, comment_thread_min: 3, comment_thread_max: 5 },
     behaviorInstructions: ["正文先让人物、现场和窄问题成立；知识只选一项自然进入。", "评论在短问短答、经验差异、人物路由和边界之间保持平衡。"],
     evidenceStatus: "operational_default",
   },
@@ -742,6 +832,39 @@ function findStyle(id: string | undefined): BuiltInStyleProfile | undefined {
   return style;
 }
 
+/**
+ * 当前配置下参数值不影响产出的确定性原因;不适用时返回 undefined。
+ *
+ * 只覆盖能从 config 100% 判定的情形,不做"大概没用"的猜测。语义边界:
+ *  - 空转 ≠ 参数写错。滑杆本身接线正确,是上游开关或上下限把它的作用域压成了零。
+ *  - 这里**不产生校验 error**。开关关闭时要求模型做多轮生长必然是假阳性
+ *    (见 content.ts 的 P2-11 注释),所以空转只作为诚实告知,不作为约束。
+ */
+function inertReasonFor(id: string, config: ResolvedGenerationConfig): string | undefined {
+  // 诊断强调滑杆按设计只排序人工检查清单,不进模型上下文也不进校验
+  // (prompt.ts 的 isDisplayOnlyDiagnosticParameter 显式剔除)。
+  if (id.startsWith("body_diagnostic_") || id.startsWith("comment_diagnostic_")) {
+    return "仅控制人工检查清单的显示顺序，不进入模型上下文，也不参与校验。";
+  }
+  // 多轮生长三重门:engine.ts shouldGrowComments = 开关 && followUpDepth>0 && rate>0。
+  const growthOff = config.content.commentMultiTurnGrowthEnabled !== true;
+  const noFollowUp = config.content.followUpDepth <= 0;
+  if (id === "comment_conversation_rate") {
+    if (growthOff) return "「评论多轮接龙生长」开关关闭，多轮目标恒为 0，本滑杆当前不影响产出。";
+    if (noFollowUp) return "追问深度为 0，没有可生长的轮次，本滑杆当前不影响产出。";
+  }
+  if (id === "comment_branching_strength" && (growthOff || noFollowUp)) {
+    return "多轮接话未启用（生长开关关闭或追问深度为 0），延展强度当前没有作用对象。";
+  }
+  if (id === "follow_up_depth" && growthOff) {
+    return "「评论多轮接龙生长」开关关闭，所有线程停在一问一答，追问深度当前不影响产出。";
+  }
+  if (id === "comment_expansion" && config.content.commentThreadMax - config.content.commentThreadMin <= 0) {
+    return "问答线程上下限相同，展开力度没有可调空间，线程数已被上下限固定。";
+  }
+  return undefined;
+}
+
 function explicitBehavior(id: string, value: ParameterValue, config: ResolvedGenerationConfig): string[] {
   const numeric = typeof value === "number" ? value : undefined;
   switch (id) {
@@ -754,7 +877,12 @@ function explicitBehavior(id: string, value: ParameterValue, config: ResolvedGen
     case "evidence_requirements": return [`逐条执行证据要求：${config.informationWindow.evidenceRequirements.length ? config.informationWindow.evidenceRequirements.join("；") : "使用通用证据红线"}。`];
     case "reusable_frameworks": return [config.informationWindow.reusableFrameworks.length ? `在不挤压直接答案的前提下提供判断框架：${config.informationWindow.reusableFrameworks.join("；")}。` : "未指定额外判断框架，优先直接回答缺口。"]; 
     case "information_priorities": return [config.informationWindow.priorities.length ? `信息按以下优先顺序编排：${config.informationWindow.priorities.join("→")}。` : "按决策相关性、可答性和风险边界确定信息顺序。"]; 
-    case "information_boundaries": return ["把适用条件和未知边界写进正文或对应回答；关键风险不得只藏在评论。"];
+    // 随实际边界条数分档:边界越多越要交代清楚放在哪儿,一条也没有时不能假装有。
+    case "information_boundaries": return [config.informationWindow.boundaries.length === 0
+      ? "本次没有额外披露的适用边界；不得自行编造限制条件，遇到无法判断的情形按未知处理。"
+      : config.informationWindow.boundaries.length >= 3
+        ? `需要交代 ${config.informationWindow.boundaries.length} 条适用条件与未知边界：逐条落在依赖它的结论附近，关键风险不得只藏在评论。`
+        : "把适用条件和未知边界写进正文或对应回答；关键风险不得只藏在评论。"];
     case "expression_voice": return [`全篇使用“${config.expressionWindow.voice}”的口吻，但口吻不能改变证据身份。`];
     case "enabled_channels": return [`本次启用通道：${config.expressionWindow.channels.join("、")}；未启用的可选通道不分配信息，标题与正文为完整包必需。`];
     case "expression_forms": return [`优先使用这些表达形式：${config.expressionWindow.forms.join("、")}；不同形式不能重复计算同一信息。`];
@@ -798,7 +926,11 @@ function explicitBehavior(id: string, value: ParameterValue, config: ResolvedGen
     case "comment_discovery_strength": return [numeric! >= 70 ? "把人物线索、经验差异和路由信息分散在不同评论节点，让读者通过浏览关系网自己拼出答案；必要风险仍直接说，不用统一Reveal模板。" : "以自然问答为主，只安排少量可以从上下文发现的线索。"]; 
     case "comment_inference_effort": return [numeric! > 70 ? "推断负荷过高：只允许moderate并输出warning；必须把推断简化为一步条件判断，避免让读者猜隐藏答案。" : numeric! >= 40 ? "推断难度为moderate：只做一步比较或条件判断，并在同线程揭示。" : "推断难度为low：线索后给出容易完成的一步判断，并立即揭示。"]; 
     case "comment_self_verification": return [numeric! >= 70 ? "揭示后给出具体SelfCheck：核对来源、适用条件、反例或仍缺输入，不能只问“懂了吗”。" : "揭示后保留一个最低必要自检问题或核验动作。"]; 
-    case "comment_false_closure_guard": return ["假闭合硬约束：发现感≠证据；缺答案或个体输入时只能标为awaiting_user_input/unknown_with_verification，并写明所需输入或核验路径。"]; 
+    // 硬约束本身恒定(发现感≠证据,任何档位不降低——方法论 §1726 独立硬约束),
+    // 只有"未知要交代到多细"随值分档,否则滑杆对模型完全无信号。
+    case "comment_false_closure_guard": return [numeric! >= 70
+      ? "假闭合硬约束：发现感≠证据；缺答案或个体输入时只能标为awaiting_user_input/unknown_with_verification，并显式写出所需输入或核验路径。"
+      : "假闭合硬约束：发现感≠证据；无证据结论仍不能写成事实，未知可用更简短的方式交代，不必每处重复核验路径。"];
     case "redundancy_tolerance": return [numeric! <= 30 ? "标签负责路由、正文负责共同前提、评论负责条件答案；同一证据不跨通道原样重复。" : "允许关键承诺跨通道呼应，但每次出现必须承担不同功能。"]; 
     case "evidence_strictness": return [numeric! >= 70 ? "只有知识库支持的内容可写成事实；缺证据就标为推理、猜想或unknown。" : "仍禁止无依据事实；可用更概括的措辞表达低风险推理并明确身份。"]; 
     case "boundary_visibility": return [numeric! >= 70 ? "限制条件、反例和信息不足要在相关结论附近可见，不放到读者难以找到的位置。" : "保留全部关键边界，非关键 caveat 可压缩表达。"]; 
@@ -1041,13 +1173,17 @@ export function compileGenerationParameters(
     const value = getPath(configRecord, definition.path);
     assertParameterValue(definition, value);
     values[definition.id] = structuredClone(value);
+    const inertReason = inertReasonFor(definition.id, config);
     return {
       parameterId: definition.id,
       path: definition.path,
       label: definition.label,
       value: structuredClone(value),
       source: sourceByParameter[definition.id] ?? { source: "default" },
-      behaviorInstructions: hasEnabledHandler(
+      ...(inertReason ? { inertReason } : {}),
+      // 空转参数不再下发写作指令:开关关闭时告诉模型"约 60% 的根评论要长出接话"
+      // 是一句它无法执行的话,只会稀释上下文。原因改由 inertReason 诚实告知用户。
+      behaviorInstructions: inertReason === undefined && hasEnabledHandler(
         formulaVersion,
         config.formula.enabledFormulaIds,
         definition.formulaIds,

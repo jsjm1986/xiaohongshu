@@ -20,6 +20,8 @@ export interface ApiOptions {
   platformTransport: 'responses' | 'chat_completions';
   modelRequestTimeoutMs: number;
   modelRetryAttempts: number;
+  /** 重试退避基数(毫秒);指数退避,用于跨过中继断流的故障窗口。 */
+  modelRetryBaseDelayMs: number;
   modelMaxConcurrentRequests: number;
   knowledgeContextTokens: number;
   pdfFontPath: string;
@@ -60,8 +62,12 @@ export function resolveOptions(input: ApiOptionsInput = {}): ApiOptions {
       (process.env.OPENAI_TRANSPORT === 'chat_completions' ? 'chat_completions' : 'responses'),
     modelRequestTimeoutMs:
       input.modelRequestTimeoutMs ?? Number.parseInt(process.env.CONTENT_AGENT_MODEL_TIMEOUT_MS ?? '90000', 10),
+    // 默认值按实测中继错误簇分布设定(见 retryModelProvider 注释):6 次尝试 ×
+    // 4000ms 基数 = 4+8+16+32+64 = 124 秒退避窗口,覆盖实测 37 个簇中的绝大多数。
     modelRetryAttempts:
-      input.modelRetryAttempts ?? Number.parseInt(process.env.CONTENT_AGENT_MODEL_RETRY_ATTEMPTS ?? '2', 10),
+      input.modelRetryAttempts ?? Number.parseInt(process.env.CONTENT_AGENT_MODEL_RETRY_ATTEMPTS ?? '6', 10),
+    modelRetryBaseDelayMs:
+      input.modelRetryBaseDelayMs ?? Number.parseInt(process.env.CONTENT_AGENT_MODEL_RETRY_BASE_DELAY_MS ?? '4000', 10),
     modelMaxConcurrentRequests:
       input.modelMaxConcurrentRequests ?? Number.parseInt(process.env.CONTENT_AGENT_MODEL_MAX_CONCURRENT ?? '2', 10),
     knowledgeContextTokens:

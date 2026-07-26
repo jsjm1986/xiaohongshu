@@ -759,7 +759,34 @@ function inferPrototype(strategy: ExpressionStrategy, config: ResolvedGeneration
   return compatible[Math.floor(hashUnit(seed, "prototype-fallback") * compatible.length)]!;
 }
 
-function surfaceTargets(prototype: PersonaScenePlan["prototype"]): PersonaScenePlan["surfaceTargets"] {
+/**
+ * 样本基线里评论转录行数的上界(CONFIRMED_REFERENCE_SAMPLE_BASELINE 的
+ * comment_lines: p75=14 / max=20)。为多轮预留行数时不得越过 max —— 预留是把
+ * 已观察到的形态上界用满,不是凭空放大成 FAQ 长文。
+ */
+const SAMPLE_COMMENT_LINES_MAX = 20;
+
+/**
+ * 多轮生长开启时为追问预留的可见行数。
+ *
+ * followUpLineCapacity = floor((linesMax - threads*2) / 2):根评论固定 5 条、行数
+ * 上限 13 时容量只剩 1 条追问——实测两篇 rate=60 与 rate=70 的生长数都是 1,接话
+ * 比例整段 48–75 被行数天花板吃掉。若不预留,"选中多轮"与"不选"在产出上几乎无
+ * 差别,滑杆等于白调。
+ *
+ * 预留 2 行 = 1 条追问(问、答各一行),把容量从 1 抬到 2,并夹到样本 max=20 以内。
+ *
+ * 为什么不预留更多:实测两篇的可见评论字数已是 419 / 451,单节点均长约 40 字。再
+ * 加 2 条追问(4 个节点)会到 571–615 字,逼近 comment_network_overexpanded 的 650
+ * 字 error 门槛,并已越过 360 字的密度 warning。预留 2 行是"让开关有效"与"不把评
+ * 论区撑成 FAQ 长文"之间的平衡点;要再放宽必须先放宽字数护栏,那是另一个决定。
+ */
+const MULTI_TURN_RESERVED_LINES = 2;
+
+function surfaceTargets(
+  prototype: PersonaScenePlan["prototype"],
+  multiTurnGrowthEnabled = false,
+): PersonaScenePlan["surfaceTargets"] {
   const targets: Record<PersonaScenePlan["prototype"], PersonaScenePlan["surfaceTargets"]> = {
     narrow_request: { titleChars: [4, 14], bodyChars: [25, 70], bodyParagraphs: [1, 2], visibleCommentLines: [7, 13], typicalCommentChars: [4, 24] },
     live_moment: { titleChars: [1, 12], bodyChars: [25, 105], bodyParagraphs: [1, 3], visibleCommentLines: [6, 13], typicalCommentChars: [4, 26] },
@@ -770,7 +797,14 @@ function surfaceTargets(prototype: PersonaScenePlan["prototype"]): PersonaSceneP
     relationship_moment: { titleChars: [6, 18], bodyChars: [90, 220], bodyParagraphs: [2, 5], visibleCommentLines: [6, 14], typicalCommentChars: [4, 28] },
     option_comparison: { titleChars: [5, 18], bodyChars: [45, 145], bodyParagraphs: [1, 4], visibleCommentLines: [6, 12], typicalCommentChars: [4, 30] },
   };
-  return targets[prototype];
+  const base = targets[prototype];
+  if (!multiTurnGrowthEnabled) return base;
+  const [linesMin, linesMax] = base.visibleCommentLines;
+  return {
+    ...base,
+    // 只抬上限、不动下限:下限是"至少要有多少行"的形态约束,与追问无关。
+    visibleCommentLines: [linesMin, Math.min(SAMPLE_COMMENT_LINES_MAX, linesMax + MULTI_TURN_RESERVED_LINES)],
+  };
 }
 
 /**
@@ -948,7 +982,7 @@ function buildPersonaScenePlan(
     event: { ...event, openLoop: `把“${topicQuestion}”留下一个可以在评论里自然接住的窄分支` },
     commentCast,
     commentNetwork,
-    surfaceTargets: surfaceTargets(prototype),
+    surfaceTargets: surfaceTargets(prototype, config.content.commentMultiTurnGrowthEnabled === true),
     crossChannelRules: [
       "图片、标题、正文和楼主回复必须是同一个人、同一个时间阶段和同一件事。",
       "内部Stage/Gap/Evidence标签不得出现在可见文字里。",
@@ -1472,7 +1506,10 @@ function dialoguePlans(
   const organicVariation = method?.commentOrganicVariation ?? 58;
   const stages: TopicOpportunity["audienceStage"][] = ["discovering", "collecting", "comparing", "hesitating", "ready"];
   const stageIndex = stages.indexOf(opportunity.audienceStage);
-  const stageRadius = roleDiversity >= 75 ? 2 : roleDiversity >= 40 ? 1 : 0;
+  // 档位覆盖预设实际区间:内置预设的 commentRoleDiversity 取值集中在 75–95,
+  // 旧阈值(>=75 / >=40)把整段压进同一档,滑杆在生产中恒等于常量。分档上移后
+  // 75 / 85 / 95 分别落在半径 1 / 1 / 2,低档语义(<40 不跨阶段)保持不变。
+  const stageRadius = roleDiversity >= 88 ? 2 : roleDiversity >= 40 ? 1 : 0;
   const roleStages = stages.filter((_, index) => Math.abs(index - stageIndex) <= stageRadius);
   const evidenceStances: DialogueThreadPlan["roleCard"]["evidenceStance"][] = [
     "evidence_first", "verification_seeking", "boundary_sensitive", "unknown_aware",
@@ -1589,7 +1626,11 @@ function dialoguePlans(
     const roleStage = roleStages[Math.floor(hashUnit(seed, `role-stage:${index}`) * roleStages.length)] ?? opportunity.audienceStage;
     const stagePersonas = personasByStage[roleStage];
     const personaOffset = roleDiversity >= 40 ? Math.floor(hashUnit(seed, `persona:${index}`) * stagePersonas.length) : 0;
-    const stancePool = roleDiversity >= 70 ? evidenceStances : evidenceStances.slice(0, roleDiversity >= 35 ? 2 : 1);
+    // 同上:证据立场池也按预设实际区间分档(旧阈值 >=70 让 75–95 共用全池)。
+    // 90+ 全池 4 种,75–89 取 3 种,40–74 取 2 种,更低只留 1 种。
+    const stancePool = roleDiversity >= 90
+      ? evidenceStances
+      : evidenceStances.slice(0, roleDiversity >= 75 ? 3 : roleDiversity >= 40 ? 2 : 1);
     const evidenceStance = stancePool[Math.floor(hashUnit(seed, `stance:${index}`) * stancePool.length)]!;
     const constraints = Array.from({ length: Math.min(constraintCount, constraintPool.length) }, (_, offset) =>
       constraintPool[(constraintStart + index + offset * Math.max(1, targetCount)) % constraintPool.length]!,

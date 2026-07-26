@@ -776,6 +776,36 @@ function prohibitedHistoryTerms(blueprint: ProjectCreativeBlueprint): string[] {
 }
 
 /**
+ * 蓝图禁语命中判定。词表(触发面)仍然只来自蓝图——本函数不新增任何领域词,只判断
+ * **命中处是不是在声称该经历**。
+ *
+ * 起因是真实误报:one_time 项目的蓝图把「续费/复购」列为禁止声称,而评论照实转述
+ * 服务边界——「服务是一次性的,一个申请季结束就完结,没有续费或复购」——被判
+ * fabricated_operational_experience。禁语出现在**否定或口径陈述**里时,说话人是在
+ * 排除该经历,不是在声称它;裸 includes 无法区分,于是把正确的边界说明也拦了。
+ *
+ * 同文件的 claimsFirstPersonCompletion 早已按这个思路给"我…了/过"加了否定与未来式
+ * 护栏,这里补齐同一标准:只在禁语前方近距离出现否定/无化标记时排除该命中。判断的
+ * 是局部否定,不是句子语义——语义归模型与判官,校验层只做这一层不可让位的硬门槛。
+ */
+function assertsProhibitedHistory(node: string, prohibitedHistories: string[]): boolean {
+  return prohibitedHistories.some((term) => {
+    if (!term) return false;
+    for (let index = node.indexOf(term); index >= 0; index = node.indexOf(term, index + 1)) {
+      // 否定在中文里作用于**整个小句**,不是固定字数窗口:"不会有后续费用或续费"
+      // 里"续费"离"不会"有 8 个字,却仍在否定范围内。因此只回看到最近的句读为止
+      // ——小句内出现否定/无化标记就算被排除,跨句不算,这样"我复购过,不过没续费"
+      // 的前半句仍会被拦。
+      const clauseStart = Math.max(...[..."。！？!?；;，,、"].map((mark) => node.lastIndexOf(mark, index - 1))) + 1;
+      const lead = node.slice(Math.max(0, clauseStart), index);
+      if (/(?:没有|没|不|无需|无|非|未|免)/u.test(lead)) continue;
+      return true;
+    }
+    return false;
+  });
+}
+
+/**
  * Domain-neutral first-person intent vocabulary (generic language patterns
  * only — no industry terms). A body containing one of these marks the host as
  * still intending/undecided rather than reporting a completed experience.
@@ -1067,6 +1097,16 @@ export function splitSensitiveStatements(text: string): string[] {
   return text.split(/(?<=[。！？!?；;])|\n+/u).map((item) => item.trim()).filter(Boolean);
 }
 
+/**
+ * 纯话题标签行:整段只由 `#标签` 构成(可含空白与分隔)。标签不是声明句,不进
+ * 受控声明扫描——实测 `#结果保证 #留学申请 #选机构 #诚信` 被"保证"命中判 error。
+ */
+export function isHashtagOnlyLine(statement: string): boolean {
+  const trimmed = statement.trim();
+  if (!trimmed.startsWith("#")) return false;
+  return /^(?:#[^#\s]+[\s、,，]*)+$/u.test(trimmed);
+}
+
 export function validateGenerationDraft(input: DraftValidationInput): ContentValidationIssue[] {
   const { draft, config, ledger } = input;
   const issues: ContentValidationIssue[] = [];
@@ -1080,7 +1120,10 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
   if (bodyLength < config.content.bodyMinChars) add("body_too_short", "error", "N.body", `Body has ${bodyLength} characters; minimum is ${config.content.bodyMinChars}.`);
   if (bodyLength > config.content.bodyMaxChars) add("body_too_long", "error", "N.body", `Body has ${bodyLength} characters; maximum is ${config.content.bodyMaxChars}.`);
   const publicText = allContentText(draft.content);
-  if (/\bevidence_[\w:.-]+\b|(?:sourceClusterId|reasoning|replyPlan|discoveryPlan)|(?:本线程|该线程|线程内)/iu.test(publicText)) {
+  // 「待核实维度：」「已披露地点范围：」是规划层的内部维度标记(planning.ts 的
+  // unresolvedConstraintDimensions)。prompt 层已剥前缀,这里是兜底:实测曾原样出
+  // 现在机构答复里 ——「…不向业主加收费用。；待核实维度：方案适配条件。」
+  if (/\bevidence_[\w:.-]+\b|(?:sourceClusterId|reasoning|replyPlan|discoveryPlan)|(?:本线程|该线程|线程内)|(?:待核实维度|已披露地点范围)[：:]/iu.test(publicText)) {
     add("internal_audit_artifact_visible", "error", "package", "User-visible copy contains an internal evidence ID, audit field or thread-control phrase.");
   }
   if (/(?:只回应.{0,18}不承担.{0,8}答题|AI\s*不便|后台(?:库存|任务|参数)|内容任务|写作任务|人物设定|提示词|核验路径|按计划(?:回答|展开)|不承担完整答题)/iu.test(publicText)) {
@@ -1139,15 +1182,41 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     }
     // P4-20: coverage check instead of a flat "at least three roles" floor —
     // the cast should cover min(4, threadCount) distinct visible positions and
-    // the same position should not repeat on adjacent threads. Warning level
-    // until the blueprint role-spectrum data catches up.
+    // the same position should not repeat on adjacent threads.
+    //
+    // 滑杆挂钩(软校验):地板由 comment_role_diversity 推导,让滑杆真的改变期望
+    // ——没有这一层时调 95 与调 50 对产物的要求完全相同(实测齐禾 #6/#7 就是
+    // role_diversity 95/88 却全员同一身份,校验层一声不响)。
+    //
+    // 但严重度**恒为 warning 且 repairable=false**:角色是否真的丰富是语义判断,
+    // 交给带完整上下文的 agent;校验层只负责诚实告知,不阻断、不触发 repair 重写。
     const displayRoles = draft.content.Cref.threads
       .map((thread) => thread.surfaceRoleCard?.displayRole)
       .filter((role): role is string => Boolean(role));
     const distinctRoles = new Set(displayRoles).size;
     const adjacentRoleRepeat = displayRoles.some((role, index) => index > 0 && role === displayRoles[index - 1]);
-    if (threadCount >= 2 && (distinctRoles < Math.min(4, threadCount) || adjacentRoleRepeat)) {
-      add("comment_surface_roles_flat", "warning", "Cref", `Only ${distinctRoles} distinct visible social position(s) across ${threadCount} threads${adjacentRoleRepeat ? ", with the same position repeating on adjacent threads" : ""}; the comments may still sound like one FAQ author.`, false);
+    const roleDiversity = config.parameters?.commentRoleDiversity ?? 85;
+    // 期望值按滑杆分档,但**必须夹到规划层真的能提供的角色数**:退化蓝图的
+    // fallbackCommentCast 只有 3 个角色(其中仅 2 个读者侧),此时要求 4 种社会位
+    // 置是不可能满足的,警告会在每一篇上无条件出现,变成纯噪声。可用供给以本篇
+    // commentCast 的实际规模为准,拿不到计划时退回观测到的 distinctRoles。
+    // 注意:供给未知时不能回退成 distinctRoles ——那是被检查的量本身,
+    // 拿它当上限会让条件恒不成立,检查静默失效。未知时按线程数(既有行为)。
+    const castSupply = new Set(
+      (surfacePlan.commentCast ?? []).map((role) => role.displayRole).filter(Boolean),
+    ).size;
+    const availableRoles = castSupply > 0 ? castSupply : threadCount;
+    const requestedDistinctRoles = roleDiversity >= 75 ? 4 : roleDiversity >= 40 ? 2 : 1;
+    const requiredDistinctRoles = Math.max(1, Math.min(requestedDistinctRoles, threadCount, availableRoles));
+    const rolesFlat = distinctRoles < requiredDistinctRoles || adjacentRoleRepeat;
+    if (threadCount >= 2 && rolesFlat) {
+      add(
+        "comment_surface_roles_flat",
+        "warning",
+        "Cref",
+        `Only ${distinctRoles} distinct visible social position(s) across ${threadCount} threads${adjacentRoleRepeat ? ", with the same position repeating on adjacent threads" : ""}; comment_role_diversity is ${roleDiversity}, which expects at least ${requiredDistinctRoles}. The comments may still sound like one FAQ author.`,
+        false,
+      );
     }
     const metaQuestionPattern = /(?:你最想问什么|你最关心(?:哪一点|什么)|还有什么想了解(?:的)?|有什么问题(?:都)?可以问|欢迎(?:留言|评论|私信)(?:咨询|提问)?)/u;
     const metaQuestion = visibleCommentNodes.find((node) => metaQuestionPattern.test(node));
@@ -1169,11 +1238,11 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     const effectiveGrowingMax = Math.min(growableThreadCount, Math.max(effectiveGrowingMin, targetGrowingMax));
     const actualGrowingThreads = draft.content.Cref.threads.filter((thread) => thread.followUps.length > 0).length;
     if (actualGrowingThreads < effectiveGrowingMin) {
-      // P4-20: with the growth switch on and a non-zero multi-turn target the
-      // shortfall is a hard failure (repairable); with the switch off the
-      // target is [0,0] and this never fires.
-      const escalated = config.content.commentMultiTurnGrowthEnabled === true && targetGrowingMin > 0;
-      add("comment_network_under_grown", escalated ? "error" : "warning", "Cref", `The comment-network distribution expected ${effectiveGrowingMin}-${effectiveGrowingMax} naturally growing roots, but only ${actualGrowingThreads} grew. Do not fill a quota mechanically; review whether useful triggers were missed.`, escalated);
+      // 软校验:欠生长恒为 warning 且不可 repair。multiTurnTarget 是**整片评论区
+      // 的分布期望**,不是逐条配额——"上一句没有可接的具体话头就不接"是正确行
+      // 为,判 error 会把模型逼去机械凑数,生成硬凑的追问,反而降低质量。接话是
+      // 否自然属语义判断,交给带完整上下文的 agent;校验层只做诚实告知。
+      add("comment_network_under_grown", "warning", "Cref", `The comment-network distribution expected ${effectiveGrowingMin}-${effectiveGrowingMax} naturally growing roots, but only ${actualGrowingThreads} grew. Do not fill a quota mechanically; review whether useful triggers were missed.`, false);
     } else if (actualGrowingThreads > effectiveGrowingMax) {
       add("comment_network_over_grown", "warning", "Cref", `The comment-network distribution expected ${effectiveGrowingMin}-${effectiveGrowingMax} naturally growing roots, but ${actualGrowingThreads} grew. Review whether every continuation is actually triggered by the previous line.`, false);
     }
@@ -1323,6 +1392,9 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
   ];
   for (const surface of sensitiveSurfaces) {
     for (const statement of splitSensitiveStatements(surface.text)) {
+      // 话题标签行不是声明:`#结果保证 #留学申请` 只是标签串,却因含「保证」被
+      // 当成受控声明。标签的合规性由 H 通道自己的检查负责。
+      if (isHashtagOnlyLine(statement)) continue;
       const matchedRules = controlledRules.filter((rule) => rule.terms.some((term) => term && statement.includes(term)));
       if ((!genericMeasuredClaim.test(statement) && matchedRules.length === 0) || /[？?]$/u.test(statement)) continue;
       const judgment = claimJudgmentByStatement.get(statement);
@@ -1700,8 +1772,7 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     // 说法,一律判 error 就是误伤。判断权归项目分析
     // 阶段:蓝图按 serviceModel 与行业产出 prohibitedUnsupportedHistories /
     // claimType=historical_action 的 terms,本校验照真源生效,不另立第二套词表。
-    const prohibitedHit = visibleNodes.find((node) =>
-      prohibitedHistories.some((term) => node.includes(term)));
+    const prohibitedHit = visibleNodes.find((node) => assertsProhibitedHistory(node, prohibitedHistories));
     if (prohibitedHit) {
       add("fabricated_operational_experience", "error", "Cref", `A simulated role claims a prohibited unsupported history: ${prohibitedHit}`);
     }

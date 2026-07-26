@@ -529,11 +529,48 @@ describe("fabricated_operational_experience (标注制:只拦证词形态与蓝�
     ))).not.toContain("blueprint_prohibited_history_unspecified");
   });
 
-  it("否定式不误伤", () => {
+  it("否定式不误伤(证词形态)", () => {
     const negated = validate(
       parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({ id: "t1", question: "我没做过，所以想问问到底咋回事？" })]))),
     );
     expect(codes(negated)).not.toContain("fabricated_operational_experience");
+  });
+
+  it("否定式不误伤(蓝图禁语):照实转述'没有续费或复购'的服务边界不是声称经历", () => {
+    // 线上真实误报:one_time 项目的蓝图把"续费/复购"列为禁止声称,而助理照资料
+    // 转述"服务是一次性的，没有续费或复购"——这是**否定**该经历,恰恰是正确口径,
+    // 却被裸子串匹配判成 fabricated_operational_experience。
+    const blueprint = blueprintWithProhibitedHistories(["二次签约", "续费", "回购", "复购"]);
+    for (const sentence of [
+      "这个服务是一次性的，一个周期结束就完结，没有续费或复购。",
+      // 否定词与禁语之间可以隔着好几个字("不会有后续费用或续费"),定长窗口拦不住;
+      // 且"后续费用"本身跨词含有"续费"二字,更要按整个小句判否定作用域。
+      "是的，一个周期结束就结清，不会有后续费用或续费。",
+      "不涉及回购，做完这次就结束了。",
+      "后面无需二次签约，按当期口径来就行。",
+      "我们这边未开放复购，具体以当期确认为准。",
+    ]) {
+      const issues = validate(
+        parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({ id: "t1", answer: sentence })]))),
+        { projectBlueprint: blueprint },
+      );
+      expect(codes(issues), `否定禁语的转述不应被拦:${sentence}`).not.toContain("fabricated_operational_experience");
+    }
+  });
+
+  it("否定豁免不过度:同句里真实声称仍然拦", () => {
+    const blueprint = blueprintWithProhibitedHistories(["续费", "复购"]);
+    for (const sentence of [
+      "我复购过两次了，想问下这次还一样吗？",
+      // 前半句否定了另一个词,不能豁免后半句真实声称的那个。
+      "我没续费，但复购过一回，想问下有区别吗？",
+    ]) {
+      const issues = validate(
+        parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({ id: "t1", question: sentence })]))),
+        { projectBlueprint: blueprint },
+      );
+      expect(codes(issues), `真实声称必须仍被拦:${sentence}`).toContain("fabricated_operational_experience");
+    }
   });
 
   it("可追责答复侧同样不得冒充独立消费者(staff/expert 不只 publisher)", () => {

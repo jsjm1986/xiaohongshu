@@ -35,6 +35,18 @@ export const GENERATION_PARAMETERS = GENERATION_PARAMETER_REGISTRY.map((definiti
   effects: [...definition.channels],
   evidenceStatus: definition.evidenceStatus,
   evidenceNote: definition.evidenceNote,
+  // 执行强度(validated/derived/guidance/display):告诉用户系统靠什么让这个值
+  // 生效,与 risk(改动风险)是两个正交维度。guidance 表示只有提示词引导、没有
+  // 结构性保证——这类参数填了不一定改变产物,必须让用户看得见。
+  enforcement: definition.enforcement ?? 'guidance',
+  // 运行成本与副作用告知:供前端在勾选前做醒目提示(与 risk 不同,risk 说的是
+  // 改动风险,这里说的是开销与产出容量的实际影响)。
+  costNotice: definition.costNotice ? structuredClone(definition.costNotice) : undefined,
+  // 与配置无关的恒定空转:诊断强调滑杆按设计只排序人工检查清单,不进模型上下
+  // 文也不参与校验(agent-core 的 isDisplayOnlyDiagnosticParameter)。与配置
+  // 相关的空转(如生长开关关闭时的接话比例)不在静态投影里判定,由每次生成的
+  // impactReport.parameterTraces[].inertReason 承担。
+  displayOnly: definition.enforcement === 'display',
 }));
 
 export const DEFAULT_PARAMETER_VALUES: Record<string, ParameterValue> = Object.fromEntries(
