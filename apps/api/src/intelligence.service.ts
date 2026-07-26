@@ -4,11 +4,14 @@ import { basename, extname, join, relative, resolve } from 'node:path';
 import {
   BadRequestException,
   ConflictException,
+  HttpException,
   Inject,
   Injectable,
+  InternalServerErrorException,
   NotFoundException,
   OnModuleInit,
   PayloadTooLargeException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import {
   PROJECT_BLUEPRINT_MODULE_KEYS,
@@ -113,10 +116,60 @@ export interface PreparedPlanningContext {
   imageContext: Array<Record<string, unknown>>;
 }
 
-class AnalysisGatewayError extends Error {
+export class AnalysisGatewayError extends Error {
   constructor(message: string, readonly status?: number) {
     super(message);
   }
+}
+
+/**
+ * 把分析失败翻译成用户看得懂、且能行动的错误。
+ *
+ * 实测缺陷:AnalysisGatewayError 是普通 Error,Nest 一律包成
+ * `500 {"message":"Internal server error"}`——真 saas 账号点「分析知识库」,中继返回
+ * 500 之后,界面上只有一句「Internal server error」。用户不知道发生了什么、要不要
+ * 重试、是不是自己的问题,而额度已经扣掉了(那条已另外修成失败退还)。
+ *
+ * 分类只按「用户下一步该做什么」分,不暴露中继地址、模型名这些内部细节:
+ *  - 模型服务暂时不可用 → 稍后重试(额度已退还,这句要说,否则用户以为白花了)
+ *  - 模型返回的结果不完整 → 重试一次通常能好(采样波动)
+ *  - 其余 → 原文透出,至少比 "Internal server error" 多一点线索
+ */
+export function analysisFailureException(error: unknown): HttpException {
+  const raw = error instanceof Error ? error.message : String(error);
+  if (error instanceof HttpException) return error;
+  if (!(error instanceof AnalysisGatewayError)) {
+    return new InternalServerErrorException(`分析失败：${raw}`);
+  }
+  /*
+   * 技术原文挂在 cause 上,不进用户可见文本。
+   *
+   * 用户要的是「怎么办」,而排查(以及三阶段 fail-fast 的契约测试)要的是「缺了哪个
+   * 模块」「JSON 坏在哪」。两者都要,所以分层:message 给人看,cause 留原始错误。
+   */
+  const withCause = <T extends HttpException>(exception: T): T => {
+    (exception as { cause?: unknown }).cause = error;
+    return exception;
+  };
+  const status = error.status;
+  // 5xx / 429 / 网络层失败:不是用户的问题,重试即可
+  if (status === undefined || status === 429 || status >= 500) {
+    return withCause(new ServiceUnavailableException(
+      '模型服务暂时不可用，分析没有完成。已退还本次额度，请稍后重试；若持续失败请联系客服。',
+    ));
+  }
+  if (status === 401 || status === 403) {
+    return withCause(new ServiceUnavailableException(
+      '模型服务凭据异常，分析没有完成。已退还本次额度，请联系客服处理。',
+    ));
+  }
+  // 模型返回了但内容不合契约(缺模块、JSON 坏、缺口为空):重试一次多半能好
+  if (/omitted required|invalid JSON|empty planning resources/i.test(raw)) {
+    return withCause(new ServiceUnavailableException(
+      '模型这次返回的结果不完整，分析没有完成。已退还本次额度，直接重试一次通常就好了。',
+    ));
+  }
+  return withCause(new InternalServerErrorException(`分析失败：${raw}`));
 }
 
 @Injectable()
@@ -961,8 +1014,9 @@ export class IntelligenceService implements OnModuleInit {
       });
       return this.projectAnalysisResult(this.taskRow(task.id), false);
     } catch (error) {
+      // 任务表里记原始技术信息(排查用),抛给用户的是翻译过的、能行动的那句
       this.failTask(task.id, error);
-      throw error;
+      throw analysisFailureException(error);
     }
   }
 
@@ -1021,8 +1075,9 @@ export class IntelligenceService implements OnModuleInit {
         topicOpportunities: this.listOpportunities(projectId),
       };
     } catch (error) {
+      // 同 analyzeProject:任务表记原始技术信息,抛给用户的是能行动的那句
       this.failTask(task.id, error);
-      throw error;
+      throw analysisFailureException(error);
     }
   }
 
@@ -1061,8 +1116,9 @@ export class IntelligenceService implements OnModuleInit {
       this.record(project, principal, 'image-analysis.analyze', 'analysis_task', task.id, { projectId, assetId, cached: false });
       return { task: this.mapTask(this.taskRow(task.id)), analysis: this.mapImageAnalysis(this.row('image_analysis_versions', projectId, id)), cached: false };
     } catch (error) {
+      // 同 analyzeProject:任务表记原始技术信息,抛给用户的是能行动的那句
       this.failTask(task.id, error);
-      throw error;
+      throw analysisFailureException(error);
     }
   }
 
@@ -1567,8 +1623,24 @@ export class IntelligenceService implements OnModuleInit {
   ): Promise<Record<string, unknown>> {
     const settings = this.settings.provider(String(project.workspace_id), principal.userId);
     if (!settings.apiKey) throw new BadRequestException('Configure a model API key before running analysis.');
-    if (settings.mode === 'platform') this.settings.consumePlatformQuota(String(project.workspace_id));
-    const result = this.analysisTail.then(() => this.retryAnalysis(settings, prompt, imageDataUrls, taskId, temperature));
+    const workspaceId = String(project.workspace_id);
+    const platform = settings.mode === 'platform';
+    // 先扣后调:必须如此,否则并发能穿透配额。失败再退(见下)。
+    if (platform) this.settings.consumePlatformQuota(workspaceId);
+    const result = this.analysisTail
+      .then(() => this.retryAnalysis(settings, prompt, imageDataUrls, taskId, temperature))
+      .catch((error: unknown) => {
+        /*
+         * 分析彻底失败要退还额度。
+         *
+         * 实测:中继返回 HTTP 500 时三次重试全败、任务标 failed,而额度已经扣掉——
+         * 用户什么都没拿到却少了一次。按次计费的产品不能这样记账。
+         *
+         * 只在这条「确认无产出」的路径上退;成功路径不碰。
+         */
+        if (platform) this.settings.refundPlatformQuota(workspaceId);
+        throw error;
+      });
     this.analysisTail = result.then(() => undefined, () => undefined);
     return result;
   }
@@ -2306,7 +2378,13 @@ function projectBlueprintAnalysisPrompt(sourceJson: string): string {
     'domain_model={"projectNoun":"","industry":"","domain":"","objects":[],"actions":[],"concepts":[],"decisionTasks":[],"vocabulary":[]}.',
     'audience_model={"states":[{"id":"","label":"","stages":["discovering|collecting|comparing|hesitating|ready"],"goals":[],"constraints":[],"knowledgeState":"","hesitationReasons":[],"actionConditions":[],"source":{"status":"inference","evidenceIds":[]}}]}. These are conditional states, not population distributions.',
     'scenario_model={"families":[{"id":"","label":"","prototype":"narrow_request|live_moment|expectation_reversal|process_log|outcome_observation|retrospective_update|relationship_moment|option_comparison","applicableStages":[],"hostIdentityCues":[],"lifeContexts":[],"timeAnchors":[],"settings":[],"triggers":[],"observableActions":[],"frictions":[],"emotionalAftertastes":[],"imageMoments":[],"prohibitedUnsupportedHistories":[],"source":{"status":"hypothesis","evidenceIds":[]}}]}. Produce materially different, project-derived scene families. prohibitedUnsupportedHistories must be filled, not left empty: list the concrete wordings a simulated reader or an accountable responder must never use to claim a project history the supplied source cannot support. Derive them from this project\'s industry and service model rather than from a generic list, and judge repeat-purchase vocabulary (老用户 / 回购 / 复购 / 续做 / 第二次做 and the project\'s own equivalents) by that service model: for one_time projects (renovation, study-abroad, wedding planning, legal consultation) such wording describes a history the project structurally cannot have, so prohibit it; for recurring or mixed projects it is an identity claim that needs evidence, so prohibit it unless the source supports it; where the project language treats it as an ordinary neutral phrase, leave it out instead of prohibiting it. Also include first-person completion and third-party word-of-mouth wordings specific to this project\'s actions (e.g. the domain verb for having undergone or purchased the service, plus 亲测 / 亲身经历 / 朋友做过 style endorsements when they would read as independent testimony here). Keep every entry a surface wording that could literally appear in copy, and keep it consistent with the claim_policy rule whose claimType is historical_action.',
-    'role_model={"serviceModel":"one_time|recurring|mixed","hostVoiceTraits":[],"hostSpeechMarkers":[],"roles":[{"id":"","displayRole":"","relationToHost":"","identityCues":[],"situationCues":[],"motives":[],"knowledgePosition":"","speechPatterns":[],"lexicalCues":[],"interactionHooks":[],"permittedContributions":[],"utteranceModes":["direct_question|shared_concern|experience_fragment|counterexample|social_reaction|detail_spotter|knowledge_translation|identity_route|service_answer"],"replyDisplayRoles":[],"targetChars":[4,30],"accountable":false,"source":{"status":"hypothesis","evidenceIds":[]}}]}. First judge the project service model from the supplied source and record it in serviceModel. Judge by whether the same customer has REPEAT CONTACT with the provider over time, not by whether they buy twice: one_time = the decision is made once and the engagement ends (a single visit, or one signed engagement that simply runs to completion with no ongoing return visits); recurring = the same customer keeps coming back over an extended period (multi-session courses, monthly follow-ups, maintenance or review phases, renewals) even when they signed only once and paid once; mixed = both patterns coexist. A long engagement with scheduled return visits is recurring, NOT one_time. Cross-check against domain_model.actions and concepts: if they contain follow-up, review, maintenance, retention or repeat-visit stages, serviceModel must not be one_time. Produce diverse social positions and accountable roles only where supported; never fabricate real users. Give at least 6 question-side roles covering the decision-stage (discovering/collecting/comparing/hesitating/ready) x social-position matrix (e.g. first-time researcher, cautious comparer, risk worrier, same-city action seeker, lurking follower, dissenting skeptic, pure-reaction empathizer; trim to what the project actually supports), each with at least 3 utteranceModes. Choose question-side marketing-flavored roles from this candidate pool, trimmed by serviceModel: 心动种草/拼单询价/同城行动/探店打卡/术后回访/转介绍/围观共鸣 for every model, plus 老客复购 only when serviceModel is recurring or mixed. Produce exactly 2 accountable=true public identities for the two-account operation: (1) the publishing IP / host, its displayRole named as the organization IP in project language; (2) an open assistant, its displayRole named organization name + 助理, its utteranceModes centered on service_answer and identity_route, its permittedContributions distilled only from claims the claim_policy allows — every price, number or promise it may state must anchor to a knowledge entry, and when knowledge is missing it must route to human staff instead of improvising; both identities answer in public organization identities and never pose as ordinary users. Every other role\'s replyDisplayRoles must point to the fitting accountable identity (the IP for professional answers, the assistant for marketing handoff). hostVoiceTraits must match the publishing account\'s real identity (an amateur personal account gets an amateur voice, never an institutional tone).',
+    'role_model={"serviceModel":"one_time|recurring|mixed","hostVoiceTraits":[],"hostSpeechMarkers":[],"roles":[{"id":"","displayRole":"","relationToHost":"","identityCues":[],"situationCues":[],"motives":[],"knowledgePosition":"","speechPatterns":[],"lexicalCues":[],"interactionHooks":[],"permittedContributions":[],"utteranceModes":["direct_question|shared_concern|experience_fragment|counterexample|social_reaction|detail_spotter|knowledge_translation|identity_route|service_answer"],"replyDisplayRoles":[],"targetChars":[4,30],"accountable":false,"source":{"status":"hypothesis","evidenceIds":[]}}]}. First judge the project service model from the supplied source and record it in serviceModel. Judge by whether the same customer has REPEAT CONTACT with the provider over time, not by whether they buy twice: one_time = the decision is made once and the engagement ends (a single visit, or one signed engagement that simply runs to completion with no ongoing return visits); recurring = the same customer keeps coming back over an extended period (multi-session courses, monthly follow-ups, maintenance or review phases, renewals) even when they signed only once and paid once; mixed = both patterns coexist. A long engagement with scheduled return visits is recurring, NOT one_time. Cross-check against domain_model.actions and concepts: if they contain follow-up, review, maintenance, retention or repeat-visit stages, serviceModel must not be one_time. Produce diverse social positions and accountable roles only where supported; never fabricate real users. Give at least 6 question-side roles covering the decision-stage (discovering/collecting/comparing/hesitating/ready) x social-position matrix (e.g. first-time researcher, cautious comparer, risk worrier, same-city action seeker, lurking follower, dissenting skeptic, pure-reaction empathizer; trim to what the project actually supports), each with at least 3 utteranceModes. Choose question-side marketing-flavored roles from this candidate pool, trimmed by serviceModel: 心动种草/拼单询价/同城行动/探店打卡/术后回访/转介绍/围观共鸣 for every model, plus 老客复购 only when serviceModel is recurring or mixed. Produce exactly 2 accountable=true public identities for the two-account operation: (1) the publishing IP / host, its displayRole named as the organization IP in project language; (2) an open assistant, its displayRole named organization name + 助理, its utteranceModes centered on service_answer and identity_route, its permittedContributions distilled only from claims the claim_policy allows — every price, number or promise it may state must anchor to a knowledge entry, and when knowledge is missing it must route to human staff instead of improvising; both identities answer in public organization identities and never pose as ordinary users. hostVoiceTraits must match the publishing account\'s real identity (an amateur personal account gets an amateur voice, never an institutional tone). '
+    // 两条硬约束单独提出:埋在上面长段落里时,产出的 role_model 半数以上只给
+    // 0 或 1 个 accountable 身份,且 replyDisplayRoles 写内部 id(host_account /
+    // role_IP / role_01),生成阶段无法路由,答复展示名回落通用兜底名。
+    + 'TWO HARD REQUIREMENTS on roles, checked before the module is accepted — violating either makes the whole module unusable: '
+    + '(H1) The count of accountable=true roles must be EXACTLY 2 — no more, no fewer. Not 0, not 1. One is the organization IP / host, the other is the open assistant. If the supplied source only describes one public account, still emit both: infer the assistant from the organization name (organization name + 助理) and mark its source.status as "hypothesis". '
+    + '(H2) Every accountable=false role must have a non-empty replyDisplayRoles, and every string in it must EXACTLY equal the displayRole of one of the 2 accountable roles. Copy the displayRole text verbatim. Never put an internal id there (not "host_account", not "assistant_account", not "role_IP", not "role_01", not "host"), never put a role description, never invent a name that no accountable role uses. Route professional / knowledge questions to the IP\'s displayRole and price / location / schedule / contact questions to the assistant\'s displayRole. Accountable roles themselves keep replyDisplayRoles empty.',
     'claim_policy={"rules":[{"id":"","label":"","claimType":"price|identity|credential|schedule|outcome|causality|suitability|location|historical_action|other","terms":[],"requiresEvidence":true,"allowedEvidenceStatuses":["supplied_fact"],"dynamic":false,"handling":"block|qualify|verify","source":{"status":"inference","evidenceIds":[]}}],"prohibitedClaims":[],"dynamicInformation":[],"unknownHandling":[]}.',
     'surface_language={"registerDescription":"","preferredTerms":[],"optionalColloquialisms":[],"prohibitedCliches":[],"antiCopyRules":[]}. Observe project language without copying distinctive sample sentences and without making slang mandatory.',
     'intelligence={"industry":"","domain":"","projectSummary":"","verifiedFacts":[],"differentiators":[],"audienceStates":[],"hardBoundaries":[],"prohibitedClaims":[],"dynamicUnknowns":[],"evidenceIds":[],"domainAtlas":{"decisionTasks":[],"concepts":[],"userStates":[],"questionFamilies":[]},"evidenceLedger":[{"statement":"","sourceStatus":"supplied_fact|inference|hypothesis|unknown","evidenceIds":[]}]}.',

@@ -6,7 +6,9 @@ import { ReaderDetail, type ExportFormat } from '../components/quick/ReaderDetai
 import { WaitCard } from '../components/quick/WaitCard';
 import { api } from '../lib/api';
 import { readerCandidateToMarkdown } from '../lib/publish-copy';
-import { readerPath, rememberWorkspace } from '../lib/quick-nav';
+import { readerPath } from '../lib/quick-nav';
+import { areaPath, QUICK_HOME_PATH } from '../lib/quick-routes';
+import { failureReason } from '../lib/retry-plan';
 import { retryJobOnce } from '../lib/single-retry';
 import { readerNeighbors } from '../lib/reader-navigation';
 import type { GenerationJob, Project, ReaderCandidate, ReaderJob } from '../types';
@@ -127,12 +129,13 @@ export function QuickReaderPage() {
    * 返回产出区。
    *
    * 直接打开一个阅读链接(收藏/别人发的)时浏览器没有可回退的历史,所以不用
-   * history.back();统一写记忆再进 /quick,工作区据此恢复项目 + 「产出」分区。
+   * history.back(),而是直接进那个项目的产出区地址。四区改成真路由之后这里不再
+   * 需要 sessionStorage 记忆——地址本身就是记忆。
+   *
+   * job 还没拉到(首屏或打不开)时退回卡墙:此时连 projectId 都不知道。
    */
-  const backToHistory = () => {
-    if (job?.projectId) rememberWorkspace({ projectId: job.projectId, tab: 'history' });
-    navigate('/quick');
-  };
+  const backToHistory = () =>
+    navigate(job?.projectId ? areaPath(job.projectId, 'history') : QUICK_HOME_PATH);
 
   return (
     <div className="page qc-reader-page">
@@ -190,25 +193,38 @@ export function QuickReaderPage() {
         <WaitCard job={job as unknown as GenerationJob} now={now} />
       )}
 
-      {job?.status === 'failed' && (
+      {job?.status === 'failed' && (() => {
+        // 与产出区同一套归类:原文是中文前缀套英文模型层报错,用户读不出该怎么办
+        const reason = failureReason(job.error);
+        return (
         <div className="quick-card">
           <div className="quick-card__body">
-            <p className="qc-hint">生成失败：{job.error || '未知错误'}</p>
+            <p className="qc-hint qc-hint--error">生成失败：{reason.label}</p>
+            {reason.raw && reason.raw !== reason.label && (
+              <details className="qc-failure-raw">
+                <summary>技术细节</summary>
+                <p>{reason.raw}</p>
+              </details>
+            )}
             <div className="qc-actions">
               <Button
                 variant="secondary"
                 icon={<RotateCcw size={13} />}
                 loading={retrying}
-                disabled={retrying || !project}
+                // 余额不足/密钥失效这类重试注定再败,还白扣一次额度
+                disabled={retrying || !project || reason.blocking}
                 onClick={() => void retry()}
               >
                 按同款重试
               </Button>
-              <small className="qc-hint">重试消耗 1 次额度</small>
+              <small className="qc-hint">
+                {reason.blocking ? '这类原因重试仍会失败，请先解决上述问题' : '重试消耗 1 次额度'}
+              </small>
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {job && job.status === 'completed' && job.candidates.length === 0 && (
         <p className="qc-hint">这次生成没有可展示的候选。</p>

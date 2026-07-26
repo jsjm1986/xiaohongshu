@@ -50,11 +50,18 @@ export function BatchBoard({ project, activeBatchId, fail, onOpenJob, onReuseRec
     try {
       const jobs = jobsByBatch[batch.id] ?? [];
       const completed = jobs.filter((j) => j.status === 'completed');
-      // 批次任务不含候选,逐个取详情(并发,失败的当未完成处理)
+      /*
+       * 批次任务不含候选,逐个取详情。走 reader 投影而不是 get():
+       * 实测 get() 单条 1024 KB、reader 35 KB(差 29 倍),而整批导出要并发拉 N 条
+       * ——24 篇就是 24 MB 对 0.8 MB。
+       *
+       * planBatchExport 只读 id / topic / status / candidates[].{id,validation},
+       * 这些 reader 投影全都有(它反而额外带了 reasoning/gapLedger)。
+       */
       const detailed = await Promise.all(
-        completed.map((j) => api.generations.get(j.id).catch(() => null)),
+        completed.map((j) => api.generations.reader(j.id).catch(() => null)),
       );
-      const usable = detailed.filter((j): j is GenerationJob => Boolean(j));
+      const usable = detailed.filter((j): j is NonNullable<typeof j> => Boolean(j)) as unknown as GenerationJob[];
       const plan = planBatchExport(usable, format);
 
       if (plan.total === 0) {
@@ -111,12 +118,23 @@ export function BatchBoard({ project, activeBatchId, fail, onOpenJob, onReuseRec
     if (pending.length === 0) return;
     let cancelled = false;
     const timer = setTimeout(async () => {
-      const updated = await Promise.all(pending.map((id) => api.generations.get(id).catch(() => null)));
-      if (cancelled) return;
+      /*
+       * 轮询走批次列表接口重取,而不是逐个 api.generations.get()。
+       *
+       * 实测 get() 单条 1024 KB(reader 投影 35 KB,差 29 倍),而这里每 2 秒一拍、
+       * 批量常提 24 篇——一拍 24 MB。轮询只用到 status/progress/queuePosition,
+       * 那些重字段(trace、参数影响报告、编排快照)一个都不读。
+       *
+       * 批次列表接口本身带 jobs 且走列表投影,一个请求换掉 N 个重请求。
+       */
+      const list = await api.generationBatches.list(project.id).catch(() => null);
+      if (cancelled || !list) return;
+      const updated = list.flatMap((b) => b.jobs ?? []).filter((j) => pending.includes(j.id));
       setJobsByBatch((cur) => mergeJobUpdates(cur, updated));
     }, POLL_INTERVAL_MS);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [jobsByBatch]);
+    // project.id 进依赖:换项目后不能继续拿旧项目的批次去合并
+  }, [jobsByBatch, project.id]);
 
   // 重试:按原任务的配方(选题+预设+覆盖项)重投一个单任务批次,失败卡不改写、结果并入看板。
   // 配方回填那段抽到 lib/single-retry,与产出区列表里的单篇重试共用同一份实现——

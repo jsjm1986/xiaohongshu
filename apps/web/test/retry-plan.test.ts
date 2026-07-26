@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { failureDigest, planBatchRetry } from '../src/lib/retry-plan.js';
+import { failureDigest, failureReason, planBatchRetry } from '../src/lib/retry-plan.js';
 
 const job = (over: Record<string, unknown> = {}) => ({
   id: 'j1',
@@ -157,4 +157,47 @@ test('failureDigest 空错误与空列表都不崩', () => {
   const d = failureDigest([job({ error: undefined })]);
   assert.equal(d.total, 1);
   assert.equal(d.groups.length, 1);
+});
+
+/*
+ * failureReason:单条失败行的可读原因。
+ *
+ * 实测缺口——批次摘要显示的是归类好的中文,而单条失败行直接摊出原文:
+ * 「生成失败：模型候选 1 生成失败,任务已停止且未生成可发布降级稿：Model provider
+ * rejected the request: Insufficient Balance」。付费用户读不出该怎么办。
+ */
+test('failureReason:余额不足归类为阻塞,重试不该开放', () => {
+  const r = failureReason('模型候选 1 生成失败，任务已停止：Model provider rejected the request: Insufficient Balance');
+  assert.equal(r.label, '模型账户余额不足，充值后再重试');
+  assert.equal(r.blocking, true);
+});
+
+test('failureReason:可重试类不阻塞', () => {
+  assert.equal(failureReason('应用重启导致任务中断，请重新生成').blocking, false);
+  assert.equal(failureReason('Model provider rejected the request: unexpected EOF').blocking, false);
+  assert.match(failureReason('Model output did not contain a complete JSON object.').label, /重试通常可恢复/);
+});
+
+test('failureReason:密钥失效阻塞,不让用户白烧额度', () => {
+  const r = failureReason('Model provider rejected the request: invalid_api_key');
+  assert.equal(r.blocking, true);
+});
+
+// 归不了类时保留原文:排查与报障全靠它,不能吞掉
+test('failureReason:归不了类时原文照出,不显示空白', () => {
+  const r = failureReason('something nobody classified yet');
+  assert.equal(r.label, 'something nobody classified yet');
+  assert.equal(r.blocking, false);
+});
+
+test('failureReason:没有错误信息时给兜底文案', () => {
+  assert.equal(failureReason(undefined).label, '未记录失败原因');
+  assert.equal(failureReason('').label, '未记录失败原因');
+  assert.equal(failureReason('   ').label, '未记录失败原因');
+});
+
+// raw 与 label 相同时界面不该再折一层「技术细节」
+test('failureReason:raw 始终是 trim 过的原文', () => {
+  assert.equal(failureReason('  boom  ').raw, 'boom');
+  assert.equal(failureReason('  boom  ').label, 'boom');
 });

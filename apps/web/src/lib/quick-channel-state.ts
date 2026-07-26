@@ -1,13 +1,13 @@
 // 四区结构:① 总览 ② 知识库 ③ 创作 ④ 产出
-export type QuickTab = 'overview' | 'knowledge' | 'create' | 'history';
-
-export function clearDownstreamOfProject() {
-  return { opportunities: [] as never[], opportunityId: '' as const, results: [] as never[] };
-}
-
-export function clearResults() {
-  return { results: [] as never[] };
-}
+//
+// 区的枚举与地址已经搬到 lib/quick-routes.ts(四区改成真频道路由)。这里的
+// QuickTab 保留为它的别名,免得把四个 Tab 组件的 props 签名一起翻一遍——
+// 它们只是"跳到某个区",不关心区是 tab 还是路由。
+//
+// clearDownstreamOfProject / clearResults 已删除:换项目时由
+// QuickWorkspaceProvider 的 key 重挂整体清空,不再需要手工列举字段;
+// 清结果就是 setResults([]),包一层函数只是让调用点更绕。
+export type { QuickArea as QuickTab } from './quick-routes';
 
 // ---------- 总览「下一步」推导 ----------
 

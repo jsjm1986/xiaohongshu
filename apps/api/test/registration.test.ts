@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseService } from '../src/database.service.js';
+import { DatabaseService, SCHEMA_VERSION } from '../src/database.service.js';
 import type { ApiOptions } from '../src/config.js';
 import { AuthService } from '../src/auth.service.js';
 import { RegistrationService } from '../src/registration.service.js';
@@ -32,7 +32,7 @@ test('migration v11 adds user_kind column and bumps user_version', () => {
     .get() as { name: string } | undefined;
   assert.equal(row?.name, 'registration_requests');
   const version = Number(db.prepare('PRAGMA user_version').get()?.user_version);
-  assert.equal(version, 12);
+  assert.equal(version, SCHEMA_VERSION);
   const columns = db.prepare('PRAGMA table_info(users)').all() as Array<{ name: string; dflt_value: string | null }>;
   const userKind = columns.find((column) => column.name === 'user_kind');
   assert.ok(userKind, 'users.user_kind 列应存在');

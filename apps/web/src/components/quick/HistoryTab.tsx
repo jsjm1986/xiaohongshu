@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { BookOpen, Clock, Repeat, RotateCcw, SearchX } from 'lucide-react';
+import { BookOpen, Clock, Repeat, RotateCcw, SearchX, Trash2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { Button, useToast } from '../Ui';
 import { api } from '../../lib/api';
@@ -7,7 +7,7 @@ import { approveOpportunitiesForBatch } from '../../lib/quick-generation';
 import { filterGenerationJobs, type GenerationStatusFilter } from '../../lib/quick-channel-state';
 import { overviewDigest } from '../../lib/overview-digest';
 import { readerPath } from '../../lib/quick-nav';
-import { failureDigest, planBatchRetry } from '../../lib/retry-plan';
+import { failureDigest, failureReason, planBatchRetry } from '../../lib/retry-plan';
 import { retryJobOnce } from '../../lib/single-retry';
 import { waitStatus } from '../../lib/wait-status';
 import { buildBatchJobs } from '../../lib/quick-batch';
@@ -26,6 +26,8 @@ interface Props {
   focusJobId?: string;
   /** 「再来一篇同款」:把该任务的配方回灌创作区 */
   onReuseRecipe?: (job: GenerationJob) => void;
+  /** 空态里的「去创作」出路;未接通时该按钮不显示 */
+  onGoCreate?: () => void;
 }
 
 const STATUS_LABEL: Record<string, { text: string; tone: 'ok' | 'warn' | 'error' | 'muted' }> = {
@@ -45,7 +47,7 @@ const STATUS_CHIPS: Array<{ key: GenerationStatusFilter; label: string }> = [
   { key: 'failed', label: '失败' },
 ];
 
-export function HistoryTab({ project, history, fail, setHistory, activeBatchId, focusJobId, onReuseRecipe }: Props) {
+export function HistoryTab({ project, history, fail, setHistory, activeBatchId, focusJobId, onReuseRecipe, onGoCreate }: Props) {
   const toast = useToast();
   const navigate = useNavigate();
   /**
@@ -56,6 +58,7 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
   const [statusFilter, setStatusFilter] = useState<GenerationStatusFilter>('all');
   const [keyword, setKeyword] = useState('');
   const [retryingId, setRetryingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   // 本地加载态:以前这里置壳的 busy,但本组件并不读 busy,所以自己没有加载提示,
   // 只是让创作区残留「正在生成」进度条。改为自持状态,壳的 busy 不再被搭便车。
   const [loadingHistory, setLoadingHistory] = useState(false);
@@ -191,6 +194,35 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
     } catch (e) { fail(e, '重试失败'); } finally { setRetryingId(null); }
   };
 
+  /**
+   * 删除一条产出(软删,可撤销)。
+   *
+   * 本地先摘掉再打接口?不。删除是写操作,失败了要能把行放回去;先等接口回来再改
+   * 列表,状态永远和服务端一致,代价只是一次点击后的短暂 loading。
+   */
+  const removeJob = async (job: GenerationJob) => {
+    if (deletingId) return;
+    setDeletingId(job.id);
+    try {
+      await api.generations.remove(job.id);
+      setHistory(history.filter((j) => j.id !== job.id));
+      if (expanded === job.id) setExpanded(null);
+      toast.push(`已删除「${job.topic || '未命名选题'}」`, 'info', {
+        label: '撤销',
+        run: () => {
+          void api.generations.restore(job.id)
+            .then(async () => {
+              // 重新拉列表而不是把本地那条塞回去:期间可能有别的任务完成,
+              // 塞回去会让顺序和状态与服务端不一致。
+              if (projectId) setHistory((await api.generations.list(projectId)).items);
+              toast.push('已恢复');
+            })
+            .catch((e) => fail(e, '撤销失败'));
+        },
+      });
+    } catch (e) { fail(e, '删除失败'); } finally { setDeletingId(null); }
+  };
+
   /** 已完成 → 去独立阅读页;未完成 → 行内展开进度(收起再点即折叠)。 */
   const open = (job: GenerationJob) => {
     if (job.status === 'completed') { navigate(readerPath(job.id)); return; }
@@ -259,7 +291,13 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
             <button key={c.key} type="button" className={`chip${statusFilter === c.key ? ' chip--active' : ''}`} onClick={() => setStatusFilter(c.key)}>{c.label}</button>
           ))}
         </div>
-        <input value={keyword} onChange={(e) => setKeyword(e.target.value)} placeholder="搜索标题关键词" />
+        {/* placeholder 不是可访问名:读屏软件在输入后就读不到它了,补 aria-label */}
+        <input
+          value={keyword}
+          onChange={(e) => setKeyword(e.target.value)}
+          placeholder="搜索标题关键词"
+          aria-label="搜索产出标题"
+        />
       </div>
 
       <ul className="qc-history-list">
@@ -289,26 +327,58 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
                 {onReuseRecipe && (
                   <Button variant="ghost" icon={<Repeat size={13} />} onClick={() => onReuseRecipe(job)}>再来一篇同款</Button>
                 )}
+                {/*
+                  删除:产出区原来只增不减,单个项目跑到 33 条之后失败的、试错的、
+                  重复的全堆在一起,用户没法整理自己的工作区。软删 + 提示里撤销:
+                  逐条弹确认弹窗在"连删几条"时太重,而删完无声无息又让人不敢下手。
+                */}
+                <Button
+                  variant="ghost"
+                  icon={<Trash2 size={13} />}
+                  title="从列表中删除（可撤销）"
+                  loading={deletingId === job.id}
+                  disabled={deletingId !== null}
+                  onClick={() => void removeJob(job)}
+                >
+                  删除
+                </Button>
               </div>
               {isOpen && running && <WaitCard job={job} now={now} />}
-              {isOpen && job.status === 'failed' && (
+              {isOpen && job.status === 'failed' && (() => {
+                // 归类后的可读原因,而不是原文。原文是中文前缀套英文模型层报错
+                // (「…未生成可发布降级稿：Model provider rejected the request:
+                // Insufficient Balance」),付费用户读不出该怎么办。
+                const reason = failureReason(job.error);
+                return (
                 <div className="qc-history-detail">
-                  <p className="qc-hint">生成失败：{job.error || '未知错误'}</p>
+                  <p className="qc-hint qc-hint--error">生成失败：{reason.label}</p>
+                  {/* 原文折叠留着:归不了类时它是唯一线索,报障时也要能贴给客服 */}
+                  {reason.raw && reason.raw !== reason.label && (
+                    <details className="qc-failure-raw">
+                      <summary>技术细节</summary>
+                      <p>{reason.raw}</p>
+                    </details>
+                  )}
                   {/* 失败条目原本只能去批次看板重试;这里直接给入口 */}
                   <div className="qc-actions">
                     <Button
                       variant="secondary"
                       icon={<RotateCcw size={13} />}
                       loading={retryingId === job.id}
-                      disabled={retryingId !== null || !project}
+                      // blocking 的失败(余额不足、密钥失效)重试注定再失败,
+                      // 还要白扣一次额度——直接禁用,并说明先解决什么
+                      disabled={retryingId !== null || !project || reason.blocking}
                       onClick={() => void retryOne(job)}
                     >
                       按同款重试
                     </Button>
-                    <small className="qc-hint">重试消耗 1 次额度</small>
+                    <small className="qc-hint">
+                      {reason.blocking ? '这类原因重试仍会失败，请先解决上述问题' : '重试消耗 1 次额度'}
+                    </small>
                   </div>
                 </div>
-              )}
+                );
+              })()}
             </li>
           );
         })}
@@ -319,14 +389,26 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
               正在加载产出…
             </li>
           ) : history.length === 0 ? (
+            // 空态要给出路。原来只有一句「还没有产出」——用户站在一个空列表前,
+            // 下一步在别的区,而这里一个字都没说。
             <li className="qc-empty">
               <span className="qc-empty__icon"><Clock size={18} /></span>
-              还没有产出
+              还没有产出。去创作区选个选题,生成第一篇。
+              {onGoCreate && (
+                <Button variant="secondary" onClick={onGoCreate}>去创作</Button>
+              )}
             </li>
           ) : (
+            // 筛出空同理:用户可能忘了自己还挂着筛选条件,给一键清除
             <li className="qc-empty">
               <span className="qc-empty__icon"><SearchX size={18} /></span>
-              没有符合筛选条件的历史
+              没有符合筛选条件的产出（共 {history.length} 篇）。
+              <Button
+                variant="ghost"
+                onClick={() => { setStatusFilter('all'); setKeyword(''); }}
+              >
+                清除筛选
+              </Button>
             </li>
           )
         )}

@@ -22,7 +22,7 @@ import {
 import sharp from 'sharp';
 import { createApplication } from '../src/app.js';
 import { resolveOptions } from '../src/config.js';
-import { DatabaseService } from '../src/database.service.js';
+import { DatabaseService, SCHEMA_VERSION } from '../src/database.service.js';
 import { IntelligenceService } from '../src/intelligence.service.js';
 import type { SessionPrincipal } from '../src/models.js';
 import { seedApprovedProjectBlueprint } from './project-blueprint-fixture.js';
@@ -152,7 +152,7 @@ test('migrates a v3 database to the current schema with source-image boundaries'
 
   const migrated = new DatabaseService(resolveOptions({ dataDir, databasePath, logger: false }));
   try {
-    assert.equal(Number(migrated.prepare('PRAGMA user_version').get()?.user_version), 12);
+    assert.equal(Number(migrated.prepare('PRAGMA user_version').get()?.user_version), SCHEMA_VERSION);
     const tables = new Set((migrated.prepare(
       "SELECT name FROM sqlite_master WHERE type='table'",
     ).all() as Array<{ name: string }>).map((row) => row.name));
@@ -1564,7 +1564,10 @@ test('project analysis is cached and failed retries do not create intelligence f
   const before = await request(`/api/projects/${project.body.id}/intelligence`);
   fail = true;
   const failed = await request(path, { method: 'POST', body: JSON.stringify({ force: true }) });
-  assert.equal(failed.response.status, 500);
+  // 上游 500 现在对客户端报 503 + 可行动话术(原来是裸的 500 Internal server error,
+  // 用户看不出发生了什么、要不要重试);分类见 analysis-failure-message.test.ts
+  assert.equal(failed.response.status, 503);
+  assert.match(String(failed.body.message), /模型服务暂时不可用/);
   assert.equal(calls, 9);
   const after = await request(`/api/projects/${project.body.id}/intelligence`);
   assert.equal(after.body.length, before.body.length);

@@ -1254,6 +1254,21 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ candidateId, instruction }),
       }),
+    /**
+     * 软删一条产出:从列表里移除,记录与内容包仍在,可 restore 撤销。
+     * 已扣的额度不退——删除是整理工作区,不是退款。
+     */
+    remove: (id: string) =>
+      request<{ id: string; topic: string; alreadyDeleted: boolean }>(
+        `/api/generations/${encodeURIComponent(id)}`,
+        { method: "DELETE" },
+      ),
+    /** 撤销软删。 */
+    restore: (id: string) =>
+      request<{ id: string; topic: string; alreadyActive: boolean }>(
+        `/api/generations/${encodeURIComponent(id)}/restore`,
+        { method: "POST" },
+      ),
     exportUrl: (
       id: string,
       candidateId: string,

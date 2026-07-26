@@ -4,6 +4,7 @@ import { APP_OPTIONS, type ApiOptions } from './config.js';
 import { AuditService } from './audit.service.js';
 import { DatabaseService } from './database.service.js';
 import type { SessionPrincipal } from './models.js';
+import { QUOTA_EXHAUSTED_MESSAGE } from './support.js';
 import { nowIso, parseJson } from './utils.js';
 
 interface SettingsRow {
@@ -139,8 +140,28 @@ export class SettingsService {
   consumePlatformQuota(workspaceId: string): void {
     const row = this.ensure(workspaceId);
     if (row.provider_mode !== 'platform') return;
-    if (row.quota_used >= row.monthly_quota) throw new ForbiddenException('平台测试额度已用完，请联系管理员增加额度或配置 BYOK');
+    // 话术见 support.ts:「联系管理员 / 配置 BYOK」对付费 SaaS 用户是两条走不通的路
+    if (row.quota_used >= row.monthly_quota) throw new ForbiddenException(QUOTA_EXHAUSTED_MESSAGE);
     this.database.prepare('UPDATE workspace_settings SET quota_used = quota_used + 1, updated_at = ? WHERE workspace_id = ?').run(nowIso(), workspaceId);
+  }
+
+  /**
+   * 退还一次额度。
+   *
+   * 额度是在调用模型**之前**扣的(必须如此:先扣才防得住并发超额)。但实测知识库
+   * 分析在中继返回 HTTP 500 时,三次重试全败、任务标 failed,而额度已经扣掉——
+   * 用户什么都没拿到却少了一次。对按次计费的产品这是实质性的错账。
+   *
+   * 只在「确认没有产出任何结果」的失败路径上退。下限保护到 0:并发下重复退还
+   * 不该把计数打成负数。
+   */
+  refundPlatformQuota(workspaceId: string): void {
+    const row = this.ensure(workspaceId);
+    if (row.provider_mode !== 'platform') return;
+    if (row.quota_used <= 0) return;
+    this.database
+      .prepare('UPDATE workspace_settings SET quota_used = MAX(0, quota_used - 1), updated_at = ? WHERE workspace_id = ?')
+      .run(nowIso(), workspaceId);
   }
 
   workspaceConfig(workspaceId: string): Record<string, unknown> {

@@ -56,6 +56,8 @@ interface JobRow {
   progress: number;
   error: string | null;
   completed_at: string | null;
+  /** 软删时间戳;非空表示已从列表中移除(记录与内容包仍在,可撤销) */
+  deleted_at: string | null;
   knowledge_context_json: string;
   preset_id: string | null;
   style_profile_version: number;
@@ -418,11 +420,54 @@ export class GenerationService implements OnModuleInit {
     return rows.map((row) => this.getBatch(row.id));
   }
 
+  /**
+   * 任务列表。已软删的一律不返回(deleted_at IS NULL)。
+   *
+   * 单条 GET /:id 与 /:id/reader 不加这个过滤:删除后地址可能还在别人的收藏里,
+   * 让它继续读得到比 404 更少惊吓——列表里看不见就够了。
+   */
   list(projectId?: string): Record<string, unknown>[] {
     const rows = (projectId
-      ? this.database.prepare('SELECT * FROM generation_jobs WHERE project_id = ? ORDER BY created_at DESC').all(projectId)
-      : this.database.prepare('SELECT * FROM generation_jobs ORDER BY created_at DESC').all()) as unknown as JobRow[];
+      ? this.database.prepare('SELECT * FROM generation_jobs WHERE project_id = ? AND deleted_at IS NULL ORDER BY created_at DESC').all(projectId)
+      : this.database.prepare('SELECT * FROM generation_jobs WHERE deleted_at IS NULL ORDER BY created_at DESC').all()) as unknown as JobRow[];
     return rows.map((row) => this.mapJobForList(row));
+  }
+
+  /**
+   * 软删一条产出。返回撤销所需的信息。
+   *
+   * 不物理删:内容包、生成事件、批次都靠 job_id 外键挂着,物理删会连带清掉审计
+   * 痕迹;而且付费产品里「删错了」必须有退路。已扣的额度不退——记录还在才解释得清账。
+   */
+  softDelete(jobId: string): Record<string, unknown> {
+    const row = this.jobRow(jobId);
+    if (row.deleted_at) return { id: row.id, topic: row.topic, alreadyDeleted: true };
+    // 还在队列里的任务先摘出队列,否则删掉之后它照样会被 drainQueue 捞起来跑,
+    // 白烧一次模型调用(额度在创建时已扣,跑完也没人看)。
+    const queued = this.queue.indexOf(jobId);
+    if (queued !== -1) this.queue.splice(queued, 1);
+    // 独立语句而不是扩展 updateJob:后者一次性重写 status/progress/error 等七个字段,
+    // 让它顺带管软删会把"删除"和"改状态"这两件事纠缠在一起。
+    const now = nowIso();
+    this.database.prepare('UPDATE generation_jobs SET deleted_at=?, updated_at=? WHERE id=?').run(now, now, jobId);
+    this.event(jobId, 'deleted', { removedFromQueue: queued !== -1 });
+    return { id: row.id, topic: row.topic, alreadyDeleted: false };
+  }
+
+  /** 撤销软删。 */
+  restore(jobId: string): Record<string, unknown> {
+    const row = this.jobRow(jobId);
+    if (!row.deleted_at) return { id: row.id, topic: row.topic, alreadyActive: true };
+    /*
+     * 只清 deleted_at,不重新入队。
+     *
+     * 被删的任务如果当时还在排队,软删已经把它摘出内存队列了;撤销时重新入队看似
+     * 对称,实则危险——用户删掉一个排队任务往往正是为了让它别跑(省额度、改主意)。
+     * 恢复出来的记录停在 queued 状态,由「按同款重试」显式重发,而不是悄悄开跑。
+     */
+    this.database.prepare('UPDATE generation_jobs SET deleted_at=NULL, updated_at=? WHERE id=?').run(nowIso(), jobId);
+    this.event(jobId, 'restored', {});
+    return { id: row.id, topic: row.topic, alreadyActive: false };
   }
 
   /**
