@@ -9,7 +9,8 @@ import {
   Injectable,
   InternalServerErrorException,
   NotFoundException,
-  OnModuleInit,
+  type OnModuleDestroy,
+  type OnModuleInit,
   PayloadTooLargeException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -36,6 +37,7 @@ import {
 } from '@content-agent/agent-core';
 import sharp from 'sharp';
 import { AuditService } from './audit.service.js';
+import { APP_OPTIONS, type ApiOptions } from './config.js';
 import { DatabaseService } from './database.service.js';
 import type { SessionPrincipal } from './models.js';
 import { ResourceService } from './resource.service.js';
@@ -173,22 +175,46 @@ export function analysisFailureException(error: unknown): HttpException {
 }
 
 @Injectable()
-export class IntelligenceService implements OnModuleInit {
+export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   private analysisTail: Promise<void> = Promise.resolve();
+  /** 在跑分析的心跳定时器,按 taskId 索引;任务收尾时清掉。 */
+  private readonly taskHeartbeats = new Map<string, NodeJS.Timeout>();
+  /** 已关停。心跳回调据此静默放弃,避免撞上已关闭的数据库连接。 */
+  private stopped = false;
 
   constructor(
     @Inject(DatabaseService) private readonly database: DatabaseService,
     @Inject(ResourceService) private readonly resources: ResourceService,
     @Inject(SettingsService) private readonly settings: SettingsService,
     @Inject(AuditService) private readonly audit: AuditService,
+    @Inject(APP_OPTIONS) private readonly options: ApiOptions,
   ) {}
 
+  /**
+   * 重启后清理本实例遗留的分析任务。
+   *
+   * 分析任务是 insert 时直接 running 的同步 inline 执行,没有队列可回,所以语义
+   * 仍是「重启即失败、重试安全」。改的是**范围**:原来无条件把全表 queued/running
+   * 标 failed,多实例下 B 启动会杀掉 A 正在跑的分析——用户那边表现为分析莫名失败。
+   *
+   * 判据只看心跳、不看归属:instanceId 含 pid 与随机后缀,进程重启后是新身份,
+   * 所以「心跳新鲜」就等于「有活着的实例在跑」。旧进程留下的行心跳必然停更,
+   * 靠超时一样能清掉。心跳为 NULL 的是迁移前的存量行,当作孤儿清理。
+   */
   onModuleInit(): void {
     const now = nowIso();
+    const deadline = new Date(Date.now() - this.options.jobClaimTimeoutMs).toISOString();
     this.database.prepare(
       `UPDATE analysis_tasks SET status='failed', error=?, completed_at=?, updated_at=?
-       WHERE status IN ('queued', 'running')`,
-    ).run('Application restart interrupted the analysis; retry is safe.', now, now);
+       WHERE status IN ('queued', 'running')
+         AND (heartbeat_at IS NULL OR heartbeat_at < ?)`,
+    ).run('Application restart interrupted the analysis; retry is safe.', now, now, deadline);
+  }
+
+  onModuleDestroy(): void {
+    this.stopped = true;
+    for (const timer of this.taskHeartbeats.values()) clearInterval(timer);
+    this.taskHeartbeats.clear();
   }
 
   listIntelligence(projectId: string): Record<string, unknown>[] {
@@ -1794,25 +1820,62 @@ export class IntelligenceService implements OnModuleInit {
   private createTask(projectId: string, kind: 'project' | 'image', targetId: string | null, fingerprint: string, principal: SessionPrincipal): AnalysisTaskRow {
     const id = randomUUID();
     const now = nowIso();
+    // 写上归属与心跳:别的实例启动时靠这两列判断「这个分析是不是还有人在跑」,
+    // 而不是无条件把它标 failed。
     this.database.prepare(
       `INSERT INTO analysis_tasks
        (id, project_id, kind, target_id, status, source_fingerprint, attempt_count,
-        created_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'running', ?, 1, ?, ?, ?)`,
-    ).run(id, projectId, kind, targetId, fingerprint, principal.userId, now, now);
+        created_by, created_at, updated_at, claimed_by, heartbeat_at)
+       VALUES (?, ?, ?, ?, 'running', ?, 1, ?, ?, ?, ?, ?)`,
+    ).run(id, projectId, kind, targetId, fingerprint, principal.userId, now, now, this.options.instanceId, now);
+    this.startTaskHeartbeat(id);
     return this.taskRow(id);
   }
 
+  /**
+   * 分析任务的心跳。分析是同步 inline 跑的,单次可能持续几分钟(实测知识库分析
+   * 三阶段串联),不续心跳的话另一个实例启动时会把它当成孤儿清掉。
+   */
+  private startTaskHeartbeat(taskId: string): void {
+    const timer = setInterval(() => {
+      // 关停时 Nest 可能先销毁 DatabaseService,这一拍会撞上已关闭的连接;
+      // 心跳是可跳过的周期性工作,静默放弃即可。
+      if (this.stopped) return;
+      try {
+        const result = this.database
+          .prepare('UPDATE analysis_tasks SET heartbeat_at=? WHERE id=? AND claimed_by=? AND status=?')
+          .run(nowIso(), taskId, this.options.instanceId, 'running');
+        // 任务已收尾(或已被清理),没必要再续。
+        if (!result.changes) this.stopTaskHeartbeat(taskId);
+      } catch { /* 关停竞态或瞬时锁冲突:下一拍再来 */ }
+    }, this.options.jobHeartbeatMs);
+    timer.unref();
+    this.taskHeartbeats.set(taskId, timer);
+  }
+
+  private stopTaskHeartbeat(taskId: string): void {
+    const timer = this.taskHeartbeats.get(taskId);
+    if (timer) clearInterval(timer);
+    this.taskHeartbeats.delete(taskId);
+  }
+
+  // 终态清空归属与心跳:留着会让已完成的分析看起来仍有实例在跑。
   private completeTask(id: string, resultId: string, now: string): void {
+    this.stopTaskHeartbeat(id);
     this.database.prepare(
-      `UPDATE analysis_tasks SET status='completed', result_id=?, error=NULL, completed_at=?, updated_at=? WHERE id=?`,
+      `UPDATE analysis_tasks SET status='completed', result_id=?, error=NULL, completed_at=?, updated_at=?,
+              claimed_by=NULL, heartbeat_at=NULL
+        WHERE id=?`,
     ).run(resultId, now, now, id);
   }
 
   private failTask(id: string, error: unknown): void {
+    this.stopTaskHeartbeat(id);
     const message = (error instanceof Error ? error.message : String(error)).slice(0, 1_000);
     this.database.prepare(
-      `UPDATE analysis_tasks SET status='failed', error=?, completed_at=?, updated_at=? WHERE id=?`,
+      `UPDATE analysis_tasks SET status='failed', error=?, completed_at=?, updated_at=?,
+              claimed_by=NULL, heartbeat_at=NULL
+        WHERE id=?`,
     ).run(message, nowIso(), nowIso(), id);
   }
 

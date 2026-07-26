@@ -16,6 +16,10 @@ import { GenerationService } from '../src/generation.service.js';
  * 不知道是在跑还是卡死,也看不到自己排在第几位。
  *
  * 这些用例锁住:queued 任务要能报出队列位置,running/completed 不报。
+ *
+ * 位次现在从 DB 算(status='queued' 按 created_at 排序),不再是某个实例的内存
+ * 数组下标——内存队列在多实例下让用户看到的位次是错的,每个实例只看得见自己的
+ * 那一段。并发上限 2 仍是每实例语义。
  */
 
 let app: NestExpressApplication;
@@ -38,7 +42,15 @@ async function request(path: string, options: RequestInit = {}) {
   return { response, body: body as any };
 }
 
-function seedJob(id: string, status: string) {
+/**
+ * 队列在 DB 里(status='queued'),位次按 (created_at, id) 算——与 claimNextJob 的
+ * 取件顺序一致。所以用例要显式给 createdAt 来控制先后,不能靠插入顺序。
+ *
+ * 原来这些用例往 service 的内存队列数组里 push 来造位次。队列改成 DB 驱动之后
+ * 那个注入点不存在了,而且内存队列本身就是被修掉的缺陷:多实例下它让位次失真。
+ * 现在 seed 真实的 queued 行,测的是真链路。
+ */
+function seedJob(id: string, status: string, createdAt?: string) {
   const db = app.get(DatabaseService);
   const admin = db.prepare("SELECT id FROM users WHERE username='admin'").get() as { id: string };
   db.prepare(
@@ -48,9 +60,14 @@ function seedJob(id: string, status: string) {
         resolution_snapshot_json, config_impact_json, opportunity_snapshot_json,
         planning_context_json, image_context_json, research_snapshot_json, quality_status)
      VALUES (?, ?, ?, '{"formula":{"versionId":"fv"},"knowledge":{"mode":"full","selectedFileIds":[]}}',
-        's', ?, datetime('now'), datetime('now'), ?, 'g', 'simple', 0, '{}', 1,
+        's', ?, ?, datetime('now'), ?, 'g', 'simple', 0, '{}', 1,
         '{}', '{}', '{}', '{}', '[]', '{}', 'unknown')`,
-  ).run(id, projectId, status, admin.id, `选题-${id}`);
+  ).run(id, projectId, status, admin.id, createdAt ?? new Date().toISOString(), `选题-${id}`);
+}
+
+/** 每个用例独占队列状态:位次是全局真值,残留的 queued 行会串味。 */
+function clearJobs() {
+  app.get(DatabaseService).prepare('DELETE FROM generation_jobs').run();
 }
 
 before(async () => {
@@ -77,13 +94,12 @@ after(async () => {
   if (dataDir) await rm(dataDir, { recursive: true, force: true });
 });
 
-test('queued 任务报出队列位置,按入队顺序从 1 开始', () => {
+test('queued 任务报出队列位置,按排队先后从 1 开始', () => {
   const service = app.get(GenerationService);
-  seedJob('q-1', 'queued');
-  seedJob('q-2', 'queued');
-  seedJob('q-3', 'queued');
-  // 直接把 id 塞进内存队列(真实入队要走生成,依赖模型)
-  (service as unknown as { queue: string[] }).queue.push('q-1', 'q-2', 'q-3');
+  clearJobs();
+  seedJob('q-1', 'queued', '2026-07-26T00:00:01.000Z');
+  seedJob('q-2', 'queued', '2026-07-26T00:00:02.000Z');
+  seedJob('q-3', 'queued', '2026-07-26T00:00:03.000Z');
 
   assert.equal(service.queuePosition('q-1'), 1);
   assert.equal(service.queuePosition('q-2'), 2);
@@ -97,10 +113,8 @@ test('不在队列里的任务返回 undefined,不返回 0 或 -1', () => {
 });
 
 test('详情接口给 queued 任务带上 queuePosition', async () => {
-  const service = app.get(GenerationService);
+  clearJobs();
   seedJob('q-api', 'queued');
-  (service as unknown as { queue: string[] }).queue.length = 0;
-  (service as unknown as { queue: string[] }).queue.push('q-api');
 
   const { response, body } = await request('/api/generations/q-api');
   assert.equal(response.status, 200);
@@ -108,17 +122,16 @@ test('详情接口给 queued 任务带上 queuePosition', async () => {
 });
 
 test('running 任务不带 queuePosition:它已经在跑,不在排队', async () => {
+  clearJobs();
   seedJob('r-api', 'running');
   const { body } = await request('/api/generations/r-api');
   assert.equal(body.queuePosition, undefined);
 });
 
 test('列表也带 queuePosition:产出区要显示每条排在第几', async () => {
-  const service = app.get(GenerationService);
-  (service as unknown as { queue: string[] }).queue.length = 0;
-  (service as unknown as { queue: string[] }).queue.push('q-list-a', 'q-list-b');
-  seedJob('q-list-a', 'queued');
-  seedJob('q-list-b', 'queued');
+  clearJobs();
+  seedJob('q-list-a', 'queued', '2026-07-26T00:00:01.000Z');
+  seedJob('q-list-b', 'queued', '2026-07-26T00:00:02.000Z');
 
   const { body } = await request(`/api/generations?projectId=${projectId}`);
   const a = body.find((j: any) => j.id === 'q-list-a');
@@ -128,10 +141,10 @@ test('列表也带 queuePosition:产出区要显示每条排在第几', async ()
 });
 
 test('不排队的任务连 queueLength 都不带:已完成的稿子带全局队列长度只是噪声', async () => {
-  const service = app.get(GenerationService);
+  clearJobs();
   seedJob('c-api', 'completed');
-  (service as unknown as { queue: string[] }).queue.length = 0;
-  (service as unknown as { queue: string[] }).queue.push('someone-else');
+  // 另有一条真在排队:证明「不带 queueLength」不是因为队列恰好空。
+  seedJob('someone-else', 'queued');
 
   const detail = await request('/api/generations/c-api');
   assert.equal(detail.body.queuePosition, undefined);
@@ -144,7 +157,25 @@ test('不排队的任务连 queueLength 都不带:已完成的稿子带全局队
 
 test('queueLength 报出当前排队总数,让「第 3/24 位」成立', () => {
   const service = app.get(GenerationService);
-  (service as unknown as { queue: string[] }).queue.length = 0;
-  (service as unknown as { queue: string[] }).queue.push('a', 'b', 'c');
+  clearJobs();
+  seedJob('len-a', 'queued');
+  seedJob('len-b', 'queued');
+  seedJob('len-c', 'queued');
+  // running 与终态不计入排队总数。
+  seedJob('len-running', 'running');
+  seedJob('len-done', 'completed');
+
   assert.equal(service.queueLength(), 3);
+});
+
+test('软删的任务不占位次:产出区删掉的不该再显示在排队里', () => {
+  const service = app.get(GenerationService);
+  clearJobs();
+  seedJob('del-1', 'queued', '2026-07-26T00:00:01.000Z');
+  seedJob('del-2', 'queued', '2026-07-26T00:00:02.000Z');
+  service.softDelete('del-1');
+
+  assert.equal(service.queueLength(), 1);
+  assert.equal(service.queuePosition('del-1'), undefined);
+  assert.equal(service.queuePosition('del-2'), 1, '前面那条删掉后位次应前移');
 });

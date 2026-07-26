@@ -13,7 +13,7 @@ export type SqlValue = string | number | bigint | Uint8Array | null;
  * 无关的测试变红——那不是回归信号,是维护噪声。测试断言这个常量,真正想验的
  * 「迁移到最新且表结构对得上」不变。
  */
-export const SCHEMA_VERSION = 13;
+export const SCHEMA_VERSION = 14;
 
 @Injectable()
 export class DatabaseService implements OnModuleDestroy {
@@ -815,6 +815,52 @@ export class DatabaseService implements OnModuleDestroy {
       `);
     });
     if (version < 13) version = 13;
+
+    if (version < 14) this.transaction(() => {
+      /*
+       * 任务的实例归属与心跳。
+       *
+       * 队列与恢复逻辑原来假设「本进程独占这个 DB」:recoverInterruptedJobs 无条件
+       * 抓全表 queued/running 重置,于是多实例下 B 启动会把 A 正在跑的任务判成
+       * 「被重启打断」——同一任务被两个实例并发执行(重复烧模型调用),三轮误判后
+       * 触顶判 failed。实测两个任务就是这么死的,报「被应用重启多次打断(3 次)」
+       * 而实际上没有任何一次真正的重启。
+       *
+       * claimed_by 让领取变成原子事实:UPDATE ... WHERE status='queued' 的
+       * changes===1 才算领到,SQLite 的单写者模型保证两个实例不可能都拿到。
+       * heartbeat_at 让「实例死了」和「实例在正常跑」可区分,回收只动前者。
+       *
+       * 存量行 claimed_by 为 NULL。回收逻辑必须把「NULL 且 running」当作上一代
+       * 进程留下的孤儿接管,否则升级那一刻在跑的任务会永久卡在 running。
+       */
+      this.db.exec(`
+        ALTER TABLE generation_jobs ADD COLUMN claimed_by TEXT;
+        ALTER TABLE generation_jobs ADD COLUMN claimed_at TEXT;
+        ALTER TABLE generation_jobs ADD COLUMN heartbeat_at TEXT;
+        /*
+         * 索引只含本次 ALTER 出来的两列,不带 status。
+         *
+         * 见 v13 的同类说明:从 v3 升上来的老库里 generation_jobs 只有 id 一列,
+         * status/project_id 都不存在,把它们写进索引会让整条迁移以「no such
+         * column: status」失败(实测 migrates a v3 database 用例就是这样红的)。
+         * 回收扫描按 heartbeat_at 筛,这个索引已经顶住;status 维度由 v1 的
+         * generation_jobs_project_idx 与主键覆盖。
+         */
+        CREATE INDEX generation_jobs_claim_idx
+          ON generation_jobs(claimed_by, heartbeat_at);
+
+        /*
+         * 分析任务是 insert 时直接 running 的同步 inline 执行,没有队列可回,
+         * 所以只加归属与心跳、不加 claimed_at:它需要的是「别杀别人的」,
+         * 不是「原子领取」。
+         */
+        ALTER TABLE analysis_tasks ADD COLUMN claimed_by TEXT;
+        ALTER TABLE analysis_tasks ADD COLUMN heartbeat_at TEXT;
+
+        PRAGMA user_version = 14;
+      `);
+    });
+    if (version < 14) version = 14;
   }
 
   onModuleDestroy(): void {

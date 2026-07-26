@@ -18,7 +18,10 @@ import {
   type PlanningContext,
   type ResolvedGenerationConfig,
 } from '@content-agent/agent-core';
-import { BadRequestException, Inject, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
+import {
+  BadRequestException, Inject, Injectable, NotFoundException,
+  type OnModuleDestroy, type OnModuleInit,
+} from '@nestjs/common';
 import { AuditService } from './audit.service.js';
 import { APP_OPTIONS, type ApiOptions } from './config.js';
 import { DatabaseService } from './database.service.js';
@@ -30,7 +33,13 @@ import {
 } from './diagnostic-contract.js';
 import { FormulaService } from './formula.service.js';
 import { readerView } from './generation-reader-view.js';
-import { recoverInterruptedJobs } from './generation-restart-recovery.js';
+import {
+  claimNextJob,
+  heartbeatJob,
+  queuedJobCount,
+  queuedJobPosition,
+  reclaimStaleJobs,
+} from './job-claim.js';
 import { detectProviderOutage } from './provider-outage.js';
 import { IntelligenceService } from './intelligence.service.js';
 import type { SessionPrincipal } from './models.js';
@@ -212,10 +221,20 @@ export function classifyImageBriefKind(actualImageBrief: string, artifactStatus?
 }
 
 @Injectable()
-export class GenerationService implements OnModuleInit {
-  private readonly queue: string[] = [];
+export class GenerationService implements OnModuleInit, OnModuleDestroy {
+  /**
+   * 本实例正在跑的任务数。队列本身在 DB 里(status='queued'),这里只留本地计数——
+   * 它约束的是**本实例**的并发度(内存、本地 CPU),不是全局资源。真正需要全局
+   * 约束的模型并发由 modelMaxConcurrentRequests 与中继侧的凭据池负责。
+   */
   private activeJobs = 0;
   private readonly maxConcurrentJobs = 2;
+  /** 在跑任务的心跳定时器,按 jobId 索引;任务收尾时清掉。 */
+  private readonly heartbeats = new Map<string, NodeJS.Timeout>();
+  /** 孤儿回收的周期扫描。只在启动时回收不够:实例中途崩掉,它的任务要等下次有人启动才被收回。 */
+  private reclaimTimer?: NodeJS.Timeout;
+  /** 已关停。定时器回调据此静默放弃,避免撞上已关闭的数据库连接。 */
+  private stopped = false;
 
   constructor(
     @Inject(DatabaseService) private readonly database: DatabaseService,
@@ -230,8 +249,49 @@ export class GenerationService implements OnModuleInit {
   ) {}
 
   onModuleInit(): void {
-    const recovered = recoverInterruptedJobs(this.database);
-    for (const jobId of recovered) this.enqueue(jobId);
+    this.reclaimAndDrain();
+    // unref:定时器不该阻止进程退出,否则测试里 app.close() 之后进程挂着不走。
+    this.reclaimTimer = setInterval(() => this.tick(() => this.reclaimAndDrain()), this.options.jobHeartbeatMs);
+    this.reclaimTimer.unref();
+  }
+
+  onModuleDestroy(): void {
+    this.stopped = true;
+    if (this.reclaimTimer) clearInterval(this.reclaimTimer);
+    for (const timer of this.heartbeats.values()) clearInterval(timer);
+    this.heartbeats.clear();
+  }
+
+  /**
+   * 定时器回调的统一护栏。
+   *
+   * 关停时 Nest 可能先销毁 DatabaseService、后触发本服务的 onModuleDestroy(销毁
+   * 顺序按依赖图,不保证定时器先停),这一拍回调就会撞上「database is not open」
+   * 并冒成 unhandledRejection——实测 research 测试因此变红。定时任务全是可跳过的
+   * 周期性工作,关停途中静默放弃是正确行为,不需要报错。
+   */
+  private tick(fn: () => void): void {
+    if (this.stopped) return;
+    try { fn(); } catch { /* 关停竞态或瞬时锁冲突:下一拍再来 */ }
+  }
+
+  /**
+   * 回收心跳超时的孤儿任务,然后领取。
+   *
+   * 回收只看心跳、不看归属:instanceId 含 pid 与随机后缀,重启后是新身份,所以
+   * 「心跳新鲜」就等于「有活着的实例在跑」,不论那是谁。这是修掉误杀的关键——原
+   * 实现在这里把别的实例正在跑的任务抢回队列,导致同一任务被并发执行、三轮后
+   * 触顶判 failed。
+   */
+  private reclaimAndDrain(): void {
+    const result = reclaimStaleJobs(this.database, nowIso(), this.options.jobClaimTimeoutMs);
+    for (const jobId of result.requeued) {
+      this.event(jobId, 'requeued', { reason: 'claim_timeout' });
+    }
+    for (const jobId of result.failed) {
+      this.event(jobId, 'failed', { message: '任务被反复打断，已停止自动重跑' });
+    }
+    this.drainQueue();
   }
 
   create(raw: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
@@ -442,15 +502,15 @@ export class GenerationService implements OnModuleInit {
   softDelete(jobId: string): Record<string, unknown> {
     const row = this.jobRow(jobId);
     if (row.deleted_at) return { id: row.id, topic: row.topic, alreadyDeleted: true };
-    // 还在队列里的任务先摘出队列,否则删掉之后它照样会被 drainQueue 捞起来跑,
-    // 白烧一次模型调用(额度在创建时已扣,跑完也没人看)。
-    const queued = this.queue.indexOf(jobId);
-    if (queued !== -1) this.queue.splice(queued, 1);
+    // 队列在 DB 里,而领取与位次查询都带 deleted_at IS NULL,所以软删本身就让它
+    // 不再被 drainQueue 捞起来跑——不需要额外摘队列。这比原来只摘本实例内存队列
+    // 更可靠:多实例下别的实例照样不会捞它。
+    const wasQueued = row.status === 'queued';
     // 独立语句而不是扩展 updateJob:后者一次性重写 status/progress/error 等七个字段,
     // 让它顺带管软删会把"删除"和"改状态"这两件事纠缠在一起。
     const now = nowIso();
     this.database.prepare('UPDATE generation_jobs SET deleted_at=?, updated_at=? WHERE id=?').run(now, now, jobId);
-    this.event(jobId, 'deleted', { removedFromQueue: queued !== -1 });
+    this.event(jobId, 'deleted', { removedFromQueue: wasQueued });
     return { id: row.id, topic: row.topic, alreadyDeleted: false };
   }
 
@@ -657,23 +717,26 @@ export class GenerationService implements OnModuleInit {
    * queued 阶段恒为 0,用户无法区分"排队中"和"卡死",所以把位次露出来。
    */
   queuePosition(jobId: string): number | undefined {
-    const index = this.queue.indexOf(jobId);
-    return index === -1 ? undefined : index + 1;
+    return queuedJobPosition(this.database, jobId);
   }
 
   /** 当前排队总数,让前端能说"第 3/24 位"而不是光一个 3。 */
   queueLength(): number {
-    return this.queue.length;
+    return queuedJobCount(this.database);
   }
 
   /** 两个映射(列表/详情)共用的排队字段,只在真的排队时出现。 */
   private queueView(jobId: string): { queuePosition?: number; queueLength?: number } {
     const position = this.queuePosition(jobId);
-    return position === undefined ? {} : { queuePosition: position, queueLength: this.queue.length };
+    return position === undefined ? {} : { queuePosition: position, queueLength: this.queueLength() };
   }
 
-  private enqueue(jobId: string): void {
-    this.queue.push(jobId);
+  /**
+   * 触发领取。任务插入时已经是 status='queued',DB 本身就是队列,所以这里不再
+   * 往内存数组里 push——多实例下内存队列会让位次失真、让 outage 清理漏掉别的
+   * 实例上的任务。
+   */
+  private enqueue(_jobId: string): void {
     this.drainQueue();
   }
 
@@ -691,35 +754,34 @@ export class GenerationService implements OnModuleInit {
    * 返回被清掉的任务数,供调用方写审计。
    */
   private failQueuedForOutage(projectId: string, reason: string): number {
-    const remaining: string[] = [];
-    const cleared: string[] = [];
-    for (const queuedId of this.queue) {
-      let row: JobRow | undefined;
-      try { row = this.jobRow(queuedId); } catch { row = undefined; }
-      // 读不到行的一律留在队列里:宁可多跑一篇,也不要凭猜测判死任务
-      if (row?.project_id === projectId) cleared.push(queuedId);
-      else remaining.push(queuedId);
-    }
-    if (cleared.length === 0) return 0;
-    // 原地替换队列内容(queue 是 readonly 引用,位次计算依赖同一个数组)
-    this.queue.length = 0;
-    this.queue.push(...remaining);
-    for (const clearedId of cleared) {
-      this.updateJob(clearedId, { status: 'failed', error: reason, progress: 100, completedAt: nowIso() });
-      this.event(clearedId, 'failed', { message: reason, providerOutage: true });
+    // 直接按项目 + status 清库,覆盖所有实例上的排队任务。原来只遍历本实例内存
+    // 队列,多实例下别的实例上同项目的任务不会被清——而这个函数存在的全部意义
+    // 就是避免每篇再花 16 分钟撞同一面墙。
+    const cleared = this.database
+      .prepare("SELECT id FROM generation_jobs WHERE project_id=? AND status='queued' AND deleted_at IS NULL")
+      .all(projectId) as unknown as Array<{ id: string }>;
+    if (!cleared.length) return 0;
+    for (const row of cleared) {
+      this.updateJob(row.id, { status: 'failed', error: reason, progress: 100, completedAt: nowIso() });
+      this.event(row.id, 'failed', { message: reason, providerOutage: true });
     }
     return cleared.length;
   }
 
   private drainQueue(): void {
-    while (this.activeJobs < this.maxConcurrentJobs && this.queue.length) {
-      const jobId = this.queue.shift();
+    // 关停途中不再领新活:领了也跑不完,而且 process 会在连接关闭后继续写库。
+    // 已领的任务留在 running,心跳停更后由下一个实例(或本实例重启后)回收。
+    if (this.stopped) return;
+    while (this.activeJobs < this.maxConcurrentJobs) {
+      // 领取是原子的:changes===1 才拿到,两个实例不可能都领到同一条。
+      const jobId = claimNextJob(this.database, this.options.instanceId, nowIso());
       if (!jobId) return;
       this.activeJobs += 1;
       setImmediate(() => {
         void this.process(jobId)
           .catch(() => undefined)
           .finally(() => {
+            this.stopHeartbeat(jobId);
             this.activeJobs -= 1;
             this.drainQueue();
           });
@@ -727,10 +789,67 @@ export class GenerationService implements OnModuleInit {
     }
   }
 
+  /**
+   * 心跳续约。返回 false 表示本实例已丢失这个任务的所有权(被回收或被接管),
+   * 调用方必须停手——否则两个实例会同时写同一个任务的产出。
+   */
+  private startHeartbeat(jobId: string): void {
+    const timer = setInterval(() => this.tick(() => {
+      if (!heartbeatJob(this.database, jobId, this.options.instanceId, nowIso())) this.stopHeartbeat(jobId);
+    }), this.options.jobHeartbeatMs);
+    timer.unref();
+    this.heartbeats.set(jobId, timer);
+  }
+
+  private stopHeartbeat(jobId: string): void {
+    const timer = this.heartbeats.get(jobId);
+    if (timer) clearInterval(timer);
+    this.heartbeats.delete(jobId);
+  }
+
+  /**
+   * 推进进度。关停途中静默跳过:进度只是 UI 反馈,而 process 的 await 之间可能
+   * 跨过 app.close(),这时写库会撞上已关闭的连接。
+   */
+  private progress(jobId: string, value: number, knowledgeContext?: unknown): void {
+    if (this.stopped) return;
+    try {
+      this.updateJob(jobId, knowledgeContext === undefined
+        ? { progress: value }
+        : { progress: value, knowledgeContext });
+    } catch { /* 关停竞态:任务留在 running,由回收接管 */ }
+  }
+
+  /**
+   * 本实例是否仍应该写这个任务的结果。收尾写库前确认一次。
+   *
+   * 两种情况要停手:(a) 已关停——连接可能已经关闭,继续写会撞上「database is not
+   * open」并冒成 unhandledRejection;任务留在 running,心跳停更后由下一个实例回收。
+   * (b) 归属已易主——任务被回收并被别的实例接管重跑,再写就会与接管者互相覆盖,
+   * 同一个 job 出现两套 content_packages。
+   */
+  private stillOwns(jobId: string): boolean {
+    if (this.stopped) return false;
+    try {
+      const row = this.database
+        .prepare('SELECT claimed_by FROM generation_jobs WHERE id=?')
+        .get(jobId) as { claimed_by: string | null } | undefined;
+      return row?.claimed_by === this.options.instanceId;
+    } catch {
+      // 关停竞态:连接已关闭。当作不再持有,放弃写入。
+      return false;
+    }
+  }
+
   private async process(jobId: string): Promise<void> {
     const job = this.jobRow(jobId);
-    this.updateJob(jobId, { status: 'running', progress: 12, error: null });
+    // status 已由 claimNextJob 原子置为 running,这里只推进进度。
+    this.updateJob(jobId, { progress: 12, error: null });
+    this.startHeartbeat(jobId);
     this.event(jobId, 'running', {});
+    // process 的每个 await 之间都可能跨过 app.close()。收尾写入靠 stillOwns 挡,
+    // 中途的进度更新靠 progress() 挡,失败路径也检查 stillOwns。
+
     try {
       const config = parseJson<ResolvedGenerationConfig>(job.config_json, {} as ResolvedGenerationConfig);
       const storedResolution = parseJson<Record<string, unknown>>(job.resolution_snapshot_json, {});
@@ -742,9 +861,9 @@ export class GenerationService implements OnModuleInit {
       const formula = this.formulas.get(job.formula_version_id).version;
       const project = this.resources.projectRow(job.project_id);
       const providerSettings = this.settings.provider(String(project.workspace_id), job.created_by);
-      this.updateJob(jobId, { progress: 28 });
+      this.progress(jobId, 28);
       const knowledge = await this.loadKnowledge(job.project_id);
-      this.updateJob(jobId, { progress: 44 });
+      this.progress(jobId, 44);
       const planningContext = await this.intelligence.hydratePlanningContext(job.project_id, storedPlanningContext);
       const agent = new ContentGenerationAgent({ modelProvider: this.modelProvider(providerSettings) });
       const result = await agent.generate({ jobId, config, formulaVersion: formula, knowledge, parameterSelection, planningContext });
@@ -770,7 +889,14 @@ export class GenerationService implements OnModuleInit {
       const impactReport = result.impactReport ?? storedImpact;
       const validCandidateCount = result.packages.filter((content) => content.validation.valid).length;
       const qualityStatus = deriveQualityStatus(result.packages);
-      this.updateJob(jobId, { progress: 88, knowledgeContext: result.knowledgeContext });
+      // 收尾前确认所有权:若本实例的心跳曾经断掉、任务已被别的实例接管并重跑,
+      // 这里再写产出就会与接管者互相覆盖(同一 job 出现两套 content_packages)。
+      // 放弃写入而不是抛错:接管者会完整跑完,用户拿到的仍是一份正常产出。
+      if (!this.stillOwns(jobId)) {
+        this.event(jobId, 'claim_lost', { message: '任务已被其他实例接管，本次结果丢弃' });
+        return;
+      }
+      this.progress(jobId, 88, result.knowledgeContext);
       this.database.transaction(() => {
         for (const content of result.packages) {
           if (resolutionSnapshot && !content.resolutionSnapshot) content.resolutionSnapshot = resolutionSnapshot;
@@ -840,7 +966,11 @@ export class GenerationService implements OnModuleInit {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message.slice(0, 1_000) : String(error).slice(0, 1_000);
-      this.updateJob(jobId, { status: 'failed', error: message, progress: 100, completedAt: nowIso() });
+      // 已被接管的任务不写失败态:接管者可能正跑得好好的,把它标 failed 是覆盖
+      // 别人的正确结果。本次失败只记事件,不改状态。
+      if (this.stillOwns(jobId)) {
+        this.updateJob(jobId, { status: 'failed', error: message, progress: 100, completedAt: nowIso() });
+      }
       this.event(jobId, 'failed', { message });
       // 供应商级故障(余额不足/无可用账号/凭据冷却):后面排队的注定同样失败,
       // 立刻判掉而不是每篇再花 16 分钟撞一次同一面墙。单篇级错误不触发。
@@ -1142,9 +1272,18 @@ export class GenerationService implements OnModuleInit {
 
   private updateJob(jobId: string, input: { status?: string; qualityStatus?: JobRow['quality_status']; progress?: number; error?: string | null; completedAt?: string; knowledgeContext?: unknown }): void {
     const row = this.jobRow(jobId);
+    const status = input.status ?? row.status;
+    // 终态清空归属与心跳:留着会让已完成的任务看起来仍被某个实例持有,回收扫描
+    // 也得多筛一层。清掉之后「claimed_by 非空」就精确等于「有实例正在跑」。
+    const terminal = status === 'completed' || status === 'failed';
     this.database
-      .prepare('UPDATE generation_jobs SET status=?, quality_status=?, progress=?, error=?, completed_at=?, knowledge_context_json=?, updated_at=? WHERE id=?')
-      .run(input.status ?? row.status, input.qualityStatus ?? row.quality_status, input.progress ?? row.progress, input.error === undefined ? row.error : input.error, input.completedAt ?? row.completed_at, input.knowledgeContext === undefined ? row.knowledge_context_json : JSON.stringify(input.knowledgeContext), nowIso(), jobId);
+      .prepare(
+        `UPDATE generation_jobs
+            SET status=?, quality_status=?, progress=?, error=?, completed_at=?, knowledge_context_json=?, updated_at=?
+                ${terminal ? ', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL' : ''}
+          WHERE id=?`,
+      )
+      .run(status, input.qualityStatus ?? row.quality_status, input.progress ?? row.progress, input.error === undefined ? row.error : input.error, input.completedAt ?? row.completed_at, input.knowledgeContext === undefined ? row.knowledge_context_json : JSON.stringify(input.knowledgeContext), nowIso(), jobId);
   }
 
   private event(jobId: string, event: string, details: Record<string, unknown>): void {

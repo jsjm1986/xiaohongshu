@@ -68,8 +68,20 @@ function failQueued(projectId: string, reason: string): number {
   return service.failQueuedForOutage(projectId, reason);
 }
 
-function queueRef(): string[] {
-  return (app.get(GenerationService) as unknown as { queue: string[] }).queue;
+/**
+ * 队列在 DB 里(status='queued'),所以「清空队列」就是「那些行不再是 queued」。
+ * 原来这些用例往内存数组里 push id 来造队列——那个数组已经删掉了,它本身就是被
+ * 修掉的缺陷:多实例下 failQueuedForOutage 只看得见自己那一段,别的实例上同项目
+ * 的排队任务照样会各花 16 分钟去撞同一面墙。
+ */
+function queuedIds(): string[] {
+  return (app.get(DatabaseService)
+    .prepare("SELECT id FROM generation_jobs WHERE status='queued' AND deleted_at IS NULL ORDER BY created_at, id")
+    .all() as Array<{ id: string }>).map((row) => row.id);
+}
+
+function clearJobs(): void {
+  app.get(DatabaseService).prepare('DELETE FROM generation_jobs').run();
 }
 
 before(async () => {
@@ -103,9 +115,8 @@ after(async () => {
 });
 
 test('余额不足时同项目排队任务全部判失败,并写明原因与出路', () => {
-  const queue = queueRef();
-  queue.length = 0;
-  for (const id of ['a1', 'a2', 'a3']) { seedQueued(id, projectA); queue.push(id); }
+  clearJobs();
+  for (const id of ['a1', 'a2', 'a3']) seedQueued(id, projectA);
 
   const reason = '模型账户余额不足，本项目排队中的任务已停止，充值后可在产出区批量重试';
   assert.equal(failQueued(projectA, reason), 3);
@@ -117,58 +128,64 @@ test('余额不足时同项目排队任务全部判失败,并写明原因与出�
     // progress 置 100 与既有失败路径一致,前端不会显示成"还在跑"
     assert.equal(Number(row.progress), 100);
   }
-  assert.equal(queue.length, 0, '队列应被清空');
+  assert.deepEqual(queuedIds(), [], '队列应被清空');
 });
 
 test('跨项目不牵连:另一个项目可能用自己的 BYOK 密钥', () => {
-  const queue = queueRef();
-  queue.length = 0;
+  clearJobs();
   seedQueued('x1', projectA);
   seedQueued('y1', projectB);
   seedQueued('x2', projectA);
-  queue.push('x1', 'y1', 'x2');
 
   assert.equal(failQueued(projectA, '余额不足'), 2);
   assert.equal(statusOf('x1').status, 'failed');
   assert.equal(statusOf('x2').status, 'failed');
   // B 项目的任务既不改状态,也要留在队列里继续跑
   assert.equal(statusOf('y1').status, 'queued');
-  assert.deepEqual(queue, ['y1']);
+  assert.deepEqual(queuedIds(), ['y1']);
 });
 
 test('队列里没有该项目的任务时返回 0,不误伤别人', () => {
-  const queue = queueRef();
-  queue.length = 0;
+  clearJobs();
   seedQueued('z1', projectB);
-  queue.push('z1');
   assert.equal(failQueued(projectA, '余额不足'), 0);
   assert.equal(statusOf('z1').status, 'queued');
-  assert.deepEqual(queue, ['z1']);
+  assert.deepEqual(queuedIds(), ['z1']);
 });
 
 test('队列为空时安全返回 0', () => {
-  queueRef().length = 0;
+  clearJobs();
   assert.equal(failQueued(projectA, '余额不足'), 0);
 });
 
-test('队列里有读不到的任务 id 时保留它,不凭猜测判死', () => {
-  const queue = queueRef();
-  queue.length = 0;
-  seedQueued('k1', projectA);
-  // 'ghost' 在库里不存在(例如已被清理);jobRow 会抛 NotFound
-  queue.push('ghost', 'k1');
+test('只清排队中的:已在跑的任务不被牵连,它可能马上就出稿了', () => {
+  clearJobs();
+  seedQueued('run-1', projectA);
+  app.get(DatabaseService).prepare("UPDATE generation_jobs SET status='running' WHERE id='run-1'").run();
+  seedQueued('wait-1', projectA);
+
   assert.equal(failQueued(projectA, '余额不足'), 1);
-  assert.equal(statusOf('k1').status, 'failed');
-  assert.deepEqual(queue, ['ghost'], '读不到的 id 留在队列里');
+  assert.equal(statusOf('run-1').status, 'running', '在跑的任务由它自己的失败路径处理');
+  assert.equal(statusOf('wait-1').status, 'failed');
+});
+
+test('软删的任务不被清:它已经不在队列里,再判一次失败只是噪声', () => {
+  clearJobs();
+  seedQueued('gone', projectA);
+  const service = app.get(GenerationService);
+  service.softDelete('gone');
+  seedQueued('alive', projectA);
+
+  assert.equal(failQueued(projectA, '余额不足'), 1);
+  assert.equal(statusOf('gone').status, 'queued', '软删的行状态不该被改写');
+  assert.equal(statusOf('alive').status, 'failed');
 });
 
 test('已扣的配额不退:计费在创建时发生,重试走产出区', async () => {
   const db = app.get(DatabaseService);
   const before = db.prepare('SELECT quota_used FROM workspace_settings LIMIT 1').get() as { quota_used: number } | undefined;
-  const queue = queueRef();
-  queue.length = 0;
+  clearJobs();
   seedQueued('q1', projectA);
-  queue.push('q1');
   failQueued(projectA, '余额不足');
   const afterRow = db.prepare('SELECT quota_used FROM workspace_settings LIMIT 1').get() as { quota_used: number } | undefined;
   assert.equal(afterRow?.quota_used, before?.quota_used, '快失败不该改动配额');
