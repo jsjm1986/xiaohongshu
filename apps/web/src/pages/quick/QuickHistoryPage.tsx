@@ -69,6 +69,7 @@ export function QuickHistoryPage() {
       activeBatchId={w.activeBatchId}
       focusJobId={focusJobId}
       onReuseRecipe={(job) => void onReuseRecipe(job)}
+      onGoCreate={() => navigate(areaPath(project.id, 'create'))}
     />
   );
 }

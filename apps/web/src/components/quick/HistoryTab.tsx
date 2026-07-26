@@ -26,6 +26,8 @@ interface Props {
   focusJobId?: string;
   /** 「再来一篇同款」:把该任务的配方回灌创作区 */
   onReuseRecipe?: (job: GenerationJob) => void;
+  /** 空态里的「去创作」出路;未接通时该按钮不显示 */
+  onGoCreate?: () => void;
 }
 
 const STATUS_LABEL: Record<string, { text: string; tone: 'ok' | 'warn' | 'error' | 'muted' }> = {
@@ -45,7 +47,7 @@ const STATUS_CHIPS: Array<{ key: GenerationStatusFilter; label: string }> = [
   { key: 'failed', label: '失败' },
 ];
 
-export function HistoryTab({ project, history, fail, setHistory, activeBatchId, focusJobId, onReuseRecipe }: Props) {
+export function HistoryTab({ project, history, fail, setHistory, activeBatchId, focusJobId, onReuseRecipe, onGoCreate }: Props) {
   const toast = useToast();
   const navigate = useNavigate();
   /**
@@ -289,7 +291,13 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
             <button key={c.key} type="button" className={`chip${statusFilter === c.key ? ' chip--active' : ''}`} onClick={() => setStatusFilter(c.key)}>{c.label}</button>
           ))}
         </div>
-        <input value={keyword} onChange={(e) => setKeyword(e.target.value)} placeholder="搜索标题关键词" />
+        {/* placeholder 不是可访问名:读屏软件在输入后就读不到它了,补 aria-label */}
+        <input
+          value={keyword}
+          onChange={(e) => setKeyword(e.target.value)}
+          placeholder="搜索标题关键词"
+          aria-label="搜索产出标题"
+        />
       </div>
 
       <ul className="qc-history-list">
@@ -364,14 +372,26 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
               正在加载产出…
             </li>
           ) : history.length === 0 ? (
+            // 空态要给出路。原来只有一句「还没有产出」——用户站在一个空列表前,
+            // 下一步在别的区,而这里一个字都没说。
             <li className="qc-empty">
               <span className="qc-empty__icon"><Clock size={18} /></span>
-              还没有产出
+              还没有产出。去创作区选个选题,生成第一篇。
+              {onGoCreate && (
+                <Button variant="secondary" onClick={onGoCreate}>去创作</Button>
+              )}
             </li>
           ) : (
+            // 筛出空同理:用户可能忘了自己还挂着筛选条件,给一键清除
             <li className="qc-empty">
               <span className="qc-empty__icon"><SearchX size={18} /></span>
-              没有符合筛选条件的历史
+              没有符合筛选条件的产出（共 {history.length} 篇）。
+              <Button
+                variant="ghost"
+                onClick={() => { setStatusFilter('all'); setKeyword(''); }}
+              >
+                清除筛选
+              </Button>
             </li>
           )
         )}

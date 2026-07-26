@@ -4001,3 +4001,38 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 /* 例外:嵌在徽标行里的幽灵按钮(批次子卡的「再来一篇同款」/「重试」)必须保持紧凑,
    否则一格里「待核查 + 按钮」放不下会折成两行,子卡高度翻倍。 */
 .quick-shell .qc-jobcell__badge .button { padding: 2px 7px; font-size: var(--v2-fs-micro); }
+
+/* ==========================================================================
+   基础版 · 手机端(D 段)
+   ==========================================================================
+   实测 390px 视口:无横向溢出,但步骤条的四个区名被逐字折行成「总/览」「知识/库」
+   ——连接线各占 14px margin + ::before 的 14px 宽度,四个区加起来吃掉了 100px+,
+   剩给文字的宽度不足一个词。手机上不画连接线,让四个区平分整行。
+   ========================================================================== */
+@media (max-width: 560px) {
+  /* 连接线与额外左边距一起去掉:它是桌面端「四步流程」的装饰,不是信息 */
+  .quick-shell .qc-page .qc-tabs button:not(:first-child),
+  .quick-shell .qc-page .qc-tabs a:not(:first-child) { margin-left: 0; }
+  .quick-shell .qc-page .qc-tabs button:not(:first-child)::before,
+  .quick-shell .qc-page .qc-tabs a:not(:first-child)::before { content: none; }
+  /* 四个区平分一行,文字不折 */
+  .quick-shell .qc-page .qc-tabs { gap: 2px; }
+  .quick-shell .qc-page .qc-tabs button,
+  .quick-shell .qc-page .qc-tabs a {
+    flex: 1 1 0; min-width: 0; padding: 9px 4px;
+    text-align: center; white-space: nowrap; font-size: var(--v2-fs-sm);
+  }
+
+  /* 顶栏:品牌副标题(「基础版」)在窄屏让位给额度与用户菜单 */
+  .qs-topbar { padding: 0 14px; gap: 8px; }
+  .qs-brand__text small { display: none; }
+  .qs-topbar__right { gap: 8px; }
+
+  /* 产出行:标题独占一行,状态与动作换行排下面,避免按钮被挤成竖条 */
+  .quick-shell .qc-project-row { flex-wrap: wrap; row-gap: 8px; }
+  .quick-shell .qc-project-row > strong { flex: 1 1 100%; }
+
+  /* 面包屑与页面内边距收紧 */
+  .qs-main .page { padding: 16px 14px 40px; }
+  .quick-shell .qc-crumb h1 { font-size: var(--v2-fs-xl); }
+}
