@@ -2,8 +2,6 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   deriveNextAction,
-  clearDownstreamOfProject,
-  clearResults,
   parseCities,
   parseDoctors,
   pruneCheckedIds,
@@ -13,18 +11,9 @@ import {
   filterGenerationJobs,
 } from '../src/lib/quick-channel-state.js';
 
-test('changing project clears opportunities, selection, and results', () => {
-  const cleared = clearDownstreamOfProject();
-  assert.deepEqual(cleared.opportunities, []);
-  assert.equal(cleared.opportunityId, '');
-  assert.deepEqual(cleared.results, []);
-});
-
-test('changing topic clears only results', () => {
-  const cleared = clearResults();
-  assert.deepEqual(cleared.results, []);
-  assert.equal((cleared as Record<string, unknown>).opportunityId, undefined);
-});
+// clearDownstreamOfProject / clearResults 的用例已删:两个函数不复存在。
+// 换项目的清空改由 QuickWorkspaceProvider 的 key 重挂承担(结构性保证,不是靠
+// 记得列举字段),对应验收点在浏览器实测:换项目后勾选与配置为空。
 
 test('deriveNextAction:无知识文件 → 上传资料并分析(其余就绪也优先)', () => {
   const a = deriveNextAction({ hasKnowledge: false, analysis: 'ready', topicCount: 3, generationCount: 2 });

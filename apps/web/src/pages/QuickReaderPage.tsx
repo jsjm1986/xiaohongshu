@@ -6,7 +6,8 @@ import { ReaderDetail, type ExportFormat } from '../components/quick/ReaderDetai
 import { WaitCard } from '../components/quick/WaitCard';
 import { api } from '../lib/api';
 import { readerCandidateToMarkdown } from '../lib/publish-copy';
-import { readerPath, rememberWorkspace } from '../lib/quick-nav';
+import { readerPath } from '../lib/quick-nav';
+import { areaPath, QUICK_HOME_PATH } from '../lib/quick-routes';
 import { retryJobOnce } from '../lib/single-retry';
 import { readerNeighbors } from '../lib/reader-navigation';
 import type { GenerationJob, Project, ReaderCandidate, ReaderJob } from '../types';
@@ -127,12 +128,13 @@ export function QuickReaderPage() {
    * 返回产出区。
    *
    * 直接打开一个阅读链接(收藏/别人发的)时浏览器没有可回退的历史,所以不用
-   * history.back();统一写记忆再进 /quick,工作区据此恢复项目 + 「产出」分区。
+   * history.back(),而是直接进那个项目的产出区地址。四区改成真路由之后这里不再
+   * 需要 sessionStorage 记忆——地址本身就是记忆。
+   *
+   * job 还没拉到(首屏或打不开)时退回卡墙:此时连 projectId 都不知道。
    */
-  const backToHistory = () => {
-    if (job?.projectId) rememberWorkspace({ projectId: job.projectId, tab: 'history' });
-    navigate('/quick');
-  };
+  const backToHistory = () =>
+    navigate(job?.projectId ? areaPath(job.projectId, 'history') : QUICK_HOME_PATH);
 
   return (
     <div className="page qc-reader-page">

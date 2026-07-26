@@ -2800,9 +2800,9 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 
 /* 极简创作 · 完整频道 */
 .qc-page .qc-tabs { display: flex; gap: 8px; margin: 20px 0 16px; border-bottom: 1px solid var(--v2-line); }
-.qc-tabs button { padding: 10px 16px; border: none; background: none; cursor: pointer; color: var(--v2-muted); border-bottom: 2px solid transparent; font-size: var(--v2-fs-md); }
-.qc-tabs button.active { color: var(--v2-brand); border-bottom-color: var(--v2-brand); font-weight: 600; }
-.qc-tabs button:disabled { opacity: .4; cursor: not-allowed; }
+.qc-tabs button, .qc-tabs a { padding: 10px 16px; border: none; background: none; cursor: pointer; color: var(--v2-muted); border-bottom: 2px solid transparent; font-size: var(--v2-fs-md); }
+.qc-tabs button.active, .qc-tabs a.active { color: var(--v2-brand); border-bottom-color: var(--v2-brand); font-weight: 600; }
+.qc-tabs button:disabled, .qc-tabs a:disabled { opacity: .4; cursor: not-allowed; }
 .qc-tab { display: inline-flex; align-items: center; gap: 6px; }
 .qc-tab__seq {
   display: inline-flex; align-items: center; justify-content: center;
@@ -3311,6 +3311,22 @@ div.qc-topic { cursor: default; }
 .qc-comment__a { display: flex; align-items: baseline; gap: 8px; margin-top: 6px; }
 .qc-comment__a p { margin: 0; font-size: var(--v2-fs-sm); color: var(--v2-ink-2); line-height: 1.7; }
 .qc-comment__side { display: block; margin-top: 4px; font-size: var(--v2-fs-micro); color: var(--v2-muted); }
+/* 编排信息折叠区:计划字段(阶段/功能/缺口/边界/下一步)默认收起,不与发布文案混排。 */
+.qc-comment__plan { margin-top: 6px; font-size: var(--v2-fs-micro); }
+.qc-comment__plan > summary {
+  cursor: pointer; color: var(--v2-muted); list-style: none;
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.qc-comment__plan > summary::marker, .qc-comment__plan > summary::-webkit-details-marker { display: none; }
+.qc-comment__plan > summary::before { content: '▸'; font-size: 9px; }
+.qc-comment__plan[open] > summary::before { content: '▾'; }
+.qc-comment__plan dl {
+  display: grid; grid-template-columns: auto 1fr; gap: 2px 8px;
+  margin: 6px 0 0; padding: 6px 8px;
+  background: var(--v2-surface); border: 1px solid var(--v2-line); border-radius: 4px;
+}
+.qc-comment__plan dt { color: var(--v2-muted); white-space: nowrap; }
+.qc-comment__plan dd { margin: 0; color: var(--v2-ink-2); }
 .qc-comment__follow {
   list-style: none; margin: 8px 0 0; padding-left: 12px;
   border-left: 2px solid var(--v2-line); display: flex; flex-direction: column; gap: 6px;
@@ -3584,8 +3600,10 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 
 /* ---- 工作区:面包屑 ---- */
 .qc-crumb { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px; margin: 2px 0 6px; }
-.qc-crumb__back { padding: 0; border: none; background: none; font-size: var(--v2-fs-sm); color: var(--v2-muted); cursor: pointer; }
+/* 面包屑与步骤条改成 NavLink(可中键新开、可复制链接),所以要去掉链接下划线 */
+.qc-crumb__back { padding: 0; border: none; background: none; font-size: var(--v2-fs-sm); color: var(--v2-muted); cursor: pointer; text-decoration: none; }
 .qc-crumb__back:hover { color: var(--v2-brand); }
+.qc-tabs a { text-decoration: none; }
 .qc-crumb h1 { margin: 0; font-size: var(--v2-fs-xl); font-weight: 600; color: var(--v2-ink); }
 .qc-crumb small { font-size: var(--v2-fs-sm); color: var(--v2-muted); }
 
@@ -3600,12 +3618,12 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
   padding: 8px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius-lg);
   background: var(--v2-surface); box-shadow: var(--v2-shadow-sm);
 }
-.qc-page .qc-tabs button { padding: 8px 14px; border-bottom: 0; border-radius: var(--v2-radius-lg); }
-.qc-page .qc-tabs button:not(.active):not(:disabled):hover { background: var(--v2-canvas); }
-.qc-page .qc-tabs button.active { background: var(--v2-brand-soft); color: var(--v2-brand-ink); font-weight: 600; }
+.qc-page .qc-tabs button, .qc-page .qc-tabs a { padding: 8px 14px; border-bottom: 0; border-radius: var(--v2-radius-lg); }
+.qc-page .qc-tabs button:not(.active):not(:disabled):hover, .qc-page .qc-tabs a:not(.active):hover { background: var(--v2-canvas); }
+.qc-page .qc-tabs button.active, .qc-page .qc-tabs a.active { background: var(--v2-brand-soft); color: var(--v2-brand-ink); font-weight: 600; }
 /* 步骤连接线;前一步 done 时连接线加深为 ok 绿 */
-.qc-page .qc-tabs button:not(:first-child) { position: relative; margin-left: 14px; }
-.qc-page .qc-tabs button:not(:first-child)::before {
+.qc-page .qc-tabs button:not(:first-child), .qc-page .qc-tabs a:not(:first-child) { position: relative; margin-left: 14px; }
+.qc-page .qc-tabs button:not(:first-child)::before, .qc-page .qc-tabs a:not(:first-child)::before {
   content: ""; position: absolute; left: -22px; top: 50%; width: 14px;
   border-top: 1px solid var(--v2-line-dark);
 }
@@ -3908,8 +3926,8 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
   background: transparent; box-shadow: none;
   gap: 4px; margin: 8px 0 18px;
 }
-.quick-shell .qc-page .qc-tabs button { padding: 9px 16px; border-radius: 999px; font-size: var(--v2-fs-md); }
-.quick-shell .qc-page .qc-tabs button.active { background: var(--v2-brand-soft); }
+.quick-shell .qc-page .qc-tabs button, .quick-shell .qc-page .qc-tabs a { padding: 9px 16px; border-radius: 999px; font-size: var(--v2-fs-md); }
+.quick-shell .qc-page .qc-tabs button.active, .quick-shell .qc-page .qc-tabs a.active { background: var(--v2-brand-soft); }
 
 /* ---- 6. 页头:项目名给到 h1 该有的份量 ----
    原来 20px/600,和卡片标题几乎同级;在一个"当前工作对象"的位置上太轻。 */
