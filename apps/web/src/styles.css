@@ -4122,7 +4122,16 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
   display: flex; align-items: center; gap: 6px;
   font-size: var(--v2-fs-xs); color: var(--v2-muted); margin-bottom: 12px;
 }
-.quick-shell .xhs-comments__note { display: inline-flex; color: var(--v2-muted-2); cursor: help; }
+/* ⓘ 是真 button(span 上的 aria-label 属于禁止的 author-supplied name,读屏可丢弃),
+   但视觉上仍要是一个不起眼的小图标:去掉浏览器默认的边框/底色/内边距。 */
+.quick-shell .xhs-comments__note {
+  display: inline-flex; padding: 0; border: 0; background: none;
+  color: var(--v2-muted-2); cursor: pointer;
+}
+/* 点开的声明原文:触屏没有 tooltip,这里是它唯一能被读到的地方。 */
+.quick-shell .xhs-comments__disclaimer {
+  margin: -6px 0 12px; font-size: var(--v2-fs-micro); line-height: 1.6; color: var(--v2-muted-2);
+}
 .quick-shell .xhs-comment { display: flex; gap: 9px; margin-bottom: 13px; }
 .quick-shell .xhs-comment__avatar { width: 26px; height: 26px; font-size: var(--v2-fs-micro); }
 .quick-shell .xhs-comment__main { min-width: 0; flex: 1; }

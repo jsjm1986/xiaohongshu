@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Copy, Info } from 'lucide-react';
 import { Button, useToast } from '../Ui';
 import { commentSectionView, gapNameMap } from '../../lib/comment-view';
@@ -19,23 +20,40 @@ export interface NoteCommentsProps {
 export const COMMENT_DISCLAIMER_FALLBACK = '情景演练与答复参考，不代表真实用户发言。';
 
 /**
- * 追问答复的署名由所属线程的 threadKind 决定,不看 answererLabel。
+ * 答复(主答复与追问答复共用)的署名由所属线程的 threadKind 决定。
  *
- * org_answer 线程里追问的 answer 是机构补充(实测「只要是教练私下额外收费…一样是
- * 换教练、全额退」这类补充口径),必须带可追责身份;reader_exchange 的追问答复是
- * 另一位模拟读者接话,标成机构发言就是假冒机构表态。threadKind 缺失的历史包按
- * org_answer 处理,与 comment-view 的 answererLabelFor 保持同一套兜底。
+ * 只有 reader_exchange 的 answer 是另一位模拟读者接话,署名机构就是假冒机构表态;
+ * 其余线程的 answer 都是机构发言,必须带可追责身份:
+ * - org_answer:机构答复与补充口径(「只要是教练私下额外收费…一样是换教练、全额退」)。
+ * - organic_reaction:实测库内 6 条线程的 answer 全是机构口径(如「不承诺录取结果、
+ *   不承诺奖学金、不承诺签证通过」,postingIdentity=publisher),恰恰是在声明合规边界,
+ *   缺了「作者」标等于把担责的那句话摘掉署名。
+ * - threadKind 缺失的历史包按 org_answer 处理,与 comment-view 的 answererLabelFor 同一套兜底。
  *
- * 抽成纯函数是为了让这个判定可被测试覆盖——它是本组件唯一有真假之分的分支,
- * 其余都是排版。
+ * 刻意不看 answererLabel:那是给人看的中文标签,按它比字符串会让「改个措辞」变成
+ * 「改身份归属」。抽成纯函数是为了让这个判定可被测试覆盖——它是本组件唯一有真假之分
+ * 的分支,其余都是排版。displayName 只影响读者侧的称呼,与是否机构无关。
  */
-export function followUpReplyIdentity(
+export function replyIdentity(
   threadKind: string | undefined,
   accountLabel: string,
+  displayName?: string,
 ): { name: string; badge?: string } {
-  return (threadKind ?? 'org_answer') === 'org_answer'
-    ? { name: accountLabel, badge: '作者' }
-    : { name: '读者' };
+  if ((threadKind ?? 'org_answer') === 'reader_exchange') {
+    // 提问者已用 displayName 署名,答复者是「另一位」才说得通;没昵称时只能说「读者」。
+    return { name: displayName ? '另一位读者' : '读者' };
+  }
+  return { name: accountLabel, badge: '作者' };
+}
+
+/**
+ * 评论总数:自备首评是运营真的要贴上去的一条评论,所以它算数。
+ *
+ * 互动条的「评论 N」与评论区标题的「共 N 条评论」必须同源——同一张卡上两个数字打架时,
+ * 用户没法判断哪个是真的,而条数是本产品唯一声称如实的数字。
+ */
+export function commentTotal(candidate: Pick<Source, 'comments' | 'commentOwnedFirstComment'>): number {
+  return (candidate.comments?.length ?? 0) + (candidate.commentOwnedFirstComment ? 1 : 0);
 }
 
 /**
@@ -52,6 +70,7 @@ export function followUpReplyIdentity(
  */
 export function NoteComments({ candidate, accountLabel }: NoteCommentsProps) {
   const toast = useToast();
+  const [noteOpen, setNoteOpen] = useState(false);
   const view = commentSectionView(
     candidate.comments,
     gapNameMap(candidate.gapCards, candidate.gapLedger?.entries),
@@ -63,23 +82,31 @@ export function NoteComments({ candidate, accountLabel }: NoteCommentsProps) {
     catch { toast.push('复制失败，请手动选择文本', 'error'); }
   };
 
-  const total = view.rows.length + (candidate.commentOwnedFirstComment ? 1 : 0);
+  const total = commentTotal(candidate);
+  const disclaimer = candidate.commentDisclaimer || COMMENT_DISCLAIMER_FALLBACK;
 
   return (
     <section className="xhs-comments">
       <header className="xhs-comments__head">
         <span>共 {total} 条评论</span>
         {/* 声明挂在 ⓘ 上而不是常驻一行:预览区要沉浸,但这句必须可达。
-            aria-label 放声明全文而非「关于这些评论」——后者会把声明从无障碍树里
-            盖掉,屏幕阅读器读不到就等于对读屏用户没有声明。 */}
-        <span
+            必须是真 button,不是带 aria-label 的 span:span 的隐含角色是 generic,
+            author-supplied name 在规范里是禁止的,读屏软件可以直接丢掉 aria-label;
+            而 title 在触屏(本产品主场景)根本不出 tooltip。button 上 aria-label 合法,
+            且点一下就能把声明原文摊开——触屏也能读到。
+            aria-label 放声明全文而非「关于这些评论」——后者会把声明从无障碍树里盖掉。 */}
+        <button
+          type="button"
           className="xhs-comments__note"
-          title={candidate.commentDisclaimer || COMMENT_DISCLAIMER_FALLBACK}
-          aria-label={candidate.commentDisclaimer || COMMENT_DISCLAIMER_FALLBACK}
+          title={disclaimer}
+          aria-label={disclaimer}
+          aria-expanded={noteOpen}
+          onClick={() => setNoteOpen((open) => !open)}
         >
           <Info size={12} />
-        </span>
+        </button>
       </header>
+      {noteOpen && <p className="xhs-comments__disclaimer">{disclaimer}</p>}
 
       {candidate.commentOwnedFirstComment && (
         <Row
@@ -99,11 +126,10 @@ export function NoteComments({ candidate, accountLabel }: NoteCommentsProps) {
           reply={
             row.answer?.trim()
               ? {
-                  // answererLabel 已由 comment-view 按 threadKind 判定:只有 org_answer
-                  // 才是可追责身份,reader_exchange 是模拟读者接话。这里据此决定署名和
-                  // 「作者」标,不自己重判。
-                  name: row.answererLabel === '模拟读者接话' ? (row.displayName ? '另一位读者' : '读者') : accountLabel,
-                  badge: row.answererLabel && row.answererLabel !== '模拟读者接话' ? '作者' : undefined,
+                  // 主答复与追问答复走同一个 replyIdentity:身份归属只能由 threadKind 决定。
+                  // 曾经这里比对 answererLabel === '模拟读者接话',把合规判定绑在一句中文
+                  // 文案上——改个措辞就会把读者接话集体署名成机构。
+                  ...replyIdentity(row.threadKind, accountLabel, row.displayName),
                   text: row.answer,
                   onCopy: () => void copyOne(row.answer),
                 }
@@ -111,7 +137,7 @@ export function NoteComments({ candidate, accountLabel }: NoteCommentsProps) {
           }
           followUps={row.followUps.filter((f) => f.question?.trim())}
           onCopyFollow={(text) => void copyOne(text)}
-          followReply={followUpReplyIdentity(row.threadKind, accountLabel)}
+          followReply={replyIdentity(row.threadKind, accountLabel, row.displayName)}
         />
       ))}
     </section>
@@ -126,7 +152,7 @@ interface RowProps {
   reply?: { name: string; badge?: string; text: string; onCopy: () => void };
   followUps?: Array<{ question: string; answer: string }>;
   onCopyFollow?: (text: string) => void;
-  /** 追问答复的署名:与主答复同一套判定结果,org_answer 才带「作者」标 */
+  /** 追问答复的署名:与主答复同一套判定结果(replyIdentity),只有 reader_exchange 不带「作者」标 */
   followReply?: { name: string; badge?: string };
 }
 

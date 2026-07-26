@@ -1,6 +1,6 @@
 import { Bookmark, Copy, Heart, MessageCircle } from 'lucide-react';
 import { Button, useToast } from '../Ui';
-import { NoteComments } from './NoteComments';
+import { commentTotal, NoteComments } from './NoteComments';
 import { accountName, avatarTone, noteDate } from '../../lib/note-view';
 import type { ReaderCandidate, ReaderJob } from '../../types';
 
@@ -28,6 +28,7 @@ export function NoteCard({ candidate, job, projectName }: Props) {
   const account = accountName(projectName);
   const tone = avatarTone(account);
   const date = noteDate(job);
+  const comments = commentTotal(candidate);
 
   const copy = async (text: string, label = '已复制') => {
     try { await navigator.clipboard.writeText(text); toast.push(label); }
@@ -93,11 +94,12 @@ export function NoteCard({ candidate, job, projectName }: Props) {
         {date && <div className="xhs-note__date">{date}</div>}
       </div>
 
-      {/* 无数字:见组件头注释 */}
+      {/* 无数字:见组件头注释。唯一的例外是评论数——它是本产品声称如实的数字,
+          且必须与下方评论区标题同源(commentTotal),否则同一张卡上两个数字打架。 */}
       <div className="xhs-note__bar">
         <span><Heart size={15} />点赞</span>
         <span><Bookmark size={15} />收藏</span>
-        <span><MessageCircle size={15} />评论{candidate.comments.length > 0 ? ` ${candidate.comments.length}` : ''}</span>
+        <span><MessageCircle size={15} />评论{comments > 0 ? ` ${comments}` : ''}</span>
       </div>
 
       <NoteComments candidate={candidate} accountLabel={account} />
