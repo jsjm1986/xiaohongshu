@@ -165,20 +165,21 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
         <>
           {analyzed ? (
             <V2Instrument columns={isStale || isDraft ? 4 : 3}>
-              <V2InstrumentCell tone="brand" icon={<Sparkles size={14} />} label="实体" value={intel?.entity || '已分析'} />
-              <V2InstrumentCell tone="ai" icon={<Building2 size={14} />} label="行业" value={intel?.industry || '已建立内容地图'} />
+              {/* text:值是词组不是读数,不该用 31px 读数字号(见 V2InstrumentCell) */}
+              <V2InstrumentCell text tone="brand" icon={<Sparkles size={14} />} label="实体" value={intel?.entity || '已分析'} />
+              <V2InstrumentCell text tone="ai" icon={<Building2 size={14} />} label="行业" value={intel?.industry || '已建立内容地图'} />
               <V2InstrumentCell tone="ok" icon={<Lightbulb size={14} />} label="可用选题" value={topicCount} unit="个" />
               {isStale && (
-                <V2InstrumentCell tone="warn" icon={<TriangleAlert size={14} />} label="需要更新" value="内容地图待刷新" note={staleReasons.join('；') || '资料有更新'} />
+                <V2InstrumentCell text tone="warn" icon={<TriangleAlert size={14} />} label="需要更新" value="内容地图待刷新" note={staleReasons.join('；') || '资料有更新'} />
               )}
               {!isStale && isDraft && (
-                <V2InstrumentCell tone="ai" icon={<Info size={14} />} label="状态" value="待确认" note="生成时会自动确认,不阻塞使用" />
+                <V2InstrumentCell text tone="ai" icon={<Info size={14} />} label="状态" value="待确认" note="生成时会自动确认,不阻塞使用" />
               )}
             </V2Instrument>
           ) : (
             <V2Instrument columns={2}>
-              <V2InstrumentCell tone="brand" icon={<Sparkles size={14} />} label="状态" value="尚未分析" />
-              <V2InstrumentCell tone="ai" icon={<Lightbulb size={14} />} label="下一步" value="上传知识 → 分析" note="AI 会建立内容地图并生成选题" />
+              <V2InstrumentCell text tone="brand" icon={<Sparkles size={14} />} label="状态" value="尚未分析" />
+              <V2InstrumentCell text tone="ai" icon={<Lightbulb size={14} />} label="下一步" value="上传知识 → 分析" note="AI 会建立内容地图并生成选题" />
             </V2Instrument>
           )}
 

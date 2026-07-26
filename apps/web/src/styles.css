@@ -2253,6 +2253,9 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .v2-instrument__cell--warn::before { background: var(--v2-warn); }
 .v2-instrument__value { font-size: 31px; }
 .v2-instrument__value--mono { font-size: 25px; }
+/* 文字值(词组,不是读数):31px/750/负字距套在词组上,一个纯标签会和页面标题一样重。
+   实测知识库页「实体：驾驶培训」两格 30px 大字压过了真正的读数「18 个选题」。 */
+.v2-instrument__value--text { font-size: 20px; font-weight: 650; letter-spacing: 0; line-height: 1.35; }
 
 .v2-sec-label {
   font-family: var(--v2-mono); font-size: 10px; font-weight: 500;
@@ -3833,3 +3836,111 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 /* 换一批「存为模板」内联命名行(替代原弹窗,少一层交互) */
 .qc-tpl-inline { display: flex; align-items: center; gap: 8px; }
 .qc-tpl-inline input { flex: 1 1 auto; min-width: 0; }
+
+/* ==========================================================================
+   基础版 · 版面尺度(C 段)
+   ==========================================================================
+   实测(1512px 视口,四个区各量一遍):页面上出现最多的字号是 11px(146 个元素),
+   其次 10px(50 个)、9.2px(4 个);正文 16px 但 line-height 是 normal(中文约
+   1.2,行间几乎贴住);内容嵌在三层描边盒子里(步骤条卡 → 面板卡 → 内容卡),
+   每层各自 14—28px 内边距。三件事叠起来就是「小气」:字小、行密、层层收边。
+
+   这一段只调**尺度与层次**,不动配色与信息结构;全部限定在 .quick-shell 作用域,
+   专家版(.app-shell)一个像素都不动——两个版本的目标用户不同,专家版的高密度
+   是有意的。
+   ========================================================================== */
+
+/* ---- 1. 字号谱整体上移一档 ----
+   token 在 .quick-shell 上重新赋值,下游所有 var(--v2-fs-*) 自动跟随,不用逐条改
+   规则。11px 的正文级说明升到 13px,10px 的元信息升到 12px:9—11px 在 1512px
+   屏上是"能看见但读起来费劲"的区间,而这是付费产品的主界面。 */
+.quick-shell {
+  --v2-fs-micro: 12px;
+  --v2-fs-xs: 13px;
+  --v2-fs-sm: 14px;
+  --v2-fs-md: 15px;
+  --v2-fs-lg: 17px;
+  --v2-fs-xl: 22px;
+  --v2-fs-h1: 30px;
+}
+
+/* ---- 2. 行距 ----
+   line-height: normal 对中文约 1.2,是"挤"的主因之一。正文 1.75、说明 1.6:
+   中文没有词间空隙,行距要比西文更松才读得开。 */
+.quick-shell { line-height: 1.6; }
+.quick-shell .quick-body { line-height: 1.85; letter-spacing: .01em; }
+.quick-shell p, .quick-shell li { line-height: 1.7; }
+.quick-shell h1, .quick-shell h2, .quick-shell h3, .quick-shell h4 { line-height: 1.35; }
+
+/* ---- 3. 去掉一层盒子 ----
+   面板卡是三层嵌套里最没有信息量的一层:它包住的就是当前分区的全部内容,而分区
+   已经由步骤条标明。去掉它的描边与白底,内容直接落在画布上,内部的内容卡自己
+   负责分组。省下的 28px 内边距还给内容。 */
+.quick-shell .qc-page .qc-panel {
+  padding: 4px 0 8px; border: 0; border-radius: 0;
+  background: transparent; box-shadow: none;
+}
+@media (max-width: 720px) {
+  .quick-shell .qc-page .qc-panel { padding: 4px 0 8px; }
+}
+
+/* ---- 4. 内容卡:内边距与卡间距同步放大 ----
+   卡片原来 14/16px 内边距、10px 间距,在放大后的字号下会显得"文字顶着边框"。
+   内边距按 1.5 倍走,卡间距 16px:间距要明显大于卡内行距,否则分组读不出来。 */
+.quick-shell .quick-card { padding: 20px 24px; border-radius: var(--v2-radius-lg); }
+.quick-shell .quick-card > header { margin-bottom: 12px; }
+.quick-shell .qc-step { gap: 22px; }
+.quick-shell .qc-history-list { gap: 12px; }
+.quick-shell .qc-history-item { padding: 16px 18px; border-radius: var(--v2-radius); }
+.quick-shell .qc-topic { padding: 18px 20px; }
+.quick-shell .qc-topic-list { gap: 12px; }
+.quick-shell .qc-preset-card { padding: 14px 16px; gap: 6px; }
+.quick-shell .qc-preset-cards { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; }
+.quick-shell .qc-batch-card { padding: 18px 20px; border-radius: var(--v2-radius); }
+.quick-shell .qc-jobcell { padding: 14px; gap: 8px; }
+.quick-shell .qc-batch-card__grid { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
+
+/* ---- 5. 步骤条:降调 ----
+   它原来是一张带描边、白底、阴影的大卡,视觉重量和内容平级——而它只是导航。
+   去掉卡壳只留分段控件本体,高度从 56px 收到 40px 一档。 */
+.quick-shell .qc-page .qc-tabs {
+  padding: 0; border: 0; border-radius: 0;
+  background: transparent; box-shadow: none;
+  gap: 4px; margin: 8px 0 18px;
+}
+.quick-shell .qc-page .qc-tabs button { padding: 9px 16px; border-radius: 999px; font-size: var(--v2-fs-md); }
+.quick-shell .qc-page .qc-tabs button.active { background: var(--v2-brand-soft); }
+
+/* ---- 6. 页头:项目名给到 h1 该有的份量 ----
+   原来 20px/600,和卡片标题几乎同级;在一个"当前工作对象"的位置上太轻。 */
+.quick-shell .qc-crumb { align-items: baseline; gap: 12px; margin-bottom: 4px; }
+.quick-shell .qc-crumb h1 { font-size: var(--v2-fs-h1); font-weight: 680; letter-spacing: -0.015em; }
+.quick-shell .qc-crumb small { font-size: var(--v2-fs-sm); }
+
+/* ---- 7. 内容宽度:一根居中的内容柱 ----
+   面板原来硬顶 720px 且左对齐,而壳给到 1440px。实测(1512px 视口)产出区左边距
+   61px、右边距 372px——内容挤在左边一条窄柱里,右边一大片空,这是"小气"最直接的
+   空间来源。
+
+   改成三者共用同一根居中内容柱:面包屑、步骤条、面板左右边界对齐,整体居中。
+   创作区是双栏(选题池 + 配置),需要更宽,用 :has() 把这一柱整体放宽——只切一个
+   变量,三者仍然对齐。不支持 :has 的浏览器退化为窄一档,不会错位。 */
+.quick-shell .qc-page { --qc-col: 1080px; }
+.quick-shell .qc-page:has(.qc-panel--wide) { --qc-col: 1440px; }
+.quick-shell .qc-crumb,
+.quick-shell .qc-page .qc-tabs,
+.quick-shell .qc-page .qc-panel {
+  max-width: var(--qc-col); margin-left: auto; margin-right: auto;
+}
+/* margin-inline: auto 会覆盖上面 tabs 的 margin 简写,竖向间距要补回来 */
+.quick-shell .qc-page .qc-tabs { margin-top: 8px; margin-bottom: 18px; }
+.quick-shell .qc-page .qc-panel--wide { max-width: var(--qc-col); }
+
+/* ---- 8. 按钮:主动作要有份量 ----
+   38px 高的主按钮在放大后的版面里偏小。主按钮 44px,次级维持 40px 一档。 */
+.quick-shell .button { padding: 10px 18px; font-size: var(--v2-fs-md); border-radius: var(--v2-radius-sm); }
+.quick-shell .button--primary { padding: 12px 22px; font-weight: 620; }
+.quick-shell .button--ghost { padding: 8px 12px; }
+/* 例外:嵌在徽标行里的幽灵按钮(批次子卡的「再来一篇同款」/「重试」)必须保持紧凑,
+   否则一格里「待核查 + 按钮」放不下会折成两行,子卡高度翻倍。 */
+.quick-shell .qc-jobcell__badge .button { padding: 2px 7px; font-size: var(--v2-fs-micro); }
