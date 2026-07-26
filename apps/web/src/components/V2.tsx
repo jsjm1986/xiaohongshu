@@ -51,6 +51,7 @@ export function V2InstrumentCell({
   unit,
   note,
   mono,
+  text,
 }: {
   tone: V2InstrumentTone;
   icon: ReactNode;
@@ -60,14 +61,27 @@ export function V2InstrumentCell({
   note?: ReactNode;
   /** 大数字使用等宽字体（版本号/编号类） */
   mono?: boolean;
+  /**
+   * 值是文字而非数字（「驾驶培训」「尚未分析」）。
+   *
+   * 读数样式是为数字设计的：28—31px / 750 字重 / 负字距。套在词组上，一个纯标签
+   * 会和页面标题一样重——实测知识库页「实体：驾驶培训」就是这样，两格 30px 大字
+   * 压过了真正的读数「18 个选题」。文字值降一档、字距归零。
+   */
+  text?: boolean;
 }) {
+  const valueClass = [
+    'v2-instrument__value',
+    mono ? 'v2-instrument__value--mono' : '',
+    text ? 'v2-instrument__value--text' : '',
+  ].filter(Boolean).join(' ');
   return (
     <div className={`v2-instrument__cell v2-instrument__cell--${tone}`}>
       <div className="v2-instrument__label">
         <span className={`v2-instrument__chip v2-instrument__chip--${tone}`}>{icon}</span>
         {label}
       </div>
-      <div className={mono ? 'v2-instrument__value v2-instrument__value--mono' : 'v2-instrument__value'}>
+      <div className={valueClass}>
         {value}
         {unit && <small>{unit}</small>}
       </div>

@@ -158,7 +158,8 @@ export function OverviewTab({ project, busy, setBusy, fail, goTo, onProjectUpdat
     <div className="qc-step">
       {/* 有额度可显示时扩到 5 格(BYOK 或读取失败时 quotaCell 返回 null,保持 4 格) */}
       <V2Instrument columns={4}>
-        <V2InstrumentCell tone={mapCell.tone} icon={<Map size={14} />} label="内容地图" value={mapCell.value} note={mapNote} />
+        {/* text:「已就绪」「待刷新」是状态词不是读数,不用 31px 读数字号 */}
+        <V2InstrumentCell text tone={mapCell.tone} icon={<Map size={14} />} label="内容地图" value={mapCell.value} note={mapNote} />
         <V2InstrumentCell tone="brand" icon={<FileText size={14} />} label="知识文件" value={project.knowledgeCount ?? 0} unit="个" />
         <V2InstrumentCell tone="ai" icon={<Lightbulb size={14} />} label="选题池" value={opps.length} unit="个" note={`未处理 ${activeCount} · 收藏 ${collectedCount}`} />
         <V2InstrumentCell tone="ok" icon={<Layers size={14} />} label="累计产出" value={jobs.length} unit="篇" />
@@ -179,6 +180,7 @@ export function OverviewTab({ project, busy, setBusy, fail, goTo, onProjectUpdat
             note={quotaInfo.note}
           />
           <V2InstrumentCell
+            text
             tone="blue"
             icon={<Server size={14} />}
             label="计费方式"
