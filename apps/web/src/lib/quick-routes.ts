@@ -35,35 +35,11 @@ export function areaPath(projectId: string, area: QuickArea = DEFAULT_AREA): str
   return `/quick/${encodeURIComponent(projectId)}/${area}`;
 }
 
-/** 项目根地址(会被布局路由重定向到默认区)。 */
-export function projectPath(projectId: string): string {
-  return `/quick/${encodeURIComponent(projectId)}`;
-}
-
-/**
- * 解析地址里的区段。
- *
- * 白名单之外(手改地址、旧收藏、拼错)一律落默认区,而不是渲染一个空白路由。
- * 返回值第二项告诉调用方"这是兜底的",据此决定要不要 replace 掉地址栏——
- * 让用户停在一个错的地址上,下一次刷新还会错。
- */
-export function parseArea(raw: string | undefined | null): { area: QuickArea; fallback: boolean } {
-  if (typeof raw === 'string' && (AREA_ORDER as readonly string[]).includes(raw)) {
-    return { area: raw as QuickArea, fallback: false };
-  }
-  return { area: DEFAULT_AREA, fallback: true };
-}
-
 /**
  * /quick 下的固定段。
  *
  * `:projectId` 是动态段,而 read/account 是静态段,两者都能匹配 /quick/:x。
- * React Router 的 rank 规则让静态段胜出,但那是隐式的——这张表把它写下来,
- * 供测试断言,也提醒后来加固定段的人:新增的名字不能和项目 id 的位置打架。
+ * React Router 的 rank 规则让静态段胜出,但那是隐式的——这张表把它写下来供测试
+ * 断言,也提醒后来加固定段的人:新名字不能和项目 id 的位置打架。
  */
 export const QUICK_RESERVED_SEGMENTS: readonly string[] = ['read', 'account'] as const;
-
-/** 这个 /quick 子路径是不是项目工作区(而不是 read/account 这类固定页)。 */
-export function isWorkspaceSegment(segment: string): boolean {
-  return segment.length > 0 && !QUICK_RESERVED_SEGMENTS.includes(segment);
-}

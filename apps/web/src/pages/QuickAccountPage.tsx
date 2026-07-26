@@ -1,10 +1,11 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { ArrowLeft, KeyRound, ShieldCheck } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../components/AuthContext';
 import { Button, Field, useToast } from '../components/Ui';
 import { api } from '../lib/api';
 import { quotaAbsenceNote, quotaCell, type QuotaSnapshot } from '../lib/quota-view';
+import { QUICK_HOME_PATH } from '../lib/quick-routes';
 
 /**
  * 极简创作的账户页。
@@ -21,6 +22,7 @@ export function QuickAccountPage() {
   const { user, setUser } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
+  const location = useLocation();
   const [password, setPassword] = useState({ current: '', next: '', confirm: '' });
   const [saving, setSaving] = useState(false);
   const [quota, setQuota] = useState<QuotaSnapshot | null>(null);
@@ -66,12 +68,24 @@ export function QuickAccountPage() {
 
   const cell = quotaCell(quota);
   const absenceNote = quotaAbsenceNote(quota);
+  // idx > 0 表示这个位置前面还有本站的历史条目,navigate(-1) 不会退出站点
+  const canGoBack = (location.key !== 'default') && window.history.length > 1;
 
   return (
     <div className="page qc-page qc-account">
       <div className="qc-crumb">
-        <button type="button" className="qc-crumb__back" onClick={() => navigate('/quick')}>
-          <ArrowLeft size={13} /> 返回创作
+        {/*
+          返回上一处,而不是硬跳 /quick。四区改成真路由后,「顶栏点额度 → 账户页 →
+          返回」如果统一去卡墙,用户会被踢出正在工作的项目,要重新选项目再点回原来
+          那个区。有历史就退回去(账户页多半是从某个区点进来的);直接打开账户页
+          链接时没有可退的历史,才落卡墙。
+        */}
+        <button
+          type="button"
+          className="qc-crumb__back"
+          onClick={() => (canGoBack ? navigate(-1) : navigate(QUICK_HOME_PATH))}
+        >
+          <ArrowLeft size={13} /> {canGoBack ? '返回' : '全部项目'}
         </button>
         <h1>账户</h1>
       </div>

@@ -6,9 +6,6 @@ import {
   AREA_ORDER,
   areaPath,
   DEFAULT_AREA,
-  isWorkspaceSegment,
-  parseArea,
-  projectPath,
   QUICK_RESERVED_SEGMENTS,
 } from '../src/lib/quick-routes.js';
 
@@ -18,38 +15,21 @@ test('四个区,顺序即步骤顺序', () => {
   assert.deepEqual(Object.keys(AREA_LABELS).sort(), [...AREA_ORDER].sort());
 });
 
-test('areaPath 拼出 /quick/:projectId/:area', () => {
+test('areaPath 拼出 /quick/:projectId/:area,省略区时给默认区', () => {
   assert.equal(areaPath('p1', 'overview'), '/quick/p1/overview');
   assert.equal(areaPath('p1', 'history'), '/quick/p1/history');
   assert.equal(areaPath('p1'), '/quick/p1/overview');
-  assert.equal(projectPath('p1'), '/quick/p1');
 });
 
 // 地址要被收藏和分享,不假设 projectId 永远无需转义
-test('areaPath / projectPath 对 projectId 做 URL 转义', () => {
+test('areaPath 对 projectId 做 URL 转义', () => {
   assert.equal(areaPath('a/b', 'create'), '/quick/a%2Fb/create');
-  assert.equal(projectPath('a b'), '/quick/a%20b');
+  assert.equal(areaPath('a b', 'create'), '/quick/a%20b/create');
 });
 
-test('parseArea 认得四个合法区', () => {
-  for (const area of AREA_ORDER) {
-    assert.deepEqual(parseArea(area), { area, fallback: false });
-  }
-});
-
-// 手改地址、旧收藏、拼错:一律落默认区,并且要能被识别为兜底(调用方据此 replace 地址)
-test('parseArea 对非法值落默认区并标记 fallback', () => {
-  for (const raw of ['', 'nope', 'Overview', 'HISTORY', 'read', undefined, null]) {
-    assert.deepEqual(parseArea(raw), { area: 'overview', fallback: true }, `raw=${String(raw)}`);
-  }
-});
-
-test('固定段名单与工作区段判别', () => {
+// 固定段与项目 id 抢同一个位置,名单要和 App.tsx 的路由表对得上
+test('固定段名单', () => {
   assert.deepEqual([...QUICK_RESERVED_SEGMENTS].sort(), ['account', 'read']);
-  assert.equal(isWorkspaceSegment('some-project-id'), true);
-  assert.equal(isWorkspaceSegment('read'), false);
-  assert.equal(isWorkspaceSegment('account'), false);
-  assert.equal(isWorkspaceSegment(''), false);
 });
 
 /*
