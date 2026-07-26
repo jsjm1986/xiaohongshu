@@ -958,6 +958,8 @@ export interface ReaderComment {
   question: string;
   answer: string;
   function?: string;
+  /** 线程互动形态:只有 org_answer 的 answer 出自可追责身份,其余是模拟读者接话。 */
+  threadKind?: "org_answer" | "reader_exchange" | "organic_reaction" | string;
   postingIdentity?: string;
   personaRole?: string;
   stage?: string;

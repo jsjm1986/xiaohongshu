@@ -33,6 +33,13 @@ export interface ReaderComment {
   question: string;
   answer: string;
   function?: string;
+  /**
+   * 线程互动形态。必须下发到前端:只有 org_answer 的 answer 才是可追责身份的
+   * 答复,reader_exchange/organic_reaction 的 answer 是**模拟读者接话**。缺这个
+   * 字段时前端只能按 postingIdentity 打标签,于是把读者互聊标成「员工身份」
+   * ——实测三篇 20/20 条非 org_answer 线程全部被错标。
+   */
+  threadKind?: string;
   postingIdentity?: string;
   personaRole?: string;
   stage?: string;
@@ -128,6 +135,8 @@ function readerComments(pkg: ContentPackage): ReaderComment[] {
       question: thread.question,
       answer: thread.answer,
       function: thread.function,
+      // 成稿线程可能缺 threadKind(旧包),规划线程里有;与其他元数据同一套回落。
+      threadKind: thread.threadKind ?? plan?.threadKind,
       postingIdentity: thread.postingIdentity,
       personaRole: thread.personaRole ?? plan?.personaRole,
       stage: thread.stage,
