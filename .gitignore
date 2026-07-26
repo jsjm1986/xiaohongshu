@@ -11,3 +11,4 @@ coverage/
 .tmp-*.json
 .tmp-*/
 tmp/
+.superpowers/
