@@ -117,3 +117,66 @@ test("gapNameMap 以 gapCards 优先,台账兜底", () => {
   assert.equal(map.get("g-2"), "只有台账");
   assert.equal(gapNameMap().size, 0);
 });
+
+/**
+ * 回答方标签必须按线程形态判定,不能只看 postingIdentity。
+ *
+ * 规划层把 postingIdentity 统一赋给每个线程(含读者互聊与漂浮短反应),所以
+ * reader_exchange 的 answer——实际是另一位模拟读者接话——也带着 staff/expert。
+ * 实测三篇 20/20 条非 org_answer 线程全部被标成机构身份,前端据此打「员工身份」
+ * 绿标,把读者说的「我也这么觉得」渲染成员工发言。
+ */
+test("reader_exchange 的接话标成模拟读者，不冒充机构身份", () => {
+  const view = commentSectionView([
+    {
+      id: "t-1",
+      question: "正畸医保能报吗",
+      answer: "医保这块资料里没明确说法，建议面诊时问医师。",
+      threadKind: "org_answer",
+      postingIdentity: "publisher",
+      simulated: true,
+      followUps: [],
+    },
+    {
+      id: "t-2",
+      question: "感觉医保一般只保基础治疗",
+      answer: "我也这么觉得，之前查资料好像也没几家能报。",
+      threadKind: "reader_exchange",
+      postingIdentity: "expert",
+      simulated: true,
+      followUps: [],
+    },
+  ]);
+  assert.ok(view);
+  // org_answer 照旧显示可追责身份。
+  assert.equal(view.rows[0]!.answererLabel, identityLabel("publisher"));
+  // 读者互聊不得显示机构身份。
+  assert.equal(view.rows[1]!.answererLabel, "模拟读者接话");
+  // identitySummary 只声明可追责身份，不把读者接话混进去。
+  assert.deepEqual(view.identitySummary, [identityLabel("publisher")]);
+});
+
+test("organic_reaction 不显示回答方标签（按设计无机构答复）", () => {
+  const view = commentSectionView([
+    {
+      id: "t-1",
+      question: "蹲一下，我也想搞清楚",
+      answer: "",
+      threadKind: "organic_reaction",
+      postingIdentity: "publisher",
+      simulated: true,
+      followUps: [],
+    },
+  ]);
+  assert.ok(view);
+  assert.equal(view.rows[0]!.answererLabel, undefined);
+  assert.deepEqual(view.identitySummary, []);
+});
+
+test("threadKind 缺失的历史包按 org_answer 处理，保持旧行为", () => {
+  const view = commentSectionView([
+    { id: "t-1", question: "问", answer: "答", postingIdentity: "staff", simulated: true, followUps: [] },
+  ]);
+  assert.ok(view);
+  assert.equal(view.rows[0]!.answererLabel, identityLabel("staff"));
+});

@@ -58,9 +58,6 @@ export function CommentSection({ candidate }: { candidate: Source }) {
             <li key={row.id ?? `${row.question}-${i}`} className="qc-comment">
               <div className="qc-comment__meta">
                 <span className="qc-badge qc-badge--muted">{row.askerLabel}</span>
-                {row.stageLabel && <span className="qc-hint">{row.stageLabel}</span>}
-                {row.functionLabel && <span className="qc-comment__fn">{row.functionLabel}</span>}
-                {row.gapLabel && <span className="qc-comment__gap">补「{row.gapLabel}」</span>}
                 <Button
                   variant="ghost"
                   icon={<Copy size={12} />}
@@ -76,16 +73,38 @@ export function CommentSection({ candidate }: { candidate: Source }) {
                 <p>{row.answer}</p>
               </div>
 
-              {row.boundary && <small className="qc-comment__side">边界：{row.boundary}</small>}
-              {row.nextStep && <small className="qc-comment__side">下一步：{row.nextStep}</small>}
+              {/* 编排信息折叠:stage/function/gap/boundary/nextStep 都是写给生成器的
+                  计划字段,不是发布文案。此前平铺在问答旁边,于是「不得夸大监督效果。」
+                  「按证据来源核验自己的适用条件」这类内部指令直接展示给用户。运营仍
+                  需要它们做核对,所以收进折叠区而不是删掉。 */}
+              {(row.stageLabel || row.functionLabel || row.gapLabel || row.boundary || row.nextStep) && (
+                <details className="qc-comment__plan">
+                  <summary>编排信息</summary>
+                  <dl>
+                    {row.stageLabel && <><dt>读者阶段</dt><dd>{row.stageLabel}</dd></>}
+                    {row.functionLabel && <><dt>线程功能</dt><dd>{row.functionLabel}</dd></>}
+                    {row.gapLabel && <><dt>承担缺口</dt><dd>{row.gapLabel}</dd></>}
+                    {row.boundary && <><dt>边界要求</dt><dd>{row.boundary}</dd></>}
+                    {row.nextStep && <><dt>下一步核验</dt><dd>{row.nextStep}</dd></>}
+                  </dl>
+                </details>
+              )}
 
               {row.followUps.length > 0 && (
                 <ul className="qc-comment__follow">
                   {row.followUps.map((f, j) => (
                     <li key={`${f.question}-${j}`}>
                       <span>追问：{f.question}</span>
-                      <span>回应：{f.answer}</span>
-                      {f.boundary && <small>边界：{f.boundary}</small>}
+                      {/* 空答复不渲染出一行空白「回应：」——organic_reaction 按设计
+                          无机构答复，其他线程偶发空答复（实测 1/20）也同样处理。 */}
+                      {f.answer?.trim() && <span>回应：{f.answer}</span>}
+                      {/* 追问的 boundary 同样是内部约束,与主线程一致收进折叠区。 */}
+                      {f.boundary && (
+                        <details className="qc-comment__plan">
+                          <summary>编排信息</summary>
+                          <dl><dt>边界要求</dt><dd>{f.boundary}</dd></dl>
+                        </details>
+                      )}
                     </li>
                   ))}
                 </ul>
