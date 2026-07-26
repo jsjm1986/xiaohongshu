@@ -8,6 +8,7 @@ import { NoteCard } from '../components/quick/NoteCard';
 import { ReaderDetail, type ExportFormat } from '../components/quick/ReaderDetail';
 import { WaitCard } from '../components/quick/WaitCard';
 import { api } from '../lib/api';
+import { clampCandidateIndex } from '../lib/note-view';
 import { readerCandidateToMarkdown } from '../lib/publish-copy';
 import { readerPath } from '../lib/quick-nav';
 import { areaPath, QUICK_HOME_PATH } from '../lib/quick-routes';
@@ -245,9 +246,8 @@ export function QuickReaderPage() {
       {/* 排队中/失败的任务不进 NoteCard:半成品套上笔记外壳会像已经发布过了,
           这两种状态各自有 WaitCard 与失败块。 */}
       {job && job.status === 'completed' && job.candidates.length > 0 && (() => {
-        // 两头都夹,与 ReaderDetail 里同一套:预览与工作区读同一个下标,
-        // 任一侧只夹上界都会在负数/NaN 时崩在非空断言上。
-        const current = job.candidates[Math.min(Math.max(0, activeIndex || 0), job.candidates.length - 1)]!;
+        // 与工作区共用同一个夹法,见 clampCandidateIndex 的注释
+        const current = job.candidates[clampCandidateIndex(activeIndex, job.candidates.length)]!;
         return (
           <>
             {/* 标签走 candidateDiffView,与工作区差异表同源;单候选时组件自己不渲染 */}

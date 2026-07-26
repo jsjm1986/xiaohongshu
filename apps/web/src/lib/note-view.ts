@@ -51,6 +51,20 @@ export function noteDate(job: { completedAt?: string; createdAt?: string }): str
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
+/**
+ * 把候选下标夹进合法范围。
+ *
+ * 下标由阅读页持有,同时喂给预览区与工作区两侧,所以两边必须用同一套夹法——各写一遍
+ * 就会出现「一侧读第 3 版、另一侧回落到最后一版」这种两层显示不同候选的情况。
+ *
+ * 两头都夹:上界防「上一篇选了第 3 版、下一篇只有 1 版」,下界防负数与 NaN
+ * (调用方拿到脏值时,candidates[-1]! 的非空断言会直接崩)。
+ */
+export function clampCandidateIndex(index: number, total: number): number {
+  if (total <= 0) return 0;
+  return Math.min(Math.max(0, index || 0), total - 1);
+}
+
 /** 账号名。项目名缺失时用中性称呼,不留空。 */
 export function accountName(projectName?: string | null): string {
   const text = (projectName ?? '').trim();

@@ -1,7 +1,4 @@
-import { candidateDiffView } from '../../lib/candidate-diff';
-import type { ReaderCandidate } from '../../types';
-
-type Source = Pick<ReaderCandidate, 'id' | 'seed' | 'strategy' | 'validation'>;
+import { candidateDiffView, type DiffSource } from '../../lib/candidate-diff';
 
 /**
  * 候选差异说明。
@@ -20,13 +17,14 @@ export function CandidateDiffBar({
   candidates,
   activeIndex,
 }: {
-  candidates: Source[];
+  candidates: DiffSource[];
   activeIndex: number;
 }) {
   if (candidates.length === 0) return null;
   const view = candidateDiffView(candidates);
-  // 切换按钮搬走之后这个容器可能什么都不剩(单候选,或多候选但表达轴全同且…),
-  // 留一个空 div 会在工作区顶上多出一段间距
+  // 切换按钮搬到预览区之后,这个容器在「只有一版」时什么都不剩;留一个空 div
+  // 会在工作区顶上白占一段 flex 间距。多候选而表达轴全同时仍要渲染——那条
+  // 「表达设定相同」的提示本身就是结论。
   const identicalHint = candidates.length > 1 && view.identical;
   if (view.differingAxes.length === 0 && !identicalHint) return null;
 

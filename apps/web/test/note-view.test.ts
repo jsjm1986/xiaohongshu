@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { accountName, avatarTone, noteDate } from '../src/lib/note-view';
+import { accountName, avatarTone, clampCandidateIndex, noteDate } from '../src/lib/note-view';
 
 test('avatarTone 对同一账号名稳定', () => {
   const a = avatarTone('稳行驾校');
@@ -48,4 +48,27 @@ test('accountName 缺项目名时回落发布账号', () => {
   assert.equal(accountName(undefined), '发布账号');
   assert.equal(accountName(''), '发布账号');
   assert.equal(accountName('稳行驾校'), '稳行驾校');
+});
+
+test('clampCandidateIndex 合法下标原样返回', () => {
+  assert.equal(clampCandidateIndex(0, 3), 0);
+  assert.equal(clampCandidateIndex(2, 3), 2);
+});
+
+// 「上一篇选了第 3 版,下一篇只有 1 版」——不夹上界就会读到 undefined
+test('clampCandidateIndex 越界回落到最后一版', () => {
+  assert.equal(clampCandidateIndex(2, 1), 0);
+  assert.equal(clampCandidateIndex(99, 3), 2);
+});
+
+// 下界:负数与 NaN 都会让 candidates[i]! 的非空断言崩掉
+test('clampCandidateIndex 负数与脏值归零', () => {
+  assert.equal(clampCandidateIndex(-1, 3), 0);
+  assert.equal(clampCandidateIndex(Number.NaN, 3), 0);
+  assert.equal(clampCandidateIndex(undefined as unknown as number, 3), 0);
+});
+
+test('clampCandidateIndex 空候选列表返回 0 而不是 -1', () => {
+  assert.equal(clampCandidateIndex(0, 0), 0);
+  assert.equal(clampCandidateIndex(5, 0), 0);
 });

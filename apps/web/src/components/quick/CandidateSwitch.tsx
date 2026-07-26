@@ -1,7 +1,5 @@
-import { candidateDiffView } from '../../lib/candidate-diff';
-import type { ReaderCandidate } from '../../types';
-
-type Source = Pick<ReaderCandidate, 'id' | 'seed' | 'strategy' | 'validation'>;
+import { candidateDiffView, type DiffSource } from '../../lib/candidate-diff';
+import { clampCandidateIndex } from '../../lib/note-view';
 
 /**
  * 预览区顶部的版本切换条。
@@ -17,13 +15,16 @@ export function CandidateSwitch({
   activeIndex,
   onPick,
 }: {
-  candidates: Source[];
+  candidates: DiffSource[];
   activeIndex: number;
   onPick: (index: number) => void;
 }) {
   // 只有一版时没有「切换」可言,整条不占版面
   if (candidates.length < 2) return null;
   const { tabs } = candidateDiffView(candidates);
+  // 用与两个内容层同一个夹法算高亮:否则下标越界时两层都回落到最后一版,
+  // 而按钮一个都不显示选中,看起来像「没选任何版本」。
+  const active = clampCandidateIndex(activeIndex, tabs.length);
 
   return (
     <div className="xhs-switch">
@@ -31,9 +32,9 @@ export function CandidateSwitch({
         <button
           key={tab.id}
           type="button"
-          className={i === activeIndex ? 'active' : ''}
+          className={i === active ? 'active' : ''}
           // 选中态只靠类名的话读屏软件读不出「当前是哪一版」
-          aria-pressed={i === activeIndex}
+          aria-pressed={i === active}
           title={tab.seed !== undefined ? `seed ${tab.seed}` : undefined}
           onClick={() => onPick(i)}
         >

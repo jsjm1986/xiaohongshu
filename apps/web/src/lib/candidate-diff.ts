@@ -61,7 +61,8 @@ export interface CandidateDiffView {
   identical: boolean;
 }
 
-type DiffSource = Pick<ReaderCandidate, 'id' | 'seed' | 'strategy' | 'validation'>;
+/** 差异视图与切换条共用的最小候选面。导出以免各组件各抄一份。 */
+export type DiffSource = Pick<ReaderCandidate, 'id' | 'seed' | 'strategy' | 'validation'>;
 
 function axisValue(strategy: ReaderStrategy | undefined, key: keyof ReaderStrategy, mapped?: boolean): string | undefined {
   const raw = strategy?.[key];

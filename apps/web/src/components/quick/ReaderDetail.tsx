@@ -8,6 +8,7 @@ import { FactLedgerCard } from './FactLedgerCard';
 import { GapCoverageCard } from './GapCoverageCard';
 import { ValidationVerdict } from './ValidationVerdict';
 import { issueVerdict, exportBlockReason } from '../../lib/issue-verdict';
+import { clampCandidateIndex } from '../../lib/note-view';
 import { publishOrderText } from '../../lib/publish-copy';
 import type { ReaderCandidate, ReaderJob } from '../../types';
 
@@ -43,9 +44,8 @@ export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, ret
   const [instruction, setInstruction] = useState('');
   const candidates = job.candidates;
   if (candidates.length === 0) return null;
-  // 两头都夹:下标从页面传进来之后,负数或 NaN 会让下面的非空断言直接崩。
-  // 原来它是内部 useState(0),只夹上界是安全的;提升出去就不是了。
-  const current = candidates[Math.min(Math.max(0, activeIndex || 0), candidates.length - 1)]!;
+  // 与预览区共用同一个夹法,见 clampCandidateIndex 的注释
+  const current = candidates[clampCandidateIndex(activeIndex, candidates.length)]!;
   const verdict = issueVerdict(current.validation);
   const blockReason = exportBlockReason(verdict);
 
