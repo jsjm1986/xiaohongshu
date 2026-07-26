@@ -1,0 +1,229 @@
+import { useCallback, useEffect, useState } from 'react';
+import { ArrowLeft, ChevronLeft, ChevronRight, RotateCcw } from 'lucide-react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { Button, useToast } from '../components/Ui';
+import { ReaderDetail, type ExportFormat } from '../components/quick/ReaderDetail';
+import { WaitCard } from '../components/quick/WaitCard';
+import { api } from '../lib/api';
+import { readerCandidateToMarkdown } from '../lib/publish-copy';
+import { readerPath, rememberWorkspace } from '../lib/quick-nav';
+import { retryJobOnce } from '../lib/single-retry';
+import { readerNeighbors } from '../lib/reader-navigation';
+import type { GenerationJob, Project, ReaderCandidate, ReaderJob } from '../types';
+
+/**
+ * 独立阅读页 /quick/read/:jobId。
+ *
+ * 原来「查看」是产出列表里的手风琴:同一页展开一块两千多像素高的详情,上下还挂着
+ * 别的任务行。读一篇文案要在列表里滚,列表本身也被撑散;而这一屏要同时承载
+ * 「第 37 条在排队」和正文全文两种完全不同的阅读姿态。
+ *
+ * 这里只做一件事:读一篇。顶部是返回原处 + 上一篇/下一篇,正文交给 ReaderDetail
+ * (与手风琴时期同一个组件,内容分段没变)。
+ */
+export function QuickReaderPage() {
+  const { jobId = '' } = useParams<{ jobId: string }>();
+  const navigate = useNavigate();
+  const toast = useToast();
+  const [job, setJob] = useState<ReaderJob | null>(null);
+  const [project, setProject] = useState<Project | null>(null);
+  /** 同项目的任务列表:只为算上一篇/下一篇与返回目标,不在这页渲染 */
+  const [siblings, setSiblings] = useState<GenerationJob[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [revisingId, setRevisingId] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+
+  const fail = (e: unknown, fallback: string) =>
+    toast.push(e instanceof Error ? e.message : fallback, 'error');
+
+  const load = useCallback(async () => {
+    if (!jobId) return;
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const fresh = await api.generations.reader(jobId);
+      setJob(fresh);
+    } catch (e) {
+      // 直接打开一个不存在/无权限的 id 是正常路径(收藏了旧链接),给页面级
+      // 说明而不是一个空白页加一条 toast。
+      setLoadError(e instanceof Error ? e.message : '读取失败');
+    } finally {
+      setLoading(false);
+    }
+  }, [jobId]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  // 项目名与相邻任务:拿到 job 才知道 projectId,所以跟在后面拉。
+  // 失败不影响阅读——顶栏少一个项目名和翻页,正文照读。
+  useEffect(() => {
+    const projectId = job?.projectId;
+    if (!projectId) return;
+    let cancelled = false;
+    void Promise.all([
+      api.projects.list().then((res) => res.items.find((p) => p.id === projectId) ?? null).catch(() => null),
+      api.generations.list(projectId).then((res) => res.items).catch(() => [] as GenerationJob[]),
+    ]).then(([p, list]) => {
+      if (cancelled) return;
+      setProject(p);
+      setSiblings(list);
+    });
+    return () => { cancelled = true; };
+  }, [job?.projectId]);
+
+  // 未完成任务:等待卡要走秒,并按 3s 续拉直到落地
+  const inFlight = job?.status === 'queued' || job?.status === 'running';
+  useEffect(() => {
+    if (!inFlight) return;
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    const poll = setInterval(() => { void load(); }, 3000);
+    return () => { clearInterval(tick); clearInterval(poll); };
+  }, [inFlight, load]);
+
+  const revise = async (candidate: ReaderCandidate, instruction: string) => {
+    setRevisingId(candidate.id);
+    try {
+      await api.generations.revise(jobId, candidate.id, instruction);
+      setJob(await api.generations.reader(jobId));
+      toast.push('已按意见修改');
+    } catch (e) { fail(e, '修改失败'); } finally { setRevisingId(null); }
+  };
+
+  const retry = async () => {
+    if (!project || !job) return;
+    setRetrying(true);
+    try {
+      const result = await retryJobOnce({
+        project,
+        // ReaderJob 是 GenerationJob 的投影;retryJobOnce 只读配方相关字段,
+        // 而阅读投影不带 resolvedConfig,所以用列表里的同一条(它带 task 配方)。
+        job: siblings.find((j) => j.id === job.id) ?? (job as unknown as GenerationJob),
+        deps: { opportunities: api.opportunities, presets: api.presets, generationBatches: api.generationBatches },
+      });
+      for (const w of result.warnings) toast.push(w, 'info');
+      toast.push('已按同款重新提交，消耗 1 次额度');
+    } catch (e) { fail(e, '重试失败'); } finally { setRetrying(false); }
+  };
+
+  const exportAs = (candidate: ReaderCandidate, format: ExportFormat) => {
+    if (format === 'markdown') {
+      const blob = new Blob([readerCandidateToMarkdown(candidate)], { type: 'text/markdown;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${job?.topic || '文案'}-${candidate.candidateIndex + 1}.md`;
+      a.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
+    window.location.assign(api.generations.exportUrl(jobId, candidate.id, format));
+  };
+
+  const neighbors = readerNeighbors(siblings, jobId);
+
+  /**
+   * 返回产出区。
+   *
+   * 直接打开一个阅读链接(收藏/别人发的)时浏览器没有可回退的历史,所以不用
+   * history.back();统一写记忆再进 /quick,工作区据此恢复项目 + 「产出」分区。
+   */
+  const backToHistory = () => {
+    if (job?.projectId) rememberWorkspace({ projectId: job.projectId, tab: 'history' });
+    navigate('/quick');
+  };
+
+  return (
+    <div className="page qc-reader-page">
+      <header className="qc-reader-page__bar">
+        <button type="button" className="qc-crumb__back" onClick={backToHistory}>
+          <ArrowLeft size={14} />返回产出
+        </button>
+        <div className="qc-reader-page__title">
+          <h1>{job?.topic || (loading ? '正在打开…' : '这一篇')}</h1>
+          <small>
+            {project?.name}
+            {job?.createdAt && `${project?.name ? ' · ' : ''}${new Date(job.createdAt).toLocaleString()}`}
+          </small>
+        </div>
+        {/* 上一篇/下一篇:批量产出的典型动作是连着读十几篇,回列表再点开一次是多余的往返 */}
+        {(neighbors.previous || neighbors.next) && (
+          <div className="qc-reader-page__pager">
+            <Button
+              variant="ghost"
+              icon={<ChevronLeft size={14} />}
+              disabled={!neighbors.previous}
+              title={neighbors.previous?.topic || undefined}
+              onClick={() => neighbors.previous && navigate(readerPath(neighbors.previous.id))}
+            >
+              上一篇
+            </Button>
+            <small className="qc-hint">{neighbors.position} / {neighbors.total}</small>
+            <Button
+              variant="ghost"
+              disabled={!neighbors.next}
+              title={neighbors.next?.topic || undefined}
+              onClick={() => neighbors.next && navigate(readerPath(neighbors.next.id))}
+            >
+              下一篇<ChevronRight size={14} />
+            </Button>
+          </div>
+        )}
+      </header>
+
+      {loading && !job && <p className="qc-hint">正在读取这一篇…</p>}
+
+      {loadError && (
+        <div className="quick-card">
+          <div className="quick-card__body">
+            <p className="qc-hint">打不开这一篇：{loadError}</p>
+            <div className="qc-actions">
+              <Button variant="secondary" onClick={() => void load()}>重新读取</Button>
+              <Button variant="ghost" onClick={backToHistory}>返回产出</Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {job && inFlight && (
+        <WaitCard job={job as unknown as GenerationJob} now={now} />
+      )}
+
+      {job?.status === 'failed' && (
+        <div className="quick-card">
+          <div className="quick-card__body">
+            <p className="qc-hint">生成失败：{job.error || '未知错误'}</p>
+            <div className="qc-actions">
+              <Button
+                variant="secondary"
+                icon={<RotateCcw size={13} />}
+                loading={retrying}
+                disabled={retrying || !project}
+                onClick={() => void retry()}
+              >
+                按同款重试
+              </Button>
+              <small className="qc-hint">重试消耗 1 次额度</small>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {job && job.status === 'completed' && job.candidates.length === 0 && (
+        <p className="qc-hint">这次生成没有可展示的候选。</p>
+      )}
+
+      {job && job.candidates.length > 0 && (
+        <ReaderDetail
+          job={job}
+          onExport={exportAs}
+          onRevise={revise}
+          revisingId={revisingId}
+          onRetry={() => void retry()}
+          retrying={retrying}
+        />
+      )}
+    </div>
+  );
+}

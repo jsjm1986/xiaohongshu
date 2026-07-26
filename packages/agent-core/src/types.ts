@@ -520,6 +520,34 @@ export interface GenerationParameterDefinition {
   commentStage?: "reader" | "answer" | "both";
   evidenceStatus: ParameterEvidenceStatus;
   evidenceNote: string;
+  /**
+   * 开启/调高该参数的**运行成本与副作用告知**,供 UI 醒目提示(不是风险等级,
+   * riskFor 已由 evidenceStatus 承担)。只给确实会改变生成开销或产出容量的参数,
+   * 让用户在勾选前就看到代价,而不是事后从耗时里猜。
+   */
+  costNotice?: {
+    /** 一句话结论,UI 标题位。 */
+    headline: string;
+    /** 额外模型调用的阶段说明(没有额外调用则省略)。 */
+    extraModelCalls?: string;
+    /** 实测耗时影响;必须写明是实测还是估算。 */
+    measuredImpact?: string;
+    /** 该开关生效还依赖哪些前置条件——不满足时它不起作用。 */
+    dependsOn?: string[];
+  };
+  /**
+   * 该参数在系统里的**执行强度**——与 evidenceStatus 是两个正交维度。
+   * evidenceStatus 说的是"改这个值的风险有多高"(riskFor 据此给 low/medium/high),
+   * enforcement 说的是"系统靠什么让这个值生效":
+   *
+   *  - `validated`  值经确定性推导进入产物,且有校验层检查违反(违反可进 repair)。
+   *  - `derived`    值经确定性推导改变产物结构,但没有校验层复核结果。
+   *  - `guidance`   值只编译成一句提示词交给模型,系统不做任何结构性保证。
+   *  - `display`    值只影响人工检查清单的展示顺序,不进模型也不进校验。
+   *
+   * 缺省按 `guidance` 理解(最弱假设);历史快照无此字段仍可读。
+   */
+  enforcement?: "validated" | "derived" | "guidance" | "display";
 }
 
 export interface BuiltInGenerationPreset {
@@ -573,6 +601,17 @@ export interface ParameterImpactTrace {
   channels: ContentChannel[];
   evidenceStatus: ParameterEvidenceStatus;
   evidenceNote: string;
+  /**
+   * 当前配置下该参数值**不影响产出**的确定性原因(中文一句)。
+   *
+   * 只在能从 config 确定性判定时给出——例如 comment_conversation_rate 的三处
+   * 读取全在 commentMultiTurnGrowthEnabled(默认 false)门后,开关关闭时它乘进
+   * 一条恒为零的路径。有 inertReason 的参数不再产出 behaviorInstructions:
+   * 给模型一句它无法执行的话只会稀释上下文。
+   *
+   * 可选字段,历史快照没有它按"未标注"处理(向后兼容)。
+   */
+  inertReason?: string;
 }
 
 export interface CompiledFormulaResult {
@@ -1964,7 +2003,14 @@ export interface GenerationInput {
 
 export interface GenerationResult {
   jobId: string;
-  packages: [ContentPackage, ContentPackage, ContentPackage];
+  /**
+   * 至少一个候选;正常是 3 个。原先是固定三元组,任一候选失败即整单抛错、三个
+   * 候选的产出全部丢弃(实测 87 个失败任务落库包数均为 0)。现在只要有候选跑
+   * 通就落库,失败的候选记入 degradedCandidates 供前端与运维查因。
+   */
+  packages: ContentPackage[];
+  /** 失败候选的索引与真因;为空表示三个候选都成功。 */
+  degradedCandidates?: Array<{ candidateIndex: number; reason: string }>;
   knowledgeContext: KnowledgeContextSelection;
   startedAt: string;
   completedAt: string;

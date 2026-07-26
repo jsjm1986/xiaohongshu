@@ -15,6 +15,7 @@ import { LoginPage } from './pages/LoginPage';
 import { ProjectsPage } from './pages/ProjectsPage';
 import { QuickAccountPage } from './pages/QuickAccountPage';
 import { QuickChannelPage } from './pages/QuickChannelPage';
+import { QuickReaderPage } from './pages/QuickReaderPage';
 import { RegisterPage } from './pages/RegisterPage';
 import { ResearchPage } from './pages/ResearchPage';
 import { SettingsPage } from './pages/SettingsPage';
@@ -49,6 +50,9 @@ export default function App() {
       <Route element={<ProtectedRoute><QuickShell /></ProtectedRoute>}>
         <Route path="quick" element={<QuickChannelPage />} />
         <Route path="quick/account" element={<QuickAccountPage />} />
+        {/* 阅读是独立页,不是产出列表里的手风琴:一篇文案有自己的地址,可收藏、可分享、
+            可前进后退,读的时候屏幕上没有别的任务行 */}
+        <Route path="quick/read/:jobId" element={<QuickReaderPage />} />
       </Route>
       {/* 兜底也要按用户类型分叉:统一去 / 会让 SaaS 用户再被弹一次 */}
       <Route path="*" element={<RootRedirect />} />

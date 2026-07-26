@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useProjects } from '../components/ProjectContext';
 import { useToast } from '../components/Ui';
 import { QuickHome } from '../components/quick/QuickHome';
@@ -11,6 +11,7 @@ import { api } from '../lib/api';
 import { buildBatchJobs } from '../lib/quick-batch';
 import { extractRecipe, resolveRecipeTargets } from '../lib/quick-recipe';
 import { clearDownstreamOfProject, clearResults, pruneCheckedIds, type QuickTab } from '../lib/quick-channel-state';
+import { forgetWorkspace, recallWorkspace, rememberWorkspace } from '../lib/quick-nav';
 import type { ContentPreset, GenerationJob, Project, TopicOpportunity } from '../types';
 import type { SimpleSettingOverrides } from '../lib/simple-generation';
 
@@ -27,6 +28,9 @@ export function QuickChannelPage() {
   const { projects, loading } = useProjects();
   const toast = useToast();
   const [project, setProject] = useState<Project | null>(null);
+  // 阅读页是独立路由,回来时这个组件是重新挂载的。没有记忆的话,读完一篇点返回会
+  // 掉回项目卡墙——用户要重新选项目、再点到「产出」,才回到刚才那个列表。
+  const memo = recallWorkspace();
   const [opportunities, setOpportunities] = useState<TopicOpportunity[]>([]);
   const [opportunityId, setOpportunityId] = useState('');
   const [presets, setPresets] = useState<ContentPreset[]>([]);
@@ -36,7 +40,7 @@ export function QuickChannelPage() {
   const [history, setHistory] = useState<GenerationJob[]>([]);
   const [imageAssetIds, setImageAssetIds] = useState<string[]>([]);
   const [jobId, setJobId] = useState<string | undefined>(undefined);
-  const [activeTab, setActiveTab] = useState<QuickTab>('overview');
+  const [activeTab, setActiveTab] = useState<QuickTab>(memo?.tab ?? 'overview');
   const [busy, setBusy] = useState(false);
   // busy = 「有操作在跑」（用于禁用按钮，防并发）；generating = 「真的在生成文案」。
   // 两者必须分开：以前只有 busy，于是在创作区点一下收藏/归档，右栏就会闪出
@@ -70,6 +74,27 @@ export function QuickChannelPage() {
   // 四区导航常开,goTo 不再门控
   const goTo = (tab: QuickTab) => setActiveTab(tab);
 
+  /**
+   * 从阅读页返回时恢复原处:项目 + 所在分区。
+   *
+   * 只在「当前没有项目」且记忆里的项目还在时恢复,所以正常从卡墙进来不受影响。
+   * 恢复用的是 projects 列表里的那一条,不额外拉接口——列表已经在 ProjectProvider 里。
+   */
+  useEffect(() => {
+    if (project || !memo || projects.length === 0) return;
+    const found = projects.find((p) => p.id === memo.projectId);
+    if (!found) { forgetWorkspace(); return; }
+    setProject(found);
+    setActiveTab(memo.tab);
+    // memo 是每次渲染重算的对象,不进依赖;projects/project 变化足以覆盖恢复时机
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects, project]);
+
+  // 记住原处,供阅读页返回时恢复
+  useEffect(() => {
+    if (project) rememberWorkspace({ projectId: project.id, tab: activeTab });
+  }, [project, activeTab]);
+
   const onProjectChosen = (p: Project) => {
     setProject(p);
     const cleared = clearDownstreamOfProject();
@@ -96,6 +121,9 @@ export function QuickChannelPage() {
 
   // 回首页/删项目共用:清空项目与全部下游状态,回到「总览」标签
   const clearWorkspace = () => {
+    // 主动回卡墙就是放弃这个工作区,记忆要一起清——否则下一次渲染的恢复 effect
+    // 会立刻把刚放弃的项目又装回来。
+    forgetWorkspace();
     setProject(null);
     const cleared = clearDownstreamOfProject();
     setOpportunities(cleared.opportunities);

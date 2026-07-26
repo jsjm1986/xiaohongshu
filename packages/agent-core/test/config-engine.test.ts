@@ -320,9 +320,28 @@ describe("three-candidate content generation engine", () => {
     const value = config();
     value.generation.maxRepairAttempts = 0;
 
+    // 本测试守的是"不拿机械兜底稿冒充模型产出",不是"必须整单失败"。原实现挂一
+    // 个候选就废整单,连另外两个真实跑通的候选(各 6+ 次模型调用)一起丢——实测
+    // 87 个失败任务落库包数均为 0。现在交付真实候选、失败候选记因,兜底稿仍然
+    // 不得出现,这条约束在下面正面断言。
+    const result = await new ContentGenerationAgent({ modelProvider: provider })
+      .generate({ jobId: "partial-provider-failure", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge });
+    expect(result.packages).toHaveLength(2);
+    expect(result.packages.map((item) => item.candidateIndex)).toEqual([0, 2]);
+    expect(result.degradedCandidates).toEqual([
+      { candidateIndex: 1, reason: expect.stringContaining("temporary upstream failure") },
+    ]);
+    // 交付的必须是模型产出:失败候选的序号不出现,且没有候选退化成确定性兜底稿。
+    expect(result.packages.every((item) => item.content.N.title === "先核实再决定")).toBe(true);
+  });
+
+  it("三个候选全失败时仍然整单失败,不吐兜底稿", async () => {
+    const provider: ModelProvider = { async generate() { throw new Error("temporary upstream failure"); } };
+    const value = config();
+    value.generation.maxRepairAttempts = 0;
     await expect(new ContentGenerationAgent({ modelProvider: provider })
-      .generate({ jobId: "partial-provider-failure", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge }))
-      .rejects.toThrow(/候选 2 生成失败.*未生成可发布降级稿/u);
+      .generate({ jobId: "all-candidates-failed", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge }))
+      .rejects.toThrow(/三个模型候选全部生成失败.*未生成可发布降级稿/u);
   });
 
   it("revises only the selected candidate and preserves unaffected channels", async () => {
@@ -557,5 +576,234 @@ describe("three-candidate content generation engine", () => {
     expect(revisionText).toContain("图片中有核验清单");
     expect(revisionText).toContain("image-analysis:img1");
     expect(Array.isArray(revisionContent) && revisionContent.some((part) => part.type === "image_url")).toBe(true);
+  });
+
+  /**
+   * 生长阶段(2.2)因中继/上游不可用而失败时,followUps 必然为空,于是
+   * comment_network_under_grown 也必然触发 —— 但它的措辞("是否漏掉了可接的话
+   * 头")把一次基础设施故障说成内容质量问题。生产实测(job 4ee471e2 候选 0/2)两
+   * 条 warning 成对出现,真因只有 model_comment_growth_failed 那条。
+   *
+   * 抑制只针对欠生长:生长调用失败不可能导致超额,故 over_grown 不受影响。
+   */
+  it("生长调用失败时抑制欠生长告警,只保留真因", async () => {
+    const growthOutcomes: Array<"fail" | "ok"> = ["fail", "ok", "fail"];
+    const provider: ModelProvider = {
+      async generate(request) {
+        const purpose = String(request.metadata?.purpose);
+        if (purpose === "generate_comment_growth") {
+          const candidateIndex = Number(request.metadata?.candidateIndex ?? 0);
+          if (growthOutcomes[candidateIndex] === "fail") {
+            throw new Error("读取响应失败: error decoding response body");
+          }
+          return {
+            text: JSON.stringify({ disclaimer: "评论区问答参考模板", threads: stagedCommentThreads(request, "按资料逐项核实。") }),
+            raw: {},
+          };
+        }
+        if (purpose === "generate_comment_readers") return {
+          text: JSON.stringify({ threads: stagedCommentThreads(request, "按资料逐项核实。") }),
+          raw: {},
+        };
+        if (purpose === "generate_org_answers") return {
+          text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "按资料逐项核实。" })) }),
+          raw: {},
+        };
+        return {
+          text: JSON.stringify({
+            content: {
+              H: { hashtags: ["信息补全", "比较方法"] },
+              N: {
+                imageBrief: "核验清单",
+                title: "先核验再选择",
+                body: "正文明确说明适用边界，并把已知、未知和需要核验的信息分开。".repeat(10),
+              },
+              Cref: {
+                disclaimer: "以下为评论区问答参考模板，不代表真实用户发言。",
+                threads: [0, 1].map((index) => ({
+                  id: `t${index}`,
+                  stage: "比较方案",
+                  gap: "fit",
+                  function: "verification",
+                  question: "哪些条件需要核验？",
+                  answer: "按资料逐项核实。",
+                  followUps: [],
+                  nextStep: "记录自己的条件。",
+                  postingIdentity: "author",
+                  sourceClusterIds: ["d1"],
+                  evidenceIds: ["evidence_d1"],
+                })),
+              },
+            },
+            evidenceIds: ["evidence_d1"],
+            reasoning: [{ statement: "使用项目资料", status: "fact", evidenceIds: ["evidence_d1"] }],
+            unknowns: [],
+          }),
+          raw: {},
+        };
+      },
+    };
+    const value = config();
+    value.content.bodyMinChars = 20;
+    value.content.commentThreadMin = 2;
+    value.generation.maxRepairAttempts = 0;
+    value.content.commentMultiTurnGrowthEnabled = true;
+    const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-07-25T00:00:00Z") })
+      .generate({ jobId: "growth-failure-job", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge: [knowledge[0]!] });
+    const codesOf = (index: number) => result.packages[index]!.validation.issues.map((issue) => issue.code);
+    for (const failedIndex of [0, 2]) {
+      const codes = codesOf(failedIndex);
+      // 真因保留,如实报告基础设施故障。
+      expect(codes).toContain("model_comment_growth_failed");
+      // 误导性的内容判断被抑制。
+      expect(codes).not.toContain("comment_network_under_grown");
+    }
+    // 生长成功的候选完全不受影响:抑制条件不成立,分布告警照常按内容判定。
+    expect(codesOf(1)).not.toContain("model_comment_growth_failed");
+  });
+
+  /**
+   * 台账阶段失败是 warning,不是 error。
+   *
+   * 定级依据(实测 217 个包):台账失败**不导致台账缺失**——126/126 个失败包的
+   * reasoning 均非空(catch 保留前序阶段产出),它降低的是事实锚定率(人均 fact
+   * 0.8 → 0.2)。这是质量削弱而非内容失效。同类阶段失败(判官/机构答复/评论生长)
+   * 全是 warning,只有台账判 error,导致中继一抖动 quality_status 就归零:实测
+   * 18 篇产出零 passed 全由这一条决定,质量信号失去区分度。
+   */
+  it("台账阶段失败记 warning 并保留可见文案，不把整篇判为无效", async () => {
+    const provider: ModelProvider = {
+      async generate(request) {
+        const purpose = String(request.metadata?.purpose);
+        if (purpose === "generate_ledger") throw new Error("读取响应失败: error decoding response body");
+        if (purpose === "generate_comment_readers") return {
+          text: JSON.stringify({ threads: stagedCommentThreads(request, "按资料逐项核实。") }),
+          raw: {},
+        };
+        if (purpose === "generate_org_answers") return {
+          text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "按资料逐项核实。" })) }),
+          raw: {},
+        };
+        return {
+          text: JSON.stringify({
+            content: {
+              H: { hashtags: ["信息补全", "比较方法"] },
+              N: {
+                imageBrief: "核验清单",
+                title: "先核验再选择",
+                body: "正文明确说明适用边界，并把已知、未知和需要核验的信息分开。".repeat(8),
+              },
+              Cref: {
+                disclaimer: "以下为评论区问答参考模板，不代表真实用户发言。",
+                threads: [0, 1].map((index) => ({
+                  id: `t${index}`,
+                  stage: "比较方案",
+                  gap: "fit",
+                  function: "verification",
+                  question: "哪些条件需要核验？",
+                  answer: "按资料逐项核实。",
+                  followUps: [],
+                  nextStep: "记录自己的条件。",
+                  postingIdentity: "author",
+                  sourceClusterIds: ["d1"],
+                  evidenceIds: ["evidence_d1"],
+                })),
+              },
+            },
+            evidenceIds: ["evidence_d1"],
+            reasoning: [{ statement: "使用项目资料", status: "fact", evidenceIds: ["evidence_d1"] }],
+            unknowns: [],
+          }),
+          raw: {},
+        };
+      },
+    };
+    const value = config();
+    value.content.bodyMinChars = 20;
+    value.content.commentThreadMin = 2;
+    value.generation.maxRepairAttempts = 0;
+    const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-07-26T00:00:00Z") })
+      .generate({ jobId: "ledger-failure-job", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge: [knowledge[0]!] });
+    const ledgerIssues = result.packages.flatMap((item) =>
+      item.validation.issues.filter((issue) => issue.code === "model_ledger_failed"));
+    expect(ledgerIssues.length).toBeGreaterThan(0);
+    // 与同类阶段失败一致:warning、不可 repair。
+    expect(ledgerIssues.every((issue) => issue.severity === "warning" && issue.repairable === false)).toBe(true);
+    // 文案要点明后果(锚定不完整),而不是只说"失败"。
+    expect(ledgerIssues[0]!.message).toContain("事实锚定");
+    // 可见文案完整保留,台账失败不再让候选整体无效。
+    expect(result.packages.every((item) => item.content.N.body.length > 0)).toBe(true);
+    expect(result.packages.every((item) => item.content.Cref.threads.length >= 2)).toBe(true);
+  });
+
+  /**
+   * 判官失效必须留下信号。生产实测:174 个包 claimJudgments 全为 0、60 个包报出
+   * sensitive_claim_without_evidence,却没有任何 issue 指向判官——受控声明是按
+   * 语义裁决还是按裸词面判定,从产物上完全看不出来。
+   */
+  it("判官调用失败时在校验结果里留下 model_claim_judge_failed", async () => {
+    const provider: ModelProvider = {
+      async generate(request) {
+        const purpose = String(request.metadata?.purpose);
+        if (purpose === "claim_judge") throw new Error("读取响应失败: error decoding response body");
+        if (purpose === "generate_comment_readers") return {
+          text: JSON.stringify({ threads: stagedCommentThreads(request, "按资料逐项核实。") }),
+          raw: {},
+        };
+        if (purpose === "generate_org_answers") return {
+          text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "按资料逐项核实。" })) }),
+          raw: {},
+        };
+        return {
+          text: JSON.stringify({
+            content: {
+              H: { hashtags: ["信息补全", "比较方法"] },
+              N: {
+                imageBrief: "核验清单",
+                title: "先核验再选择",
+                // 带数字的受控声明:走 genericMeasuredClaim,正是判官的输入。
+                body: `消肿一般7天左右，具体以面诊为准。${"正文明确说明适用边界，并把已知、未知和需要核验的信息分开。".repeat(8)}`,
+              },
+              Cref: {
+                disclaimer: "以下为评论区问答参考模板，不代表真实用户发言。",
+                threads: [0, 1].map((index) => ({
+                  id: `t${index}`,
+                  stage: "比较方案",
+                  gap: "fit",
+                  function: "verification",
+                  question: "哪些条件需要核验？",
+                  answer: "按资料逐项核实。",
+                  followUps: [],
+                  nextStep: "记录自己的条件。",
+                  postingIdentity: "author",
+                  sourceClusterIds: ["d1"],
+                  evidenceIds: ["evidence_d1"],
+                })),
+              },
+            },
+            evidenceIds: ["evidence_d1"],
+            reasoning: [{ statement: "使用项目资料", status: "fact", evidenceIds: ["evidence_d1"] }],
+            unknowns: [],
+          }),
+          raw: {},
+        };
+      },
+    };
+    const value = config();
+    value.content.bodyMinChars = 20;
+    value.content.commentThreadMin = 2;
+    value.generation.maxRepairAttempts = 0;
+    const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-07-25T00:00:00Z") })
+      .generate({ jobId: "judge-failure-job", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge: [knowledge[0]!] });
+    const failures = result.packages.flatMap((item) =>
+      item.validation.issues.filter((issue) => issue.code === "model_claim_judge_failed"));
+    expect(failures.length).toBeGreaterThan(0);
+    // 只补信号,不升级严重度:判官失效不阻断发布。
+    expect(failures.every((issue) => issue.severity === "warning" && issue.repairable === false)).toBe(true);
+    expect(failures[0]!.message).toContain("error decoding response body");
+    // 每候选只记一条,不随重试次数堆叠。
+    for (const item of result.packages) {
+      expect(item.validation.issues.filter((issue) => issue.code === "model_claim_judge_failed").length).toBeLessThanOrEqual(1);
+    }
   });
 });

@@ -1,19 +1,19 @@
 import { useEffect, useState } from 'react';
-import { Clock, Repeat, RotateCcw, SearchX } from 'lucide-react';
+import { BookOpen, Clock, Repeat, RotateCcw, SearchX } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { Button, useToast } from '../Ui';
 import { api } from '../../lib/api';
 import { approveOpportunitiesForBatch } from '../../lib/quick-generation';
 import { filterGenerationJobs, type GenerationStatusFilter } from '../../lib/quick-channel-state';
 import { overviewDigest } from '../../lib/overview-digest';
-import { readerCandidateToMarkdown } from '../../lib/publish-copy';
+import { readerPath } from '../../lib/quick-nav';
 import { failureDigest, planBatchRetry } from '../../lib/retry-plan';
 import { retryJobOnce } from '../../lib/single-retry';
 import { waitStatus } from '../../lib/wait-status';
 import { buildBatchJobs } from '../../lib/quick-batch';
 import { BatchBoard } from './BatchBoard';
-import { ReaderDetail, type ExportFormat } from './ReaderDetail';
 import { WaitCard } from './WaitCard';
-import type { GenerationJob, Project, ReaderCandidate, ReaderJob } from '../../types';
+import type { GenerationJob, Project } from '../../types';
 
 interface Props {
   project: Project | null;
@@ -47,17 +47,14 @@ const STATUS_CHIPS: Array<{ key: GenerationStatusFilter; label: string }> = [
 
 export function HistoryTab({ project, history, fail, setHistory, activeBatchId, focusJobId, onReuseRecipe }: Props) {
   const toast = useToast();
+  const navigate = useNavigate();
+  /**
+   * 未完成任务在行内展开进度(轻量、就该留在列表里);已完成的「阅读」走独立页
+   * /quick/read/:jobId,不再在列表里挂两千像素的手风琴。
+   */
   const [expanded, setExpanded] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<GenerationStatusFilter>('all');
   const [keyword, setKeyword] = useState('');
-  /**
-   * 展开时按需取详情并缓存。走阅读投影接口(:id/reader)而不是 :id ——
-   * 后者单任务 1.05 MB(trace/参数影响报告/编排快照占 90%,这里一个都不渲染),
-   * 而前者 36 KB 且反过来带上了 reasoning / gapLedger / strategy。
-   */
-  const [details, setDetails] = useState<Record<string, ReaderJob>>({});
-  const [loadingId, setLoadingId] = useState<string | null>(null);
-  const [revisingId, setRevisingId] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);
   // 本地加载态:以前这里置壳的 busy,但本组件并不读 busy,所以自己没有加载提示,
   // 只是让创作区残留「正在生成」进度条。改为自持状态,壳的 busy 不再被搭便车。
@@ -127,7 +124,7 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
     } catch (e) { fail(e, '批量重试失败'); } finally { setRetryingAll(false); }
   };
 
-  // 创作区把「还在后台跑」的任务交接过来时,直接展开那一条,别让用户在列表里自己找。
+  // 创作区把「还在后台跑」的任务交接过来时,直接展开那一条的进度,别让用户自己找。
   // 状态筛选同时回到「全部」:兜底落点进来的任务多半是 running,若上次筛的是
   // 「已完成」,展开的那条会被筛掉,等于交接到一个空列表。
   useEffect(() => {
@@ -175,37 +172,8 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
     return () => clearInterval(timer);
   }, [hasInFlight]);
 
-  // 展开中的任务跑完时补一次详情。候选只有 GET /api/generations/:id 才带,而原本
-  // 只在点击展开的那一刻按 status==='completed' 取过一次;若用户在它还 running 时
-  // 就展开(兜底落点的典型路径),轮询把状态刷成 completed 后没人再去取候选,卡片
-  // 就一直停在「正在生成」。这里补上状态翻转这一路。
-  const expandedStatus = history.find((j) => j.id === expanded)?.status;
-  useEffect(() => {
-    if (!expanded || expandedStatus !== 'completed' || details[expanded]) return;
-    let cancelled = false;
-    setLoadingId(expanded);
-    api.generations.reader(expanded)
-      .then((full) => { if (!cancelled) setDetails((cur) => ({ ...cur, [full.id]: full })); })
-      .catch(() => { /* 静默:再次点击折叠/展开仍可重试 */ })
-      .finally(() => { if (!cancelled) setLoadingId(null); });
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expanded, expandedStatus]);
-
-  /**
-   * 按意见修改。后端 revise 就地替换该候选的内容包,所以修改后要重取详情——
-   * 否则界面还显示旧文案。每次消耗 1 次额度(后端 revise 路径会 consumePlatformQuota),
-   * 该提示在 ReaderDetail 里明写。
-   */
-  const revise = async (jobId: string, candidateId: string, instruction: string) => {
-    setRevisingId(candidateId);
-    try {
-      await api.generations.revise(jobId, candidateId, instruction);
-      const fresh = await api.generations.reader(jobId);
-      setDetails((cur) => ({ ...cur, [jobId]: fresh }));
-      toast.push('已按意见修改');
-    } catch (e) { fail(e, '修改失败'); } finally { setRevisingId(null); }
-  };
+  // 跑完的任务自动进阅读页?不做。用户可能正在读别的东西,页面被抢走比多点一下更糟。
+  // 完成后行内展开的进度卡自己收掉(waitStatus 返回 settled),行上出现「阅读」。
 
   /** 单篇重试:与批次看板共用同一段配方回填逻辑(lib/single-retry)。 */
   const retryOne = async (job: GenerationJob) => {
@@ -223,51 +191,14 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
     } catch (e) { fail(e, '重试失败'); } finally { setRetryingId(null); }
   };
 
-  /**
-   * 导出。markdown 走本地拼装(即时、不占额度、离线可用),docx/pdf/json 必须走后端
-   * ——只有服务端能生成这几种二进制格式。
-   *
-   * 后端一直支持 markdown/json/docx/pdf 四种,完整版工作台四个按钮都给;极简创作
-   * 此前只有一个本地 Markdown Blob,付费用户要交付用的 docx/pdf 拿不到。
-   *
-   * 门槛差异要紧:后端导出对未通过校验的候选一律 400
-   * (export.service.ts:155「禁止导出」),实测 165 个候选里 129 个都过不了;
-   * 而本地 Markdown 不经后端,不受此限。所以只门控后端三种格式,
-   * 本地 Markdown 始终可用——待核对的稿子仍然要能拿出来给人看。
-   */
-  const exportAs = (job: GenerationJob, v: ReaderCandidate, format: ExportFormat) => {
-    if (format === 'markdown') {
-      const blob = new Blob([readerCandidateToMarkdown(v)], { type: 'text/markdown;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${job.topic || '文案'}-${v.candidateIndex + 1}.md`;
-      a.click();
-      URL.revokeObjectURL(url);
-      return;
-    }
-    // 后端按 Content-Disposition 给文件名(含中文标题),这里直接跳转触发下载
-    window.location.assign(api.generations.exportUrl(job.id, v.id, format));
+  /** 已完成 → 去独立阅读页;未完成 → 行内展开进度(收起再点即折叠)。 */
+  const open = (job: GenerationJob) => {
+    if (job.status === 'completed') { navigate(readerPath(job.id)); return; }
+    setExpanded((cur) => (cur === job.id ? null : job.id));
   };
 
-  // 候选加载交给上面那个 effect(它同时覆盖「展开时已完成」和「展开后才完成」两路),
-  // 这里只管展开态,免得同一次点击发两个重复的详情请求。
-  const toggle = (job: GenerationJob) => {
-    if (expanded === job.id) { setExpanded(null); return; }
-    setExpanded(job.id);
-  };
-
-  // 看板子卡 → 展开下方列表里的同一任务。批次里刚完成的任务可能还不在 history
-  // (轮询按 3s 走,看板可能先知道),所以先补一次列表再展开。
-  // 候选同样交给上面那个 effect:补完列表后它就能拿到 status。这里不能自己去 get,
-  // 否则任务还在 running 时会把空候选写进 details,反而把 effect 的重试条件堵死。
-  const openJobFromBoard = async (jobId: string) => {
-    setExpanded(jobId);
-    if (!history.some((j) => j.id === jobId) && projectId) {
-      try { setHistory((await api.generations.list(projectId)).items); }
-      catch { /* 静默:状态刷新失败,下一拍轮询会再补 */ }
-    }
-  };
+  // 看板子卡「查看」只对已完成的任务开放(BatchBoard 里 disabled),直接进阅读页。
+  const openJobFromBoard = (jobId: string) => navigate(readerPath(jobId));
 
   return (
     <div className="qc-step">
@@ -317,7 +248,7 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
       {project && (
         <BatchBoard
           project={project} activeBatchId={activeBatchId} fail={fail}
-          onOpenJob={(id) => void openJobFromBoard(id)}
+          onOpenJob={openJobFromBoard}
           onReuseRecipe={onReuseRecipe}
         />
       )}
@@ -333,9 +264,9 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
 
       <ul className="qc-history-list">
         {visible.map((job) => {
-          const open = expanded === job.id;
+          const isOpen = expanded === job.id;
           const running = job.status === 'running' || job.status === 'queued';
-          const detail = open && job.status === 'completed' ? details[job.id] : undefined;
+          const done = job.status === 'completed';
           return (
             <li key={job.id} className="qc-history-item">
               <div className="qc-project-row">
@@ -347,29 +278,20 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
                   return <small className="qc-hint">{s.headline}{s.elapsedLabel ? ` · ${s.elapsedLabel}` : ''}</small>;
                 })()}
                 <small className="qc-hint">{job.createdAt ? new Date(job.createdAt).toLocaleString() : ''}</small>
-                <Button variant="ghost" onClick={() => void toggle(job)}>{open ? '收起' : '查看'}</Button>
+                {/* 已完成走独立阅读页(主动作,给实心按钮);未完成只展开进度 */}
+                {done ? (
+                  <Button variant="secondary" icon={<BookOpen size={13} />} onClick={() => open(job)}>阅读</Button>
+                ) : (
+                  <Button variant="ghost" onClick={() => open(job)}>
+                    {isOpen ? '收起' : job.status === 'failed' ? '看原因' : '看进度'}
+                  </Button>
+                )}
                 {onReuseRecipe && (
                   <Button variant="ghost" icon={<Repeat size={13} />} onClick={() => onReuseRecipe(job)}>再来一篇同款</Button>
                 )}
               </div>
-              {open && loadingId === job.id && <p className="qc-hint">正在加载候选…</p>}
-              {open && detail && loadingId !== job.id && detail.candidates.length > 0 && (
-                <div className="qc-history-detail">
-                  <ReaderDetail
-                    job={detail}
-                    onExport={(candidate, format) => exportAs(job, candidate, format)}
-                    onRevise={(candidate, instruction) => revise(job.id, candidate.id, instruction)}
-                    revisingId={revisingId}
-                    onRetry={() => void retryOne(job)}
-                    retrying={retryingId === job.id}
-                  />
-                </div>
-              )}
-              {open && detail && loadingId !== job.id && detail.candidates.length === 0 && (
-                <p className="qc-hint">该次生成没有可展示的候选。</p>
-              )}
-              {open && running && <WaitCard job={job} now={now} />}
-              {open && job.status === 'failed' && (
+              {isOpen && running && <WaitCard job={job} now={now} />}
+              {isOpen && job.status === 'failed' && (
                 <div className="qc-history-detail">
                   <p className="qc-hint">生成失败：{job.error || '未知错误'}</p>
                   {/* 失败条目原本只能去批次看板重试;这里直接给入口 */}

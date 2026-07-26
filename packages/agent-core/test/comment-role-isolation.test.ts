@@ -5,6 +5,7 @@ import {
   buildOrgThreadScope,
   buildStagedCommentGrowthPrompt,
   buildStagedCommentReadersPrompt,
+  buildStagedCorePrompt,
   buildStagedOrgAnswersPrompt,
   buildStagedOrgFollowUpAnswersPrompt,
   commentStageInstructions,
@@ -470,6 +471,52 @@ describe("buildOrgThreadScope (逐 gap 口径)", () => {
     replyPlan: { directAnswer: "单次 680 起", condition: "以当期为准", boundary: "不承诺效果", unknown: "个人差异未知", nextQuestion: "核实预算" },
   };
   const gapCard = { gapId: "price_gap", label: "价格", evidenceIds: ["evidence_d1"] };
+
+  /**
+   * 内部占位符不得随口径下发给模型。
+   *
+   * planning 的 unresolvedConstraintDimensions 用 `待核实维度：xxx` /
+   * `已披露地点范围：xxx` 做**内部维度标记**(planning.ts 注释明说这不是对人的断
+   * 言)。engine 的兜底渲染器在三处剥掉这个前缀,但分阶段提示词路径没有 —— 于是
+   * 前缀原样进 replyPlan.condition,模型照抄进可见文案。实测产出:
+   * 「…不向业主加收费用。；待核实维度：方案适配条件。」
+   */
+  it("口径里剥掉内部维度前缀,不把后台标记喂给模型", () => {
+    const leaky = {
+      primaryGapId: "price_gap",
+      replyPlan: {
+        directAnswer: "单次 680 起",
+        condition: "待核实维度：成本边界",
+        boundary: "已披露地点范围：上海",
+        unknown: "待核实维度：来源可信度",
+        nextQuestion: "核实预算",
+      },
+    };
+    const scope = buildOrgThreadScope(leaky, gapCard, evidenceReferences);
+    const text = JSON.stringify(scope.口径);
+    expect(text).not.toContain("待核实维度");
+    expect(text).not.toContain("已披露地点范围");
+    // 剥前缀不等于丢信息:维度名本身仍要留给模型判断是否需要澄清。
+    expect(text).toContain("成本边界");
+    expect(text).toContain("上海");
+  });
+
+  /**
+   * 上一条只覆盖了分阶段答复路径(buildOrgThreadScope)。orchestrationPlan 投影
+   * 里的 contentAnchor 也原样携带 replyPlan.condition —— 而这个投影进的是**核心
+   * 图文阶段**的写作上下文。生产实测(job 4ee471e2)三个候选的 contentAnchor 全
+   * 部带着「待核实维度：时间与工作可见性」。两条路径都要剥。
+   */
+  it("orchestrationPlan 投影的 contentAnchor 也剥掉内部维度前缀", () => {
+    const plan = isolationPlan();
+    const leaked = plan.dialogueThreads.filter((thread) =>
+      /待核实维度[：:]|已披露地点范围[：:]/u.test(JSON.stringify(thread.replyPlan)));
+    // 前置断言:规划层确实会产出带前缀的口径,否则本测试是空跑。
+    expect(leaked.length).toBeGreaterThan(0);
+    const text = promptFullText(buildStagedCorePrompt(promptInput(plan)));
+    expect(text).not.toContain("待核实维度");
+    expect(text).not.toContain("已披露地点范围");
+  });
 
   it("有证据的 gap 输出钉到该 gap 的 quote(id/section/quote/caveats),不带硬约束", () => {
     const scope = buildOrgThreadScope(thread, gapCard, evidenceReferences);

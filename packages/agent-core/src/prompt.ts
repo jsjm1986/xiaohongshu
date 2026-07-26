@@ -577,11 +577,13 @@ function modelVisibleOrchestrationPlan(plan?: OrchestrationPlan): Record<string,
       id: thread.id,
       primaryGapId: thread.primaryGapId,
       auxiliaryGapIds: thread.auxiliaryGapIds,
+      // 内部维度标记(待核实维度：/已披露地点范围：)是校验层的白名单前缀，不是
+      // 可写进文案的措辞;送进写作上下文前统一剥掉，只留维度本身。
       contentAnchor: {
-        possibleAnswer: thread.replyPlan?.directAnswer,
-        relevantCondition: thread.replyPlan?.condition,
-        necessaryLimit: thread.replyPlan?.boundary,
-        stillUnknown: thread.replyPlan?.unknown,
+        possibleAnswer: optionalStripped(thread.replyPlan?.directAnswer),
+        relevantCondition: optionalStripped(thread.replyPlan?.condition),
+        necessaryLimit: optionalStripped(thread.replyPlan?.boundary),
+        stillUnknown: optionalStripped(thread.replyPlan?.unknown),
       },
     })),
     targetThreadCount: plan.targetThreadCount,
@@ -982,6 +984,29 @@ export interface OrgThreadScope {
 }
 
 /**
+ * 剥掉规划层的内部维度标记前缀，保留维度名本身。
+ *
+ * `待核实维度：成本边界` / `已披露地点范围：上海` 是 planning 的
+ * unresolvedConstraintDimensions 用来标记"这是一个待澄清的决策维度、不是对某人生
+ * 活的断言"（见 planning.ts 该数组上方注释）。engine 的兜底渲染器已在三处剥掉它，
+ * 但分阶段提示词路径没有——前缀原样进 replyPlan，模型照抄进可见文案。实测产出
+ * 「…不向业主加收费用。；待核实维度：方案适配条件。」这类后台措辞泄漏。
+ *
+ * 只去前缀不去内容：维度名（成本边界 / 上海）仍要留给模型判断是否需要澄清。
+ */
+function stripInternalDimensionMarkers(value: string): string {
+  return value
+    .replace(/(^|[；;、，,])\s*(?:待核实维度|已披露地点范围)[：:]\s*/gu, "$1")
+    .replace(/^[；;、，,]+/u, "")
+    .trim();
+}
+
+/** 同上，但容忍缺省字段——用于 orchestrationPlan 投影里的可选口径。 */
+function optionalStripped(value: string | undefined): string | undefined {
+  return value === undefined ? undefined : stripInternalDimensionMarkers(value);
+}
+
+/**
  * 按侧+按角色隔离的机构答复（2A-O/2B-O）：为单个线程组装“你手里的口径”。
  * replyPlan 取自规划层；证据原文按缺口卡 evidenceIds 钉到该 gap，只取
  * id/section/quote/caveats。quotes 为空时输出显式硬约束——没有口径的 gap
@@ -1000,11 +1025,11 @@ export function buildOrgThreadScope(
   return {
     gap标签: gapLabel,
     口径: {
-      直接回答: thread.replyPlan.directAnswer,
-      适用条件: thread.replyPlan.condition,
-      边界: thread.replyPlan.boundary,
-      仍未知: thread.replyPlan.unknown,
-      下一项核验: thread.replyPlan.nextQuestion,
+      直接回答: stripInternalDimensionMarkers(thread.replyPlan.directAnswer),
+      适用条件: stripInternalDimensionMarkers(thread.replyPlan.condition),
+      边界: stripInternalDimensionMarkers(thread.replyPlan.boundary),
+      仍未知: stripInternalDimensionMarkers(thread.replyPlan.unknown),
+      下一项核验: stripInternalDimensionMarkers(thread.replyPlan.nextQuestion),
     },
     证据原文: quotes,
     ...(quotes.length === 0 ? { 硬约束: `你手里没有${gapLabel}的信息口径，只能走转人工（“我帮你跟专人确认”）或保留未知；禁止承诺提供、禁止编具体说法、禁止“发定位/发详细地址/加微信发你”类具体交付` } : {}),

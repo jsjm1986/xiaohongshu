@@ -30,6 +30,7 @@ import {
 } from './diagnostic-contract.js';
 import { FormulaService } from './formula.service.js';
 import { readerView } from './generation-reader-view.js';
+import { recoverInterruptedJobs } from './generation-restart-recovery.js';
 import { detectProviderOutage } from './provider-outage.js';
 import { IntelligenceService } from './intelligence.service.js';
 import type { SessionPrincipal } from './models.js';
@@ -93,9 +94,15 @@ export function retryModelProvider(
 ): ModelProvider {
   const requestedAttempts = options.maxAttempts ?? 3;
   const maxAttempts = Number.isFinite(requestedAttempts)
-    ? Math.max(1, Math.min(5, Math.floor(requestedAttempts)))
+    ? Math.max(1, Math.min(8, Math.floor(requestedAttempts)))
     : 3;
-  const baseDelayMs = Math.max(0, options.baseDelayMs ?? 300);
+  // 退避窗口要跨过中继的**错误簇**,不是单次抖动。实测(kirostudio 40 分钟日志,
+  // 37 个簇):502「读取响应失败」成簇发生,持续 0-410 秒,中位约 16-20 秒。旧配置
+  // (baseDelay=300/1000 × 4 次)累计只等 2-7 秒,整段落在簇内必然全败——实测同一篇
+  // 生成里 generate_comment_readers 两个候选把 4 次尝试全部耗尽。这解释了台账阶段
+  // 100% 失败:它是最后一个阶段,前面每步都在消耗时间与运气。
+  // 生产默认 6 次 × 4000ms = 4+8+16+32+64 = 124 秒;上限放宽到 8 次以覆盖长尾。
+  const baseDelayMs = Math.max(0, options.baseDelayMs ?? 4_000);
   const sleep = options.sleep ?? ((delayMs: number) => new Promise<void>((resolveDelay) => setTimeout(resolveDelay, delayMs)));
   return {
     generate: async (request) => {
@@ -106,6 +113,12 @@ export function retryModelProvider(
         } catch (error) {
           lastError = error;
           const status = error instanceof ModelProviderError ? error.status : undefined;
+          // 可选诊断:确认重试是否真的发生、每次 status 是什么。定位台账 100% 失败
+          // 时靠它拿到了"两个候选把 4 次尝试全部耗尽"这一关键证据。
+          if (process.env.CONTENT_AGENT_DEBUG_RETRY) {
+            const detail = error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160);
+            console.error(`[retry] purpose=${String(request.metadata?.purpose)} attempt=${attempt + 1}/${maxAttempts} status=${status} ${detail}`);
+          }
           if (status !== undefined && status !== 429 && status < 500) throw error;
           if (attempt < maxAttempts - 1) await sleep(baseDelayMs * 2 ** attempt);
         }
@@ -215,9 +228,8 @@ export class GenerationService implements OnModuleInit {
   ) {}
 
   onModuleInit(): void {
-    this.database
-      .prepare("UPDATE generation_jobs SET status='failed', error=?, updated_at=? WHERE status IN ('queued','running')")
-      .run('应用重启导致任务中断，请重新生成', nowIso());
+    const recovered = recoverInterruptedJobs(this.database);
+    for (const jobId of recovered) this.enqueue(jobId);
   }
 
   create(raw: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
@@ -712,7 +724,7 @@ export class GenerationService implements OnModuleInit {
         ?? (isRecord(storedResolution.values) ? storedResolution as unknown as ParameterResolutionSnapshot : undefined);
       const impactReport = result.impactReport ?? storedImpact;
       const validCandidateCount = result.packages.filter((content) => content.validation.valid).length;
-      const qualityStatus: JobRow['quality_status'] = validCandidateCount > 0 ? 'passed' : 'needs_review';
+      const qualityStatus = deriveQualityStatus(result.packages);
       this.updateJob(jobId, { progress: 88, knowledgeContext: result.knowledgeContext });
       this.database.transaction(() => {
         for (const content of result.packages) {
@@ -1157,6 +1169,26 @@ function validationIssueCountHeuristic(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * 质量状态判定。
+ *
+ * 台账失败已从 error 降为 warning（可发布但事实锚定不完整，定级依据见 engine.ts）。
+ * 降级后它不再拖垮 validation.valid，但也不该无声通过——quality_status 只有
+ * passed/needs_review 两档，所以这里显式把「锚定受损」并入 needs_review：人工复核
+ * 的信号保留，同时让完全正常的候选能真正 passed。
+ *
+ * 改这条之前，判定只看「有无 error」，于是中继一抖动就把整批打成 needs_review：
+ * 实测 18 篇产出零 passed 全由台账那一条决定，质量信号完全失去区分度。
+ */
+export function deriveQualityStatus(
+  packages: Array<{ validation: { valid: boolean; issues: Array<{ code: string }> } }>,
+): 'passed' | 'needs_review' {
+  const hasValidCandidate = packages.some((content) => content.validation.valid);
+  const anchoringDegraded = packages.some((content) => content.validation.issues
+    .some((issue) => issue.code === 'model_ledger_failed'));
+  return hasValidCandidate && !anchoringDegraded ? 'passed' : 'needs_review';
 }
 
 export function computeBatchStatus(jobStatuses: string[]): 'queued' | 'running' | 'completed' | 'failed' | 'partial' {

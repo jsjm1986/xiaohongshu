@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildKnowledgeLedger,
+  channelsForIssues,
   ContentGenerationAgent,
   createDefaultGenerationConfig,
   DEFAULT_FORMULA_VERSION,
@@ -296,15 +297,18 @@ describe("P4 comment identity and host-state validators", () => {
 });
 
 describe("P4 comment network shape and growth levels", () => {
-  it("escalates under-grown to error only when the growth switch is on with a non-zero target", () => {
+  it("欠生长一律只是 warning:接话是否自然发生属语义判断,不阻断也不触发 repair", () => {
     const config = validationConfig();
     config.content.commentMultiTurnGrowthEnabled = true;
     const fourFlatThreads = [1, 2, 3, 4].map((index) => thread({ id: `t${index}`, question: `第${index}项怎么选？` }));
     const draft = parseGenerationDraft(JSON.stringify(draftJson(plainBody, fourFlatThreads)));
     const plan = commentNetworkPlan(4, [2, 3]);
 
-    const escalated = validate(draft, config, { orchestrationPlan: plan });
-    expect(escalated).toContainEqual(expect.objectContaining({ code: "comment_network_under_grown", severity: "error", repairable: true }));
+    // 开关打开 + 目标非零:仍然只是 warning。multiTurnTarget 是分布期望,
+    // 「没有可接的话头就不接」是正确行为,判 error 会逼模型机械凑配额。
+    const withGrowth = validate(draft, config, { orchestrationPlan: plan });
+    expect(withGrowth).toContainEqual(expect.objectContaining({ code: "comment_network_under_grown", severity: "warning", repairable: false }));
+    expect(channelsForIssues(withGrowth.filter((issue) => issue.code === "comment_network_under_grown"))).toEqual([]);
 
     config.content.commentMultiTurnGrowthEnabled = false;
     const warningOnly = validate(draft, config, { orchestrationPlan: plan });
@@ -385,6 +389,69 @@ describe("P4 comment network shape and growth levels", () => {
     expect(codes(withRoles(["谨慎比较者", "首次功课者", "同城行动者", "蹲反馈者"]))).not.toContain("comment_surface_roles_flat");
     expect(codes(withRoles(["谨慎比较者", "首次功课者", "同城行动者", "蹲反馈者", "蹲反馈者"]))).toContain("comment_surface_roles_flat");
     expect(codes(withRoles(["谨慎比较者", "首次功课者", "同城行动者", "蹲反馈者", "谨慎比较者"]))).not.toContain("comment_surface_roles_flat");
+  });
+
+  /**
+   * 滑杆挂钩(软校验):comment_role_diversity 决定"期望覆盖几种社会位置",地板随
+   * 滑杆分档,但**任何档位都只报 warning、不触发 repair**。滑杆调高只表示期望更
+   * 丰富,不构成阻断理由——角色是否真的丰富属于语义判断,交给带完整上下文的
+   * agent,校验层只做诚实告知(蓝图角色谱数据也仍在补齐)。
+   */
+  it("按 comment_role_diversity 分档:地板随滑杆变化,但一律只是 warning", () => {
+    const plan = (count: number) => commentNetworkPlan(count, [0, 0], Math.max(8, count * 2));
+    const issueAt = (roleDiversity: number, roles: string[]) => {
+      const config = validationConfig();
+      config.parameters!.commentRoleDiversity = roleDiversity;
+      const threads = roles.map((role, index) => thread({ id: `t${index + 1}`, question: `第${index + 1}项怎么选？` }));
+      const draft = parseGenerationDraft(JSON.stringify(draftJson(plainBody, threads)));
+      draft.content.Cref.threads.forEach((item, index) => {
+        item.surfaceRoleCard = surfaceRole(roles[index]!);
+      });
+      return validate(draft, config, { orchestrationPlan: plan(roles.length) })
+        .find((issue) => issue.code === "comment_surface_roles_flat");
+    };
+    // 4 线程只有 2 种社会位置:高档位期望 min(4,4)=4 种,提示但不阻断。
+    const twoPositions = ["谨慎比较者", "首次功课者", "谨慎比较者", "首次功课者"];
+    expect(issueAt(95, twoPositions)).toMatchObject({ severity: "warning", repairable: false });
+    // 同一份输入在低档位是合规的——50 只期望 2 种,不该无端提示。
+    expect(issueAt(50, twoPositions)).toBeUndefined();
+    // 全员同一个人:任何档位都会提示,同样只是 warning。
+    const onePosition = ["谨慎比较者", "谨慎比较者", "谨慎比较者", "谨慎比较者"];
+    expect(issueAt(50, onePosition)).toMatchObject({ severity: "warning", repairable: false });
+    expect(issueAt(95, onePosition)).toMatchObject({ severity: "warning", repairable: false });
+    // 软校验的硬保证:该码永远不会进入 repair 通道。
+    expect(channelsForIssues([issueAt(95, onePosition)!])).toEqual([]);
+  });
+
+  /**
+   * 兜底护栏:内部维度标记若真的漏到可见文案,必须判 error。
+   * 已在 prompt 层剥掉前缀(buildOrgThreadScope),但模型仍可能从别处照抄,
+   * 所以校验层也要拦 —— 这类后台措辞出现在成品里是硬缺陷,不是风格问题。
+   */
+  it("可见文案出现「待核实维度：」等内部标记时判 error", () => {
+    const config = validationConfig();
+    const draft = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [
+      thread({ id: "t1", question: "这个怎么算？", answer: "会更换班组，不加收费用。；待核实维度：方案适配条件。" }),
+      thread({ id: "t2", question: "谁来认定？" }),
+    ])));
+    expect(codes(validate(draft, config))).toContain("internal_audit_artifact_visible");
+  });
+
+  it("期望值夹到规划层实际角色供给,不产生无条件警告", () => {
+    // 退化蓝图的 commentCast 只有 3 个角色。若期望值不夹到供给,高档位会要求 4
+    // 种社会位置——每一篇都必然报警,警告退化成噪声。
+    const config = validationConfig();
+    config.parameters!.commentRoleDiversity = 95;
+    const roles = ["处境相近者", "谨慎比较者", "可追责信息提供者", "处境相近者"];
+    const threads = roles.map((_, index) => thread({ id: `t${index + 1}`, question: `第${index + 1}项怎么选？` }));
+    const draft = parseGenerationDraft(JSON.stringify(draftJson(plainBody, threads)));
+    draft.content.Cref.threads.forEach((item, index) => {
+      item.surfaceRoleCard = surfaceRole(roles[index]!);
+    });
+    const plan = commentNetworkPlan(roles.length, [0, 0], 12);
+    // 供给恰好 3 种,产出也是 3 种且无相邻重复 → 已用尽可用角色,不该报警。
+    plan.personaScenePlan.commentCast = ["处境相近者", "谨慎比较者", "可追责信息提供者"].map(surfaceRole);
+    expect(codes(validate(draft, config, { orchestrationPlan: plan }))).not.toContain("comment_surface_roles_flat");
   });
 
   it("exempts all-question networks that have follow-up depth", () => {

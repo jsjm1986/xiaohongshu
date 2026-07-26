@@ -123,7 +123,7 @@ export function validationIssueLabel(code?: string) {
     // 图文对齐与模型运行
     plan_to_copy_alignment: "图片说明与计划锚点需要人工复核",
     repair_parse_failed: "模型输出没有完整解析,本次生成不完整",
-    model_ledger_failed: "模型事实账本生成失败",
+    model_ledger_failed: "事实账本生成失败(文案可用,事实锚定待人工复核)",
     model_comment_growth_failed: "评论多轮生长失败",
   };
   return (code && labels[code]) || null;

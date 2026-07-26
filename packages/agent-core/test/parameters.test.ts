@@ -114,6 +114,8 @@ describe("explainable generation parameter registry", () => {
       expect(definition.channels.length).toBeGreaterThan(0);
       expect(definition.evidenceNote).not.toBe("");
       expect(definition.control).toMatchObject({ simpleMode: expect.any(Boolean), advanced: expect.any(Boolean) });
+      // 执行强度必须逐个显式标注,不允许漏标(漏标会让 UI 对用户高估约束力)。
+      expect(["validated", "derived", "guidance", "display"]).toContain(definition.enforcement);
     }
     expect(GENERATION_PARAMETER_REGISTRY.map((item) => item.id)).toEqual(expect.arrayContaining([
       "comment_role_diversity", "comment_constraint_density", "comment_gap_multiplexing", "comment_reply_increment", "question_compression", "comment_inference_effort",
@@ -127,7 +129,12 @@ describe("explainable generation parameter registry", () => {
   });
 
   it("compiles social-register and conversation-network controls into executable instructions", () => {
-    const compiled = compileGenerationParameters(baseConfig(), DEFAULT_FORMULA_VERSION, {
+    // 多轮相关指令只有在生长开关打开时才是"可执行的":开关关闭时 multiTurnTarget
+    // 恒为 [0,0],此处必须显式打开,否则 conversation_rate/branching_strength 会
+    // 被判为空转并按设计不再下发指令(见下一条用例)。
+    const growthOn = baseConfig();
+    growthOn.content.commentMultiTurnGrowthEnabled = true;
+    const compiled = compileGenerationParameters(growthOn, DEFAULT_FORMULA_VERSION, {
       overrides: {
         comment_platform_register: 85,
         comment_conversation_rate: 70,
@@ -146,6 +153,99 @@ describe("explainable generation parameter registry", () => {
     expect(instructions).toContain("约 70% 的根评论");
     expect(instructions).toContain("相邻缺口");
     expect(instructions).toContain("整齐销售漏斗");
+  });
+
+  describe("执行强度标注与实际消费路径一致", () => {
+    const enforcementOf = (id: string) =>
+      GENERATION_PARAMETER_REGISTRY.find((item) => item.id === id)?.enforcement;
+
+    it("仅提示词引导的参数标为 guidance,不冒充硬约束", () => {
+      // 这几个逐个实测确认 planning/engine/content 都不读值,只有一句提示词。
+      for (const id of [
+        "evidence_strictness", "boundary_visibility", "body_completeness",
+        "state_information_strength", "redundancy_tolerance", "thread_style",
+      ]) {
+        expect(enforcementOf(id)).toBe("guidance");
+      }
+    });
+
+    it("有校验层复核的参数标为 validated", () => {
+      for (const id of ["body_min_chars", "comment_thread_max", "forbidden_phrases", "comment_gap_multiplexing"]) {
+        expect(enforcementOf(id)).toBe("validated");
+      }
+    });
+
+    it("只推导不校验的参数标为 derived", () => {
+      for (const id of ["comment_role_diversity", "question_compression", "comment_expansion"]) {
+        expect(enforcementOf(id)).toBe("derived");
+      }
+    });
+
+    it("诊断强调滑杆标为 display", () => {
+      expect(enforcementOf("comment_diagnostic_gapCoverage")).toBe("display");
+      expect(enforcementOf("body_diagnostic_stateMatch")).toBe("display");
+    });
+
+    it("evidenceStatus 与 enforcement 是正交维度:高风险不等于强执行", () => {
+      const strictness = GENERATION_PARAMETER_REGISTRY.find((item) => item.id === "evidence_strictness")!;
+      // 调低证据严格度确实高风险,所以 evidenceStatus 保持 normative_boundary;
+      // 但系统对它只有提示词引导,两者必须能同时如实表达。
+      expect(strictness.evidenceStatus).toBe("normative_boundary");
+      expect(strictness.enforcement).toBe("guidance");
+    });
+  });
+
+  describe("空转参数标注 inertReason", () => {
+    const traceOf = (compiled: ReturnType<typeof compileGenerationParameters>, id: string) =>
+      compiled.impactReport.parameterTraces.find((trace) => trace.parameterId === id)!;
+
+    it("生长开关关闭时,接话比例被标为空转且不再下发指令", () => {
+      const config = baseConfig();
+      config.content.commentMultiTurnGrowthEnabled = false;
+      const compiled = compileGenerationParameters(config, DEFAULT_FORMULA_VERSION, {
+        overrides: { comment_conversation_rate: 70 },
+      });
+      const trace = traceOf(compiled, "comment_conversation_rate");
+      expect(trace.inertReason).toContain("开关关闭");
+      expect(trace.behaviorInstructions).toEqual([]);
+      // 空转的那句话也不能从整篇指令里泄漏出去。
+      expect(compiled.impactReport.behaviorInstructions.join("\n")).not.toContain("约 70% 的根评论");
+    });
+
+    it("生长开关打开时,接话比例不再是空转且指令回归", () => {
+      const config = baseConfig();
+      config.content.commentMultiTurnGrowthEnabled = true;
+      const compiled = compileGenerationParameters(config, DEFAULT_FORMULA_VERSION, {
+        overrides: { comment_conversation_rate: 70 },
+      });
+      const trace = traceOf(compiled, "comment_conversation_rate");
+      expect(trace.inertReason).toBeUndefined();
+      expect(trace.behaviorInstructions.join("\n")).toContain("约 70% 的根评论");
+    });
+
+    it("线程上下限相同时,展开力度被标为空转", () => {
+      const config = baseConfig();
+      config.content.commentThreadMin = 4;
+      config.content.commentThreadMax = 4;
+      const compiled = compileGenerationParameters(config, DEFAULT_FORMULA_VERSION, {
+        overrides: { comment_expansion: 90 },
+      });
+      expect(traceOf(compiled, "comment_expansion").inertReason).toContain("没有可调空间");
+    });
+
+    it("诊断强调滑杆恒为显示用途,不进模型也不进校验", () => {
+      const compiled = compileGenerationParameters(baseConfig(), DEFAULT_FORMULA_VERSION);
+      const trace = traceOf(compiled, "comment_diagnostic_gapCoverage");
+      expect(trace.inertReason).toContain("显示顺序");
+      expect(trace.behaviorInstructions).toEqual([]);
+    });
+
+    it("真正生效的参数不带 inertReason", () => {
+      const compiled = compileGenerationParameters(baseConfig(), DEFAULT_FORMULA_VERSION);
+      expect(traceOf(compiled, "question_compression").inertReason).toBeUndefined();
+      expect(traceOf(compiled, "comment_role_diversity").inertReason).toBeUndefined();
+      expect(traceOf(compiled, "comment_thread_max").inertReason).toBeUndefined();
+    });
   });
 
   it("compiles comment inference effort as a real generation parameter", () => {
@@ -232,6 +332,54 @@ describe("explainable generation parameter registry", () => {
     }
     for (const style of BUILT_IN_STYLE_PROFILES) {
       expect(() => compileGenerationParameters(baseConfig(), DEFAULT_FORMULA_VERSION, { styleProfileId: style.id })).not.toThrow();
+    }
+  });
+
+  it("多轮生长开关必须带成本告知,且写明依赖前置条件", () => {
+    const growth = GENERATION_PARAMETER_REGISTRY.find((item) => item.id === "comment_multi_turn_growth")!;
+    expect(growth.costNotice).toBeDefined();
+    expect(growth.costNotice!.headline).toContain("行数预算");
+    expect(growth.costNotice!.extraModelCalls).toContain("2.2");
+    // 依赖项必须点明另外两个会让它失效的前置条件,否则用户开了却没效果无从判断。
+    const depends = growth.costNotice!.dependsOn!.join("");
+    expect(depends).toContain("follow_up_depth");
+    expect(depends).toContain("comment_conversation_rate");
+  });
+
+  it("十个预设都开启多轮生长,让 comment_conversation_rate 真正生效", () => {
+    // 卡片文案承诺「评论区自然接住细节」「承担可查找的长尾分支」「评论展开条件
+    // 分支」,而 comment_conversation_rate 的三处读取全在 commentMultiTurnGrowth
+    // 门后。开关关闭时 multiTurnTarget 恒为 [0,0]、评论永远停在一问一答,文案
+    // 就成了兑现不了的承诺。预设显式开启它,让实现与卡片一致。
+    for (const preset of BUILT_IN_GENERATION_PRESETS) {
+      expect(
+        preset.parameterValues.comment_multi_turn_growth,
+        `${preset.id} 必须显式开启多轮生长,否则它设的 comment_conversation_rate 是死值`,
+      ).toBe(true);
+      expect(Number(preset.parameterValues.comment_conversation_rate)).toBeGreaterThan(0);
+      expect(Number(preset.parameterValues.follow_up_depth ?? 2)).toBeGreaterThan(0);
+    }
+  });
+
+  it("开启生长后接话比例不再被标为空转", () => {
+    for (const preset of BUILT_IN_GENERATION_PRESETS) {
+      const compiled = compileGenerationParameters(baseConfig(), DEFAULT_FORMULA_VERSION, { presetId: preset.id });
+      const trace = compiled.impactReport.parameterTraces.find((item) => item.parameterId === "comment_conversation_rate")!;
+      expect(trace.inertReason, `${preset.id} 的接话比例仍被判空转`).toBeUndefined();
+      expect(trace.behaviorInstructions.join("")).toContain("根评论长出自然接话");
+    }
+  });
+
+  it("每个可见预设都显式声明送达阶段与入口,不靠 registry 默认兜底", () => {
+    // 预设是"这张卡面向谁"的声明。漏设 audience_stage/entry_route 会让该卡静默
+    // 落到 registry 默认(collecting/search)、与别的卡撞车,且 resolutionSnapshot
+    // 里 source 记为 config 而不是 preset——用户看不出这张卡到底定位在哪一步。
+    for (const preset of BUILT_IN_GENERATION_PRESETS) {
+      expect(preset.parameterValues.audience_stage, `${preset.id} 缺 audience_stage`).toBeDefined();
+      expect(preset.parameterValues.entry_route, `${preset.id} 缺 entry_route`).toBeDefined();
+      const compiled = compileGenerationParameters(baseConfig(), DEFAULT_FORMULA_VERSION, { presetId: preset.id });
+      expect(compiled.resolutionSnapshot.sourceByParameter.audience_stage).toMatchObject({ source: "preset", sourceId: preset.id });
+      expect(compiled.resolutionSnapshot.sourceByParameter.entry_route).toMatchObject({ source: "preset", sourceId: preset.id });
     }
   });
 

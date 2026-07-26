@@ -199,6 +199,13 @@ export async function judgeSensitiveClaimsWithModel(
     temperature?: number;
     maxOutputTokens?: number;
     metadata?: Record<string, string | number | boolean>;
+    /**
+     * 判官失败时的观测钩子。原实现 catch 后静默返回,判官这一层可以整体失效而
+     * 不留任何信号:实测生产 174 个包 claimJudgments 全为 0、其中 60 个包报出
+     * sensitive_claim_without_evidence,却无从判断是文案无据还是判官没跑。
+     * 降级行为保持不变(仍回退词面旧逻辑),只是把真因交给调用方记录。
+     */
+    onFailure?: (error: unknown) => void;
   },
 ): Promise<GenerationDraft> {
   // 无未锚定句或无锚定池时不调用;同时清掉可能残留的过期裁决(句面已变)。
@@ -224,7 +231,8 @@ export async function judgeSensitiveClaimsWithModel(
     });
     const verdicts = parseClaimJudgeVerdicts(parseJsonObject(response.text), claims.length);
     return { ...draft, claimJudgments: resolveClaimJudgments(claims, verdicts, evidencePool) };
-  } catch {
+  } catch (error) {
+    request.onFailure?.(error);
     return clear();
   }
 }
@@ -1800,6 +1808,43 @@ function packageId(jobId: string, candidateIndex: number, seed: number): string 
   return `pkg_${createHash("sha256").update(`${jobId}:${candidateIndex}:${seed}`).digest("hex").slice(0, 20)}`;
 }
 
+/**
+ * 生长阶段(2.2)因中继/模型不可用而失败时,followUps 必然为空——此时
+ * comment_network_under_grown 描述的"是否漏掉了可接的话头"是内容判断,却会把
+ * 一次基础设施故障说成质量问题,是误导信号。已有 model_comment_growth_failed
+ * 如实报告了真因,故在其存在时抑制这条分布告警(过量生长不受影响:生长失败不可
+ * 能导致超额)。校验层保持纯函数,不感知基础设施状态。
+ */
+/**
+ * 判官失败记一条 warning,不改降级行为。
+ *
+ * 受控声明的语义裁决(邀约/限定/疑问放行,事实断言查证)只有判官能做;判官缺席
+ * 时校验层回退纯词面命中,于是「助理可以帮你约时间」这类句子照样落 error。行为
+ * 上这是保守的(宁可多报),但**无声**:实测 174 个包无一条裁决,60 个包报出
+ * sensitive_claim_without_evidence,没有任何信号指向判官。这条 warning 只补信号
+ * ——同一次生成里若同时看到它和成批的受控声明 error,真因就在判官而非文案。
+ *
+ * 每候选只记一条:判官在初次与每轮修复后各调用一次,失败原因通常同一个。
+ */
+function recordClaimJudgeFailure(stageIssues: ContentValidationIssue[], error: unknown): void {
+  if (stageIssues.some((issue) => issue.code === "model_claim_judge_failed")) return;
+  stageIssues.push({
+    code: "model_claim_judge_failed",
+    severity: "warning",
+    channel: "package",
+    message: `受控声明的语义裁决未完成，敏感声明改按词面命中判定（可能偏严）：${error instanceof Error ? error.message : String(error)}`,
+    repairable: false,
+  });
+}
+
+function suppressGrowthWarningsAfterGrowthFailure(
+  issues: ContentValidationIssue[],
+  stageIssues: ContentValidationIssue[],
+): ContentValidationIssue[] {
+  if (!stageIssues.some((issue) => issue.code === "model_comment_growth_failed")) return issues;
+  return issues.filter((issue) => issue.code !== "comment_network_under_grown");
+}
+
 function uniqueUnknowns(ledger: KnowledgeLedger, draft: GenerationDraft): GenerationDraft["unknowns"] {
   return [...new Map([...ledger.unknowns, ...draft.unknowns].map((item) => [item.id, item])).values()];
 }
@@ -1843,19 +1888,23 @@ export class ContentGenerationAgent implements GenerationEngine {
       this.generateCandidate(effectiveInput, context, ledger, 1, planning, compilation.resolutionSnapshot, compilation.impactReport),
       this.generateCandidate(effectiveInput, context, ledger, 2, planning, compilation.resolutionSnapshot, compilation.impactReport),
     ]);
-    const failedCandidate = candidateResults.findIndex((result) => result.status === "rejected");
-    if (failedCandidate >= 0) {
-      const failed = candidateResults[failedCandidate] as PromiseRejectedResult;
+    // 部分成功即交付:原先任一候选 rejected 就整单抛错,另外两个已跑完的候选
+    // (每个 6+ 次模型调用)连同产物一起丢弃——实测 87 个失败任务落库包数均为
+    // 0,其中 9ee6677e 挂在候选 2,候选 1 白跑 21 分钟。三候选的产品语义是"给
+    // 用户挑一个",两个也能挑,所以只要有候选跑通就交付,失败的记因。
+    const degradedCandidates = candidateResults.flatMap((result, candidateIndex) => result.status === "rejected"
+      ? [{ candidateIndex, reason: result.reason instanceof Error ? result.reason.message : String(result.reason) }]
+      : []);
+    const candidates = candidateResults.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+    if (!candidates.length) {
       throw new Error(
-        `模型候选 ${failedCandidate + 1} 生成失败，任务已停止且未生成可发布降级稿：${failed.reason instanceof Error ? failed.reason.message : String(failed.reason)}`,
+        `三个模型候选全部生成失败，未生成可发布降级稿：${degradedCandidates.map((item) => `候选 ${item.candidateIndex + 1}：${item.reason}`).join("；")}`,
       );
     }
-    const candidates = candidateResults.map(
-      (result) => (result as PromiseFulfilledResult<ContentPackage>).value,
-    ) as [ContentPackage, ContentPackage, ContentPackage];
     return {
       jobId: input.jobId,
       packages: candidates,
+      ...(degradedCandidates.length ? { degradedCandidates } : {}),
       knowledgeContext: context,
       startedAt,
       completedAt: this.now().toISOString(),
@@ -2302,11 +2351,19 @@ export class ContentGenerationAgent implements GenerationEngine {
           unknowns: parsed.unknowns,
         };
       } catch (error) {
+        // 与同类阶段失败对齐为 warning。判官/机构答复/评论生长失败都是 warning,
+        // 只有台账判 error,于是中继一抖动 quality_status 就归零——实测 18 篇产出
+        // 零 passed 全由这一条决定,质量信号失去区分度。
+        //
+        // 定级依据(实测 217 个包):台账失败**不导致台账缺失**,126/126 个失败包的
+        // reasoning 均非空(catch 保留了前序阶段的产出,只是没被本阶段精炼);它降低
+        // 的是事实锚定率(人均 fact 0.8 → 0.2)。这是质量削弱,不是内容失效,可发布
+        // 但需人工复核锚定——故 warning + repairable:false,并在文案里点明后果。
         stageIssues.push({
           code: "model_ledger_failed",
-          severity: "error",
+          severity: "warning",
           channel: "package",
-          message: `模型可见文案已保留，但事实台账阶段失败，必须人工复核：${error instanceof Error ? error.message : String(error)}`,
+          message: `模型可见文案已保留，但事实台账阶段失败，事实锚定与证据引用可能不完整，发布前需人工复核：${error instanceof Error ? error.message : String(error)}`,
           repairable: false,
         });
       }
@@ -2339,11 +2396,15 @@ export class ContentGenerationAgent implements GenerationEngine {
         temperature: Math.min(input.config.model.temperature, 0.2),
         maxOutputTokens: input.config.model.maxOutputTokens,
         metadata: { jobId: input.jobId, candidateIndex, purpose: "claim_judge", stage: 3.6 },
+        onFailure: (error) => recordClaimJudgeFailure(stageIssues, error),
       });
     }
     draft = refreshCreativeScenarioIdentities(draft);
     let issues = [
-      ...validateGenerationDraft({ draft, config: input.config, ledger, allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, orchestrationPlan, projectBlueprint: input.planningContext?.projectBlueprint }),
+      ...suppressGrowthWarningsAfterGrowthFailure(
+        validateGenerationDraft({ draft, config: input.config, ledger, allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, orchestrationPlan, projectBlueprint: input.planningContext?.projectBlueprint }),
+        stageIssues,
+      ),
       ...stageIssues,
     ];
     let repairAttempts = 0;
@@ -2427,11 +2488,15 @@ export class ContentGenerationAgent implements GenerationEngine {
           temperature: Math.min(input.config.model.temperature, 0.2),
           maxOutputTokens: input.config.model.maxOutputTokens,
           metadata: { jobId: input.jobId, candidateIndex, purpose: "claim_judge", attempt: repairAttempts },
+          onFailure: (error) => recordClaimJudgeFailure(stageIssues, error),
         });
       }
       draft = refreshCreativeScenarioIdentities(draft);
       issues = [
-        ...validateGenerationDraft({ draft, config: input.config, ledger, allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, orchestrationPlan, projectBlueprint: input.planningContext?.projectBlueprint }),
+        ...suppressGrowthWarningsAfterGrowthFailure(
+          validateGenerationDraft({ draft, config: input.config, ledger, allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, orchestrationPlan, projectBlueprint: input.planningContext?.projectBlueprint }),
+          stageIssues,
+        ),
         ...stageIssues,
       ];
     }

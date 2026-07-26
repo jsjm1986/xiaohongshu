@@ -338,6 +338,49 @@ describe("judgeSensitiveClaimsWithModel 安全降级", () => {
     expect(sensitiveClaimIssues(judged)).toHaveLength(1);
   });
 
+  /**
+   * 降级不再无声。判官整体失效时行为上只是"回退词面判定"(保守、不更坏),但没有
+   * 任何信号:实测生产 174 个包 claimJudgments 全为 0、60 个包报出受控声明
+   * error,无从判断是文案无据还是判官没跑。onFailure 把真因交给调用方。
+   */
+  it("判官失败时把真因交给 onFailure,降级行为不变", async () => {
+    const draft = unanchoredDraft("今天整理了大家常问的问题。想约的姐妹私聊我,帮你安排恢复期的面诊。");
+    const failures: unknown[] = [];
+    const thrown = new Error("读取响应失败: error decoding response body");
+    const judged = await judgeSensitiveClaimsWithModel(
+      { async generate() { throw thrown; } },
+      draft,
+      anchorContext(),
+      { onFailure: (error) => failures.push(error) },
+    );
+    expect(failures).toEqual([thrown]);
+    // 降级语义不变:仍无裁决、仍按词面报 error。
+    expect(judged.claimJudgments).toBeUndefined();
+    expect(sensitiveClaimIssues(judged)).toHaveLength(1);
+  });
+
+  it("解析失败(而非调用抛错)同样触发 onFailure", async () => {
+    const draft = unanchoredDraft("今天整理了大家常问的问题。想约的姐妹私聊我,帮你安排恢复期的面诊。");
+    const failures: unknown[] = [];
+    await judgeSensitiveClaimsWithModel(spyProvider("这不是 JSON"), draft, anchorContext(), {
+      onFailure: (error) => failures.push(error),
+    });
+    expect(failures).toHaveLength(1);
+  });
+
+  it("判官成功时不触发 onFailure", async () => {
+    const draft = unanchoredDraft("今天整理了大家常问的问题。想约的姐妹私聊我,帮你安排恢复期的面诊。");
+    const failures: unknown[] = [];
+    const judged = await judgeSensitiveClaimsWithModel(
+      spyProvider(JSON.stringify({ judgments: [{ statementIndex: 0, classification: "service_offer" }] })),
+      draft,
+      anchorContext(),
+      { onFailure: (error) => failures.push(error) },
+    );
+    expect(failures).toEqual([]);
+    expect(judged.claimJudgments).toHaveLength(1);
+  });
+
   it("无未锚定句时不发起模型调用(零成本),返回原引用", async () => {
     const draft = attachKnowledgeAnchors(makeDraft("消肿一般7天左右。"), anchorContext());
     expect(collectUnanchoredSensitiveClaims(draft, anchorContext())).toHaveLength(0);
