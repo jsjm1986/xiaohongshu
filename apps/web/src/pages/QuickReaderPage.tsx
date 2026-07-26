@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ChevronLeft, ChevronRight, RotateCcw } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Button, useToast } from '../components/Ui';
+import { CandidateSwitch } from '../components/quick/CandidateSwitch';
 import { NoteAlertBar } from '../components/quick/NoteAlertBar';
 import { NoteCard } from '../components/quick/NoteCard';
 import { ReaderDetail, type ExportFormat } from '../components/quick/ReaderDetail';
@@ -249,22 +250,8 @@ export function QuickReaderPage() {
         const current = job.candidates[Math.min(Math.max(0, activeIndex || 0), job.candidates.length - 1)]!;
         return (
           <>
-            {job.candidates.length > 1 && (
-              <div className="xhs-switch">
-                {job.candidates.map((candidate, i) => (
-                  <button
-                    key={candidate.id}
-                    type="button"
-                    className={i === activeIndex ? 'active' : ''}
-                    // 选中态只靠类名的话读屏软件读不出「当前是哪一版」
-                    aria-pressed={i === activeIndex}
-                    onClick={() => setActiveIndex(i)}
-                  >
-                    第 {i + 1} 版
-                  </button>
-                ))}
-              </div>
-            )}
+            {/* 标签走 candidateDiffView,与工作区差异表同源;单候选时组件自己不渲染 */}
+            <CandidateSwitch candidates={job.candidates} activeIndex={activeIndex} onPick={setActiveIndex} />
 
             <NoteAlertBar
               validation={current.validation}
@@ -277,7 +264,6 @@ export function QuickReaderPage() {
               <ReaderDetail
                 job={job}
                 activeIndex={activeIndex}
-                onPickIndex={setActiveIndex}
                 onExport={exportAs}
                 onRevise={revise}
                 revisingId={revisingId}

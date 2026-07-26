@@ -31,12 +31,14 @@ interface Props {
   /** 重新生成一批(重试) */
   onRetry?: () => void;
   retrying?: boolean;
-  /** 当前候选下标。原为内部 useState,现在预览区与工作区共用同一个下标,提升到页面层 */
+  /**
+   * 当前候选下标。原为内部 useState,现在预览区与工作区共用同一个下标,提升到页面层。
+   * 这里只读不写:切版本的按钮在预览区(CandidateSwitch),所以没有配套的 onPick。
+   */
   activeIndex: number;
-  onPickIndex: (index: number) => void;
 }
 
-export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, retrying, activeIndex, onPickIndex }: Props) {
+export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, retrying, activeIndex }: Props) {
   const toast = useToast();
   const [instruction, setInstruction] = useState('');
   const candidates = job.candidates;
@@ -61,7 +63,8 @@ export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, ret
 
   return (
     <div className="qc-reader">
-      <CandidateDiffBar candidates={candidates} activeIndex={activeIndex} onPick={onPickIndex} />
+      {/* 切版本在上面的预览区,这里只读差异 */}
+      <CandidateDiffBar candidates={candidates} activeIndex={activeIndex} />
 
       <ValidationVerdict validation={current.validation} />
 
