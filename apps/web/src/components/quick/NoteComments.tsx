@@ -86,6 +86,11 @@ export function NoteComments({ candidate, accountLabel }: NoteCommentsProps) {
           }
           followUps={row.followUps.filter((f) => f.question?.trim())}
           onCopyFollow={(text) => void copyOne(text)}
+          followReply={
+            row.answererLabel && row.answererLabel !== '模拟读者接话'
+              ? { name: accountLabel, badge: '作者' }
+              : { name: '读者' }
+          }
         />
       ))}
     </section>
@@ -100,9 +105,11 @@ interface RowProps {
   reply?: { name: string; badge?: string; text: string; onCopy: () => void };
   followUps?: Array<{ question: string; answer: string }>;
   onCopyFollow?: (text: string) => void;
+  /** 追问答复的署名:与主答复同一套判定结果,org_answer 才带「作者」标 */
+  followReply?: { name: string; badge?: string };
 }
 
-function Row({ name, badge, text, onCopy, reply, followUps = [], onCopyFollow }: RowProps) {
+function Row({ name, badge, text, onCopy, reply, followUps = [], onCopyFollow, followReply }: RowProps) {
   const tone = avatarTone(name);
   return (
     <div className="xhs-comment">
@@ -135,8 +142,20 @@ function Row({ name, badge, text, onCopy, reply, followUps = [], onCopyFollow }:
               )}
             </div>
             <p className="xhs-comment__text">{f.question}</p>
-            {/* organic_reaction 按设计没有机构答复,空答复不渲染出一行空白。 */}
-            {f.answer?.trim() && <p className="xhs-comment__text xhs-comment__text--reply">{f.answer}</p>}
+            {/* organic_reaction 按设计没有机构答复,空答复不渲染出一行空白。
+                追问答复(org_answer 线程是机构补充)要单独成署名块,不能吸进读者楼层。 */}
+            {f.answer?.trim() && (
+              <div className="xhs-comment__reply">
+                <div className="xhs-comment__name">
+                  {followReply?.name ?? '读者'}
+                  {followReply?.badge && <em>{followReply.badge}</em>}
+                  {onCopyFollow && (
+                    <Button variant="ghost" icon={<Copy size={11} />} onClick={() => onCopyFollow(f.answer)} aria-label="复制追问答复" />
+                  )}
+                </div>
+                <p className="xhs-comment__text">{f.answer}</p>
+              </div>
+            )}
           </div>
         ))}
       </div>
