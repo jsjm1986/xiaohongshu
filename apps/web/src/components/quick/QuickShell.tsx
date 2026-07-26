@@ -1,7 +1,8 @@
-import { ArrowUpRight, ChevronDown, Gauge, LogOut, Settings, Zap } from 'lucide-react';
+import { ChevronDown, Gauge, LogOut, Settings, Zap } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
+import { EditionSwitch } from '../EditionSwitch';
 import { ProjectProvider } from '../ProjectContext';
 import { api } from '../../lib/api';
 import { quotaCell, type QuotaSnapshot } from '../../lib/quota-view';
@@ -58,7 +59,8 @@ function QuickShellContent() {
           </span>
           <span className="qs-brand__text">
             <strong>极简创作</strong>
-            <small>Content Agent</small>
+            {/* 壳自报版本,和顶栏切换器的当前态说同一个词 */}
+            <small>基础版</small>
           </span>
         </NavLink>
         <div className="qs-topbar__right">
@@ -74,12 +76,12 @@ function QuickShellContent() {
               <small>{cell.unit}</small>
             </NavLink>
           )}
-          {!isSaasUser(user) && (
-            <NavLink to="/" end className="qs-full-link" title="返回完整工作台">
-              完整版
-              <ArrowUpRight size={14} />
-            </NavLink>
-          )}
+          {/*
+            版本切换器,和专家版顶栏同一个组件、同一个位置。原来这里是单向的
+            「完整版 ↗」链接,而回来的入口在专家版**侧边栏**里叫「极简创作」
+            ——同一个动作两个名字两个位置。SaaS 用户只有基础版,组件自己返回 null。
+          */}
+          <EditionSwitch />
           <div className="profile-menu">
             <button
               className="profile-button"

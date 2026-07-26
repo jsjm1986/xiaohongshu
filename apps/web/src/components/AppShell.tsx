@@ -14,17 +14,21 @@ import {
   Sparkles,
   UsersRound,
   X,
-  Zap,
 } from "lucide-react";
 import { useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "./AuthContext";
+import { EditionSwitch } from "./EditionSwitch";
 import { ProjectProvider, useProjects } from "./ProjectContext";
 
+/*
+  「极简创作」不在这张表里:它是**版本**,不是频道。放进导航会和知识库、公式版本
+  这些资产入口并列,暗示它是工作台的一个页面;实际点进去是换了整套壳。版本切换
+  移到顶栏 <EditionSwitch />,两个壳同一位置、双向对称。
+*/
 const navigation = [
   { to: "/", label: "概览", icon: LayoutDashboard, end: true },
   { to: "/generate", label: "内容生成", icon: Sparkles },
-  { to: "/quick", label: "极简创作", icon: Zap },
   { to: "/projects", label: "项目管理", icon: Boxes },
   { to: "/knowledge", label: "知识库", icon: BookOpenText },
   { to: "/formulas", label: "公式版本", icon: FlaskConical },
@@ -69,7 +73,8 @@ function ShellContent() {
           </div>
           <div>
             <strong>内容智造台</strong>
-            <span>Content Agent</span>
+            {/* 壳自报版本,和顶栏切换器的当前态说同一个词 */}
+            <span>科研版</span>
           </div>
           <button
             className="sidebar__close"
@@ -163,6 +168,7 @@ function ShellContent() {
             </div>
           </div>
           <div className="topbar__right">
+            <EditionSwitch />
             <button
               className="icon-button topbar__notification"
               aria-label="通知"
