@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Copy, Download, RotateCcw } from 'lucide-react';
 import { Button, useToast } from '../Ui';
 import { CandidateDiffBar } from './CandidateDiffBar';
-import { CommentSection } from './CommentSection';
+import { CommentPlanCard } from './CommentPlanCard';
 import { DeploymentPlanCard } from './DeploymentPlanCard';
 import { FactLedgerCard } from './FactLedgerCard';
 import { GapCoverageCard } from './GapCoverageCard';
@@ -12,10 +12,10 @@ import { publishOrderText } from '../../lib/publish-copy';
 import type { ReaderCandidate, ReaderJob } from '../../types';
 
 /**
- * 「查看」的完整详情。
+ * 「查看」的工作区。
  *
- * 分三段读:成品(能直接用的东西)→ 判断依据(凭什么这么写、哪些没答上)→
- * 发布方案(下一步做什么)。原来只有第一段的一半,而且校验结论会挑错重点。
+ * 成品展示(标题/正文/标签/配图/评论)已交给预览区的 NoteCard,这里只留要动手的部分:
+ * 校验结论 → 判断依据(凭什么这么写、哪些没答上、评论核对) → 发布方案 → 导出/改稿。
  */
 
 const EXPORT_FORMATS = ['markdown', 'docx', 'pdf', 'json'] as const;
@@ -31,32 +31,17 @@ interface Props {
   /** 重新生成一批(重试) */
   onRetry?: () => void;
   retrying?: boolean;
+  /** 当前候选下标。原为内部 useState,现在预览区与工作区共用同一个下标,提升到页面层 */
+  activeIndex: number;
+  onPickIndex: (index: number) => void;
 }
 
-function CopyCard({ title, text, children }: { title: string; text: string; children: React.ReactNode }) {
+export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, retrying, activeIndex, onPickIndex }: Props) {
   const toast = useToast();
-  const copy = async () => {
-    try { await navigator.clipboard.writeText(text); toast.push('已复制'); }
-    catch { toast.push('复制失败，请手动选择文本', 'error'); }
-  };
-  return (
-    <section className="quick-card">
-      <header>
-        <h3>{title}</h3>
-        <Button variant="ghost" icon={<Copy size={14} />} onClick={() => void copy()}>复制</Button>
-      </header>
-      <div className="quick-card__body">{children}</div>
-    </section>
-  );
-}
-
-export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, retrying }: Props) {
-  const toast = useToast();
-  const [index, setIndex] = useState(0);
   const [instruction, setInstruction] = useState('');
   const candidates = job.candidates;
   if (candidates.length === 0) return null;
-  const current = candidates[Math.min(index, candidates.length - 1)]!;
+  const current = candidates[Math.min(activeIndex, candidates.length - 1)]!;
   const verdict = issueVerdict(current.validation);
   const blockReason = exportBlockReason(verdict);
 
@@ -74,32 +59,16 @@ export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, ret
 
   return (
     <div className="qc-reader">
-      <CandidateDiffBar candidates={candidates} activeIndex={index} onPick={setIndex} />
+      <CandidateDiffBar candidates={candidates} activeIndex={activeIndex} onPick={onPickIndex} />
 
       <ValidationVerdict validation={current.validation} />
-
-      {/* 第一段:成品 */}
-      <div className="qc-reader__section">
-        <CopyCard title="标题" text={current.title}><p>{current.title}</p></CopyCard>
-        <CopyCard title="正文" text={current.body}><p className="quick-body">{current.body}</p></CopyCard>
-        {current.tags.length > 0 && (
-          <CopyCard title="标签" text={current.tags.join(' ')}>
-            <div className="quick-tag-row">
-              {current.tags.map((t) => <span key={t} className="quick-tag">{t}</span>)}
-            </div>
-          </CopyCard>
-        )}
-        {current.imageBrief && (
-          <CopyCard title="配图说明" text={current.imageBrief}><p>{current.imageBrief}</p></CopyCard>
-        )}
-        <CommentSection candidate={current} />
-      </div>
 
       {/* 第二段:判断依据 */}
       <div className="qc-reader__section">
         <h4 className="qc-reader__label">判断依据</h4>
         <GapCoverageCard candidate={current} />
         <FactLedgerCard candidate={current} />
+        <CommentPlanCard candidate={current} />
         {current.sources.length > 0 && (
           <details className="qc-sources">
             <summary>本次用到的来源（{current.sources.length}）</summary>
