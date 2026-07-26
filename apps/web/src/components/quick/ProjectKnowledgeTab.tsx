@@ -214,7 +214,9 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
             </ul>
           </Field>
 
-          <Field label="上传知识文件（.md / .txt，可多选，选中即上传）">
+          {/* 限制写在标签上而不是让用户撞了才知道:后端单文件上限 2 MiB
+              (knowledge.service.ts),超了会以 413 失败 */}
+          <Field label="上传知识文件（.md / .txt，单个不超过 2 MiB，可多选，选中即上传）">
             <input
               type="file"
               accept=".md,.txt"
