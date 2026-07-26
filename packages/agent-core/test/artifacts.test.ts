@@ -131,17 +131,50 @@ describe("production artifact truth states", () => {
     });
   });
 
-  it("warns instead of rejecting an ordinary Chinese paraphrase with no exact lexical match", () => {
+  /**
+   * 同义改写既不判 fail,也不发提醒。
+   *
+   * 原用例断言「词面对不上 → warn」。实测那条 warn 是纯噪声:229 个落库包里
+   * plan_to_copy_alignment 命中 202 个(88%),全部是 warning、fail 一次未触发,
+   * 且这 202 个包的 imageBrief **无一为空**——零真实缺陷。根因是比对双方性质不
+   * 对等:imagePlan.frames 去重只有 16 种抽象编排指令(「保留普通生活背景」),
+   * 而 imageBrief 条条具体,本就不该有词面重叠。
+   *
+   * 词面判据判不了同义改写,就应如实报 not_evaluated(不参与总状态、不发提醒),
+   * 而不是发一条用户无法处理的提醒。本用例的原意「同义改写不算失败」不变,
+   * 只是把「发提醒」改成「不下结论」。
+   */
+  it("neither fails nor warns on an ordinary Chinese paraphrase with no exact lexical match", () => {
     const alignment = evaluatePlanToCopyAlignment(plan(), content({
       imageBrief: "把需要确认的事项整理成一页",
       title: "先问清楚再决定",
       body: "逐项查证个人条件，再决定是否继续。",
     }));
 
-    expect(alignment.evaluated).toBe(true);
     expect(alignment.status).not.toBe("fail");
-    expect(alignment.checks.some((item) => item.status === "warn")).toBe(true);
-    expect(alignment.reasons.join(" ")).toContain("人工复核");
+    expect(alignment.checks.some((item) => item.status === "warn")).toBe(false);
+    // 词面对不上的项如实标记为无法判定,而不是消失或伪装成 pass。
+    expect(alignment.checks.some((item) => item.status === "not_evaluated")).toBe(true);
+    expect(alignment.reasons.join(" ")).toContain("无法判定");
+  });
+
+  /**
+   * 禁止性边界的正确落实就是「可见文案里不出现」。实测 1835 条边界中 59% 属于
+   * 这一类(「不得贬低其他医疗项目」「不承诺零增项」),原实现要求在文案里找到
+   * 它们的「承接」——遵守边界反而被判可疑,方向是反的。
+   */
+  it("treats an unmentioned prohibitive boundary as correctly observed, not as a missing link", () => {
+    const alignment = evaluatePlanToCopyAlignment(plan(), content({
+      imageBrief: "手机随手拍的核验清单，自然光",
+      title: "先问清楚再决定",
+      body: "逐项查证个人条件，再决定是否继续。",
+    }));
+
+    // 「不得使用前后对比」没出现在文案里 = 遵守了它,不该因此报 warn。
+    expect(alignment.status).not.toBe("fail");
+    const boundary = alignment.checks.find((item) => item.id === "boundary_continuity");
+    expect(boundary?.status).toBe("pass");
+    expect(boundary?.reason).toContain("禁止性");
   });
 
   it("marks an enabled but empty image brief as absent rather than drafted", () => {
