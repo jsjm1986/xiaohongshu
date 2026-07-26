@@ -125,6 +125,24 @@ const PATTERNS: Array<{ match: RegExp; label: string; blocking: boolean }> = [
   { match: /expected \d+|returned \d+ threads/i, label: '生成结构不符合编排要求，重试可能仍失败', blocking: false },
 ];
 
+/**
+ * 单条失败原因 → 可读说明 + 该不该重试。
+ *
+ * 与 failureDigest 共用同一张 PATTERNS 表。分出来是因为实测缺口:批次摘要里显示的是
+ * 归类好的中文(「模型账户余额不足,充值后再重试」),而**单条失败行**直接把原文摊出来
+ * ——付费用户在产出区看到的是
+ * 「生成失败：模型候选 1 生成失败,任务已停止且未生成可发布降级稿：Model provider
+ * rejected the request: Insufficient Balance」。
+ *
+ * 归不了类时保留原文:排查全靠它,不能吞掉信息。
+ */
+export function failureReason(error: string | undefined | null): { label: string; blocking: boolean; raw: string } {
+  const raw = (error ?? '').trim();
+  const hit = PATTERNS.find((p) => p.match.test(raw));
+  if (hit) return { label: hit.label, blocking: hit.blocking, raw };
+  return { label: raw || '未记录失败原因', blocking: false, raw };
+}
+
 export function failureDigest(jobs: GenerationJob[]): FailureDigest {
   const counts = new Map<string, FailureGroup>();
 

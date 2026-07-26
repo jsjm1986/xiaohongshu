@@ -4036,3 +4036,13 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
   .qs-main .page { padding: 16px 14px 40px; }
   .quick-shell .qc-crumb h1 { font-size: var(--v2-fs-xl); }
 }
+
+/* 失败原文折叠:界面上给归类后的中文原因,原文留在这里——归不了类时它是唯一线索,
+   报障时用户也要能把它贴给客服 */
+.qc-failure-raw > summary { cursor: pointer; color: var(--v2-muted); font-size: var(--v2-fs-xs); }
+.qc-failure-raw > p {
+  margin: 6px 0 0; padding: 8px 10px; border-radius: var(--v2-radius-sm);
+  background: var(--v2-canvas); color: var(--v2-muted);
+  font-family: var(--v2-mono); font-size: var(--v2-fs-xs); line-height: 1.6;
+  word-break: break-word;
+}

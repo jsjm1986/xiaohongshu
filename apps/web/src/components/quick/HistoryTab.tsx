@@ -7,7 +7,7 @@ import { approveOpportunitiesForBatch } from '../../lib/quick-generation';
 import { filterGenerationJobs, type GenerationStatusFilter } from '../../lib/quick-channel-state';
 import { overviewDigest } from '../../lib/overview-digest';
 import { readerPath } from '../../lib/quick-nav';
-import { failureDigest, planBatchRetry } from '../../lib/retry-plan';
+import { failureDigest, failureReason, planBatchRetry } from '../../lib/retry-plan';
 import { retryJobOnce } from '../../lib/single-retry';
 import { waitStatus } from '../../lib/wait-status';
 import { buildBatchJobs } from '../../lib/quick-batch';
@@ -344,24 +344,41 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
                 </Button>
               </div>
               {isOpen && running && <WaitCard job={job} now={now} />}
-              {isOpen && job.status === 'failed' && (
+              {isOpen && job.status === 'failed' && (() => {
+                // 归类后的可读原因,而不是原文。原文是中文前缀套英文模型层报错
+                // (「…未生成可发布降级稿：Model provider rejected the request:
+                // Insufficient Balance」),付费用户读不出该怎么办。
+                const reason = failureReason(job.error);
+                return (
                 <div className="qc-history-detail">
-                  <p className="qc-hint">生成失败：{job.error || '未知错误'}</p>
+                  <p className="qc-hint qc-hint--error">生成失败：{reason.label}</p>
+                  {/* 原文折叠留着:归不了类时它是唯一线索,报障时也要能贴给客服 */}
+                  {reason.raw && reason.raw !== reason.label && (
+                    <details className="qc-failure-raw">
+                      <summary>技术细节</summary>
+                      <p>{reason.raw}</p>
+                    </details>
+                  )}
                   {/* 失败条目原本只能去批次看板重试;这里直接给入口 */}
                   <div className="qc-actions">
                     <Button
                       variant="secondary"
                       icon={<RotateCcw size={13} />}
                       loading={retryingId === job.id}
-                      disabled={retryingId !== null || !project}
+                      // blocking 的失败(余额不足、密钥失效)重试注定再失败,
+                      // 还要白扣一次额度——直接禁用,并说明先解决什么
+                      disabled={retryingId !== null || !project || reason.blocking}
                       onClick={() => void retryOne(job)}
                     >
                       按同款重试
                     </Button>
-                    <small className="qc-hint">重试消耗 1 次额度</small>
+                    <small className="qc-hint">
+                      {reason.blocking ? '这类原因重试仍会失败，请先解决上述问题' : '重试消耗 1 次额度'}
+                    </small>
                   </div>
                 </div>
-              )}
+                );
+              })()}
             </li>
           );
         })}

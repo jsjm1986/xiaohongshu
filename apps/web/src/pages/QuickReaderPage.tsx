@@ -8,6 +8,7 @@ import { api } from '../lib/api';
 import { readerCandidateToMarkdown } from '../lib/publish-copy';
 import { readerPath } from '../lib/quick-nav';
 import { areaPath, QUICK_HOME_PATH } from '../lib/quick-routes';
+import { failureReason } from '../lib/retry-plan';
 import { retryJobOnce } from '../lib/single-retry';
 import { readerNeighbors } from '../lib/reader-navigation';
 import type { GenerationJob, Project, ReaderCandidate, ReaderJob } from '../types';
@@ -192,25 +193,38 @@ export function QuickReaderPage() {
         <WaitCard job={job as unknown as GenerationJob} now={now} />
       )}
 
-      {job?.status === 'failed' && (
+      {job?.status === 'failed' && (() => {
+        // 与产出区同一套归类:原文是中文前缀套英文模型层报错,用户读不出该怎么办
+        const reason = failureReason(job.error);
+        return (
         <div className="quick-card">
           <div className="quick-card__body">
-            <p className="qc-hint">生成失败：{job.error || '未知错误'}</p>
+            <p className="qc-hint qc-hint--error">生成失败：{reason.label}</p>
+            {reason.raw && reason.raw !== reason.label && (
+              <details className="qc-failure-raw">
+                <summary>技术细节</summary>
+                <p>{reason.raw}</p>
+              </details>
+            )}
             <div className="qc-actions">
               <Button
                 variant="secondary"
                 icon={<RotateCcw size={13} />}
                 loading={retrying}
-                disabled={retrying || !project}
+                // 余额不足/密钥失效这类重试注定再败,还白扣一次额度
+                disabled={retrying || !project || reason.blocking}
                 onClick={() => void retry()}
               >
                 按同款重试
               </Button>
-              <small className="qc-hint">重试消耗 1 次额度</small>
+              <small className="qc-hint">
+                {reason.blocking ? '这类原因重试仍会失败，请先解决上述问题' : '重试消耗 1 次额度'}
+              </small>
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {job && job.status === 'completed' && job.candidates.length === 0 && (
         <p className="qc-hint">这次生成没有可展示的候选。</p>
