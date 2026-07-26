@@ -137,12 +137,28 @@ export class SettingsService {
     };
   }
 
+  /**
+   * 扣一次额度。
+   *
+   * 检查与自增必须在同一条语句里。原来是 check-then-write:SELECT 读 quota_used →
+   * JS 比较 → UPDATE +1,而调用点在事务外。多实例下两个请求可以都读到 99(上限
+   * 100)、都通过检查、都 +1 变成 101 —— 按次计费的产品这是实质性超发。
+   * (单实例不会:这条路径全程同步,Node 事件循环内不被抢占。)
+   *
+   * 下推进 SQL 之后,「不超额」由 DB 保证:UPDATE 的 WHERE 与自增原子生效,
+   * changes===0 就是「已到上限」。
+   */
   consumePlatformQuota(workspaceId: string): void {
     const row = this.ensure(workspaceId);
     if (row.provider_mode !== 'platform') return;
+    const result = this.database
+      .prepare(
+        `UPDATE workspace_settings SET quota_used = quota_used + 1, updated_at = ?
+          WHERE workspace_id = ? AND quota_used < monthly_quota`,
+      )
+      .run(nowIso(), workspaceId);
     // 话术见 support.ts:「联系管理员 / 配置 BYOK」对付费 SaaS 用户是两条走不通的路
-    if (row.quota_used >= row.monthly_quota) throw new ForbiddenException(QUOTA_EXHAUSTED_MESSAGE);
-    this.database.prepare('UPDATE workspace_settings SET quota_used = quota_used + 1, updated_at = ? WHERE workspace_id = ?').run(nowIso(), workspaceId);
+    if (!result.changes) throw new ForbiddenException(QUOTA_EXHAUSTED_MESSAGE);
   }
 
   /**

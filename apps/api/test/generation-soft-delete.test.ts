@@ -141,25 +141,35 @@ test('重复删除与重复恢复都是幂等的', async () => {
   assert.equal(restoreTwice.body.alreadyActive, true);
 });
 
-test('删除排队中的任务会把它摘出内存队列,避免白跑一次', async () => {
+/**
+ * 队列在 DB 里(status='queued' AND deleted_at IS NULL),所以「不会白跑一次」现在
+ * 由领取查询本身保证,不需要额外摘队列。断言从「内存数组里没有它」改成「它不再
+ * 算在排队里、也领不到」——测的是同一个用户可见要求,而且比原来更强:多实例下
+ * 别的实例照样领不到它。
+ */
+test('删除排队中的任务后它不再排队,也不会被领取去跑', async () => {
   const service = app.get(GenerationService);
   seedJob('d-queued', 'queued');
-  const queue = (service as unknown as { queue: string[] }).queue;
-  queue.length = 0;
-  queue.push('d-queued');
+  assert.equal(service.queuePosition('d-queued'), 1, '删除前它确实在排队');
 
   await request('/api/generations/d-queued', { method: 'DELETE' });
-  assert.ok(!queue.includes('d-queued'), '已删任务不该留在队列里');
+
+  assert.equal(service.queuePosition('d-queued'), undefined, '已删任务不该还有排队位次');
+  const claimable = app.get(DatabaseService)
+    .prepare("SELECT id FROM generation_jobs WHERE status='queued' AND deleted_at IS NULL")
+    .all() as Array<{ id: string }>;
+  assert.ok(!claimable.some((row) => row.id === 'd-queued'), '已删任务不该出现在可领取集合里');
 });
 
 // 撤销一个排队任务不重新入队:用户删它往往正是为了让它别跑(省额度、改主意)
-test('恢复排队任务不会把它重新丢进队列', async () => {
-  const service = app.get(GenerationService);
-  const queue = (service as unknown as { queue: string[] }).queue;
-  queue.length = 0;
-
+test('恢复排队任务不会自动开跑:用户删它往往正是为了让它别跑', async () => {
+  const db = app.get(DatabaseService);
   await request('/api/generations/d-queued/restore', { method: 'POST' });
-  assert.deepEqual(queue, [], '恢复不该自动开跑');
+
+  // 恢复后状态不该被改成 queued 之外的东西,更不该被领取(claimed_by 仍为空)。
+  const row = db.prepare('SELECT status, claimed_by FROM generation_jobs WHERE id=?')
+    .get('d-queued') as { status: string; claimed_by: string | null };
+  assert.equal(row.claimed_by, null, '恢复不该顺带领取开跑');
 });
 
 test('删除不存在的任务返回 404', async () => {

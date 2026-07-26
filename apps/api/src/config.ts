@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -25,6 +27,20 @@ export interface ApiOptions {
   modelMaxConcurrentRequests: number;
   knowledgeContextTokens: number;
   pdfFontPath: string;
+  /**
+   * 本实例的身份。写进 generation_jobs.claimed_by / analysis_tasks.claimed_by,
+   * 让「谁在跑这个任务」成为库里的事实,回收时才能只动自己的和已死实例的。
+   * 默认含 pid 与随机后缀:同一台机器起两个进程必须是两个不同身份,否则它们
+   * 会互相当成「自己重启前留下的任务」而抢跑。
+   */
+  instanceId: string;
+  /** 在跑任务的心跳间隔;回收扫描也用这个周期。 */
+  jobHeartbeatMs: number;
+  /**
+   * 心跳超时判死的阈值。必须显著大于心跳间隔——取 6 倍,容忍单次长事务或 GC
+   * 停顿造成的心跳延迟,不会把健康实例正在跑的任务误判成孤儿。
+   */
+  jobClaimTimeoutMs: number;
 }
 
 export type ApiOptionsInput = Partial<ApiOptions>;
@@ -73,5 +89,13 @@ export function resolveOptions(input: ApiOptionsInput = {}): ApiOptions {
     knowledgeContextTokens:
       input.knowledgeContextTokens ?? Number.parseInt(process.env.KNOWLEDGE_CONTEXT_TOKENS ?? '120000', 10),
     pdfFontPath: input.pdfFontPath ?? process.env.PDF_FONT_PATH ?? '',
+    // 容器编排下可注入稳定 id;默认值保证同机多进程互不同名。
+    instanceId:
+      input.instanceId ?? process.env.CONTENT_AGENT_INSTANCE_ID
+      ?? `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`,
+    jobHeartbeatMs:
+      input.jobHeartbeatMs ?? Number.parseInt(process.env.CONTENT_AGENT_JOB_HEARTBEAT_MS ?? '15000', 10),
+    jobClaimTimeoutMs:
+      input.jobClaimTimeoutMs ?? Number.parseInt(process.env.CONTENT_AGENT_JOB_CLAIM_TIMEOUT_MS ?? '90000', 10),
   };
 }

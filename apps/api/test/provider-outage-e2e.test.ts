@@ -169,7 +169,13 @@ test('一篇撞上余额不足后,排队中的其余任务被立刻判失败而�
     `必须显著少于"5 篇全跑一遍"的 ${5 * CALLS_PER_JOB} 次,实际 ${calls} 次`,
   );
 
-  assert.equal((app.get(GenerationService) as unknown as { queue: string[] }).queue.length, 0, '队列应被清空');
+  // 队列在 DB 里,所以「清空」就是「没有行还停在 queued」。原来读的是本实例内存
+  // 数组——多实例下那个数字只反映自己那一段,别的实例上同项目的排队任务照样会
+  // 各花 16 分钟撞同一面墙。
+  const stillQueued = app.get(DatabaseService)
+    .prepare("SELECT COUNT(*) AS value FROM generation_jobs WHERE status='queued' AND deleted_at IS NULL")
+    .get() as { value: number };
+  assert.equal(Number(stillQueued.value), 0, '队列应被清空');
 });
 
 test('事件流里留下 provider_outage 记录,便于事后排查', () => {

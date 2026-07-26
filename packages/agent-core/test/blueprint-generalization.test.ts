@@ -92,9 +92,44 @@ function blueprint(input: {
           interactionHooks: ["追问适用条件"],
           permittedContributions: ["提出条件化问题"],
           utteranceModes: ["direct_question"],
-          replyDisplayRoles: ["发布者"],
+          // 双号运营：读者角色只能路由到已定义的可追责公开身份（展示名，不是内部 id）。
+          replyDisplayRoles: [`${input.noun}主创`],
           targetChars: [6, 30],
           accountable: false,
+          source: { status: "hypothesis", evidenceIds: [] },
+        }, {
+          id: "org_ip",
+          displayRole: `${input.noun}主创`,
+          relationToHost: "机构 IP 本人",
+          identityCues: ["长期做这件事的人"],
+          situationCues: ["在评论区解释边界"],
+          motives: ["把判断依据讲清楚"],
+          knowledgePosition: "掌握项目口径与适用条件",
+          speechPatterns: ["先给条件，再给结论"],
+          lexicalCues: [],
+          interactionHooks: ["补一条判断依据"],
+          permittedContributions: ["解释适用条件"],
+          utteranceModes: ["knowledge_translation", "service_answer"],
+          replyDisplayRoles: [],
+          targetChars: [20, 60],
+          accountable: true,
+          source: { status: "hypothesis", evidenceIds: [] },
+        }, {
+          id: "org_assistant",
+          displayRole: `${input.noun}助理`,
+          relationToHost: "机构公开助理",
+          identityCues: ["对接咨询的人"],
+          situationCues: ["接住具体问题"],
+          motives: ["给下一步核验路径"],
+          knowledgePosition: "掌握流程与对接方式",
+          speechPatterns: ["直接说下一步怎么做"],
+          lexicalCues: [],
+          interactionHooks: ["给核验路径"],
+          permittedContributions: ["说明流程"],
+          utteranceModes: ["service_answer"],
+          replyDisplayRoles: [],
+          targetChars: [20, 60],
+          accountable: true,
           source: { status: "hypothesis", evidenceIds: [] },
         }],
       },
@@ -186,7 +221,10 @@ describe("project creative blueprint generalization", () => {
     for (const plan of plans) {
       expect(plan.personaScenePlan?.scenarioFamilyId).toBe("trial-expiry");
       expect(plan.personaScenePlan?.event.setting).toBe("试用到期前的团队群");
-      expect(plan.personaScenePlan?.commentCast.map((role) => role.displayRole)).toEqual(["项目管理员"]);
+      expect(plan.personaScenePlan?.commentCast.filter((role) => !role.orgSide).map((role) => role.displayRole))
+        .toEqual(["项目管理员"]);
+      expect(plan.personaScenePlan?.commentCast.filter((role) => role.orgSide).map((role) => role.displayRole))
+        .toEqual(["团队协作软件主创", "团队协作软件助理"]);
     }
   });
 

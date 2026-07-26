@@ -1465,6 +1465,41 @@ export function resolveAssistantReplyDisplayRole(blueprint?: ProjectCreativeBlue
     role.accountable && role.utteranceModes.includes("service_answer") && role.displayRole !== ip)?.displayRole;
 }
 
+/**
+ * 双号运营的可追责身份体检(纯函数,不改数据)。
+ *
+ * 存量 role_model 不会因为新增审批校验而自愈:审批只挡新提交的模块,已批准的
+ * 蓝图照旧进生成,forcedReplyDisplayRole 会静默兜底到通用「机构 IP / 项目助理」,
+ * 于是评论区出现与项目无关的展示名,而质量信号里一片安静。这里把两类缺陷显性化,
+ * 引擎按候选记 warning,让存量项目在生成结果上就能被看见并回去重跑蓝图分析。
+ */
+export function diagnoseAccountableIdentities(blueprint?: ProjectCreativeBlueprint): string[] {
+  const roles = blueprint?.roleModel.roles ?? [];
+  if (!roles.length) return [];
+  const problems: string[] = [];
+  const accountableNames = [...new Set(
+    roles.filter((role) => role.accountable && role.displayRole).map((role) => role.displayRole),
+  )];
+  if (accountableNames.length !== 2) {
+    problems.push(
+      `role_model 只有 ${accountableNames.length} 个可追责公开身份（双号运营需要 IP 本人与公开助理各 1 个）`
+      + `${accountableNames.length ? `：${accountableNames.join("、")}` : ""}`
+      + "，答复展示名将回落到通用兜底名，建议重跑项目蓝图分析。",
+    );
+  }
+  const defined = new Set(accountableNames);
+  const dangling = [...new Set(
+    roles.flatMap((role) => role.replyDisplayRoles ?? []).filter((name) => name && !defined.has(name)),
+  )];
+  if (dangling.length) {
+    problems.push(
+      `role_model.replyDisplayRoles 指向未定义的可追责身份（疑似写了内部 id 而非展示名）：${dangling.slice(0, 4).join("、")}`
+      + "，读者角色的答复路由将回落到通用兜底名，建议重跑项目蓝图分析。",
+    );
+  }
+  return problems;
+}
+
 function dialoguePlans(
   opportunity: TopicOpportunity,
   gapCards: InformationGapPlanningCard[],

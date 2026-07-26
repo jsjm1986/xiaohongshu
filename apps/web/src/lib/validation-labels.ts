@@ -45,6 +45,7 @@ export function validationIssueLabel(code?: string) {
     scenario_metadata_missing: "评论线程缺少模拟情景元数据",
     invalid_scenario_speaker: "提问者未标记为模拟读者",
     unaccountable_answer_identity: "答复方不是可追责身份",
+    accountable_identity_incomplete: "项目双号身份配置不完整,答复展示名回落兜底",
     comment_identity_violation: "评论发布身份不合法",
     comment_display_name_institutional: "昵称含机构感词,容易被误认",
     comment_display_name_identity_clash: "昵称与机构身份重名,读者分不清",

@@ -212,6 +212,14 @@ test('three-stage project analysis assembles in fixed order, chains each stage o
     assert.equal(stage1Body.includes('APPROVED_STAGE_1_BLUEPRINT'), false);
     assert.equal(stage1Body.includes('APPROVED_STAGE_2_GAP_CATALOG'), false);
 
+    // 双号运营的两条硬约束必须以独立段落出现在阶段 1 提示里。此前它们埋在
+    // role_model 的长段落中间，产出的 role_model 半数以上只给 0 或 1 个
+    // accountable 身份、replyDisplayRoles 写内部 id；合回长段落即回归。
+    assert.match(stage1Body, /TWO HARD REQUIREMENTS on roles/);
+    assert.ok(stage1Body.includes('must be EXACTLY 2'), '阶段 1 提示应显式要求 accountable 身份恰好 2 个');
+    assert.ok(stage1Body.includes('host_account'), '阶段 1 提示应点名禁止把内部 id 写进 replyDisplayRoles');
+    assert.ok(stage1Body.includes('Copy the displayRole text verbatim'), '阶段 1 提示应要求逐字复制 displayRole');
+
     // —— 需求 6.2：阶段 2 入参包含阶段 1 的结构化蓝图输出（标记 + 蓝图摘要内容）。——
     assert.match(stage2Body, /APPROVED_STAGE_1_BLUEPRINT/);
     assert.ok(stage2Body.includes('STAGE1_PROJECT_NOUN'), '阶段 2 提示应含阶段 1 蓝图的 domain_model.projectNoun');
