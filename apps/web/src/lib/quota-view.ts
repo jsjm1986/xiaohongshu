@@ -68,3 +68,19 @@ export function quotaCell(q: QuotaSnapshot | null | undefined): QuotaCell | null
 
   return { tone, value: String(remaining), unit: `/ ${q.monthlyQuota} 次`, note };
 }
+
+/**
+ * 额度是否已经用尽——用于**生成前**就把话说清。
+ *
+ * 实测缺口:额度用尽时总览页与账户页都红着提示并给了客服微信,而**创作区**
+ * (用户真正点「生成文案」的地方)全页不提额度二字。付费用户在那里点下去,只会
+ * 撞上一个 403 的红条。所以生成入口自己也要知道额度状态。
+ *
+ * 只对 platform 模式判定:BYOK 用户不吃平台配额,拉取失败(null)时也不该
+ * 因为读不到额度就把生成按钮锁死——那会把"看不见"升级成"不能用"。
+ */
+export function quotaExhausted(q: QuotaSnapshot | null | undefined): boolean {
+  if (!q || q.providerMode !== 'platform') return false;
+  if (!q.monthlyQuota || q.monthlyQuota <= 0) return false;
+  return q.monthlyQuota - q.quotaUsed <= 0;
+}

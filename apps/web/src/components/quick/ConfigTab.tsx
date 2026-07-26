@@ -5,6 +5,8 @@ import { autoApproveAndGenerate, quickCandidateFields, type QuickCandidateView }
 import { InlineProgress } from './InlineProgress';
 import { buildPresetValuesFromOverrides } from '../../lib/preset-save';
 import { writeLocalPresets } from '../../lib/presets';
+import { quotaExhausted, type QuotaSnapshot } from '../../lib/quota-view';
+import { SUPPORT_HINT } from '../../lib/support';
 import type { CommentRichnessLevel, SimpleSettingOverrides } from '../../lib/simple-generation';
 import type { ContentPreset, Project } from '../../types';
 import { QuickImagePicker } from './QuickImagePicker';
@@ -65,6 +67,14 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
   const [saveOpen, setSaveOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [presetDraft, setPresetDraft] = useState({ name: '', description: '' });
+  /**
+   * 额度:生成入口自己也要知道。
+   *
+   * 实测缺口——额度用尽时总览页和账户页都红着提示并给了客服微信,而创作区(用户
+   * 真正点「生成文案」的地方)全页不提额度二字,点下去只会撞上一个 403 红条。
+   * 付费产品不该让人这样发现自己没额度了。
+   */
+  const [quota, setQuota] = useState<QuotaSnapshot | null>(null);
 
   const patch = (p: Partial<SimpleSettingOverrides>) => setOverrides({ ...overrides, ...p });
   const currentPreset = presets.find((p) => p.id === presetId);
@@ -89,6 +99,20 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, presetsEmpty]);
 
+  // 额度只在进区时拉一次:它的变化粒度是「每次生成 +1」,不必轮询;生成成功后
+  // 重拉一次(见 generate 末尾),让余量当场跟上。
+  const workspaceId = project?.workspaceId;
+  useEffect(() => {
+    if (!workspaceId) return;
+    let cancelled = false;
+    api.settings.quota(workspaceId)
+      .then((snapshot) => { if (!cancelled) setQuota(snapshot); })
+      .catch(() => { /* 静默:额度读不到不该锁死生成——那会把"看不见"升级成"不能用" */ });
+    return () => { cancelled = true; };
+  }, [workspaceId]);
+
+  const noQuota = quotaExhausted(quota);
+
   const generate = async () => {
     if (!project || !opportunityId) return;
     setBusy(true);
@@ -107,6 +131,12 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
       onGenerated(results, job.id);
       setBusy(false);
       setGenerating(false);
+      // 刚扣掉一次额度,重拉一次让余量当场跟上(否则要切区回来才更新)
+      if (workspaceId) {
+        api.settings.quota(workspaceId)
+          .then(setQuota)
+          .catch(() => { /* 静默:显示旧余量比报错更不打扰 */ });
+      }
     } catch (e) { fail(e, '生成失败'); }
   };
 
@@ -265,15 +295,19 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
       <InlineProgress active={generating} progress={progress} />
       {/* 主操作放进 action bar:qc-step 是纵向 flex,按钮作为直接子元素会被拉满整栏,
           放宽后实测拉成 940px 的巨带。这里靠左收窄,并把前置条件说明并排放在右边。 */}
+      {/* 额度用尽:在按钮**之前**说清,而不是让用户点下去撞 403 */}
+      {noQuota && (
+        <p className="qc-hint qc-hint--error">额度已用完，无法继续生成。{SUPPORT_HINT}</p>
+      )}
       <div className="qc-actions">
         {batchMode ? (
-          <Button loading={busy} disabled={busy || batchTopicCount === 0 || batchPresetIds.length === 0} onClick={onSubmitBatch}>
+          <Button loading={busy} disabled={busy || noQuota || batchTopicCount === 0 || batchPresetIds.length === 0} onClick={onSubmitBatch}>
             提交批量生成 · 共 {batchTopicCount * batchPresetIds.length} 篇
           </Button>
         ) : (
           // 必须同时门控 opportunityId:generate() 第一行就 if (!opportunityId) return,
           // 少了它按钮是亮的但点下去静默无反应。
-          <Button loading={generating} disabled={!presetId || !opportunityId || busy} onClick={() => void generate()}>生成文案</Button>
+          <Button loading={generating} disabled={!presetId || !opportunityId || busy || noQuota} onClick={() => void generate()}>生成文案</Button>
         )}
       </div>
 

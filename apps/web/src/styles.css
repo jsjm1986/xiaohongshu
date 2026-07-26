@@ -2822,6 +2822,8 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .qc-panel { max-width: 720px; }
 .qc-step { display: flex; flex-direction: column; gap: 16px; }
 .qc-hint { color: var(--v2-muted); font-size: var(--v2-fs-sm); }
+/* 阻塞性提示(额度用尽等):要和普通灰色说明区分开,它解释的是"为什么不能继续" */
+.qc-hint--error { color: var(--v2-error); }
 .qc-advanced { border-top: 1px solid var(--v2-line); padding-top: 12px; margin-top: 4px; }
 .qc-advanced summary { cursor: pointer; color: var(--v2-brand); font-size: var(--v2-fs-md); }
 .qc-advanced-grid { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }

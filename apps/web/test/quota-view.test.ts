@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { quotaAbsenceNote, quotaCell } from '../src/lib/quota-view.js';
+import { quotaAbsenceNote, quotaCell, quotaExhausted } from '../src/lib/quota-view.js';
 
 const platform = (monthlyQuota: number, quotaUsed: number) => ({
   workspaceId: 'w1',
@@ -80,4 +80,30 @@ test('quotaUsed 超出配额时显示 0 而非负数', () => {
   assert.ok(cell);
   assert.equal(cell.value, '0');
   assert.equal(cell.tone, 'error');
+});
+
+/*
+ * quotaExhausted:生成入口的门。
+ *
+ * 实测缺口——额度用尽时总览页与账户页都红着提示并给了客服微信,而创作区(用户真正
+ * 点「生成文案」的地方)全页不提额度二字,点下去只撞一个 403。这个判定就是为那里
+ * 加的,所以边界要锁死。
+ */
+test('quotaExhausted:平台模式余量为 0 时判用尽', () => {
+  assert.equal(quotaExhausted(platform(100, 100)), true);
+  assert.equal(quotaExhausted(platform(100, 99)), false);
+  assert.equal(quotaExhausted(platform(100, 0)), false);
+});
+
+// 配额被下调到低于既有用量时朴素相减是负数,同样算用尽
+test('quotaExhausted:用量超过配额也算用尽', () => {
+  assert.equal(quotaExhausted(platform(10, 18)), true);
+});
+
+// 关键:读不到额度不能锁死生成——那会把"看不见"升级成"不能用"
+test('quotaExhausted:BYOK / 读取失败 / 未配额度一律不拦', () => {
+  assert.equal(quotaExhausted(byok()), false);
+  assert.equal(quotaExhausted(null), false);
+  assert.equal(quotaExhausted(undefined), false);
+  assert.equal(quotaExhausted(platform(0, 0)), false);
 });
