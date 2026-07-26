@@ -18,7 +18,7 @@ import type {
   ResolvedGenerationConfig,
   UnknownItem,
 } from "./types.js";
-import { evaluatePlanToCopyAlignment } from "./artifacts.js";
+import { evaluatePlanToCopyAlignment, isProhibitiveBoundary } from "./artifacts.js";
 import { conservativeEvidenceSupport } from "./knowledge.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -878,6 +878,25 @@ function normalizedExpectationParts(value: string): string[] {
     .filter((item) => item.length >= 2);
 }
 
+/**
+ * 边界是否被落实。
+ *
+ * 禁止性边界(实测项目边界里 59% 属此类:「不能贬低竞品」「不承诺零增项」
+ * 「不能替代专业人员当面判断」)要求的是**可见文案里不出现该内容**,遵守它的表现恰恰
+ * 是找不到它。原实现用 realizesText 要求文案包含 boundary 原文,于是每一篇
+ * 遵守边界的稿子都被判 conditionOrBoundaryRealized=false,连带三条缺口 code
+ * 一起误报。
+ *
+ * 禁止性边界这里恒判通过——「有没有被正向违反」由 artifacts.ts 的
+ * explicitBoundaryContradiction 负责,那是能确定判定的检查。
+ * 非禁止性边界(「价格需引导人工确认」)仍按词面判定。
+ */
+function boundaryRealized(visible: string, boundary?: string): boolean {
+  if (!boundary?.trim()) return true;
+  if (isProhibitiveBoundary(boundary)) return true;
+  return realizesText(visible, boundary);
+}
+
 function realizesText(visible: string, expected?: string): boolean {
   if (!expected?.trim()) return false;
   const comparableVisible = normalizedComparable(visible);
@@ -885,6 +904,22 @@ function realizesText(visible: string, expected?: string): boolean {
   if (comparableExpected && comparableVisible.includes(comparableExpected)) return true;
   const parts = normalizedExpectationParts(expected);
   return parts.length > 0 && parts.every((part) => comparableVisible.includes(part));
+}
+
+/**
+ * 缺口在可见文案里有没有露面(不问答得好不好,只问有没有谈这件事)。
+ *
+ * 复用 realizesVisibleUnknownPath 已经验证过的判据:label/question 的任意 4 字以上
+ * 连续片段出现即算,容得下自然改写。用来把「计划了但完全没写」与「写了但词面
+ * 对不上」区分开——前者是真缺陷,后者由 gap_resolution_not_realized 一条播报。
+ */
+function gapMentionedInText(visible: string, card: InformationGapPlanningCard | undefined): boolean {
+  if (!card || !visible.trim()) return false;
+  const comparable = normalizedComparable(visible);
+  return [card.label, card.question]
+    .map(normalizedComparable)
+    .filter((item) => item.length >= 2)
+    .some((item) => comparable.includes(item) || sharesContiguousFragment(comparable, item));
 }
 
 function realizesVisibleUnknownPath(
@@ -976,9 +1011,16 @@ export function evaluateGapCoverageRealization(
 
     if (card.plannedPlacements.includes("N.body")) {
       const answerRealized = realizesText(draft.content.N.body, expectedAnswer);
-      const conditionOrBoundaryRealized = card.boundary ? realizesText(draft.content.N.body, card.boundary) : true;
+      // 禁止性 boundary(「不能贬低竞品」「不承诺零增项」)要求的是「不出现」,
+      // 遵守它的表现就是正文里找不到它;再要求正文包含它,方向就反了。
+      const conditionOrBoundaryRealized = boundaryRealized(draft.content.N.body, card.boundary);
       const evidenceRealized = bodyEvidenceRealized(draft, card);
-      const findable = answerRealized;
+      // findable = 「这个缺口在正文里能不能被找到」。原来直接等于 answerRealized,
+      // 于是它继承了逐字包含的判据,无法区分「正文没提这件事」与「提了但改写了」。
+      // 改判缺口的 label/question 是否在正文露面(realizesVisibleGapMention 用的是
+      // 4 字以上片段匹配,容得下自然改写),让 planned_body_gap_not_realized 只在
+      // 真正「计划了但没写」时触发。
+      const findable = answerRealized || gapMentionedInText(draft.content.N.body, card);
       const resolved = groundedResolution && answerRealized && conditionOrBoundaryRealized && evidenceRealized && findable;
       actualRealizations.push({
         channel: "N.body",
@@ -1005,9 +1047,11 @@ export function evaluateGapCoverageRealization(
           plannedThread.replyPlan.condition,
           card.boundary ?? plannedThread.replyPlan.boundary,
         ].filter(Boolean);
+        // 与 N.body 侧同理:禁止性要求走 boundaryRealized 恒通过,不能要求答复
+        // 里出现「不能贬低竞品」这种句子。
         const conditionOrBoundaryRealized = Boolean(
           actualThread
-          && conditionRequirements.every((requirement) => realizesText(actualThread.answer, requirement)),
+          && conditionRequirements.every((requirement) => boundaryRealized(actualThread.answer, requirement)),
         );
         const expectedEvidence = new Set(card.evidenceIds);
         const claimMappedToSource = Boolean(actualThread && draft.reasoning.some((item) =>
@@ -1898,13 +1942,26 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
       }
       const card = input.orchestrationPlan!.gapPlanningCards?.find((item) => item.gapId === entry.gapId);
       const hasGroundedResolution = Boolean(card && (card.answer || card.framework) && card.evidenceIds.length);
+      /*
+       * 这两条只在「计划了某通道但那里确实是空的」时报,不再重复播报
+       * gap_resolution_not_realized 已经说过的事。
+       *
+       * 原实现的条件是 `!resolved`,而 resolved 是 5 个条件的合取(含依赖逐字
+       * 包含的 answerRealized)。于是同一个 gap 只要词面对不上,就同时触发
+       * gap_resolution_not_realized + planned_body_gap_not_realized +
+       * planned_comment_gap_not_realized 三条——一份缺陷拆成三条提醒,实测三者
+       * 命中率同为 83~84%,观感噪声放大三倍。
+       *
+       * 改判 findable:正文有没有写、线程有没有答复,这是能确定判定的事实。
+       * 「写了但词面对不上」交给 gap_resolution_not_realized 一条播报。
+       */
       if (hasGroundedResolution && entry.plannedPlacements.includes("N.body")
-        && !entry.actualRealizations.some((item) => item.channel === "N.body" && item.resolved)) {
-        add("planned_body_gap_not_realized", entry.required ? "error" : "warning", "N.body", `Grounded gap ${entry.gapId} was assigned to the body but is not fully realized; optional adjacent information may move to the comment network.`, entry.required);
+        && !entry.actualRealizations.some((item) => item.channel === "N.body" && item.findable)) {
+        add("planned_body_gap_not_realized", entry.required ? "error" : "warning", "N.body", `Grounded gap ${entry.gapId} was assigned to the body but nothing addressing it is present there; optional adjacent information may move to the comment network.`, entry.required);
       }
       if (hasGroundedResolution && entry.plannedPlacements.includes("Cref")
-        && !entry.actualRealizations.some((item) => item.channel === "Cref" && item.resolved)) {
-        add("planned_comment_gap_not_realized", entry.required ? "error" : "warning", "Cref", `Grounded gap ${entry.gapId} is not closed inside one thread; optional information may be distributed across short social nodes.`, entry.required);
+        && !entry.actualRealizations.some((item) => item.channel === "Cref" && item.findable)) {
+        add("planned_comment_gap_not_realized", entry.required ? "error" : "warning", "Cref", `Grounded gap ${entry.gapId} has no planned thread carrying an answer; optional information may be distributed across short social nodes.`, entry.required);
       }
     }
   }

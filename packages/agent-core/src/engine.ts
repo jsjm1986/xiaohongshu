@@ -2557,6 +2557,11 @@ export class ContentGenerationAgent implements GenerationEngine {
       content: draft.content,
       evidence: citedEvidenceSnapshot(allEvidence, draft.reasoning),
       reasoning: draft.reasoning,
+      // 判官裁决随包落库。此前它只存在于 GenerationDraft 上,组包时丢弃,于是
+      // 229 个落库包 claimJudgments 全为 0——那是观测盲区,不是判官没跑(它在
+      // content.ts 的敏感声明校验里确实被消费)。落库后才能回答「敏感声明报错
+      // 里判官覆盖了多少、判了多少 unsupported」。不改变任何判定行为。
+      ...(draft.claimJudgments?.length ? { claimJudgments: draft.claimJudgments } : {}),
       unknowns: uniqueUnknowns(ledger, draft),
       conflicts: ledger.conflicts,
       diagnostics: [...diagnosticsFromValidation(issues), ...buildParameterDiagnostics(impactReport)],

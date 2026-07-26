@@ -1927,6 +1927,15 @@ export interface ContentPackage {
   content: ContentPackageContent;
   evidence: EvidenceReference[];
   reasoning: ContentReasoningEntry[];
+  /**
+   * AI 判官对敏感声明的裁决。缺省表示这一轮没有需要裁决的句子(或判官调用失败,
+   * 那种情况另有 model_claim_judge_failed 信号)。
+   *
+   * 落库是为了可审计:判官在校验层确实生效(content.ts 的敏感声明检查会消费它),
+   * 但此前只存在于 GenerationDraft 上、组包时丢弃,导致无法事后区分
+   * 「sensitive_claim_without_evidence 是判官判了 unsupported」还是「判官没覆盖到」。
+   */
+  claimJudgments?: ClaimJudgment[];
   unknowns: UnknownItem[];
   conflicts: KnowledgeConflict[];
   diagnostics: ContentDiagnostic[];
