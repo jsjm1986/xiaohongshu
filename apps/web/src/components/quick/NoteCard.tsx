@@ -34,6 +34,9 @@ export function NoteCard({ candidate, job, projectName }: Props) {
     catch { toast.push('复制失败，请手动选择文本', 'error'); }
   };
 
+  // 「复制全文」= 能原样粘进小红书发布框的东西,只有 title/body/tags。
+  // imageBrief 刻意不在其中,它是给摄影/选图的拍摄指令,不是发布内容——混进去会被误发。
+  // 配图说明有自己的复制按钮(见下方 xhs-note__cover),不要为了「补全」把它拼到这里。
   const fullText = [candidate.title, candidate.body, candidate.tags.join(' ')]
     .filter((part) => part && part.trim())
     .join('\n\n');
@@ -52,7 +55,12 @@ export function NoteCard({ candidate, job, projectName }: Props) {
 
       {candidate.imageBrief && (
         <div className="xhs-note__cover">
-          <p>{candidate.imageBrief}</p>
+          {/* 配图说明是要被复制走交给摄影/选图的,所以它需要自己的复制入口:
+              「复制全文」按设计不含它。按钮与说明标签同一行,不挤压虚线框里的正文。 */}
+          <div className="xhs-note__unit">
+            <p>{candidate.imageBrief}</p>
+            <Button variant="ghost" icon={<Copy size={12} />} onClick={() => void copy(candidate.imageBrief!, '已复制配图说明')} aria-label="复制配图说明" />
+          </div>
           <small>配图说明 · 按此拍摄或选图</small>
         </div>
       )}

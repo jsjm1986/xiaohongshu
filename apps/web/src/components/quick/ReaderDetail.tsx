@@ -63,7 +63,8 @@ export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, ret
 
       <ValidationVerdict validation={current.validation} />
 
-      {/* 第二段:判断依据 */}
+      {/* 第二段:判断依据。(原第一段「成品」已移交预览区 NoteCard,不是漏了;
+          编号沿用旧序号,方便与计划文档对照) */}
       <div className="qc-reader__section">
         <h4 className="qc-reader__label">判断依据</h4>
         <GapCoverageCard candidate={current} />
