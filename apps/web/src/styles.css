@@ -4129,10 +4129,12 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .quick-shell .xhs-comment__text {
   font-size: var(--v2-fs-sm); line-height: 1.68; color: var(--v2-ink); margin: 0; white-space: pre-wrap;
 }
+/* 楼层缩进。追问的机构答复会再套一层,靠这条左边线体现「读者问 → 机构答」的层级。
+   原计划还有个 __text--reply 修饰类做淡色答复,已删:那一版把答复当作读者楼层里的
+   第二段文字,而现在答复是独立署名块(带「作者」标),署名比淡色更能说清是谁在说。 */
 .quick-shell .xhs-comment__reply {
   margin-top: 9px; padding-left: 10px; border-left: 2px solid var(--v2-line);
 }
-.quick-shell .xhs-comment__text--reply { color: var(--v2-ink-2); margin-top: 4px; }
 
 /* 工作区与预览之间拉开距离并换底色:两种阅读姿态,视觉上要能分开 */
 .quick-shell .xhs-workbench { margin-top: 10px; padding-top: 18px; border-top: 1px solid var(--v2-line); }
