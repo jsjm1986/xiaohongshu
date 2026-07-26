@@ -3683,8 +3683,11 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .quick-result .qc-issue-line > p, .qc-page .qc-issue-line > p { display: flex; align-items: center; gap: 6px; margin: 0; }
 
 /* ---- 候选完整内容(结果页与历史页共用) ---- */
-.qc-page .qc-disclaimer, .quick-result .qc-disclaimer { margin: 0 0 10px; padding: 8px 10px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius-sm); background: var(--v2-canvas); color: var(--v2-muted); font-size: var(--v2-fs-sm); }
-.qc-page .qc-uncovered, .quick-result .qc-uncovered { display: block; margin-top: 8px; color: var(--v2-muted-2); font-size: var(--v2-fs-xs); }
+/* 选择器里要带 .qc-reader-page:阅读页根元素是 `page qc-reader-page`,不在 .qc-page 下,
+   CommentPlanCard 搬过去以后声明段落变成一段裸文字(实测 background 透明、padding 0)。
+   免责声明没有淡底框就跟正文混在一起,而这句声明是不能被读漏的。 */
+.qc-page .qc-disclaimer, .quick-result .qc-disclaimer, .qc-reader-page .qc-disclaimer { margin: 0 0 10px; padding: 8px 10px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius-sm); background: var(--v2-canvas); color: var(--v2-muted); font-size: var(--v2-fs-sm); }
+.qc-page .qc-uncovered, .quick-result .qc-uncovered, .qc-reader-page .qc-uncovered { display: block; margin-top: 8px; color: var(--v2-muted-2); font-size: var(--v2-fs-xs); }
 
 /* ---- 空态统一(图标在 TSX) ---- */
 .qc-page .qc-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 28px 0; color: var(--v2-muted); font-size: var(--v2-fs-sm); text-align: center; }
@@ -4066,12 +4069,13 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
    去推宽度(380 × 3/4 = 285px),配图位缩成卡片左侧一条窄框、右边一大片空白——
    实测 560px 卡片下正是这个症状。改成 width:100% + aspect-ratio 又会算出 744px 高,
    把标题和正文全顶到首屏之外。配图位是「待拍摄」的提示而不是真图,不需要占满 3:4,
-   给一个固定高度即可。 */
+   给一个固定高度即可。用 min-height 而不是 height:imageBrief 没有长度上限,
+   长文案会溢出固定高度的框并撞到下面的标题;短文案下两者行为相同(实测 240px)。 */
 .quick-shell .xhs-note__cover {
-  width: 100%; height: 240px; display: flex; flex-direction: column;
+  width: 100%; min-height: 240px; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 8px; text-align: center;
   padding: 22px; border-bottom: 1px solid var(--v2-line);
-  background: var(--v2-canvas); border-radius: 0;
+  background: var(--v2-canvas);
   outline: 1px dashed var(--v2-line-dark); outline-offset: -12px;
 }
 .quick-shell .xhs-note__cover p { font-size: var(--v2-fs-xs); color: var(--v2-muted); line-height: 1.65; margin: 0; }
@@ -4081,13 +4085,15 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
    与书写顺序无关——但别把它改成两类选择器,那样就要靠顺序了。 */
 .quick-shell .xhs-note__cover .xhs-note__unit { width: 100%; justify-content: center; }
 .quick-shell .xhs-note__cover .xhs-note__unit > p { flex: 0 1 auto; }
-.quick-shell .xhs-note__cover .xhs-note__unit .button { opacity: 1; flex: none; padding: 2px 8px; }
+.quick-shell .xhs-note__cover .xhs-note__unit .button { opacity: 1; flex: none; padding: 2px 8px; min-height: 0; }
 
 .quick-shell .xhs-note__body { padding: 14px 16px 8px; }
-/* 可复制单元:复制按钮悬停才显现,常亮会让笔记看起来像个表单 */
+/* 可复制单元:复制按钮悬停才显现,常亮会让笔记看起来像个表单。
+   min-height: 0 是必须的——全局 .button 有 min-height: 40px,只给 padding 只缩宽不缩高,
+   实测正文里的按钮是 37×40px,评论名字行(flex + align-items:center)整行被撑到 40px。 */
 .quick-shell .xhs-note__unit { display: flex; align-items: flex-start; gap: 6px; }
 .quick-shell .xhs-note__unit > :first-child { flex: 1; min-width: 0; }
-.quick-shell .xhs-note__unit .button { opacity: 0; padding: 2px 6px; flex: none; transition: opacity .12s; }
+.quick-shell .xhs-note__unit .button { opacity: 0; padding: 2px 6px; flex: none; min-height: 0; transition: opacity .12s; }
 .quick-shell .xhs-note__unit:hover .button,
 .quick-shell .xhs-note__unit .button:focus-visible { opacity: 1; }
 .quick-shell .xhs-note__title {
@@ -4128,8 +4134,9 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
   font-style: normal; font-size: var(--v2-fs-micro); padding: 0 5px; border-radius: 3px;
   background: var(--v2-brand-soft); color: var(--v2-brand-ink);
 }
-/* 复制按钮悬停才显现:每条评论挂一个常亮按钮会毁掉会话流的观感 */
-.quick-shell .xhs-comment__name .button { opacity: 0; padding: 1px 5px; transition: opacity .12s; }
+/* 复制按钮悬停才显现:每条评论挂一个常亮按钮会毁掉会话流的观感。
+   min-height: 0 同上——不覆盖全局的 40px,每一行名字(含答复行、追问行)都会被撑成 40px 高。 */
+.quick-shell .xhs-comment__name .button { opacity: 0; padding: 1px 5px; min-height: 0; transition: opacity .12s; }
 .quick-shell .xhs-comment:hover .xhs-comment__name .button,
 .quick-shell .xhs-comment__name .button:focus-visible { opacity: 1; }
 .quick-shell .xhs-comment__text {
@@ -4142,7 +4149,8 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
   margin-top: 9px; padding-left: 10px; border-left: 2px solid var(--v2-line);
 }
 
-/* 工作区与预览之间拉开距离并换底色:两种阅读姿态,视觉上要能分开 */
+/* 工作区与预览之间拉开距离:两种阅读姿态,视觉上要能分开。
+   刻意不换底色——同底色 + 一条分隔线就够,给工作区另铺一层灰会让它看起来像被禁用了。 */
 .quick-shell .xhs-workbench { margin-top: 10px; padding-top: 18px; border-top: 1px solid var(--v2-line); }
 
 .quick-shell .qc-planlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
@@ -4153,6 +4161,14 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 }
 .quick-shell .qc-planlist dt { color: var(--v2-muted-2); }
 .quick-shell .qc-planlist dd { color: var(--v2-muted); margin: 0; }
+
+/* 触屏没有 hover,悬停显形在这里等于永久隐藏。实测 390px + hasTouch 下
+   matchMedia('(hover: none)') 为 true,17 个复制按钮里 16 个 opacity:0 却仍占据可点区域
+   ——复制标题/正文/话题/单条评论在触屏这个主场景里等于不存在。 */
+@media (hover: none) {
+  .quick-shell .xhs-note__unit .button,
+  .quick-shell .xhs-comment__name .button { opacity: 1; }
+}
 
 @media (max-width: 560px) {
   .quick-shell .xhs-note { border-radius: 0; border-left: none; border-right: none; }
