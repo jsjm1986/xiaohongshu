@@ -282,6 +282,8 @@ test('autoApproveAndGenerate defaults imageAssetIds to []', async () => {
   assert.deepEqual(seen.imageAssetIds, []);
 });
 
+// 返回 { ...deps, calls }:calls 直接挂在 deps 上,断言写 deps.calls。
+// 多出来的 calls 键对 reviseCandidate 无影响(它只读 api)。
 function makeReviseDeps(reviseImpl: () => Promise<any>, getImpl?: () => Promise<any>) {
   const calls: string[] = [];
   const deps = {
@@ -295,45 +297,60 @@ function makeReviseDeps(reviseImpl: () => Promise<any>, getImpl?: () => Promise<
       },
     },
   };
-  return { deps, calls };
+  return { ...deps, calls };
 }
 
-test('reviseCandidate calls revise and returns the completed job without polling', async () => {
-  const { deps, calls } = makeReviseDeps(async () => ({
-    id: 'job1', projectId: 'proj1', topic: 't', mode: 'simple', status: 'completed', progress: 100,
-    candidates: [{ id: 'c1', title: 't2', body: 'b2', tags: [], comments: [], validation: { valid: true, repairAttempts: 0, issues: [] } }],
-  }));
-  const progresses: Array<number | undefined> = [];
+test('reviseCandidate:受理后轮询到修改任务终态才返回', async () => {
+  // 异步化后 revise 立即返回,此时 activeRevision 还在跑;函数必须等它到终态。
+  // 注意 job.status 全程是 completed——旧实现按它判断,于是一次都不轮询就返回了。
+  const running = {
+    id: 'job1', status: 'completed',
+    activeRevision: { id: 'rev1', candidateId: 'c1', status: 'running', progress: 40, rerunChannels: [] },
+  };
+  const done = {
+    id: 'job1', status: 'completed',
+    activeRevision: { id: 'rev1', candidateId: 'c1', status: 'completed', progress: 100, rerunChannels: ['N.body'] },
+  };
+  const deps = makeReviseDeps(async () => running, async () => done);
   const job = await reviseCandidate({
     jobId: 'job1', candidateId: 'c1', instruction: '标题再口语化一点',
-    pollIntervalMs: 1, maxPolls: 5, onProgress: (j) => progresses.push(j.progress), deps: deps as any,
+    pollIntervalMs: 1, maxPolls: 5, deps: deps as any,
   });
-  assert.equal(job.status, 'completed');
-  assert.equal(job.candidates?.[0]?.title, 't2');
-  assert.deepEqual(calls, ['revise:job1:c1:标题再口语化一点']);
-  assert.deepEqual(progresses, [100]);
+  assert.equal(job.activeRevision?.status, 'completed');
+  assert.deepEqual(deps.calls, ['revise:job1:c1:标题再口语化一点', 'get:job1']);
 });
 
-test('reviseCandidate polls to completion when revise returns a running job', async () => {
-  const { deps, calls } = makeReviseDeps(
-    async () => ({ id: 'job1', status: 'running', progress: 50 }),
-    async () => ({ id: 'job1', status: 'completed', progress: 100, candidates: [] }),
-  );
-  const job = await reviseCandidate({ jobId: 'job1', candidateId: 'c1', instruction: 'x', pollIntervalMs: 1, maxPolls: 5, deps: deps as any });
-  assert.equal(job.status, 'completed');
-  assert.deepEqual(calls, ['revise:job1:c1:x', 'get:job1']);
-});
-
-test('reviseCandidate throws job.error when the revised job failed', async () => {
-  const { deps } = makeReviseDeps(async () => ({ id: 'job1', status: 'failed', error: '模型拒绝' }));
+test('reviseCandidate:修改任务失败时抛出服务端给的原因', async () => {
+  const failed = {
+    id: 'job1', status: 'completed',
+    activeRevision: {
+      id: 'rev1', candidateId: 'c1', status: 'failed', progress: 100, rerunChannels: [],
+      error: '模型服务暂时不可用，修改没有完成。已退还本次额度，请稍后重试；若持续失败请联系客服。',
+    },
+  };
+  const deps = makeReviseDeps(async () => failed);
   await assert.rejects(
-    () => reviseCandidate({ jobId: 'job1', candidateId: 'c1', instruction: 'x', pollIntervalMs: 1, maxPolls: 5, deps: deps as any }),
-    /模型拒绝/,
+    () => reviseCandidate({ jobId: 'job1', candidateId: 'c1', instruction: 'x', pollIntervalMs: 1, deps: deps as any }),
+    /模型服务暂时不可用/u,
   );
 });
 
-test('reviseCandidate throws fallback message when failed without error', async () => {
-  const { deps } = makeReviseDeps(async () => ({ id: 'job1', status: 'failed' }));
+test('reviseCandidate:受理时没有修改任务就直接返回,不空转', async () => {
+  // 服务端若因为幂等等原因没有建任务,不该在这里等到 maxPolls 超时。
+  const deps = makeReviseDeps(async () => ({ id: 'job1', status: 'completed' }));
+  const job = await reviseCandidate({
+    jobId: 'job1', candidateId: 'c1', instruction: 'x', pollIntervalMs: 1, maxPolls: 3, deps: deps as any,
+  });
+  assert.equal(job.id, 'job1');
+  assert.deepEqual(deps.calls, ['revise:job1:c1:x']);
+});
+
+test('reviseCandidate:修改任务失败且服务端没给原因时用兜底文案', async () => {
+  // 失败判定同样落在 activeRevision 上:job.status 改稿期间恒为 completed。
+  const deps = makeReviseDeps(async () => ({
+    id: 'job1', status: 'completed',
+    activeRevision: { id: 'rev1', candidateId: 'c1', status: 'failed', progress: 100, rerunChannels: [] },
+  }));
   await assert.rejects(
     () => reviseCandidate({ jobId: 'job1', candidateId: 'c1', instruction: 'x', pollIntervalMs: 1, maxPolls: 5, deps: deps as any }),
     /修改失败，请重试/,
@@ -428,10 +445,12 @@ test('autoApproveAndGenerate 轮询用尽时抛 GenerationStillRunningError 并�
 });
 
 test('reviseCandidate 轮询用尽时同样抛 GenerationStillRunningError', async () => {
-  const { deps } = makeReviseDeps(
-    async () => ({ id: 'job1', status: 'running', progress: 40 }),
-    async () => ({ id: 'job1', status: 'running', progress: 40 }),
-  );
+  // 「还在跑」的判据是 activeRevision 一直停在 running,而不是 job.status。
+  const inFlight = {
+    id: 'job1', status: 'completed',
+    activeRevision: { id: 'rev1', candidateId: 'c1', status: 'running', progress: 40, rerunChannels: [] },
+  };
+  const deps = makeReviseDeps(async () => inFlight, async () => inFlight);
   const err = await reviseCandidate({ jobId: 'job1', candidateId: 'c1', instruction: 'x', pollIntervalMs: 1, maxPolls: 2, deps: deps as any })
     .then(() => null, (e) => e);
   assert.ok(err instanceof GenerationStillRunningError, '应是 GenerationStillRunningError');

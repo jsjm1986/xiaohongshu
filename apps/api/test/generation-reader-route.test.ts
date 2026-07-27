@@ -171,6 +171,32 @@ test('reader 响应不夹带完整版的重字段', async () => {
   assert.equal(JSON.stringify(body).includes('xxxxxxxxxx'), false);
 });
 
+/**
+ * 阅读投影必须带 activeRevision。
+ *
+ * 阅读页的 3 秒轮询受「在跑」门控,而改稿期间 job.status 保持 completed;这个字段
+ * 是它唯一的判据。缺了它的表现是「点了修改没反应、稍后自己变了」。
+ */
+test('reader 响应带 activeRevision:改稿期间 status 仍是 completed,轮询靠它', async () => {
+  const db = app.get(DatabaseService);
+  const admin = db.prepare("SELECT id FROM users WHERE username='admin'").get() as { id: string };
+  db.prepare(
+    `INSERT INTO revision_tasks
+       (id, job_id, package_id, candidate_id, instruction, status, progress, attempt_count,
+        rerun_channels_json, created_by, created_at, updated_at)
+     VALUES ('rev-reader-1', ?, ?, ?, '标题再口语化', 'running', 40, 1, '[]', ?, datetime('now'), datetime('now'))`,
+  ).run(jobId, `${jobId}-pkg`, `${jobId}-cand`, admin.id);
+  try {
+    const { body } = await request(`/api/generations/${jobId}/reader`);
+    assert.equal(body.status, 'completed', '改稿不改 job.status');
+    assert.equal(body.activeRevision.id, 'rev-reader-1');
+    assert.equal(body.activeRevision.status, 'running');
+    assert.equal(body.activeRevision.candidateId, `${jobId}-cand`);
+  } finally {
+    db.prepare("DELETE FROM revision_tasks WHERE id='rev-reader-1'").run();
+  }
+});
+
 test('SaaS 会话能读 reader:白名单是 /api/generations 前缀,子路径同样放行', async () => {
   const { response, body } = await request(`/api/generations/${jobId}/reader`, {}, saasCookie, '');
   assert.equal(response.status, 200, `SaaS 实际 ${response.status}: ${JSON.stringify(body).slice(0, 200)}`);

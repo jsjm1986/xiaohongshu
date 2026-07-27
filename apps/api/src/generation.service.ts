@@ -649,6 +649,10 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       createdAt: row.created_at,
       completedAt: row.completed_at ?? undefined,
       error: row.error ?? undefined,
+      // 与 mapJob 同源同语义:改稿期间 job.status 保持 completed,阅读页要靠这个
+      // 字段才知道「在改」——否则它那个受 inFlight 门控的 3 秒轮询根本不启动,
+      // 用户看到的是「点了没反应、稍后自己变了」。终态也带出来,用于显示上一次失败。
+      activeRevision: this.revisions.activeFor(row.id) ?? this.revisions.latestFor(row.id),
       // 只有 completed 才有候选;其余状态给空数组,前端不用分支判 undefined。
       candidates: row.status === 'completed'
         ? this.packageRows(jobId).map((item) =>

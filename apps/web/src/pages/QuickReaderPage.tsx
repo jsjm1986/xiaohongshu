@@ -15,6 +15,7 @@ import { areaPath, QUICK_HOME_PATH } from '../lib/quick-routes';
 import { failureReason } from '../lib/retry-plan';
 import { retryJobOnce } from '../lib/single-retry';
 import { readerNeighbors } from '../lib/reader-navigation';
+import { isRevisionInFlight } from '../lib/revision-progress';
 import type { GenerationJob, Project, ReaderCandidate, ReaderJob } from '../types';
 
 /**
@@ -89,7 +90,11 @@ export function QuickReaderPage() {
   }, [job?.projectId]);
 
   // 未完成任务:等待卡要走秒,并按 3s 续拉直到落地
-  const inFlight = job?.status === 'queued' || job?.status === 'running';
+  //
+  // 改稿期间 job.status 保持 completed(前端多处按它判定能否查看产出),所以要显式
+  // 把修改任务算进「在跑」,否则受理后这个轮询不会启动,页面停在旧内容上。
+  const revising = isRevisionInFlight(job?.activeRevision);
+  const inFlight = job?.status === 'queued' || job?.status === 'running' || revising;
   useEffect(() => {
     if (!inFlight) return;
     const tick = setInterval(() => setNow(Date.now()), 1000);
@@ -100,10 +105,11 @@ export function QuickReaderPage() {
   const revise = async (candidate: ReaderCandidate, instruction: string) => {
     setRevisingId(candidate.id);
     try {
+      // 受理是秒级的;执行进度由页面既有的 3 秒轮询带回来,不在这里等。
       await api.generations.revise(jobId, candidate.id, instruction);
       setJob(await api.generations.reader(jobId));
-      toast.push('已按意见修改');
-    } catch (e) { fail(e, '修改失败'); } finally { setRevisingId(null); }
+      toast.push('已受理，正在重新生成受影响的环节');
+    } catch (e) { fail(e, '提交修改失败'); } finally { setRevisingId(null); }
   };
 
   const retry = async () => {
@@ -266,7 +272,9 @@ export function QuickReaderPage() {
                 activeIndex={activeIndex}
                 onExport={exportAs}
                 onRevise={revise}
-                revisingId={revisingId}
+                // 受理返回后本地 revisingId 就清了,但任务还在跑;按钮要继续锁到终态,
+                // 否则用户能再点一次——后端会 409,白跑一趟。
+                revisingId={(revising ? job.activeRevision?.candidateId : null) ?? revisingId}
                 onRetry={() => void retry()}
                 retrying={retrying}
               />

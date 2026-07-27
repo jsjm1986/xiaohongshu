@@ -1039,6 +1039,11 @@ export interface ReaderJob {
   createdAt?: string;
   completedAt?: string;
   error?: string;
+  /**
+   * 修改任务。改稿期间 status 仍是 completed,所以「有没有在改」由这个字段回答;
+   * 无活跃任务时后端回落成最近一条(含终态),有值 ≠ 正在改,要看 status。
+   */
+  activeRevision?: RevisionTask;
   candidates: ReaderCandidate[];
 }
 

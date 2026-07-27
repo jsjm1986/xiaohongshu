@@ -1,4 +1,5 @@
 import type { Candidate, CommentThread, GenerateInput, GenerationJob, Project, TopicOpportunity } from '../types';
+import { isRevisionInFlight } from './revision-progress';
 import { buildSimpleGenerateInput, resolveSimpleGenerationSettings } from './simple-generation';
 import type { SimpleSettingOverrides } from './simple-generation';
 
@@ -312,8 +313,16 @@ interface ReviseDeps {
   api: ApiClient;
 }
 
-// 按意见局部重生成:后端 revise 目前同步返回更新后的 job,仍沿用与
-// autoApproveAndGenerate 相同的轮询模式兜底(若未来改为异步任务,调用方不用改)。
+/**
+ * 按意见局部重生成。
+ *
+ * revise 已改为异步任务:POST 立即返回,执行在服务端队列里。轮询依据是
+ * job.activeRevision 而不是 job.status——改稿期间 job.status 保持 completed
+ * (前端多处按它判定能否查看产出),用它判断会一次都不轮询就返回旧内容。
+ *
+ * 这段循环在同步实现时代是死代码:那时 revise 返回的 job 已是 completed,
+ * 条件从不成立。现在它才真的开始工作。
+ */
 export async function reviseCandidate(args: {
   jobId: string;
   candidateId: string;
@@ -333,13 +342,15 @@ export async function reviseCandidate(args: {
   let job = await d.api.generations.revise(jobId, candidateId, instruction);
   args.onProgress?.(job);
   let polls = 0;
-  while (job.status === 'queued' || job.status === 'running') {
+  while (isRevisionInFlight(job.activeRevision)) {
     if (polls >= maxPolls) throw new GenerationStillRunningError(jobId, '修改');
     await sleep(pollIntervalMs);
     job = await d.api.generations.get(jobId);
     args.onProgress?.(job);
     polls += 1;
   }
-  if (job.status === 'failed') throw new Error(job.error || '修改失败，请重试');
+  if (job.activeRevision?.status === 'failed') {
+    throw new Error(job.activeRevision.error || '修改失败，请重试');
+  }
   return job;
 }
