@@ -1042,11 +1042,18 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     this.startRevisionHeartbeat(revisionId);
     this.event(task.job_id, 'revision_running', { revisionId });
 
-    const job = this.jobRow(task.job_id);
-    const project = this.resources.projectRow(job.project_id);
-    const workspaceId = String(project.workspace_id);
     let quotaConsumed = false;
+    // workspaceId 在 try 内才拿得到,但 catch 里要用它退额度。先置空:退额度只在
+    // quotaConsumed 为真时发生,而那一定意味着 workspaceId 已经取到了。
+    let workspaceId = '';
     try {
+      // jobRow / projectRow 也在 try 内:项目或任务被软删时它们抛 NotFoundException,
+      // 放在 try 外会被 drainRevisions 的 .catch(() => undefined) 吞掉,任务就停在
+      // running——没有 failed、没有事件,还占着那条部分唯一索引的名额,只能等回收
+      // 跑满 3 轮(每轮 jobClaimTimeoutMs)才收敛。
+      const job = this.jobRow(task.job_id);
+      const project = this.resources.projectRow(job.project_id);
+      workspaceId = String(project.workspace_id);
       this.revisionProgress(revisionId, 10);
       const packageRow = this.database
         .prepare('SELECT id, content_json FROM content_packages WHERE id=?')

@@ -1,3 +1,4 @@
+import { ModelProviderError } from '@content-agent/agent-core';
 import { AnalysisGatewayError } from './intelligence.service.js';
 
 /**
@@ -9,14 +10,37 @@ import { AnalysisGatewayError } from './intelligence.service.js';
  */
 export type ModelFailureKind = 'unavailable' | 'credentials' | 'incomplete' | 'other';
 
+/**
+ * 「这是一次模型网关失败」的判据。
+ *
+ * 两条路径抛的是不同的类,没有继承关系:分析走 AnalysisGatewayError,生成与改稿走
+ * agent-core 的 ModelProviderError(OpenAICompatibleClient 抛的)。只认前者会让
+ * revise 的**每一种**模型失败都落进 other——退额度成为死代码,用户还会看到英文原文。
+ *
+ * 用显式类名单而不是「有 status 字段就算」:Nest 的每个 HttpException 都带
+ * status,`consumePlatformQuota` 的额度用尽是 ForbiddenException(status=403),
+ * 鸭子类型会把它判成「凭据异常」并对用户说凭据坏了。加第三个 provider 错误类时
+ * 在这里加一行即可。
+ */
+function modelGatewayStatus(error: unknown): { gateway: boolean; status?: number; message: string } {
+  if (error instanceof AnalysisGatewayError || error instanceof ModelProviderError) {
+    return { gateway: true, status: error.status, message: error.message };
+  }
+  return { gateway: false, message: error instanceof Error ? error.message : String(error) };
+}
+
 export function classifyModelFailure(error: unknown): ModelFailureKind {
-  if (!(error instanceof AnalysisGatewayError)) return 'other';
-  const status = (error as { status?: number }).status;
-  // 5xx / 429 / 网络层无响应(status undefined):不是用户的问题,重试即可
+  const { gateway, status, message } = modelGatewayStatus(error);
+  if (!gateway) return 'other';
+  // 5xx / 429 / 网络层无响应(status undefined:超时、连接失败、响应体读不出来):
+  // 不是用户的问题,重试即可。判据顺序保持原样——把契约不符提到前面会改掉分析路径
+  // 既有的分类结果(500 + 坏 JSON 现在是 unavailable),那不在本次范围。
   if (status === undefined || status === 429 || status >= 500) return 'unavailable';
   if (status === 401 || status === 403) return 'credentials';
   // 模型返回了但内容不合契约:采样波动,重试一次多半能好
-  if (/omitted required|invalid JSON|empty planning resources/i.test(error.message)) return 'incomplete';
+  if (/omitted required|invalid JSON|empty planning resources|not a JSON object|non-JSON response|did not contain output text/i.test(message)) {
+    return 'incomplete';
+  }
   return 'other';
 }
 

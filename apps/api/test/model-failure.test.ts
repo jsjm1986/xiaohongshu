@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { ForbiddenException } from '@nestjs/common';
+import { ModelProviderError } from '@content-agent/agent-core';
 import { AnalysisGatewayError } from '../src/intelligence.service.js';
 import { classifyModelFailure, modelFailureMessage, shouldRefundQuota } from '../src/model-failure.js';
 
@@ -44,6 +46,50 @@ test('非网关错误算 other,不退额度', () => {
   const kind = classifyModelFailure(new Error('候选未通过事实校验'));
   assert.equal(kind, 'other');
   assert.equal(shouldRefundQuota(kind), false);
+});
+
+/*
+ * 生成与改稿路径抛的是 agent-core 的 ModelProviderError,与分析路径的
+ * AnalysisGatewayError 没有继承关系。只认后者会让 revise 的每一种模型失败都落进
+ * other:退额度成死代码(用户模型故障也扣钱),报错还是英文原文。
+ */
+test('ModelProviderError 与 AnalysisGatewayError 同等分类', () => {
+  for (const status of [500, 502, 503, 429, undefined]) {
+    const kind = classifyModelFailure(new ModelProviderError('Model provider rejected the request: Bad gateway', status));
+    assert.equal(kind, 'unavailable', `status=${status} 应判 unavailable`);
+    assert.equal(shouldRefundQuota(kind), true, `status=${status} 该退额度`);
+  }
+  for (const status of [401, 403]) {
+    const kind = classifyModelFailure(new ModelProviderError('Model provider rejected the request: invalid key', status));
+    assert.equal(kind, 'credentials');
+    assert.equal(shouldRefundQuota(kind), true);
+  }
+  // 契约不符:agent-core 在读响应体阶段抛,带 200 或不带 status
+  assert.equal(classifyModelFailure(new ModelProviderError('Model response was not a JSON object.', 200)), 'incomplete');
+  assert.equal(classifyModelFailure(new ModelProviderError('Model response did not contain output text.', 200)), 'incomplete');
+});
+
+test('502 的用户文案是中文且明说退了额度,不是英文原文', () => {
+  const error = new ModelProviderError('Model provider rejected the request: Bad gateway', 502);
+  const kind = classifyModelFailure(error);
+  const message = modelFailureMessage(kind, '修改', error.message);
+  assert.match(message, /模型服务暂时不可用/u);
+  assert.match(message, /修改没有完成/u);
+  assert.match(message, /已退还本次额度/u);
+  assert.ok(!message.includes('rejected the request'), `不该把英文原文塞给用户：${message}`);
+});
+
+/*
+ * 不按「有 status 字段就算网关失败」判:Nest 的每个 HttpException 都带 status,
+ * 额度用尽是 ForbiddenException(403),鸭子类型会把它判成 credentials 并对用户说
+ * 凭据坏了——而且它会触发退额度,把刚扣的那次白送回去。
+ */
+test('带 status 的非模型错误仍是 other:Nest 异常不冒充网关失败', () => {
+  const quotaExhausted = new ForbiddenException('平台测试额度已用完');
+  assert.equal((quotaExhausted as { status?: number }).status, 403, '前提:Nest 异常确实带 status');
+  const kind = classifyModelFailure(quotaExhausted);
+  assert.equal(kind, 'other');
+  assert.equal(shouldRefundQuota(kind), false, '额度用尽时根本没扣成功,不该退');
 });
 
 test('文案带上动作名,并在退额度时明说', () => {

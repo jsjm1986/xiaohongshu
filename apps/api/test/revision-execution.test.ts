@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { createApplication } from '../src/app.js';
+import { APP_OPTIONS } from '../src/config.js';
 import { DatabaseService } from '../src/database.service.js';
+import { SettingsService } from '../src/settings.service.js';
 import { seedApprovedProjectBlueprint } from './project-blueprint-fixture.js';
 
 /**
@@ -194,6 +197,147 @@ test('事件流记下 queued / running / revised', async () => {
   assert.ok(events.includes('revision_queued'), `实际事件：${events.join(',')}`);
   assert.ok(events.includes('revision_running'), `实际事件：${events.join(',')}`);
   assert.ok(events.includes('revised'), `实际事件：${events.join(',')}`);
+});
+
+/*
+ * 前置读取抛错也必须收敛成 failed。
+ *
+ * jobRow / projectRow 在项目或任务不存在时抛 NotFoundException。它们放在 try 之外时
+ * 异常会被 drainRevisions 的 .catch(() => undefined) 吞掉:任务停在 running,没有
+ * failed、没有事件,还占着 revision_tasks_active_pkg_idx 的名额,该包再也提不了新
+ * 修改,只能等孤儿回收跑满 3 轮才收敛。
+ */
+test('项目被软删时任务收敛为 failed,不是永远卡在 running', async () => {
+  seedCompletedJob('job-orphan', 'pkg-orphan', 'cand-orphan');
+  const db = app.get(DatabaseService);
+  await request('/api/generations/job-orphan/revise', {
+    method: 'POST', body: JSON.stringify({ candidateId: 'cand-orphan', instruction: '孤儿项目' }),
+  });
+  // 受理之后、执行开始之前软删项目:projectRow 带 deleted_at IS NULL 过滤,会抛
+  // NotFoundException。删完立刻恢复,别影响后面的用例。
+  db.prepare("UPDATE projects SET deleted_at=datetime('now') WHERE id=?").run(projectId);
+  let row: { status: string; error: string | null } | undefined;
+  try {
+    // 直接轮询任务行,不走 GET /api/generations:那条投影自己也要读项目行,
+    // 项目软删期间它读不出来,轮询它只会一直超时。
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      row = db.prepare('SELECT status, error FROM revision_tasks WHERE job_id=?').get('job-orphan') as typeof row;
+      if (row && ['completed', 'failed'].includes(row.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  } finally {
+    db.prepare('UPDATE projects SET deleted_at=NULL WHERE id=?').run(projectId);
+  }
+  assert.equal(row?.status, 'failed', `前置读取失败也要落到终态，实际：${row?.status}`);
+  assert.ok(row?.error, '要有可读原因');
+  // 终态行不进部分唯一索引,所以该包还能再提修改——这是"没被锁住"的证据
+  const active = db.prepare("SELECT COUNT(*) AS n FROM revision_tasks WHERE package_id='pkg-orphan' AND status IN ('queued','running')")
+    .get() as { n: number };
+  assert.equal(Number(active.n), 0, '不该留下活跃行占着索引名额');
+});
+
+/*
+ * 单事务的原子性。
+ *
+ * 上一条用例在 formulas.get() 就失败,发生在任何写库动作之前——所以它锁不住本任务
+ * 最重要的不变量:删掉 database.transaction 包裹它照样绿。这条把失败注入到两条
+ * UPDATE**之间**:内容包已经写过了,改稿任务行的收尾 UPDATE 抛错。没有事务包裹时
+ * 内容包的那次写入会留在库里,也就是"半个包"。
+ */
+test('写库阶段中途失败时内容包回滚,不留半个包', async () => {
+  const { jobId, candidateId } = await createRealJob('改稿执行-事务');
+  const db = app.get(DatabaseService);
+  const pkgBefore = db.prepare('SELECT id, content_json, updated_at FROM content_packages WHERE job_id=? ORDER BY candidate_index LIMIT 1')
+    .get(jobId) as { id: string; content_json: string; updated_at: string };
+
+  const original = db.prepare.bind(db);
+  (db as unknown as { prepare: typeof original }).prepare = (sql: string) => {
+    const statement = original(sql);
+    // 只拦改稿任务的「置 completed」那一条:它在事务里、在内容包写入之后。
+    if (sql.includes("SET status='completed'")) {
+      return { ...statement, run: () => { throw new Error('注入故障：收尾写库失败'); } } as unknown as ReturnType<typeof original>;
+    }
+    return statement;
+  };
+  let revision: any;
+  try {
+    await request(`/api/generations/${jobId}/revise`, {
+      method: 'POST', body: JSON.stringify({ candidateId, instruction: '事务原子性' }),
+    });
+    revision = await waitForRevision(jobId);
+  } finally {
+    (db as unknown as { prepare: typeof original }).prepare = original;
+  }
+
+  assert.equal(revision.status, 'failed', '收尾写库失败要落到 failed');
+  assert.equal(revision.resultPackageId, null, '没写成的结果不该留下结果包 id');
+  const pkgAfter = db.prepare('SELECT id, content_json, updated_at FROM content_packages WHERE id=?')
+    .get(pkgBefore.id) as { id: string; content_json: string; updated_at: string } | undefined;
+  assert.ok(pkgAfter, '内容包的 id 不该被换成新包 id（那正是半个包的样子）');
+  assert.equal(pkgAfter.content_json, pkgBefore.content_json, '事务回滚后内容包一个字节都不该变');
+  assert.equal(pkgAfter.updated_at, pkgBefore.updated_at, '回滚后不该留下 updated_at 的痕迹');
+});
+
+/*
+ * 真实模型错误的分类与退额度。
+ *
+ * 这条是本任务的要害:agent.revise 抛的是 agent-core 的 ModelProviderError,不是
+ * 分析路径的 AnalysisGatewayError。分类只认后者时,revise 的每一种模型失败都落进
+ * other——退额度成为死代码(用户模型故障也被扣钱),报错还是英文原文。
+ * model-failure.test.ts 锁纯函数判据,这里锁「processRevision 真的走到那条分支」。
+ *
+ * 生成阶段要走离线确定性路径(否则建不出可改的稿),所以先用空 apiKey 生成,再把
+ * 注入的运行时选项指向 stub 中继——这样只有改稿这一步会打到 502。
+ */
+test('模型返回 502 时退还额度,并给中文可行动文案', async () => {
+  const { jobId, candidateId } = await createRealJob('改稿执行-退额度');
+  const db = app.get(DatabaseService);
+  const settings = app.get(SettingsService);
+  const workspace = db.prepare('SELECT id FROM workspaces LIMIT 1').get() as { id: string };
+  settings.ensure(workspace.id);
+  const stub = createServer((_req, res) => {
+    res.writeHead(502, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Bad gateway' } }));
+  });
+  await new Promise<void>((resolve) => stub.listen(0, '127.0.0.1', resolve));
+  const port = (stub.address() as { port: number }).port;
+
+  // base_url 在设置行建出来的那一刻就落库了(SettingsService.ensure 写的是当时的
+  // platformBaseUrl),而 provider() 读行内值优先。只改注入选项不够,行也要改,
+  // 否则请求打到 before 里配的 127.0.0.1:1 变成「连接失败」——那是另一种错误。
+  const baseUrlBefore = (db.prepare('SELECT base_url FROM workspace_settings WHERE workspace_id=?').get(workspace.id) as { base_url: string }).base_url;
+  db.prepare("UPDATE workspace_settings SET provider_mode='platform', monthly_quota=100, quota_used=5, base_url=? WHERE workspace_id=?")
+    .run(`http://127.0.0.1:${port}/v1`, workspace.id);
+
+  const options = app.get<Record<string, unknown>>(APP_OPTIONS);
+  const restore = { apiKey: options.platformApiKey, baseUrl: options.platformBaseUrl, attempts: options.modelRetryAttempts, delay: options.modelRetryBaseDelayMs };
+  options.platformApiKey = 'stub-key';
+  options.platformBaseUrl = `http://127.0.0.1:${port}/v1`;
+  options.modelRetryAttempts = 1;
+  options.modelRetryBaseDelayMs = 0;
+
+  let revision: any;
+  try {
+    await request(`/api/generations/${jobId}/revise`, {
+      method: 'POST', body: JSON.stringify({ candidateId, instruction: '打到 502' }),
+    });
+    revision = await waitForRevision(jobId);
+  } finally {
+    options.platformApiKey = restore.apiKey;
+    options.platformBaseUrl = restore.baseUrl;
+    options.modelRetryAttempts = restore.attempts;
+    options.modelRetryBaseDelayMs = restore.delay;
+    db.prepare('UPDATE workspace_settings SET base_url=? WHERE workspace_id=?').run(baseUrlBefore, workspace.id);
+    await new Promise<void>((resolve) => stub.close(() => resolve()));
+  }
+
+  assert.equal(revision.status, 'failed');
+  assert.match(revision.error, /模型服务暂时不可用/u, `文案应是中文可行动话术，实际：${revision.error}`);
+  assert.match(revision.error, /已退还本次额度/u);
+  assert.ok(!revision.error.includes('rejected the request'), `不该把英文原文塞给用户：${revision.error}`);
+  const used = db.prepare('SELECT quota_used FROM workspace_settings WHERE workspace_id=?').get(workspace.id) as { quota_used: number };
+  assert.equal(Number(used.quota_used), 5, '扣一次再退一次,计数应回到原点');
 });
 
 test('执行失败时旧内容包字节不变', async () => {
