@@ -31,6 +31,7 @@ import {
   useToast,
 } from "../components/Ui";
 import { V2Hero } from "../components/V2";
+import { InlineProgress } from "../components/quick/InlineProgress";
 import { api } from "../lib/api";
 import {
   commentNodeKindLabel,
@@ -49,6 +50,12 @@ import {
   type DiagnosticProxyView,
 } from "../lib/diagnostic-proxy";
 import { demoGenerations } from "../lib/fixtures";
+import {
+  isRevisionInFlight,
+  revisionBoxState,
+  revisionDoneSummary,
+  revisionStageText,
+} from "../lib/revision-progress";
 import {
   generationRecordNotice,
   ordinaryDiagnosticsForDisplay,
@@ -74,7 +81,6 @@ export function GenerationResultPage() {
   const [recordSource, setRecordSource] = useState<"loading" | "server" | "fallback">("loading");
   const [selectedId, setSelectedId] = useState("");
   const [revision, setRevision] = useState("");
-  const [revising, setRevising] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(true);
   const toast = useToast();
   const navigate = useNavigate();
@@ -115,6 +121,17 @@ export function GenerationResultPage() {
     if (!selectedId && job?.candidates?.[0])
       setSelectedId(job.candidates[0].id);
   }, [job, selectedId]);
+
+  // 有修改任务在跑时轮询。3 秒与阅读页一致;终态后自动停,不留常驻定时器。
+  useEffect(() => {
+    if (!job?.id || !isRevisionInFlight(job.activeRevision)) return;
+    const timer = setInterval(() => {
+      void api.generations.get(job.id).then(setJob).catch(() => undefined);
+    }, 3000);
+    return () => clearInterval(timer);
+    // 依赖里带 status 与 progress:进度每次推进都会重建定时器,这是有意的——它让
+    // 「任务终态后停止轮询」不依赖额外的清理逻辑。
+  }, [job?.id, job?.activeRevision?.status, job?.activeRevision?.progress]);
 
   const selected = useMemo(
     () =>
@@ -197,33 +214,25 @@ export function GenerationResultPage() {
     toast.push("完整内容已复制");
   };
 
+  const revisionBox = revisionBoxState(job, selected?.id);
+
   const handleRevise = async () => {
-    if (!job || !selected || !revision.trim()) return;
-    setRevising(true);
+    if (!job || !selected || !revision.trim() || revisionBox.buttonDisabled) return;
     try {
       const next = await api.generations.revise(job.id, selected.id, revision);
       setJob(next);
-      toast.push("已只重新生成受影响的部分");
-    } catch {
-      setJob((current) =>
-        current
-          ? {
-              ...current,
-              candidates: current.candidates?.map((candidate) =>
-                candidate.id === selected.id
-                  ? {
-                      ...candidate,
-                      body: `${candidate.body}\n\n【修改说明】${revision.trim()}`,
-                    }
-                  : candidate,
-              ),
-            }
-          : current,
-      );
-      toast.push("演示模式：修改说明已记录", "info");
-    } finally {
+      toast.push("已受理，正在重新生成受影响的环节");
       setRevision("");
-      setRevising(false);
+    } catch (error) {
+      /*
+       * 这里曾经有一段「演示模式」兜底:把修改指令追加到正文末尾并提示
+       * 「演示模式:修改说明已记录」。它是本次要消掉的东西——Cloudflare 约 100 秒
+       * 超时会切断同步请求并落到这里,用户看到「已记录」、正文却被污染,而服务端
+       * 那次请求已经扣了额度。异步化后受理是秒级的,失败就是失败。
+       *
+       * 失败不清空 revision:用户不该为一次服务端故障重打一遍指令。
+       */
+      toast.push(error instanceof Error ? error.message : "提交修改失败，请重试", "error");
     }
   };
 
@@ -729,12 +738,28 @@ export function GenerationResultPage() {
             />
             <Button
               onClick={handleRevise}
-              disabled={!revision.trim()}
-              loading={revising}
+              disabled={!revision.trim() || revisionBox.buttonDisabled}
               icon={<Send size={15} />}
             >
-              发送修改要求
+              {revisionBox.buttonLabel}
             </Button>
+            {revisionBox.phase === "in_flight" && (
+              <InlineProgress
+                active
+                progress={revisionBox.task?.progress}
+                label="正在修改"
+                stageText={revisionStageText}
+                showEta={false}
+              />
+            )}
+            {revisionBox.phase === "failed" && (
+              <p className="revision-box__error" role="alert">
+                {revisionBox.task?.error || "上次修改没有完成，可以重新发送。"}
+              </p>
+            )}
+            {revisionBox.phase === "done" && revisionBox.task && (
+              <p className="revision-box__done">{revisionDoneSummary(revisionBox.task)}</p>
+            )}
             <small>修改记录会与新版本一起保存</small>
           </section>
           <section className="result-insight">

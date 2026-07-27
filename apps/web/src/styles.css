@@ -884,6 +884,10 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .revision-box textarea { margin-bottom: 9px; font-size: 10px; }
 .revision-box .button { width: 100%; }
 .revision-box > small { display: block; margin-top: 8px; color: var(--muted); font-size: 7px; text-align: center; }
+/* 修改失败/完成的一行提示。失败用告警色,完成用弱化色——它是回执不是主内容。
+   选择器带上 .revision-box p 是为了压过上面那条 8px 的通用段落规则。 */
+.revision-box p.revision-box__error { color: var(--danger); font-size: 12px; line-height: 1.5; }
+.revision-box p.revision-box__done { color: var(--muted); font-size: 12px; line-height: 1.5; }
 .generation-loading, .generation-progress-page { min-height: calc(100vh - 64px); padding: 50px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
 .generation-loading__orb { width: 60px; height: 60px; margin-bottom: 18px; display: flex; align-items: center; justify-content: center; border-radius: 18px; background: var(--coral-soft); color: var(--coral); animation: breathe 1.8s ease-in-out infinite; }
 @keyframes breathe { 50% { transform: scale(1.06); box-shadow: 0 0 0 13px rgb(240 93 82 / 5%); } }

@@ -1,4 +1,4 @@
-import type { RevisionTask } from '../types';
+import type { GenerationJob, RevisionTask } from '../types';
 
 /**
  * 修改任务的阶段文案。
@@ -47,4 +47,40 @@ export function revisionDoneSummary(task: RevisionTask): string {
     .filter((label, index, all) => all.indexOf(label) === index);
   if (!labels.length) return '修改完成';
   return `修改完成，已更新${labels.join('、')}`;
+}
+
+export interface RevisionBoxState {
+  phase: 'idle' | 'in_flight' | 'done' | 'failed';
+  task?: RevisionTask;
+  buttonLabel: string;
+  buttonDisabled: boolean;
+  /** 失败时要保留输入框里的指令:原实现在 finally 里无条件清空,用户得重打一遍。 */
+  keepInstruction: boolean;
+}
+
+/**
+ * 侧边栏「继续调整当前候选」的状态。
+ *
+ * 抽成纯函数是因为这是本改动里唯一有真假之分的逻辑——什么时候禁用按钮、失败要不要
+ * 保留指令。JSX 里内联三元式没法测。
+ *
+ * candidateId 传入时只认这个候选的任务:侧边栏改的是当前选中的候选,别的候选在改
+ * 不该锁住这个按钮。
+ *
+ * 分流顺序按 status 而不是 progress:后端失败时也会写 progress = 100,只看进度会把
+ * 失败显示成「完成」。
+ */
+export function revisionBoxState(job: GenerationJob | null, candidateId?: string): RevisionBoxState {
+  const task = job?.activeRevision;
+  const mine = task && (!candidateId || task.candidateId === candidateId) ? task : undefined;
+  if (!mine) {
+    return { phase: 'idle', buttonLabel: '发送修改要求', buttonDisabled: false, keepInstruction: false };
+  }
+  if (isRevisionInFlight(mine)) {
+    return { phase: 'in_flight', task: mine, buttonLabel: '修改中…', buttonDisabled: true, keepInstruction: true };
+  }
+  if (mine.status === 'failed') {
+    return { phase: 'failed', task: mine, buttonLabel: '重新发送', buttonDisabled: false, keepInstruction: true };
+  }
+  return { phase: 'done', task: mine, buttonLabel: '发送修改要求', buttonDisabled: false, keepInstruction: false };
 }
