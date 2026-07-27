@@ -176,6 +176,9 @@ test('reader 响应不夹带完整版的重字段', async () => {
  *
  * 阅读页的 3 秒轮询受「在跑」门控,而改稿期间 job.status 保持 completed;这个字段
  * 是它唯一的判据。缺了它的表现是「点了修改没反应、稍后自己变了」。
+ *
+ * heartbeat_at 必须写:reclaimStale 按「running + heartbeat 为空」判孤儿,回收
+ * 定时器 15 秒一拍,留空会让这行被 requeue 并真的进 processRevision,测试偶发不稳。
  */
 test('reader 响应带 activeRevision:改稿期间 status 仍是 completed,轮询靠它', async () => {
   const db = app.get(DatabaseService);
@@ -183,8 +186,8 @@ test('reader 响应带 activeRevision:改稿期间 status 仍是 completed,轮�
   db.prepare(
     `INSERT INTO revision_tasks
        (id, job_id, package_id, candidate_id, instruction, status, progress, attempt_count,
-        rerun_channels_json, created_by, created_at, updated_at)
-     VALUES ('rev-reader-1', ?, ?, ?, '标题再口语化', 'running', 40, 1, '[]', ?, datetime('now'), datetime('now'))`,
+        rerun_channels_json, created_by, created_at, updated_at, heartbeat_at)
+     VALUES ('rev-reader-1', ?, ?, ?, '标题再口语化', 'running', 40, 1, '[]', ?, datetime('now'), datetime('now'), datetime('now'))`,
   ).run(jobId, `${jobId}-pkg`, `${jobId}-cand`, admin.id);
   try {
     const { body } = await request(`/api/generations/${jobId}/reader`);

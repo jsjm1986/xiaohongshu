@@ -59,7 +59,11 @@ export function ResultTab({ project, opportunityId, presetId, overrides, imageAs
       // 早已 completed),照它画条会全程停在 100%,读起来像卡住了。
       const job = await reviseCandidate({
         jobId, candidateId, instruction,
-        onProgress: (j) => setProgress(j.activeRevision?.progress),
+        // 同一个 job 的两个候选能并发改稿(后端互斥是 per package),所以还要
+        // 认 candidateId,否则画的是别人的进度。
+        onProgress: (j) => setProgress(
+          j.activeRevision?.candidateId === candidateId ? j.activeRevision.progress : undefined,
+        ),
       });
       // revise 后候选位置(candidate_index)不变;候选 id 目前也保持不变,但按
       // GenerationResultPage 的兜底思路兼容 id 变化:先按原位置取,再找没见过的 id

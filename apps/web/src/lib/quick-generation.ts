@@ -322,6 +322,11 @@ interface ReviseDeps {
  *
  * 这段循环在同步实现时代是死代码:那时 revise 返回的 job 已是 completed,
  * 条件从不成立。现在它才真的开始工作。
+ *
+ * 只认本候选的任务:后端 activeFor(jobId) 是**任务级**的,而入队互斥是
+ * per package_id(revision.service.ts),同一个 job 的两个候选能并发改稿。不过滤
+ * 就会等别人的任务、抛别人的失败原因、把别人的进度画到这里。与 Task 6 的
+ * revisionBoxState(job, candidateId) 同一口径。
  */
 export async function reviseCandidate(args: {
   jobId: string;
@@ -339,18 +344,24 @@ export async function reviseCandidate(args: {
   const maxPolls = args.maxPolls ?? 333;
   const d = args.deps ?? (await defaultDeps());
 
+  // 本次请求的任务;不是我的就当"我的已经不在跑"处理,而不是去等别人的。
+  // 比对口径:revision_tasks.candidate_id 存的是用户传入的原值,所以直接比参数。
+  const mine = (j: GenerationJob) =>
+    j.activeRevision?.candidateId === candidateId ? j.activeRevision : undefined;
+
   let job = await d.api.generations.revise(jobId, candidateId, instruction);
   args.onProgress?.(job);
   let polls = 0;
-  while (isRevisionInFlight(job.activeRevision)) {
+  while (isRevisionInFlight(mine(job))) {
     if (polls >= maxPolls) throw new GenerationStillRunningError(jobId, '修改');
     await sleep(pollIntervalMs);
     job = await d.api.generations.get(jobId);
     args.onProgress?.(job);
     polls += 1;
   }
-  if (job.activeRevision?.status === 'failed') {
-    throw new Error(job.activeRevision.error || '修改失败，请重试');
+  const settled = mine(job);
+  if (settled?.status === 'failed') {
+    throw new Error(settled.error || '修改失败，请重试');
   }
   return job;
 }

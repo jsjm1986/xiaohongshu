@@ -345,6 +345,62 @@ test('reviseCandidate:受理时没有修改任务就直接返回,不空转', asy
   assert.deepEqual(deps.calls, ['revise:job1:c1:x']);
 });
 
+test('reviseCandidate:activeRevision 属于别的候选时不去等它', async () => {
+  // 后端 activeFor(jobId) 是任务级的,而入队互斥是 per package_id:同一个 job 的
+  // 两个候选可以并发改稿。不按 candidateId 过滤就会等别人的任务、抛别人的错、
+  // 画别人的进度条。与 Task 6 的 revisionBoxState(candidateId) 同一口径。
+  const other = {
+    id: 'job1', status: 'completed',
+    activeRevision: { id: 'rev-other', candidateId: 'c2', status: 'running', progress: 40, rerunChannels: [] },
+  };
+  const deps = makeReviseDeps(async () => other, async () => other);
+  const job = await reviseCandidate({
+    jobId: 'job1', candidateId: 'c1', instruction: 'x', pollIntervalMs: 1, maxPolls: 3, deps: deps as any,
+  });
+  assert.equal(job.id, 'job1');
+  assert.deepEqual(deps.calls, ['revise:job1:c1:x'], '不该为别的候选轮询');
+});
+
+test('reviseCandidate:别的候选修改失败不该报到本次调用头上', async () => {
+  const deps = makeReviseDeps(async () => ({
+    id: 'job1', status: 'completed',
+    activeRevision: { id: 'rev-other', candidateId: 'c2', status: 'failed', progress: 100, rerunChannels: [], error: '别人的失败原因' },
+  }));
+  const job = await reviseCandidate({
+    jobId: 'job1', candidateId: 'c1', instruction: 'x', pollIntervalMs: 1, maxPolls: 3, deps: deps as any,
+  });
+  assert.equal(job.id, 'job1');
+});
+
+test('reviseCandidate:onProgress 在受理时与每次轮询后各送一次', async () => {
+  // ResultTab 的进度条只有这一条数据来源(它读 j.activeRevision.progress)。
+  // 没有这条断言,删掉那两行 args.onProgress?.(job) 不会有任何测试变红。
+  const deps = makeReviseDeps(
+    async () => ({
+      id: 'job1', status: 'completed',
+      activeRevision: { id: 'rev1', candidateId: 'c1', status: 'queued', progress: 0, rerunChannels: [] },
+    }),
+    (() => {
+      let n = 0;
+      return async () => {
+        n += 1;
+        return n >= 2
+          ? { id: 'job1', status: 'completed', activeRevision: { id: 'rev1', candidateId: 'c1', status: 'completed', progress: 100, rerunChannels: ['N.body'] } }
+          : { id: 'job1', status: 'completed', activeRevision: { id: 'rev1', candidateId: 'c1', status: 'running', progress: 40, rerunChannels: [] } };
+      };
+    })(),
+  );
+  const seen: Array<{ status?: string; progress?: number }> = [];
+  await reviseCandidate({
+    jobId: 'job1', candidateId: 'c1', instruction: 'x', pollIntervalMs: 1, maxPolls: 5,
+    onProgress: (j) => seen.push({ status: j.activeRevision?.status, progress: j.activeRevision?.progress }),
+    deps: deps as any,
+  });
+  // 受理一次 + 每次轮询各一次;进度取自 activeRevision 而不是 job.progress
+  assert.deepEqual(seen.map((s) => s.status), ['queued', 'running', 'completed']);
+  assert.deepEqual(seen.map((s) => s.progress), [0, 40, 100]);
+});
+
 test('reviseCandidate:修改任务失败且服务端没给原因时用兜底文案', async () => {
   // 失败判定同样落在 activeRevision 上:job.status 改稿期间恒为 completed。
   const deps = makeReviseDeps(async () => ({
