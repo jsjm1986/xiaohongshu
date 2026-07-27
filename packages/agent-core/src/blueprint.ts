@@ -256,13 +256,23 @@ export function projectBlueprintCompleteness(blueprint: ProjectCreativeBlueprint
         `role_model.accountable（双号运营需要恰好 ${ACCOUNTABLE_PUBLIC_IDENTITY_COUNT} 个可追责公开身份：IP 本人与公开助理，当前 ${accountableNames.size} 个）`,
       );
     }
-    // replyDisplayRoles 必须是 accountable 的 displayRole,不能是内部 id。
-    const dangling = [...new Set(
-      roles.flatMap((role) => role.replyDisplayRoles ?? []).filter((name) => name && !accountableNames.has(name)),
-    )];
-    if (dangling.length) {
-      missing.push(`role_model.replyDisplayRoles（指向未定义的可追责身份：${dangling.slice(0, 4).join("、")}）`);
-    }
+    /*
+     * replyDisplayRoles 指向内部 id 不再阻断生成。
+     *
+     * 原来把它并入 missing,于是这个检查对**已批准的存量蓝图**追溯生效,直接锁死
+     * 生成入口(intelligence.service 读蓝图时抛 BadRequestException)。实测线上两个
+     * 项目就是这样无法生成的:它们 2 个 accountable 身份齐备、只是 replyDisplayRoles
+     * 写成了 host_account / assistant_account。
+     *
+     * 而这类瑕疵**没有实际后果**:forcedReplyDisplayRole 根本不读 replyDisplayRoles,
+     * 它从 accountable 角色直接解析(resolveIpDisplayRole / resolveAssistantReply-
+     * DisplayRole)。实测两个项目的 publisher/staff/expert 三身份全部正确解析为项目
+     * 自己的展示名,无一回落到通用兜底名。
+     *
+     * 所以它属于「该修但不该拦」:生成阶段已有 accountable_identity_incomplete
+     * warning 把它显性化(见 planning.diagnoseAccountableIdentities),重跑蓝图分析
+     * 即可修正。缺少 accountable 身份仍然阻断——那会真的让 IP 与助理身份塌缩。
+     */
   }
   return { complete: missing.length === 0, missing };
 }
