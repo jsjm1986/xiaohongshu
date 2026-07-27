@@ -43,18 +43,25 @@ export interface RevisionRow {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  /** 已扣未退的额度次数。见 v15 建表块的列注释与 generation.service 的退还逻辑。 */
+  quota_consumed_count: number;
 }
 
 const TERMINAL = new Set(['completed', 'failed']);
 
-/** 应用层检查与索引兜底给的是同一件事,文案也该是同一句。 */
-const REVISION_IN_PROGRESS = '这个候选还有一次修改正在进行，请等它完成后再提交';
+/**
+ * 应用层检查与索引兜底给的是同一件事,文案也该是同一句。
+ *
+ * 措辞是「这篇稿子」而不是「这个候选」:互斥收到 job 级之后,拦住的可能是同一 job 的
+ * 另一个候选,说「这个候选」会让用户对着没在改的候选找不着北。
+ */
+const REVISION_IN_PROGRESS = '这篇稿子还有一次修改正在进行，请等它完成后再提交';
 
 /** SQLITE_CONSTRAINT_UNIQUE。node:sqlite 把它放在 error.errcode 上。 */
 const SQLITE_CONSTRAINT_UNIQUE = 2067;
 
 /**
- * 撞上 revision_tasks_active_pkg_idx 了吗?
+ * 撞上 revision_tasks_active_job_idx 了吗?
  *
  * 只认唯一约束,不认全部约束错误:外键失败(job_id 指向不存在的 job)也是 constraint
  * 错误,但那是 500 该有的样子,不能被当成「有人在改」而变成 409。
@@ -101,14 +108,21 @@ export class RevisionService {
     const packageId = this.resolvePackageId(jobId, candidateId);
     if (!packageId) throw new NotFoundException('候选内容不存在');
 
-    // 同一个包同时排两条修改会互相覆盖结果。这里挡住而不是排队:用户看到的是
-    // 「上一次还在改」,比默默排队更符合他按下按钮时的预期。
-    //
-    // 这层检查只负责给出可读的错误。真正的互斥由 revision_tasks_active_pkg_idx
-    // 保证——「先查后写」在多实例下不成立,两个进程能在彼此的查与写之间穿插。
+    /*
+     * 一个 job 同时只允许一条未终态的修改。这里挡住而不是排队:用户看到的是
+     * 「上一次还在改」,比默默排队更符合他按下按钮时的预期。
+     *
+     * 互斥的粒度是 job 而不是 package:投影 activeFor(jobId) 只回一条活跃任务,包级
+     * 互斥允许同一 job 的两个候选并发改稿,于是先提交的那个候选在轮询里看不到自己的
+     * 任务、立刻判「已完成」,把未更新的旧候选当成改稿结果报给用户(假成功)。同一
+     * 根因还会让 revisionBoxState 判 idle、按钮解锁、再点得 409。
+     *
+     * 这层检查只负责给出可读的错误。真正的互斥由 revision_tasks_active_job_idx
+     * 保证——「先查后写」在多实例下不成立,两个进程能在彼此的查与写之间穿插。
+     */
     const pending = this.database
-      .prepare("SELECT id FROM revision_tasks WHERE package_id=? AND status IN ('queued','running')")
-      .get(packageId) as { id: string } | undefined;
+      .prepare("SELECT id FROM revision_tasks WHERE job_id=? AND status IN ('queued','running')")
+      .get(jobId) as { id: string } | undefined;
     if (pending) throw new ConflictException(REVISION_IN_PROGRESS);
 
     const id = randomUUID();
@@ -131,7 +145,14 @@ export class RevisionService {
     return this.taskView(id);
   }
 
-  /** 最近一条未终态的修改任务;没有则 undefined。 */
+  /**
+   * 未终态的修改任务;没有则 undefined。
+   *
+   * 一个 job 最多只有一条(revision_tasks_active_job_idx 保证),所以「最近一条」与
+   * 「那一条」是同一件事。ORDER BY + LIMIT 1 保留着:它让这个方法在索引被误改回包级时
+   * 仍然返回单条而不是抛错,但那时投影会漏掉并发的另一条——所以真正的防线是那个索引,
+   * 迁移测试锁着它建在 job_id 上。
+   */
   activeFor(jobId: string): RevisionTaskView | undefined {
     const row = this.database
       .prepare(

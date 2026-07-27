@@ -345,10 +345,30 @@ test('reviseCandidate:受理时没有修改任务就直接返回,不空转', asy
   assert.deepEqual(deps.calls, ['revise:job1:c1:x']);
 });
 
+/*
+ * 同 job 的第二个候选被后端拒(409)时,必须把错误抛出去,不能报成「已按意见修改」。
+ *
+ * 互斥现在是 job 级(revision_tasks_active_job_idx):A 候选在改时,另一标签页改 B 候选
+ * 会拿到 409。把它吞掉、返回受理前的 job,ResultTab 就会拿未更新的旧候选去 toast
+ * 「已按意见修改」——那正是假成功的用户可见形态,只是换了触发点。
+ */
+test('reviseCandidate:受理被 409 拒绝时抛错,不报成已修改', async () => {
+  const deps = makeReviseDeps(async () => {
+    throw new Error('这篇稿子还有一次修改正在进行，请等它完成后再提交');
+  });
+  await assert.rejects(
+    () => reviseCandidate({ jobId: 'job1', candidateId: 'c2', instruction: 'x', pollIntervalMs: 1, deps: deps as any }),
+    /还有一次修改正在进行/u,
+  );
+  assert.deepEqual(deps.calls, ['revise:job1:c2:x'], '受理失败后不该继续轮询');
+});
+
 test('reviseCandidate:activeRevision 属于别的候选时不去等它', async () => {
-  // 后端 activeFor(jobId) 是任务级的,而入队互斥是 per package_id:同一个 job 的
-  // 两个候选可以并发改稿。不按 candidateId 过滤就会等别人的任务、抛别人的错、
-  // 画别人的进度条。与 Task 6 的 revisionBoxState(candidateId) 同一口径。
+  // 投影 activeFor(jobId) 是任务级的(一个 job 只回一条活跃任务),而本函数关心的是
+  // **本次**提交的那个候选。不按 candidateId 过滤就会等别人的任务、抛别人的错、画别人的
+  // 进度条——历史上包级互斥让同 job 两个候选能并发改稿,那时这是常态;现在互斥收到 job
+  // 级,这条过滤仍是必要的:投影也会带出上一次(别的候选的)终态任务。
+  // 与 Task 6 的 revisionBoxState(candidateId) 同一口径。
   const other = {
     id: 'job1', status: 'completed',
     activeRevision: { id: 'rev-other', candidateId: 'c2', status: 'running', progress: 40, rerunChannels: [] },

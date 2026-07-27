@@ -324,6 +324,100 @@ test('孤儿任务触顶后判 failed,旧内容包字节不变', async () => {
 });
 
 /*
+ * 不变量 2 之三:回收判死要按扣款次数退还,一次不落。
+ *
+ * 扣额度在**每次** processRevision 调模型之前发生,而重试靠孤儿回收重新入队:`kill -9`
+ * 或心跳失速三轮 → 扣 3 次,最终由 reclaimStale 判 failed。原实现的 failed 分支只写了
+ * 一个事件、没有任何退还逻辑,于是用户零产出、被扣 3 次——与规格「只在确认无产出时退」
+ * 正面冲突。首次生成路径不会这样,它在 create 时扣一次。
+ *
+ * 构造:直接把「已被打断 3 次、每次都扣过额度」的状态写进库(quota_consumed_count=3,
+ * attempt_count 已到上限,心跳很旧),让定时回收去判死。这样不用真跑三轮模型。
+ * 判据是扣了 3 次就退 3 次:退 1 次会少退,固定退 3 次会在只扣过 1 次时白送,所以
+ * 退还次数必须来自记账。
+ */
+test('回收触顶判死时,扣过几次就退几次', async () => {
+  const db = app.get(DatabaseService);
+  setPlatformQuota(9);
+  seedCompletedJob({
+    jobId: 'job-reclaim-refund', packageId: 'pkg-reclaim-refund', candidateId: 'cand-reclaim-refund',
+    formulaId: formulaVersionId,
+  });
+  const now = new Date().toISOString();
+  // heartbeat_at 用 ISO 格式:datetime('now') 的空格分隔格式恒小于 ISO deadline,
+  // 那样写等于没写(见本文件上方的时间戳说明)。这里刻意给一个很旧的 ISO 值。
+  db.prepare(
+    `INSERT INTO revision_tasks
+       (id, job_id, package_id, candidate_id, instruction, status, progress, attempt_count,
+        rerun_channels_json, created_by, created_at, updated_at, claimed_by, heartbeat_at,
+        quota_consumed_count)
+     VALUES ('rev-reclaim-refund', 'job-reclaim-refund', 'pkg-reclaim-refund', 'cand-reclaim-refund',
+        '改一下', 'running', 40, 3, '[]', ?, ?, ?, 'host:999:dead', '2020-01-01T00:00:00.000Z', 3)`,
+  ).run(adminId, now, now);
+
+  const before = quotaUsed();
+  const deadline = Date.now() + 20_000;
+  let row = db.prepare('SELECT status, error, quota_consumed_count FROM revision_tasks WHERE id=?')
+    .get('rev-reclaim-refund') as { status: string; error: string | null; quota_consumed_count: number };
+  while (Date.now() < deadline && row.status === 'running') {
+    await sleep(50);
+    row = db.prepare('SELECT status, error, quota_consumed_count FROM revision_tasks WHERE id=?')
+      .get('rev-reclaim-refund') as typeof row;
+  }
+
+  assert.equal(row.status, 'failed', '前提:回收要判死这条任务');
+  assert.equal(quotaUsed(), before - 3, `零产出扣了 3 次就该退 3 次：${before} → ${quotaUsed()}`);
+  assert.equal(Number(row.quota_consumed_count), 0, '退完余额要归零,否则下一次结清会重复退');
+  assert.match(row.error ?? '', /已退还/u, `真退了就要说,否则用户以为白扣了：${row.error}`);
+  // 事件里带上退还次数:这是账目可追溯的唯一痕迹
+  const refundEvent = db
+    .prepare("SELECT details_json FROM generation_events WHERE job_id=? AND event='revision_failed' ORDER BY id DESC LIMIT 1")
+    .get('job-reclaim-refund') as { details_json: string } | undefined;
+  assert.equal(JSON.parse(refundEvent?.details_json ?? '{}').refundedQuota, 3, '事件要记下退了几次');
+});
+
+/*
+ * 不变量 2 之四:重复结清不会退第二遍。
+ *
+ * 两个实例的定时回收可能同时看到同一条刚判死的任务,而 refundPlatformQuota 本身没有
+ * 幂等键。配平靠 quota_consumed_count 的读-改-写(WHERE 卡原值):余额已经归零时再结清
+ * 一次必须退 0 次,否则用户凭一次失败反复拿到额度。
+ */
+test('同一条任务重复结清额度不会退第二遍', async () => {
+  const db = app.get(DatabaseService);
+  setPlatformQuota(9);
+  seedCompletedJob({
+    jobId: 'job-refund-once', packageId: 'pkg-refund-once', candidateId: 'cand-refund-once',
+    formulaId: formulaVersionId,
+  });
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO revision_tasks
+       (id, job_id, package_id, candidate_id, instruction, status, progress, attempt_count,
+        rerun_channels_json, created_by, created_at, updated_at, claimed_by, heartbeat_at,
+        quota_consumed_count)
+     VALUES ('rev-refund-once', 'job-refund-once', 'pkg-refund-once', 'cand-refund-once',
+        '改一下', 'running', 40, 3, '[]', ?, ?, ?, 'host:999:dead', '2020-01-01T00:00:00.000Z', 2)`,
+  ).run(adminId, now, now);
+
+  const before = quotaUsed();
+  const deadline = Date.now() + 20_000;
+  let status = 'running';
+  while (Date.now() < deadline && status === 'running') {
+    await sleep(50);
+    status = (db.prepare('SELECT status FROM revision_tasks WHERE id=?').get('rev-refund-once') as { status: string }).status;
+  }
+  assert.equal(status, 'failed', '前提:回收要判死这条任务');
+  const afterFirst = quotaUsed();
+  assert.equal(afterFirst, before - 2, `第一次结清退 2 次：${before} → ${afterFirst}`);
+
+  // 再等好几个回收周期。终态行已不在 reclaimStale 的取件范围,而余额也已归零,
+  // 两道防线都失效时这里会看到额度继续往下掉。
+  await sleep(HEARTBEAT_MS * 6);
+  assert.equal(quotaUsed(), afterFirst, `重复结清不该再退：${afterFirst} → ${quotaUsed()}`);
+});
+
+/*
  * 不变量 4 之一:心跳没超时的任务,本实例的定时回收不许碰。
  *
  * 抢走会导致同一任务被两个实例并发执行、各写一次产出,正是 v14 修掉的那个 bug。
@@ -397,14 +491,30 @@ test('两个实例共用同一个库文件:同一条修改任务只被领一次'
        VALUES ('j1','p1','completed','{}','s','u1',?,?,'选题','g','simple',100,'{}',1,
           '{}','{}','{}','{}','[]','{}','unknown')`,
     ).run(now, now);
-    // 每条任务落在各自的包上:revision_tasks_active_pkg_idx 禁止同一个包有两条活跃行
-    const seedTask = (id: string, packageId: string) => instanceA.prepare(
-      `INSERT INTO revision_tasks
-         (id, job_id, package_id, candidate_id, instruction, status, progress, attempt_count,
-          rerun_channels_json, created_by, created_at, updated_at)
-       VALUES (?, 'j1', ?, 'c1', '改一下', 'queued', 0, 0, '[]', 'u1', ?, ?)`,
-    ).run(id, packageId, now, now);
-    seedTask('rev-1', 'pkg-1');
+    /*
+     * 每条任务落在各自的 job 上:revision_tasks_active_job_idx 禁止同一个 job 有两条活跃
+     * 行(那正是「同 job 两个候选并发改稿 → 假成功」的形状)。本用例验的是认领与回收的
+     * 多实例正确性,与目标 job 无关,所以一条任务一个 job。
+     */
+    const seedJobRow = (jobId: string) => instanceA.prepare(
+      `INSERT INTO generation_jobs
+         (id, project_id, status, config_json, seed, created_by, created_at, updated_at,
+          topic, goal, mode, progress, knowledge_context_json, style_profile_version,
+          resolution_snapshot_json, config_impact_json, opportunity_snapshot_json,
+          planning_context_json, image_context_json, research_snapshot_json, quality_status)
+       VALUES (?,'p1','completed','{}','s','u1',?,?,'选题','g','simple',100,'{}',1,
+          '{}','{}','{}','{}','[]','{}','unknown')`,
+    ).run(jobId, now, now);
+    const seedTask = (id: string, jobId: string, packageId: string) => {
+      seedJobRow(jobId);
+      instanceA.prepare(
+        `INSERT INTO revision_tasks
+           (id, job_id, package_id, candidate_id, instruction, status, progress, attempt_count,
+            rerun_channels_json, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, 'c1', '改一下', 'queued', 0, 0, '[]', 'u1', ?, ?)`,
+      ).run(id, jobId, packageId, now, now);
+    };
+    seedTask('rev-1', 'j-rev-1', 'pkg-1');
 
     // 两个实例同时来领:只有一个能拿到
     const first = claimNext(instanceA, REVISION_TASKS_SPEC, ID_A, new Date().toISOString());
@@ -430,7 +540,7 @@ test('两个实例共用同一个库文件:同一条修改任务只被领一次'
     assert.equal(Number(afterReclaim.attempt_count), 0, 'B 的启动不该污染 A 的打断计数');
 
     // B 只领得到真正排队的那条,A 手上那条不受影响
-    seedTask('rev-2', 'pkg-2');
+    seedTask('rev-2', 'j-rev-2', 'pkg-2');
     assert.equal(claimNext(instanceB, REVISION_TASKS_SPEC, ID_B, new Date().toISOString()), 'rev-2');
     const owners = (instanceA.prepare('SELECT id, claimed_by FROM revision_tasks ORDER BY id')
       .all() as { id: string; claimed_by: string }[])
@@ -445,7 +555,7 @@ test('两个实例共用同一个库文件:同一条修改任务只被领一次'
      * 过期的候选去 UPDATE。外层 UPDATE 的 `AND status='queued'` 是唯一挡住它的东西;
      * 去掉那个守卫,B 会把 A 正在跑的任务改成自己的,同一条修改被两个实例并发执行。
      */
-    seedTask('rev-race', 'pkg-race');
+    seedTask('rev-race', 'j-rev-race', 'pkg-race');
     // 钩住 B 的选取语句:它返回候选之后、B 自己 UPDATE 之前,让 A 完整领走这一条。
     // 这样跑的是真正的 claimNext,而不是在用例里重抄一遍它的 SQL——重抄的话
     // 生产代码怎么改这条用例都是绿的。

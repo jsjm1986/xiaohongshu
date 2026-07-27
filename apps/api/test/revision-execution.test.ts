@@ -204,7 +204,7 @@ test('事件流记下 queued / running / revised', async () => {
  *
  * jobRow / projectRow 在项目或任务不存在时抛 NotFoundException。它们放在 try 之外时
  * 异常会被 drainRevisions 的 .catch(() => undefined) 吞掉:任务停在 running,没有
- * failed、没有事件,还占着 revision_tasks_active_pkg_idx 的名额,该包再也提不了新
+ * failed、没有事件,还占着 revision_tasks_active_job_idx 的名额,这篇稿子再也提不了新
  * 修改,只能等孤儿回收跑满 3 轮才收敛。
  */
 test('项目被软删时任务收敛为 failed,不是永远卡在 running', async () => {

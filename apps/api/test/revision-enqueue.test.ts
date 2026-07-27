@@ -179,19 +179,26 @@ test('未完成的任务不能改', async () => {
   assert.equal(result.response.status, 400);
 });
 
-/** 直接插一条修改任务行,绕过应用层的 pending 检查。 */
-function insertTaskRow(id: string, jobId: string, packageId: string, status: string): void {
+/**
+ * 直接插一条修改任务行,绕过应用层的 pending 检查。
+ *
+ * heartbeat_at 写 ISO 格式(不是 datetime('now')):reclaimStale 的 deadline 是
+ * `new Date(...).toISOString()`,而 SQLite 的空格分隔格式恒小于同日 ISO deadline,
+ * 写它等于没写,行会被判成孤儿并真的进 processRevision。
+ */
+function insertTaskRow(id: string, jobId: string, packageId: string, status: string, candidateId = 'c'): void {
   const db = app.get(DatabaseService);
   const admin = db.prepare("SELECT id FROM users WHERE username='admin'").get() as { id: string };
+  const now = new Date().toISOString();
   db.prepare(
     `INSERT INTO revision_tasks
        (id, job_id, package_id, candidate_id, instruction, status, progress, attempt_count,
-        rerun_channels_json, created_by, created_at, updated_at)
-     VALUES (?, ?, ?, 'c', 'i', ?, 0, 0, '[]', ?, datetime('now'), datetime('now'))`,
-  ).run(id, jobId, packageId, status, admin.id);
+        rerun_channels_json, created_by, created_at, updated_at, heartbeat_at)
+     VALUES (?, ?, ?, ?, 'i', ?, 0, 0, '[]', ?, ?, ?, ?)`,
+  ).run(id, jobId, packageId, candidateId, status, admin.id, now, now, now);
 }
 
-test('DB 层挡住同一个包的第二条活跃修改(应用层检查失效时的最后防线)', () => {
+test('DB 层挡住同一篇稿子的第二条活跃修改(应用层检查失效时的最后防线)', () => {
   seedCompletedJob('job-g', 'pkg-g', 'cand-g');
   insertTaskRow('rev-g1', 'job-g', 'pkg-g', 'queued');
   // 绕过应用层直接插第二条。多实例下两个进程能在彼此的「查 pending」与「INSERT」
@@ -199,22 +206,43 @@ test('DB 层挡住同一个包的第二条活跃修改(应用层检查失效时�
   assert.throws(
     () => insertTaskRow('rev-g2', 'job-g', 'pkg-g', 'running'),
     /UNIQUE constraint failed/,
-    '缺 revision_tasks_active_pkg_idx 时这里会插进去',
+    '缺 revision_tasks_active_job_idx 时这里会插进去',
   );
   const db = app.get(DatabaseService);
-  const count = db.prepare('SELECT COUNT(*) AS n FROM revision_tasks WHERE package_id=?').get('pkg-g') as { n: number };
+  const count = db.prepare('SELECT COUNT(*) AS n FROM revision_tasks WHERE job_id=?').get('job-g') as { n: number };
   assert.equal(count.n, 1);
 });
 
-test('终态行不占名额:同一个包改完还能再改', () => {
+/*
+ * 互斥是 job 级的:同一个 job 的**另一个候选**同样挡住。
+ *
+ * 包级互斥会放过这一条,而投影 activeFor(jobId) 只回一条活跃任务——先提交的那个候选在
+ * 轮询里看不到自己的任务、立刻判「已完成」,把未更新的旧候选当成改稿结果报给用户。
+ */
+test('同一 job 的另一个候选也挡住:互斥是 job 级', () => {
+  const db = app.get(DatabaseService);
+  seedCompletedJob('job-j', 'pkg-j1', 'cand-j1');
+  db.prepare(
+    `INSERT INTO content_packages (id, job_id, project_id, candidate_index, content_json, created_at, updated_at)
+     VALUES ('pkg-j2', 'job-j', ?, 1, ?, datetime('now'), datetime('now'))`,
+  ).run(projectId, JSON.stringify(minimalPackage('pkg-j2', 'cand-j2')));
+  insertTaskRow('rev-j1', 'job-j', 'pkg-j1', 'running');
+  assert.throws(
+    () => insertTaskRow('rev-j2', 'job-j', 'pkg-j2', 'queued'),
+    /UNIQUE constraint failed/,
+    '包级互斥会放过它,于是同一 job 的两个候选并发改稿',
+  );
+});
+
+test('终态行不占名额:同一篇稿子改完还能再改', () => {
   seedCompletedJob('job-h', 'pkg-h', 'cand-h');
   insertTaskRow('rev-h1', 'job-h', 'pkg-h', 'completed');
   insertTaskRow('rev-h2', 'job-h', 'pkg-h', 'failed');
   // 索引带 WHERE status IN ('queued','running'),终态行不进索引。少了这个条件就成了
-  // 「一个包一辈子只能改一次」。
+  // 「一篇稿子一辈子只能改一次」。
   insertTaskRow('rev-h3', 'job-h', 'pkg-h', 'queued');
   const db = app.get(DatabaseService);
-  const count = db.prepare('SELECT COUNT(*) AS n FROM revision_tasks WHERE package_id=?').get('pkg-h') as { n: number };
+  const count = db.prepare('SELECT COUNT(*) AS n FROM revision_tasks WHERE job_id=?').get('job-h') as { n: number };
   assert.equal(count.n, 3);
 });
 
@@ -227,7 +255,7 @@ test('索引被踩到时报 409,不是 500', async () => {
   // 我们读完之后才插进去),于是 INSERT 撞索引。用户该看到 409 而不是 500。
   (db as unknown as { prepare: typeof original }).prepare = (sql: string) => {
     const statement = original(sql);
-    if (sql.includes('FROM revision_tasks WHERE package_id=?')) {
+    if (sql.includes('FROM revision_tasks WHERE job_id=?') && sql.includes('queued')) {
       return { ...statement, get: () => undefined } as unknown as ReturnType<typeof original>;
     }
     return statement;
@@ -243,6 +271,38 @@ test('索引被踩到时报 409,不是 500', async () => {
   }
   const count = db.prepare('SELECT COUNT(*) AS n FROM revision_tasks WHERE package_id=?').get('pkg-i') as { n: number };
   assert.equal(count.n, 1, '撞索引的那条不该留下半行');
+});
+
+/*
+ * 假成功的完整链路,锁在受理这一层。
+ *
+ * 包级互斥下:A 候选在改 → B 候选(另一标签页/另一用户)入队成功 → 投影
+ * activeFor(jobId) 只回**最近一条**,于是 A 的轮询里 candidateId 对不上、
+ * isRevisionInFlight 为 false、循环立刻退出,前端拿到未更新的旧候选却提示「已按意见
+ * 修改」。断言两件事:B 拿到 409 而不是被受理;A 的活跃任务仍然是 A 自己那条(投影没被
+ * 顶掉),所以 A 的轮询不会假成功。
+ */
+test('同 job 的第二个候选入队被拒,第一个候选的投影不被顶掉', async () => {
+  const db = app.get(DatabaseService);
+  seedCompletedJob('job-k', 'pkg-k1', 'cand-k1');
+  db.prepare(
+    `INSERT INTO content_packages (id, job_id, project_id, candidate_index, content_json, created_at, updated_at)
+     VALUES ('pkg-k2', 'job-k', ?, 1, ?, datetime('now'), datetime('now'))`,
+  ).run(projectId, JSON.stringify(minimalPackage('pkg-k2', 'cand-k2')));
+  // A 候选:手塞 running 行,模拟"正在改"且不会自己跑完
+  insertTaskRow('rev-k1', 'job-k', 'pkg-k1', 'running', 'cand-k1');
+
+  const second = await request('/api/generations/job-k/revise', {
+    method: 'POST', body: JSON.stringify({ candidateId: 'cand-k2', instruction: '另一个候选也改' }),
+  });
+  assert.equal(second.response.status, 409, `包级互斥会放过它并造成假成功，实际 ${second.response.status}`);
+
+  const detail = await request('/api/generations/job-k');
+  assert.equal(detail.body.activeRevision.id, 'rev-k1', '投影里的活跃任务必须还是第一个候选那条');
+  assert.equal(detail.body.activeRevision.candidateId, 'cand-k1');
+  assert.equal(detail.body.activeRevision.status, 'running', '第一个候选还在改,不能被显示成已完成');
+  const count = db.prepare('SELECT COUNT(*) AS n FROM revision_tasks WHERE job_id=?').get('job-k') as { n: number };
+  assert.equal(Number(count.n), 1, '被拒的那次不该留下任务行');
 });
 
 test('同一候选已有排队中的修改时不重复入队', async () => {

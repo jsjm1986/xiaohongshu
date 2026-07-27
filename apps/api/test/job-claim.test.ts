@@ -99,9 +99,9 @@ function seedJob(id: string, input: {
 /** 造一条修改任务。父 job 必须先由 seedJob 建好,否则外键失败。 */
 /**
  * packageId 默认按 id 取,不再固定 'pkg-1'。
- * revision_tasks_active_pkg_idx 是「一个包同时只能有一条未终态修改」的部分唯一索引,
- * 同一个包上造两条 running 是它明令禁止的状态,现实中也造不出来。本文件验的是认领与
- * 回收,与目标包无关,所以让每条任务落在各自的包上。
+ * revision_tasks_active_job_idx 是「一个 job 同时只能有一条未终态修改」的部分唯一索引,
+ * 所以要造两条同时活跃的任务就得挂在两个不同的 job 上;现实中也正是如此。本文件验的是
+ * 认领与回收,与目标 job / 包无关。
  */
 function seedRevisionTask(id: string, jobId: string, input: {
   status?: string;
@@ -354,12 +354,15 @@ test('revision_tasks:领取是原子的,同一条不会被领两次', () => {
 
 test('revision_tasks:心跳新鲜的不回收,心跳超时的才回收', () => {
   const now = new Date('2026-07-27T12:00:00.000Z');
+  // 两条同时活跃的任务必须挂在两个 job 上:revision_tasks_active_job_idx 只允许一个 job
+  // 有一条未终态修改。
   seedJob('job-1', { status: 'completed' });
+  seedJob('job-2', { status: 'completed' });
   seedRevisionTask('rev-fresh', 'job-1', {
     status: 'running', claimedBy: INSTANCE_B,
     heartbeatAt: new Date(now.getTime() - 5_000).toISOString(),
   });
-  seedRevisionTask('rev-stale', 'job-1', {
+  seedRevisionTask('rev-stale', 'job-2', {
     status: 'running', claimedBy: 'host:999:dead',
     heartbeatAt: new Date(now.getTime() - 600_000).toISOString(),
   });

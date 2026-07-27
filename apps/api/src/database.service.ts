@@ -901,18 +901,33 @@ export class DatabaseService implements OnModuleDestroy {
           updated_at          TEXT NOT NULL,
           completed_at        TEXT,
           claimed_by          TEXT,
-          heartbeat_at        TEXT
+          heartbeat_at        TEXT,
+          /*
+           * 这条任务累计扣了几次额度。
+           *
+           * 扣额度发生在每次执行(processRevision)调用模型之前,而重试是靠孤儿回收
+           * 重新入队——kill -9 三次就扣三次,最后由回收判 failed,用户零产出。没有这个
+           * 计数,回收那一侧无从知道该退几次:退 1 次会少退,固定退 3 次会在只扣过 1 次
+           * 时白送。计数只在真正 consume 成功后 +1,退还时按退还的次数减,所以任何时刻
+           * 它就是「已扣未退」的余额。
+           */
+          quota_consumed_count INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX revision_tasks_job_idx ON revision_tasks(job_id, created_at);
         CREATE INDEX revision_tasks_claim_idx ON revision_tasks(status, heartbeat_at);
         /*
-         * 一个包同时只能有一条未终态的修改。应用层入队前会先查 pending 并给出可读
+         * 一个 job 同时只能有一条未终态的修改。应用层入队前会先查 pending 并给出可读
          * 的 409,但「先查后写」在多实例下不成立:两个进程能在彼此的查与写之间穿插,
-         * 各插一条,两次改稿写回同一个包、结果互相覆盖。这条部分唯一索引是 DB 层的
-         * 最后防线。终态行不进索引,所以同一个包可以被反复修改。
+         * 各插一条。这条部分唯一索引是 DB 层的最后防线。终态行不进索引,所以同一个
+         * job 可以被反复修改。
+         *
+         * 互斥收在 job 级而不是 package 级:投影 activeFor(jobId) 是任务级的(一个 job
+         * 只回一条活跃任务),包级互斥允许同一 job 的两个候选并发改稿,于是 A 候选的
+         * 轮询会看不到自己的任务、立刻判「已完成」并把**未更新的旧候选**当成改稿结果
+         * 报给用户。三个前端实际都是单飞行(一次只改一个候选),job 级互斥不减功能。
          */
-        CREATE UNIQUE INDEX revision_tasks_active_pkg_idx
-          ON revision_tasks(package_id) WHERE status IN ('queued','running');
+        CREATE UNIQUE INDEX revision_tasks_active_job_idx
+          ON revision_tasks(job_id) WHERE status IN ('queued','running');
       `);
       this.db.exec('PRAGMA user_version = 15');
     });

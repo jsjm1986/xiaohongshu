@@ -323,10 +323,14 @@ interface ReviseDeps {
  * 这段循环在同步实现时代是死代码:那时 revise 返回的 job 已是 completed,
  * 条件从不成立。现在它才真的开始工作。
  *
- * 只认本候选的任务:后端 activeFor(jobId) 是**任务级**的,而入队互斥是
- * per package_id(revision.service.ts),同一个 job 的两个候选能并发改稿。不过滤
- * 就会等别人的任务、抛别人的失败原因、把别人的进度画到这里。与 Task 6 的
- * revisionBoxState(job, candidateId) 同一口径。
+ * 只认本候选的任务:后端 activeFor(jobId) 是**任务级**的,一个 job 只回一条,而且没有
+ * 活跃任务时投影会带出最近一条**终态**任务(可能属于别的候选)。不过滤就会等别人的任务、
+ * 抛别人的失败原因、把别人的进度画到这里。与 Task 6 的 revisionBoxState(job, candidateId)
+ * 同一口径。
+ *
+ * 入队互斥已收到 job 级(revision_tasks_active_job_idx):同 job 的第二个候选拿到 409,
+ * 由 d.api.generations.revise 抛出,不会走到这段循环。原来的包级互斥允许两个候选并发,
+ * 于是先提交的那个在这里看不到自己的任务、立刻退出并把旧候选当成结果。
  */
 export async function reviseCandidate(args: {
   jobId: string;
