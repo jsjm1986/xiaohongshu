@@ -1,9 +1,14 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { ForbiddenException } from '@nestjs/common';
 import { ModelProviderError } from '@content-agent/agent-core';
-import { AnalysisGatewayError } from '../src/intelligence.service.js';
-import { classifyModelFailure, modelFailureMessage, shouldRefundQuota } from '../src/model-failure.js';
+import { AnalysisGatewayError as ReExported } from '../src/intelligence.service.js';
+import {
+  AnalysisGatewayError, classifyModelFailure, modelFailureMessage, shouldRefundQuota,
+} from '../src/model-failure.js';
 
 /**
  * 模型失败分类。抽出来是因为 intelligence.service 已经有一份完整实现,revise
@@ -90,6 +95,29 @@ test('带 status 的非模型错误仍是 other:Nest 异常不冒充网关失败
   const kind = classifyModelFailure(quotaExhausted);
   assert.equal(kind, 'other');
   assert.equal(shouldRefundQuota(kind), false, '额度用尽时根本没扣成功,不该退');
+});
+
+/*
+ * 依赖方向:本模块是叶子,不许反向 import 那个胖 service。
+ *
+ * 分类判据要 instanceof AnalysisGatewayError,而 intelligence.service 又要用本模块的
+ * classifyModelFailure——类定义留在 service 里就形成循环 import,一个纯工具模块因此拖着
+ * sharp + agent-core + Nest。运行期当前不炸(两侧都不在模块求值期互相触碰),但下一个在
+ * 本模块顶层求值的常量就会踩到。修法是类定义搬到本模块,service 原地重新导出。
+ */
+test('model-failure 不 import intelligence.service:方向是叶子指向上层的反面', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'model-failure.ts'), 'utf8');
+  assert.ok(
+    !/from\s+'\.\/intelligence\.service\.js'/.test(source),
+    '循环 import 回来了:AnalysisGatewayError 的定义该留在 model-failure.ts',
+  );
+});
+
+test('intelligence.service 重新导出同一个类:外部 import 点不用改', () => {
+  // 同一性而不是同名:重新导出若变成"再定义一个同名类",instanceof 会在两条路径之间
+  // 静默失效——分析路径的失败会全部落进 other,退额度重新变成死代码。
+  assert.equal(ReExported, AnalysisGatewayError, '必须是同一个类对象,不能是各自定义的同名类');
+  assert.equal(classifyModelFailure(new ReExported('boom', 502)), 'unavailable');
 });
 
 test('文案带上动作名,并在退额度时明说', () => {

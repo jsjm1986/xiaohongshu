@@ -1,5 +1,19 @@
 import { ModelProviderError } from '@content-agent/agent-core';
-import { AnalysisGatewayError } from './intelligence.service.js';
+
+/**
+ * 分析路径的网关错误。
+ *
+ * 类定义放在这个叶子模块而不是 intelligence.service:分类判据要 instanceof 它,而
+ * intelligence.service 又要 import 本模块的 classifyModelFailure,反向 import 会形成
+ * 环——一个纯工具模块因此拖着 sharp + agent-core + Nest 的胖 service。运行期当前不炸
+ * (两侧都不在模块求值期互相触碰),但方向是错的,而且下一个在本模块顶层求值的常量
+ * 就会踩到。intelligence.service 原地重新导出这个名字,所以外部 import 点一个都不用改。
+ */
+export class AnalysisGatewayError extends Error {
+  constructor(message: string, readonly status?: number) {
+    super(message);
+  }
+}
 
 /**
  * 模型调用失败的分类。

@@ -40,7 +40,7 @@ import { AuditService } from './audit.service.js';
 import { APP_OPTIONS, type ApiOptions } from './config.js';
 import { DatabaseService } from './database.service.js';
 import type { SessionPrincipal } from './models.js';
-import { classifyModelFailure, modelFailureMessage } from './model-failure.js';
+import { AnalysisGatewayError, classifyModelFailure, modelFailureMessage } from './model-failure.js';
 import { ResourceService } from './resource.service.js';
 import { SettingsService, type ResolvedProviderSettings } from './settings.service.js';
 import { nowIso, parseJson, requireObject, requireString } from './utils.js';
@@ -119,11 +119,14 @@ export interface PreparedPlanningContext {
   imageContext: Array<Record<string, unknown>>;
 }
 
-export class AnalysisGatewayError extends Error {
-  constructor(message: string, readonly status?: number) {
-    super(message);
-  }
-}
+/*
+ * AnalysisGatewayError 的定义已搬到 model-failure.ts,这里原地重新导出。
+ *
+ * 原因是循环 import:分类判据(classifyModelFailure)要 instanceof 这个类,而本文件
+ * 又要用那个函数,于是叶子工具模块反向 import 了这个拖着 sharp + agent-core + Nest 的
+ * service。重新导出让外部的 import 点(测试与其它 service)一个都不用改。
+ */
+export { AnalysisGatewayError } from './model-failure.js';
 
 /**
  * 把分析失败翻译成用户看得懂、且能行动的错误。
