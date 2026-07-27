@@ -316,9 +316,32 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       const task = this.revisions.row(id);
       if (task) this.event(task.job_id, 'revision_requeued', { revisionId: id, reason: 'claim_timeout' });
     }
+    /*
+     * 回收判死这一侧必须退额度,而且要按扣款次数退。
+     *
+     * 扣额度在每次 processRevision 调模型之前发生,重试靠这里重新入队,所以 `kill -9`
+     * 或心跳失速三轮会扣三次,最后触顶判 failed——用户零产出、被扣三次。原实现的这个
+     * 分支只写了一个事件,一次都不退,与规格「只在确认无产出时退」正面冲突。
+     *
+     * keep=0:触顶判死意味着一次产出都没交付(内容包只在成功收尾的单事务里写入),所以
+     * 扣过几次就退几次。这不是 other 类——other 说的是「模型跑完了、结果不合格」,而这里
+     * 模型的每一次调用都被打断在半途。
+     */
     for (const id of revisionResult.failed) {
       const task = this.revisions.row(id);
-      if (task) this.event(task.job_id, 'revision_failed', { revisionId: id, message: '修改被反复打断，已停止自动重跑' });
+      if (!task) continue;
+      const workspaceId = this.workspaceIdForJob(task.job_id);
+      const refunded = workspaceId ? this.settleRevisionQuota(id, workspaceId, 0) : 0;
+      // 真退了才说退了。退还次数是运行时才知道的(BYOK 模式一次都没扣),所以这句话
+      // 由这里补,而不是写进 reclaimStale 的固定文案里——那样会变成一句假承诺。
+      if (refunded) {
+        this.database
+          .prepare('UPDATE revision_tasks SET error = error || ?, updated_at=? WHERE id=?')
+          .run(`已退还本次修改消耗的额度（${refunded} 次）。`, nowIso(), id);
+      }
+      this.event(task.job_id, 'revision_failed', {
+        revisionId: id, message: '修改被反复打断，已停止自动重跑', refundedQuota: refunded,
+      });
     }
     this.drainRevisions();
   }
@@ -812,6 +835,64 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     this.revisionHeartbeats.delete(revisionId);
   }
 
+  /**
+   * 这个 job 所属的 workspace。
+   *
+   * 不走 jobRow/projectRow:它们带 deleted_at IS NULL 过滤并在查不到时抛异常,而退额度
+   * 的场合恰恰包含「项目已被软删」——欠用户的那几次额度不该因为项目被删就不退了。
+   */
+  private workspaceIdForJob(jobId: string): string | undefined {
+    try {
+      const row = this.database
+        .prepare(`SELECT p.workspace_id AS workspace_id
+                    FROM generation_jobs j JOIN projects p ON p.id = j.project_id
+                   WHERE j.id = ?`)
+        .get(jobId) as { workspace_id: string } | undefined;
+      return row ? String(row.workspace_id) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * 结清一条修改任务的额度账。keep 是允许留下的扣款次数:交付了产出留 1,零产出留 0。
+   *
+   * 为什么需要它:扣额度在**每次**执行调模型之前发生,而重试靠孤儿回收重新入队,所以
+   * `kill -9` 或心跳失速三轮会扣三次,最终由 reclaimStale 判 failed——用户零产出、被扣
+   * 三次。原实现的 failed 分支只写了一个事件,一次都不退。
+   *
+   * 判据是「交付了几次产出」,不是「执行了几次」:被打断的那些执行按定义什么都没交付,
+   * 所以成功收尾也要把之前打断掉的那几次退回去,只留成功这一次。
+   *
+   * 读-改-写放在一个事务里,并用 `WHERE quota_consumed_count = ?` 卡住原值:两个实例
+   * 同时结清同一条任务时只有一个的 UPDATE 会命中,另一个退 0 次。这是「扣与退次数配平」
+   * 在多实例下成立的依据。
+   */
+  private settleRevisionQuota(revisionId: string, workspaceId: string, keep: 0 | 1): number {
+    if (!workspaceId) return 0;
+    let refunds = 0;
+    try {
+      refunds = this.database.transaction(() => {
+        const row = this.database
+          .prepare('SELECT quota_consumed_count FROM revision_tasks WHERE id=?')
+          .get(revisionId) as { quota_consumed_count: number } | undefined;
+        const consumed = Number(row?.quota_consumed_count ?? 0);
+        const refund = Math.max(0, consumed - keep);
+        if (!refund) return 0;
+        const result = this.database
+          .prepare('UPDATE revision_tasks SET quota_consumed_count=? WHERE id=? AND quota_consumed_count=?')
+          .run(consumed - refund, revisionId, consumed);
+        return result.changes ? refund : 0;
+      });
+    } catch {
+      // 关停竞态或瞬时锁冲突。宁可不退也不能在账目上退两次:计数没减就等于没退,
+      // 下一次结清(回收判死那一侧)还会看到它。
+      return 0;
+    }
+    for (let i = 0; i < refunds; i += 1) this.settings.refundPlatformQuota(workspaceId);
+    return refunds;
+  }
+
   /** 本实例是否仍持有这个修改任务。收尾写库前必查:心跳断过就可能已被接管。 */
   private stillOwnsRevision(revisionId: string): boolean {
     if (this.stopped) return false;
@@ -1046,9 +1127,8 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     this.startRevisionHeartbeat(revisionId);
     this.event(task.job_id, 'revision_running', { revisionId });
 
-    let quotaConsumed = false;
-    // workspaceId 在 try 内才拿得到,但 catch 里要用它退额度。先置空:退额度只在
-    // quotaConsumed 为真时发生,而那一定意味着 workspaceId 已经取到了。
+    // workspaceId 在 try 内才拿得到,但 catch 里要用它结额度账。先置空:取到之前就
+    // 失败时 catch 里会回查一次(见 workspaceIdForJob),因为那时余额可能是上一轮欠的。
     let workspaceId = '';
     try {
       // jobRow / projectRow 也在 try 内:项目或任务被软删时它们抛 NotFoundException,
@@ -1068,10 +1148,18 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
 
       const formula = this.formulas.get(job.formula_version_id).version;
       const providerSettings = this.settings.provider(workspaceId, task.created_by);
-      // 扣额度的时机与原同步实现一致(调用模型前),只是补上失败退还。
+      /*
+       * 扣额度的时机与原同步实现一致(调用模型前),但每次扣都记账。
+       *
+       * 记账是必需的:重试靠孤儿回收重新入队,所以一条任务可能被执行 N 次、扣 N 次,
+       * 最终由 reclaimStale 判 failed。那一侧要退,就必须知道退几次——退 1 次会少退,
+       * 固定退 3 次会在只扣过 1 次时白送。quota_consumed_count 就是「已扣未退」余额。
+       */
       if (providerSettings.mode === 'platform' && providerSettings.apiKey) {
         this.settings.consumePlatformQuota(workspaceId);
-        quotaConsumed = true;
+        this.database
+          .prepare('UPDATE revision_tasks SET quota_consumed_count = quota_consumed_count + 1 WHERE id=?')
+          .run(revisionId);
       }
 
       this.revisionProgress(revisionId, 25);
@@ -1117,6 +1205,9 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       }
 
       // 收尾前确认所有权:心跳断过、任务已被接管并重跑时,再写就会两边互相覆盖。
+      //
+      // 这里不结额度账:本次结果作废,但接管者会重跑并再扣一次,由它那一侧的终态
+      // 结清统一处理(quota_consumed_count 是整条任务的累计值,不是单次执行的)。
       if (!this.stillOwnsRevision(revisionId)) {
         this.event(task.job_id, 'revision_claim_lost', { revisionId, message: '任务已被其他实例接管，本次结果丢弃' });
         return;
@@ -1135,6 +1226,19 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
           )
           .run(JSON.stringify(result.dependency.rerunChannels), result.package.id, now, now, revisionId);
       });
+      /*
+       * 交付了一次产出,所以留一次扣款、把之前被打断的那几次退回去。
+       *
+       * 被打断的执行按定义什么都没交付(内容包在最后一步单事务写入),用户不该为它们
+       * 付费。成功路径也要结账,否则「被打断两次、第三次成功」的用户会为一次产出付
+       * 三次钱。
+       */
+      const refundedOnSuccess = this.settleRevisionQuota(revisionId, workspaceId, 1);
+      if (refundedOnSuccess) {
+        this.event(task.job_id, 'revision_quota_refunded', {
+          revisionId, refunded: refundedOnSuccess, reason: 'interrupted_attempts',
+        });
+      }
       this.event(task.job_id, 'revised', {
         revisionId,
         candidateId: task.candidate_id,
@@ -1158,7 +1262,19 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
        * 现有用户的额度账目发生变化,所以只有 revise 这条新路径用新真源。两处不一致是
        * 明知的、不是遗漏。
        */
-      if (quotaConsumed && shouldRefundQuota(kind)) this.settings.refundPlatformQuota(workspaceId);
+      /*
+       * 退几次:按 quota_consumed_count(已扣未退余额)退,不是固定退 1。这条任务可能
+       * 已经被打断重跑过几轮、每轮扣一次,而那些轮次一次产出都没交付。
+       *
+       * other 类保留一次扣款(keep=1):它消耗了真实算力并产出了可判定结果。但只保留
+       * **这一次**——之前被打断的那几轮仍然是零产出,照退。
+       *
+       * 无条件结清,不看本次执行是否扣成:失败发生在扣款之前时余额若非 0,那是上一轮
+       * 欠着的,同样该退。workspaceId 在扣款之前失败时
+       * 是空串,回查一次;余额为 0 时 settle 什么都不做,所以这条路径依然「一分不扣」。
+       */
+      const settleWorkspaceId = workspaceId || this.workspaceIdForJob(task.job_id) || '';
+      this.settleRevisionQuota(revisionId, settleWorkspaceId, shouldRefundQuota(kind) ? 0 : 1);
       if (!this.stillOwnsRevision(revisionId)) return;
       const now = nowIso();
       this.database
