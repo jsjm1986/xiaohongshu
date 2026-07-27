@@ -2,10 +2,21 @@ import { Bookmark, Copy, Heart, MessageCircle } from 'lucide-react';
 import { Button, useToast } from '../Ui';
 import { commentTotal, NoteComments } from './NoteComments';
 import { accountName, avatarTone, noteDate } from '../../lib/note-view';
+import type { NoteCommentsSource } from './NoteComments';
 import type { ReaderCandidate, ReaderJob } from '../../types';
 
+/**
+ * 按结构最小面收参,而不是要求一个完整的 ReaderCandidate。
+ *
+ * 阅读页给的是阅读投影,创作区生成完手里只有 QuickCandidateView(字段更少)。两处
+ * 要看的是同一件事「这篇发出去长什么样」,所以本组件只声明自己真正读的字段,
+ * 让两条数据源都能喂进来——否则创作区就得另写一套预览,那正是这次要消除的分裂。
+ */
+export type NoteCardSource = Pick<ReaderCandidate, 'title' | 'body' | 'tags' | 'imageBrief'> &
+  NoteCommentsSource;
+
 interface Props {
-  candidate: ReaderCandidate;
+  candidate: NoteCardSource;
   job: Pick<ReaderJob, 'completedAt' | 'createdAt'>;
   projectName?: string;
 }

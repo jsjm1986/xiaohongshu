@@ -14,6 +14,17 @@ export interface QuickComment {
   answer: string;
   boundary?: string;
   nextStep?: string;
+  /**
+   * 线程互动形态。必须带上:只有 org_answer 的 answer 出自可追责身份,
+   * reader_exchange/organic_reaction 的 answer 是模拟读者接话。丢掉这个字段,
+   * 展示层只能一律按 org_answer 渲染,于是读者互聊被署名成机构发言——
+   * 这正是方法论禁止的假冒消费者。
+   */
+  threadKind?: string;
+  /** 提问者展示昵称(模型产出的真实昵称,如「打呼的小海豹」);历史包可能没有。 */
+  displayName?: string;
+  /** T2 接话读者 B 的展示昵称;仅 reader_exchange 线程出现。 */
+  replyDisplayName?: string;
   followUps?: Array<{ question: string; answer: string; boundary?: string }>;
 }
 
@@ -51,6 +62,11 @@ function mapComment(thread: CommentThread): QuickComment {
     answer: thread.answer,
     boundary: thread.boundary,
     nextStep: thread.nextStep,
+    // 身份三字段原样透传:创作区的仿真预览要靠它们区分「机构答复」与「读者接话」。
+    // 原来这里把它们丢掉了,而丢掉的后果不是少个徽标,是署名错位。
+    threadKind: thread.threadKind,
+    displayName: thread.displayName,
+    replyDisplayName: thread.replyDisplayName,
     followUps: thread.followUps?.map((f) => ({
       question: f.question,
       answer: f.answer,

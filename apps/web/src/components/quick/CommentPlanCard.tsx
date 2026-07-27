@@ -2,12 +2,18 @@ import { Fragment } from 'react';
 import { ClipboardCheck } from 'lucide-react';
 import { commentSectionView, gapNameMap } from '../../lib/comment-view';
 import { uncoveredGapLabels } from '../../lib/comment-cref';
-import type { ReaderCandidate } from '../../types';
+import type { ReaderCandidate, ReaderComment } from '../../types';
 
-type Source = Pick<
-  ReaderCandidate,
-  'comments' | 'commentDisclaimer' | 'commentUncoveredGaps' | 'gapCards' | 'gapLedger'
->;
+/**
+ * gapCards / gapLedger 可选:它们只用于把 gap id 换成人能读的名称。创作区刚生成的
+ * 候选没有这两项,缺了就退回显示 id(uncoveredGapLabels 的既有回落),
+ * 编排字段本身照常核对。followUps 同样收成可选,理由见 comment-view。
+ */
+type Source = {
+  comments: Array<Omit<ReaderComment, 'followUps'> & { followUps?: ReaderComment['followUps'] }>;
+  commentDisclaimer?: string;
+  commentUncoveredGaps?: string[];
+} & Partial<Pick<ReaderCandidate, 'gapCards' | 'gapLedger'>>;
 
 /**
  * 评论核对(工作区)。
