@@ -668,3 +668,56 @@ test('flips to the two-part layout on schemaVersion or any Cref v1.1 field alone
   assert.doesNotMatch(deploymentMarkdown, /# 审计附录（非发布素材）/u);
   assert.match(deploymentMarkdown, /## aC · 评论运营规则/u);
 });
+
+/**
+ * 审计附录的答复归属:reader_exchange 不套机构身份。
+ *
+ * 回归的是一条实测缺陷——附录此前无条件写「- 回复：」+「- 可追责答复身份：staff」,
+ * 于是另一位读者说的「同问，这个很关键」在交付给客户的导出物里被署成机构助理发言。
+ * 数据本身没错(threadKind 标明形态、replyDisplayName 带着接话人昵称),错在附录
+ * 挑错字段。同一份导出的话术段早已分路写「读者接话」,两段口径打架。
+ */
+test('审计附录:读者互聊的答复署模拟读者,不标可追责身份', async () => {
+  const pkg = structuredClone(contentPackage) as any;
+  const thread = pkg.content.Cref.threads[0];
+  thread.threadKind = 'reader_exchange';
+  thread.postingIdentity = 'staff';
+  thread.displayName = '蹲一个答案';
+  thread.replyDisplayName = '芒果糯米饭';
+  thread.question = '能保证两边对称吗？';
+  thread.answer = '同问，这个很关键。';
+  thread.followUps = [];
+  // kind/answerKind 让判定落到 v1.1 两段式布局(话术段 + 审计附录),
+  // 这是实测数据的形态——缺陷正是这两段口径打架。
+  thread.kind = 'question';
+  thread.answerKind = 'answer';
+
+  const markdown = (await new ExportService().exportPackage(pkg, 'markdown')).toString('utf8');
+
+  // 话术段:本来就是对的
+  assert.match(markdown, /读者接话：芒果糯米饭：同问，这个很关键。/u);
+  // 审计段:修好之后同样署读者
+  assert.match(markdown, /模拟读者接话（芒果糯米饭）：同问，这个很关键。/u);
+  assert.match(markdown, /可追责答复身份：不适用（读者互聊，非机构发言）/u);
+  // 缺陷原样:不能再出现
+  assert.ok(!markdown.includes('可追责答复身份：staff'), '读者互聊不能标机构身份');
+  assert.ok(!markdown.includes('undefined'));
+});
+
+test('审计附录:org_answer 与历史包(无 threadKind)保持机构口径不变', async () => {
+  const pkg = structuredClone(contentPackage) as any;
+  const thread = pkg.content.Cref.threads[0];
+  thread.threadKind = 'org_answer';
+  thread.postingIdentity = 'staff';
+  thread.answer = '2800 元是普通脂肪，具体建议面诊确认。';
+  const orgMarkdown = (await new ExportService().exportPackage(pkg, 'markdown')).toString('utf8');
+  assert.match(orgMarkdown, /- 回复：2800 元是普通脂肪，具体建议面诊确认。/u);
+  assert.match(orgMarkdown, /可追责答复身份：staff/u);
+
+  // 历史包没有 threadKind,按 org_answer 兜底,行为与修复前一致。
+  const legacy = structuredClone(contentPackage) as any;
+  delete legacy.content.Cref.threads[0].threadKind;
+  legacy.content.Cref.threads[0].postingIdentity = 'publisher';
+  const legacyMarkdown = (await new ExportService().exportPackage(legacy, 'markdown')).toString('utf8');
+  assert.match(legacyMarkdown, /可追责答复身份：发布账号（publisher）/u);
+});

@@ -48,6 +48,42 @@ export const postingIdentityText = (value?: string): string => {
 };
 
 /**
+ * 审计附录里「这条 answer 由谁发出」的一行。返回 {label, identity}:
+ * label 是答复块的前缀,identity 是身份行的值。
+ *
+ * 存在的理由是**一处实现**。正文区早就按 threadKind 分路了(reader_exchange 写
+ * 「读者接话」并署 replyDisplayName),但审计附录两处漏了,于是同一份 markdown 里
+ * 同一句读者接话在正文标读者、在附录标机构——实测 198 条线程受影响,横跨 8 个项目。
+ * 附录那句「答复身份：staff」会被读成机构助理在说「同问，这个很关键」,等于把消费者
+ * 的话挂到自有账号名下,正是方法论《ROLE 04》禁止的反向踩线。
+ *
+ * reader_exchange 的 answer 是另一位模拟读者接话,数据里 replyDisplayName 就带着
+ * 正确昵称(如「芒果糯米饭」);postingIdentity 是规划层按线程统一赋的**答复方预留
+ * 身份**,不表示谁在说话——这一点 comment-view.answererLabelFor 与
+ * NoteComments.replyIdentity 的注释都写过,附录只是没跟上。
+ *
+ * organic_reaction 的 answer 按设计恒空,走不到这里;threadKind 缺失的历史包按
+ * org_answer 兜底,与其余判定同一套口径。
+ */
+export const auditAnswerAttribution = (
+  thread: { threadKind?: string; postingIdentity?: string; replyDisplayName?: string },
+): { label: string; identity: string } => {
+  if (commentThreadKindOf(thread) === "reader_exchange") {
+    return {
+      label: thread.replyDisplayName?.trim()
+        ? `模拟读者接话（${thread.replyDisplayName.trim()}）`
+        : "模拟读者接话",
+      // 不写「未标注」:这条 answer 本就不该有可追责身份,空缺不是数据缺失。
+      identity: "不适用（读者互聊，非机构发言）",
+    };
+  }
+  return {
+    label: "楼主/可追责身份回复",
+    identity: postingIdentityText(thread.postingIdentity) || "可追责发布者",
+  };
+};
+
+/**
  * 答复徽标:org_answer 线程按 postingIdentity 分路。三者都是方法论里的
  * accountable_responder(可追责答复方),差别只在承接什么话头——
  * publisher 发布账号本人(直接回答＋条件＋边界＋下一步)、staff 营销承接
