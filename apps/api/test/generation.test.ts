@@ -685,11 +685,19 @@ test('formula registry, settings and deterministic generation form one working f
     method: 'POST',
     body: JSON.stringify({ candidateId: job.candidates[0].id, instruction: '正文更克制，保留标题并复查评论区' }),
   });
+  // revise 已改为入队即返回:受理时模型还没跑,所以这里断言的是「受理成功且
+  // 有活跃修改任务」,而不是改后的内容。改后内容的断言(revisions.length===1、
+  // 正文真的变了)在执行落地后恢复 —— Task 5 接上 processRevision 时补回来。
   assert.equal(revised.response.status, 201);
+  assert.ok(revised.body.activeRevision, '受理后投影里要有 activeRevision');
+  assert.equal(revised.body.activeRevision.status, 'queued');
+  assert.equal(revised.body.activeRevision.candidateId, job.candidates[0].id);
+  // job 在改稿期间必须保持 completed,候选仍是旧版本(用户还能看自己的稿子)
+  assert.equal(revised.body.status, 'completed');
   assert.equal(revised.body.candidates.length, 3);
   assert.equal(JSON.stringify(revised.body.candidates[1]), beforeSecond);
   assert.equal(revised.body.candidates[0].title, job.candidates[0].title);
-  assert.equal(revised.body.candidates[0].revisions.length, 1);
+  assert.equal(revised.body.candidates[0].revisions.length, 0, '入队阶段还没有改稿记录;Task 5 恢复为 1');
   assert.equal(revised.body.candidates[0].validation?.valid, true, JSON.stringify(revised.body.candidates[0].validation));
 
   const exportCandidateId = job.candidates[1].id;

@@ -46,6 +46,7 @@ import type { SessionPrincipal } from './models.js';
 import { PresetService } from './preset.service.js';
 import { ResourceService } from './resource.service.js';
 import { ResearchService } from './research.service.js';
+import { RevisionService } from './revision.service.js';
 import { SettingsService } from './settings.service.js';
 import { nowIso, parseJson } from './utils.js';
 
@@ -245,6 +246,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     @Inject(AuditService) private readonly audit: AuditService,
     @Inject(IntelligenceService) private readonly intelligence: IntelligenceService,
     @Inject(ResearchService) private readonly research: ResearchService,
+    @Inject(RevisionService) private readonly revisions: RevisionService,
     @Inject(APP_OPTIONS) private readonly options: ApiOptions,
   ) {}
 
@@ -627,6 +629,13 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
           )
         : [],
     };
+  }
+
+  /** 受理修改请求并立即返回;执行由 RevisionService 的队列负责。 */
+  enqueueRevision(jobId: string, candidateId: string, instruction: string, principal: SessionPrincipal): Record<string, unknown> {
+    this.revisions.enqueue(jobId, candidateId, instruction, principal);
+    // 返回完整 job:前端拿到的 candidates 仍是旧版本,activeRevision 告诉它在改。
+    return this.get(jobId);
   }
 
   async revise(jobId: string, candidateId: string, instruction: string, principal: SessionPrincipal): Promise<Record<string, unknown>> {
@@ -1151,6 +1160,10 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       createdAt: row.created_at,
       completedAt: row.completed_at,
       error: row.error ?? undefined,
+      // 改稿期间 status 仍是 completed(前端 10 处按它判定能否查看产出),所以
+      // 「有没有在改」由这个字段单独回答。终态任务也带出来,前端才能显示
+      // 「上一次修改失败了」。
+      activeRevision: this.revisions.activeFor(row.id) ?? this.revisions.latestFor(row.id),
     };
   }
 

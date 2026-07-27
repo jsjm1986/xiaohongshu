@@ -31,6 +31,7 @@ import { RegistrationController } from './registration.controller.js';
 import { RegistrationService } from './registration.service.js';
 import { PresetService } from './preset.service.js';
 import { ResourceService } from './resource.service.js';
+import { RevisionService } from './revision.service.js';
 import { ResearchController } from './research.controller.js';
 import { ResearchService } from './research.service.js';
 import { SettingsController } from './settings.controller.js';
@@ -76,6 +77,7 @@ export class AppModule {
         ResearchService,
         SettingsService,
         GenerationService,
+        RevisionService,
         PresetService,
         ExportService,
         RegistrationService,
@@ -96,6 +98,7 @@ export class AppModule {
         ResearchService,
         SettingsService,
         GenerationService,
+        RevisionService,
         PresetService,
         ExportService,
         PermissionGuard,

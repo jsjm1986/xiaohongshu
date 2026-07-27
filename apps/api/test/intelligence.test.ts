@@ -1343,15 +1343,23 @@ test('planning CRUD, explicit approvals, image safety and generation snapshots w
     body: JSON.stringify({ candidateId: imageJob.candidates[0].id, instruction: 'make the image brief more concise' }),
   });
   assert.equal(revisedImageJob.response.status, 201, JSON.stringify(revisedImageJob.body));
+  // revise 已改为入队即返回。受理时模型还没跑,产出物快照仍是改稿前那份 —— 断言它
+  // 没被入队动作破坏(图像观察仍已批准、未部署),这本身就是「改稿期间用户还能
+  // 看旧稿」的要求。改后产出物与 revised 事件的 approvedSourceImageAnalysisCount
+  // 断言在 Task 5 接上 processRevision 后恢复。
+  assert.ok(revisedImageJob.body.activeRevision, '受理后投影里要有 activeRevision');
+  assert.equal(revisedImageJob.body.activeRevision.status, 'queued');
   assert.equal(revisedImageJob.body.candidates[0].productionArtifacts.imageObservation.status, 'approved');
   assert.ok(revisedImageJob.body.candidates[0].productionArtifacts.imageObservation.analysisAssetIds.includes(uploaded.body.id));
   assert.equal(revisedImageJob.body.candidates[0].productionArtifacts.finalImageAsset.status, 'absent');
   assert.equal(revisedImageJob.body.candidates[0].productionArtifacts.entrySnapshot.status, 'absent');
   assert.equal(revisedImageJob.body.candidates[0].productionArtifacts.deployment.status, 'not_deployed');
+  // 入队阶段还没有 revised 事件(它由执行阶段写)。Task 5 恢复为断言
+  // approvedSourceImageAnalysisCount === 1。
   const revisionEvent = database.prepare(
     `SELECT details_json FROM generation_events WHERE job_id=? AND event='revised' ORDER BY id DESC LIMIT 1`,
-  ).get(imageJob.id) as { details_json: string };
-  assert.equal(JSON.parse(revisionEvent.details_json).approvedSourceImageAnalysisCount, 1);
+  ).get(imageJob.id) as { details_json: string } | undefined;
+  assert.equal(revisionEvent, undefined, '入队不该写 revised 事件');
 
   const service = app.get(IntelligenceService);
   const principal: SessionPrincipal = {
