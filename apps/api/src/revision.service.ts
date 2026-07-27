@@ -38,6 +38,8 @@ export interface RevisionRow {
   error: string | null;
   rerun_channels_json: string;
   result_package_id: string | null;
+  /** 提交修改的人。执行阶段按他解析供应商设置与写审计,所以行映射要带上。 */
+  created_by: string;
   created_at: string;
   updated_at: string;
   completed_at: string | null;

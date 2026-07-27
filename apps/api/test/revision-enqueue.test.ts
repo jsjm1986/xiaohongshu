@@ -117,10 +117,11 @@ test('入队后立即返回,不等模型;job.status 保持 completed', async () 
   const db = app.get(DatabaseService);
   const job = db.prepare('SELECT status FROM generation_jobs WHERE id=?').get('job-a') as { status: string };
   assert.equal(job.status, 'completed', '改稿期间 job.status 必须保持 completed');
-  const task = db.prepare('SELECT status, progress, package_id, candidate_id, instruction FROM revision_tasks WHERE job_id=?')
-    .get('job-a') as { status: string; progress: number; package_id: string; candidate_id: string; instruction: string };
-  assert.equal(task.status, 'queued');
-  assert.equal(task.progress, 0);
+  // 受理返回体里的状态是确定的 queued:领取推到了下一拍(见 enqueueRevision)。
+  // 库里的 status 不断言——执行已接上,读的时候它可能已经在跑或已收敛,那是对的。
+  assert.equal(result.body.activeRevision.status, 'queued', '按下按钮那一刻应当看到排队中');
+  const task = db.prepare('SELECT status, package_id, candidate_id, instruction FROM revision_tasks WHERE job_id=?')
+    .get('job-a') as { status: string; package_id: string; candidate_id: string; instruction: string };
   assert.equal(task.package_id, 'pkg-a', 'package_id 是入队时解析出的权威目标');
   assert.equal(task.candidate_id, 'cand-a', 'candidate_id 保留用户传入的原值');
   assert.equal(task.instruction, '正文不要有价格');
@@ -128,14 +129,16 @@ test('入队后立即返回,不等模型;job.status 保持 completed', async () 
 
 test('GET job 带上活跃修改任务,候选仍是旧版本', async () => {
   seedCompletedJob('job-b', 'pkg-b', 'cand-b');
-  await request('/api/generations/job-b/revise', {
+  const accepted = await request('/api/generations/job-b/revise', {
     method: 'POST', body: JSON.stringify({ candidateId: 'cand-b', instruction: '换个开头' }),
   });
+  assert.equal(accepted.body.activeRevision.status, 'queued', '受理返回体里应当是排队中');
   const detail = await request('/api/generations/job-b');
   assert.equal(detail.response.status, 200);
   assert.equal(detail.body.status, 'completed');
+  // 状态不断言:执行已接上,这条手塞任务(formula_version_id 为空)会很快失败。
+  // 这里要的是「投影一直带着这条修改任务、指令没丢」。
   assert.ok(detail.body.activeRevision, '投影里要有 activeRevision');
-  assert.equal(detail.body.activeRevision.status, 'queued');
   assert.equal(detail.body.activeRevision.instruction, '换个开头');
   // 用户在改稿期间必须还能看旧稿
   assert.ok(Array.isArray(detail.body.candidates) && detail.body.candidates.length > 0, '旧候选必须还在');
