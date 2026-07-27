@@ -54,33 +54,71 @@ export interface RevisionBoxState {
   task?: RevisionTask;
   buttonLabel: string;
   buttonDisabled: boolean;
-  /** 失败时要保留输入框里的指令:原实现在 finally 里无条件清空,用户得重打一遍。 */
-  keepInstruction: boolean;
 }
 
 /**
  * 侧边栏「继续调整当前候选」的状态。
  *
- * 抽成纯函数是因为这是本改动里唯一有真假之分的逻辑——什么时候禁用按钮、失败要不要
- * 保留指令。JSX 里内联三元式没法测。
+ * 抽成纯函数是因为这是本改动里唯一有真假之分的逻辑——什么时候禁用按钮、按钮显示
+ * 什么。JSX 里内联三元式没法测。
  *
  * candidateId 传入时只认这个候选的任务:侧边栏改的是当前选中的候选,别的候选在改
  * 不该锁住这个按钮。
  *
  * 分流顺序按 status 而不是 progress:后端失败时也会写 progress = 100,只看进度会把
  * 失败显示成「完成」。
+ *
+ * 「失败保留输入框里的指令」不在这里表达,在 submitRevision:那条规则关心的是一次
+ * 提交的结果,而这个函数看的是提交之前的任务状态,两者对不上(受理成功后任务恰好
+ * 进入 in_flight,而那正是该清空指令的时刻)。
  */
 export function revisionBoxState(job: GenerationJob | null, candidateId?: string): RevisionBoxState {
   const task = job?.activeRevision;
   const mine = task && (!candidateId || task.candidateId === candidateId) ? task : undefined;
   if (!mine) {
-    return { phase: 'idle', buttonLabel: '发送修改要求', buttonDisabled: false, keepInstruction: false };
+    return { phase: 'idle', buttonLabel: '发送修改要求', buttonDisabled: false };
   }
   if (isRevisionInFlight(mine)) {
-    return { phase: 'in_flight', task: mine, buttonLabel: '修改中…', buttonDisabled: true, keepInstruction: true };
+    return { phase: 'in_flight', task: mine, buttonLabel: '修改中…', buttonDisabled: true };
   }
   if (mine.status === 'failed') {
-    return { phase: 'failed', task: mine, buttonLabel: '重新发送', buttonDisabled: false, keepInstruction: true };
+    return { phase: 'failed', task: mine, buttonLabel: '重新发送', buttonDisabled: false };
   }
-  return { phase: 'done', task: mine, buttonLabel: '发送修改要求', buttonDisabled: false, keepInstruction: false };
+  return { phase: 'done', task: mine, buttonLabel: '发送修改要求', buttonDisabled: false };
+}
+
+export interface RevisionSubmitDeps {
+  /** 提交修改;返回服务端投影后的 job。抛错即受理失败。 */
+  submit: () => Promise<GenerationJob>;
+  setJob: (job: GenerationJob) => void;
+  /** 输入框的 setter。清空指令是这里唯一的写入点。 */
+  setInstruction: (value: string) => void;
+  notify: (message: string, kind: 'success' | 'error') => void;
+}
+
+/**
+ * 提交一次修改的完整效果编排。
+ *
+ * 放在这里而不是留在组件的 handleRevise 里,是为了让下面三条硬约束有能变红的测试
+ * (仓库没有 React 渲染设施,组件内的控制流测不到):
+ *
+ * 1. 失败**不清空**指令——用户不该为一次服务端故障重打一遍。所以这里刻意不用
+ *    `finally`:清空写在 catch 之后的成功路径上,是结构性的,不是靠"记得别放进
+ *    finally"。原实现正是在 finally 里无条件清空。
+ * 2. 失败**绝不改动 job**——被删掉的那段「演示模式」兜底会把修改指令追加进正文,
+ *    Cloudflare 约 100 秒超时切断请求后正好落到那里,用户看到「已记录」、正文却被
+ *    污染,而服务端已经扣了额度。
+ * 3. 失败必须报错(kind=error),不能说成「已记录」。
+ */
+export async function submitRevision(deps: RevisionSubmitDeps): Promise<void> {
+  let next: GenerationJob;
+  try {
+    next = await deps.submit();
+  } catch (error) {
+    deps.notify(error instanceof Error ? error.message : '提交修改失败，请重试', 'error');
+    return;
+  }
+  deps.setJob(next);
+  deps.notify('已受理，正在重新生成受影响的环节', 'success');
+  deps.setInstruction('');
 }

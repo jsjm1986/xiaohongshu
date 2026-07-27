@@ -55,6 +55,7 @@ import {
   revisionBoxState,
   revisionDoneSummary,
   revisionStageText,
+  submitRevision,
 } from "../lib/revision-progress";
 import {
   generationRecordNotice,
@@ -216,24 +217,23 @@ export function GenerationResultPage() {
 
   const revisionBox = revisionBoxState(job, selected?.id);
 
+  /*
+   * 受理的成功/失败编排全在 submitRevision 里,组件只提供依赖。这么摆是因为那里有
+   * 三条要靠测试锁住的硬约束(失败不清空指令、失败不改 job、失败必须报错),而仓库
+   * 没有 React 渲染设施,留在组件里就没有能变红的测试。
+   *
+   * 被删掉的「演示模式」兜底原本就在这段的 catch 里:它把修改指令追加进正文并提示
+   * 「修改说明已记录」。Cloudflare 约 100 秒超时切断同步请求后正好落到那里,用户看到
+   * 「已记录」、正文却被污染,而服务端已经扣了额度。
+   */
   const handleRevise = async () => {
     if (!job || !selected || !revision.trim() || revisionBox.buttonDisabled) return;
-    try {
-      const next = await api.generations.revise(job.id, selected.id, revision);
-      setJob(next);
-      toast.push("已受理，正在重新生成受影响的环节");
-      setRevision("");
-    } catch (error) {
-      /*
-       * 这里曾经有一段「演示模式」兜底:把修改指令追加到正文末尾并提示
-       * 「演示模式:修改说明已记录」。它是本次要消掉的东西——Cloudflare 约 100 秒
-       * 超时会切断同步请求并落到这里,用户看到「已记录」、正文却被污染,而服务端
-       * 那次请求已经扣了额度。异步化后受理是秒级的,失败就是失败。
-       *
-       * 失败不清空 revision:用户不该为一次服务端故障重打一遍指令。
-       */
-      toast.push(error instanceof Error ? error.message : "提交修改失败，请重试", "error");
-    }
+    await submitRevision({
+      submit: () => api.generations.revise(job.id, selected.id, revision),
+      setJob,
+      setInstruction: setRevision,
+      notify: toast.push,
+    });
   };
 
   if (loading)
