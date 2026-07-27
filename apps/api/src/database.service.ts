@@ -13,7 +13,7 @@ export type SqlValue = string | number | bigint | Uint8Array | null;
  * 无关的测试变红——那不是回归信号,是维护噪声。测试断言这个常量,真正想验的
  * 「迁移到最新且表结构对得上」不变。
  */
-export const SCHEMA_VERSION = 14;
+export const SCHEMA_VERSION = 15;
 
 @Injectable()
 export class DatabaseService implements OnModuleDestroy {
@@ -861,6 +861,54 @@ export class DatabaseService implements OnModuleDestroy {
       `);
     });
     if (version < 14) version = 14;
+
+    if (version < 15) this.transaction(() => {
+      /*
+       * 修改任务(revise)的异步化。
+       *
+       * revise 原来是同步请求-响应:全程不落中间状态,前端只能显示一个转圈。而它
+       * 耗时是分钟级(实测两次 revised 事件相隔 299s),公网下会撞上 Cloudflare 约
+       * 100 秒超时——隧道日志已记录一次 context canceled。掐断后前端把指令追加进
+       * 正文并提示「演示模式:已记录」,用户以为改好了,拿到的是被污染的正文。
+       *
+       * 状态放独立表而不是给 generation_jobs 加列:一个 job 会被改 N 次,单组列
+       * 只记得住最后一次;而且 status 与 revision_status 并存会让所有读 job 状态
+       * 的代码都要先问「你说的哪个状态」。generation_jobs.status 在改稿期间保持
+       * completed——前端有 10 处按它判定能否查看产出,改它会让用户在改稿期间打不开
+       * 自己的稿子。
+       *
+       * package_id 是执行时的权威目标(入队时一次性解析),candidate_id 保留用户
+       * 传入的原值供追溯与前端匹配活跃任务。
+       *
+       * 没有 claimed_at 列:claimed_by + heartbeat_at 已足够判定归属与存活,
+       * generation_jobs 的 claimed_at 至今没有消费方。
+       */
+      this.db.exec(`
+        CREATE TABLE revision_tasks (
+          id                  TEXT PRIMARY KEY,
+          job_id              TEXT NOT NULL REFERENCES generation_jobs(id) ON DELETE CASCADE,
+          package_id          TEXT NOT NULL,
+          candidate_id        TEXT NOT NULL,
+          instruction         TEXT NOT NULL,
+          status              TEXT NOT NULL,
+          progress            INTEGER NOT NULL DEFAULT 0,
+          attempt_count       INTEGER NOT NULL DEFAULT 0,
+          error               TEXT,
+          rerun_channels_json TEXT NOT NULL DEFAULT '[]',
+          result_package_id   TEXT,
+          created_by          TEXT NOT NULL REFERENCES users(id),
+          created_at          TEXT NOT NULL,
+          updated_at          TEXT NOT NULL,
+          completed_at        TEXT,
+          claimed_by          TEXT,
+          heartbeat_at        TEXT
+        );
+        CREATE INDEX revision_tasks_job_idx ON revision_tasks(job_id, created_at);
+        CREATE INDEX revision_tasks_claim_idx ON revision_tasks(status, heartbeat_at);
+      `);
+      this.db.exec('PRAGMA user_version = 15');
+    });
+    if (version < 15) version = 15;
   }
 
   onModuleDestroy(): void {
