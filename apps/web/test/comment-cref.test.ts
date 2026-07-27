@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  auditAnswerAttribution,
   commentNodeKindLabel,
   commentThreadKindLabel,
   commentThreadKindOf,
@@ -379,4 +380,116 @@ test("candidate markdown formats reader-exchange and organic-reaction threads by
   assert.match(markdown, /- 回复：以当期确认为准。/u);
   assert.match(markdown, /可追责答复身份：staff/u);
   assert.ok(!markdown.includes("undefined"));
+});
+
+/**
+ * 审计附录的答复归属。
+ *
+ * 回归目标是一条实测缺陷:附录此前无条件写「楼主/可追责身份回复」+「答复身份：
+ * staff」,于是 reader_exchange 里另一位读者说的「同问，这个很关键」在导出物里
+ * 被署成机构助理发言——把消费者的话挂到自有账号名下,正是方法论《ROLE 04》
+ * 禁止的反向踩线。实测 198 条线程受影响,横跨 8 个项目。
+ *
+ * 数据本身是对的:replyDisplayName 带着接话人昵称,threadKind 标明形态。错只在
+ * 附录挑错了字段。所以这里锁「同一份 markdown 内正文区与附录区口径一致」。
+ */
+test("审计附录:reader_exchange 的答复署模拟读者,不套机构身份", () => {
+  const attribution = auditAnswerAttribution({
+    threadKind: "reader_exchange",
+    postingIdentity: "staff",
+    replyDisplayName: "芒果糯米饭",
+  });
+  assert.equal(attribution.label, "模拟读者接话（芒果糯米饭）");
+  assert.equal(attribution.identity, "不适用（读者互聊，非机构发言）");
+  // 关键否证:附录里不能出现任何机构身份字样
+  assert.ok(!attribution.identity.includes("staff"));
+  assert.ok(!attribution.label.includes("可追责"));
+});
+
+test("审计附录:没有 replyDisplayName 时仍不冒充机构,只说读者接话", () => {
+  const attribution = auditAnswerAttribution({ threadKind: "reader_exchange", postingIdentity: "expert" });
+  assert.equal(attribution.label, "模拟读者接话");
+  assert.equal(attribution.identity, "不适用（读者互聊，非机构发言）");
+});
+
+test("审计附录:org_answer 与 threadKind 缺失的历史包保持机构口径", () => {
+  const org = auditAnswerAttribution({ threadKind: "org_answer", postingIdentity: "staff" });
+  assert.equal(org.label, "楼主/可追责身份回复");
+  assert.equal(org.identity, "staff");
+
+  // 历史包没有 threadKind,按 org_answer 兜底——与其余判定同一套口径,行为不变。
+  const legacy = auditAnswerAttribution({ postingIdentity: "publisher" });
+  assert.equal(legacy.label, "楼主/可追责身份回复");
+  assert.equal(legacy.identity, "发布账号（publisher）");
+
+  // 身份缺失时仍要有个可读兜底,不能出 undefined
+  const bare = auditAnswerAttribution({ threadKind: "org_answer" });
+  assert.equal(bare.identity, "可追责发布者");
+});
+
+test("整份 markdown（v1.1 两段式）:读者互聊在正文区与审计附录里口径一致", () => {
+  const candidate = {
+    title: "泪沟三档怎么选",
+    body: "问了三档报价。",
+    tags: ["#成都医美"],
+    imageBrief: "报价单随手拍",
+    commentDisclaimer: "情景演练参考。",
+    comments: [
+      {
+        question: "能保证两边对称吗？",
+        answer: "同问，这个很关键。",
+        threadKind: "reader_exchange",
+        postingIdentity: "staff",
+        displayName: "蹲一个答案",
+        replyDisplayName: "芒果糯米饭",
+        speakerType: "simulated_reader",
+        simulated: true,
+        // kind 让判定落到 v1.1 两段式布局(正文区 + 审计附录),
+        // 这才是实测数据的形态——缺陷正是两段口径打架。
+        kind: "question",
+        answerKind: "answer",
+        followUps: [],
+      },
+    ],
+  } as unknown as Candidate;
+
+  const markdown = candidateToMarkdown(candidate);
+  // 正文区:早就是对的
+  assert.match(markdown, /读者接话：芒果糯米饭：同问，这个很关键。/u);
+  // 附录区:修好之后也署读者
+  assert.match(markdown, /模拟读者接话（芒果糯米饭）：同问，这个很关键。/u);
+  assert.match(markdown, /答复身份：不适用（读者互聊，非机构发言）/u);
+  // 这两句是缺陷的原样:整份导出里不能再出现
+  assert.ok(
+    !markdown.includes("楼主/可追责身份回复：同问"),
+    "读者接话不能被署成可追责身份回复",
+  );
+  assert.ok(!markdown.includes("答复身份：staff"), "读者互聊不能标机构身份");
+  assert.ok(!markdown.includes("undefined"));
+});
+
+test("整份 markdown（legacy 单流）:审计段同样不把读者接话署成机构", () => {
+  // 历史候选没有 v1.1 判据字段,走 legacy 单流布局——它只有审计段,
+  // 没有分路正文区,所以修复必须同样覆盖它。
+  const candidate = {
+    title: "泪沟三档怎么选",
+    body: "问了三档报价。",
+    tags: ["#成都医美"],
+    imageBrief: "报价单随手拍",
+    comments: [
+      {
+        question: "能保证两边对称吗？",
+        answer: "同问，这个很关键。",
+        threadKind: "reader_exchange",
+        postingIdentity: "staff",
+        replyDisplayName: "芒果糯米饭",
+        followUps: [],
+      },
+    ],
+  } as unknown as Candidate;
+
+  const markdown = candidateToMarkdown(candidate);
+  assert.match(markdown, /模拟读者接话（芒果糯米饭）：同问，这个很关键。/u);
+  assert.ok(!markdown.includes("楼主/可追责身份回复：同问"));
+  assert.ok(!markdown.includes("答复身份：staff"));
 });

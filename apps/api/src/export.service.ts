@@ -386,8 +386,8 @@ function appendCommentThreadAudit(lines: string[], threads: JsonObject[], dialog
       `- 声明状态：${text(metadata('claimStatus')) || '未标注'}`,
       `- 回复关系：${text(metadata('replyTo')) || '根线程'} ｜ 深度：${text(metadata('threadDepth')) || '0'}`,
       `- 提问：${text(thread.question) || '未提供'}`,
-      `- 回复：${text(thread.answer) || '未提供'}`,
-      `- 可追责答复身份：${postingIdentityText(thread.postingIdentity) || '未标注'}`,
+      `- ${auditAnswerAttribution(thread).label}：${text(thread.answer) || '未提供'}`,
+      `- 可追责答复身份：${auditAnswerAttribution(thread).identity}`,
     );
     // v1.1 node metadata; each line renders only when the field exists, so
     // historical packages keep their previous output verbatim.
@@ -859,6 +859,29 @@ function commentReplyOrgName(thread: JsonObject): string {
   if (!raw) return '';
   if (/^[a-z][a-z0-9_]*$/.test(raw)) return text(thread.postingIdentity) === 'staff' ? '机构助理' : '机构 IP';
   return raw;
+}
+
+/**
+ * 审计附录里「这条 answer 由谁发出」。与 web 侧 comment-cref.auditAnswerAttribution
+ * 同一套判定(这里是手抄:export.service 在 api 包,不引 web 的模块)。
+ *
+ * 起因是审计附录此前无条件套机构口径,而正文区(话术段)早已按 threadKind 分路,
+ * 于是同一份导出里同一句读者接话在正文标「读者接话」、在附录标「可追责答复身份：
+ * staff」。reader_exchange 的 answer 是另一位模拟读者接话,replyDisplayName 就带着
+ * 正确昵称;postingIdentity 是规划层按线程统一赋的预留身份,不表示谁在说话。
+ */
+function auditAnswerAttribution(thread: JsonObject): { label: string; identity: string } {
+  if (text(thread.threadKind) === 'reader_exchange') {
+    const nickname = text(thread.replyDisplayName).trim();
+    return {
+      label: nickname ? `模拟读者接话（${nickname}）` : '模拟读者接话',
+      identity: '不适用（读者互聊，非机构发言）',
+    };
+  }
+  return {
+    label: '回复',
+    identity: postingIdentityText(thread.postingIdentity) || '未标注',
+  };
 }
 
 function stringArray(value: unknown): string[] {
