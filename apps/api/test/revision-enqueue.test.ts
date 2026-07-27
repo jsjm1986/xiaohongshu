@@ -176,6 +176,72 @@ test('未完成的任务不能改', async () => {
   assert.equal(result.response.status, 400);
 });
 
+/** 直接插一条修改任务行,绕过应用层的 pending 检查。 */
+function insertTaskRow(id: string, jobId: string, packageId: string, status: string): void {
+  const db = app.get(DatabaseService);
+  const admin = db.prepare("SELECT id FROM users WHERE username='admin'").get() as { id: string };
+  db.prepare(
+    `INSERT INTO revision_tasks
+       (id, job_id, package_id, candidate_id, instruction, status, progress, attempt_count,
+        rerun_channels_json, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, 'c', 'i', ?, 0, 0, '[]', ?, datetime('now'), datetime('now'))`,
+  ).run(id, jobId, packageId, status, admin.id);
+}
+
+test('DB 层挡住同一个包的第二条活跃修改(应用层检查失效时的最后防线)', () => {
+  seedCompletedJob('job-g', 'pkg-g', 'cand-g');
+  insertTaskRow('rev-g1', 'job-g', 'pkg-g', 'queued');
+  // 绕过应用层直接插第二条。多实例下两个进程能在彼此的「查 pending」与「INSERT」
+  // 之间穿插,应用层的先查后写拦不住,只有部分唯一索引拦得住。
+  assert.throws(
+    () => insertTaskRow('rev-g2', 'job-g', 'pkg-g', 'running'),
+    /UNIQUE constraint failed/,
+    '缺 revision_tasks_active_pkg_idx 时这里会插进去',
+  );
+  const db = app.get(DatabaseService);
+  const count = db.prepare('SELECT COUNT(*) AS n FROM revision_tasks WHERE package_id=?').get('pkg-g') as { n: number };
+  assert.equal(count.n, 1);
+});
+
+test('终态行不占名额:同一个包改完还能再改', () => {
+  seedCompletedJob('job-h', 'pkg-h', 'cand-h');
+  insertTaskRow('rev-h1', 'job-h', 'pkg-h', 'completed');
+  insertTaskRow('rev-h2', 'job-h', 'pkg-h', 'failed');
+  // 索引带 WHERE status IN ('queued','running'),终态行不进索引。少了这个条件就成了
+  // 「一个包一辈子只能改一次」。
+  insertTaskRow('rev-h3', 'job-h', 'pkg-h', 'queued');
+  const db = app.get(DatabaseService);
+  const count = db.prepare('SELECT COUNT(*) AS n FROM revision_tasks WHERE package_id=?').get('pkg-h') as { n: number };
+  assert.equal(count.n, 3);
+});
+
+test('索引被踩到时报 409,不是 500', async () => {
+  seedCompletedJob('job-i', 'pkg-i', 'cand-i');
+  insertTaskRow('rev-i1', 'job-i', 'pkg-i', 'queued');
+  const db = app.get(DatabaseService);
+  const original = db.prepare.bind(db);
+  // 复现多实例竞态:让 pending 查询装作没看见已存在的活跃任务(等价于另一个实例在
+  // 我们读完之后才插进去),于是 INSERT 撞索引。用户该看到 409 而不是 500。
+  (db as unknown as { prepare: typeof original }).prepare = (sql: string) => {
+    const statement = original(sql);
+    if (sql.includes('FROM revision_tasks WHERE package_id=?')) {
+      return { ...statement, get: () => undefined } as unknown as ReturnType<typeof original>;
+    }
+    return statement;
+  };
+  try {
+    const result = await request('/api/generations/job-i/revise', {
+      method: 'POST', body: JSON.stringify({ candidateId: 'cand-i', instruction: '并发提交' }),
+    });
+    assert.equal(result.response.status, 409, `实际 ${result.response.status}：${JSON.stringify(result.body)}`);
+    assert.match(String(result.body.message), /修改正在进行/);
+  } finally {
+    (db as unknown as { prepare: typeof original }).prepare = original;
+  }
+  const count = db.prepare('SELECT COUNT(*) AS n FROM revision_tasks WHERE package_id=?').get('pkg-i') as { n: number };
+  assert.equal(count.n, 1, '撞索引的那条不该留下半行');
+});
+
 test('同一候选已有排队中的修改时不重复入队', async () => {
   seedCompletedJob('job-f', 'pkg-f', 'cand-f');
   const first = await request('/api/generations/job-f/revise', {

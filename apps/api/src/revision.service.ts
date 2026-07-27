@@ -45,6 +45,24 @@ export interface RevisionRow {
 
 const TERMINAL = new Set(['completed', 'failed']);
 
+/** 应用层检查与索引兜底给的是同一件事,文案也该是同一句。 */
+const REVISION_IN_PROGRESS = '这个候选还有一次修改正在进行，请等它完成后再提交';
+
+/** SQLITE_CONSTRAINT_UNIQUE。node:sqlite 把它放在 error.errcode 上。 */
+const SQLITE_CONSTRAINT_UNIQUE = 2067;
+
+/**
+ * 撞上 revision_tasks_active_pkg_idx 了吗?
+ *
+ * 只认唯一约束,不认全部约束错误:外键失败(job_id 指向不存在的 job)也是 constraint
+ * 错误,但那是 500 该有的样子,不能被当成「有人在改」而变成 409。
+ */
+function isUniqueViolation(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const errcode = (error as { errcode?: unknown }).errcode;
+  return errcode === SQLITE_CONSTRAINT_UNIQUE || /UNIQUE constraint failed/i.test(error.message);
+}
+
 /**
  * 修改任务(revise)的队列。
  *
@@ -83,21 +101,31 @@ export class RevisionService {
 
     // 同一个包同时排两条修改会互相覆盖结果。这里挡住而不是排队:用户看到的是
     // 「上一次还在改」,比默默排队更符合他按下按钮时的预期。
+    //
+    // 这层检查只负责给出可读的错误。真正的互斥由 revision_tasks_active_pkg_idx
+    // 保证——「先查后写」在多实例下不成立,两个进程能在彼此的查与写之间穿插。
     const pending = this.database
       .prepare("SELECT id FROM revision_tasks WHERE package_id=? AND status IN ('queued','running')")
       .get(packageId) as { id: string } | undefined;
-    if (pending) throw new ConflictException('这个候选还有一次修改正在进行，请等它完成后再提交');
+    if (pending) throw new ConflictException(REVISION_IN_PROGRESS);
 
     const id = randomUUID();
     const now = nowIso();
-    this.database
-      .prepare(
-        `INSERT INTO revision_tasks
-           (id, job_id, package_id, candidate_id, instruction, status, progress, attempt_count,
-            rerun_channels_json, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'queued', 0, 0, '[]', ?, ?, ?)`,
-      )
-      .run(id, jobId, packageId, candidateId, trimmed.slice(0, 2_000), principal.userId, now, now);
+    try {
+      this.database
+        .prepare(
+          `INSERT INTO revision_tasks
+             (id, job_id, package_id, candidate_id, instruction, status, progress, attempt_count,
+              rerun_channels_json, created_by, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'queued', 0, 0, '[]', ?, ?, ?)`,
+        )
+        .run(id, jobId, packageId, candidateId, trimmed.slice(0, 2_000), principal.userId, now, now);
+    } catch (error) {
+      // 索引被踩到说明另一个实例刚插进去了。对用户而言这与上面那次 pending 命中
+      // 是同一件事,给同样的 409;让 SQLite 的约束错误冒成 500 只会让人以为服务坏了。
+      if (isUniqueViolation(error)) throw new ConflictException(REVISION_IN_PROGRESS);
+      throw error;
+    }
     return this.taskView(id);
   }
 

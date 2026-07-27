@@ -97,11 +97,18 @@ function seedJob(id: string, input: {
 }
 
 /** 造一条修改任务。父 job 必须先由 seedJob 建好,否则外键失败。 */
+/**
+ * packageId 默认按 id 取,不再固定 'pkg-1'。
+ * revision_tasks_active_pkg_idx 是「一个包同时只能有一条未终态修改」的部分唯一索引,
+ * 同一个包上造两条 running 是它明令禁止的状态,现实中也造不出来。本文件验的是认领与
+ * 回收,与目标包无关,所以让每条任务落在各自的包上。
+ */
 function seedRevisionTask(id: string, jobId: string, input: {
   status?: string;
   claimedBy?: string | null;
   heartbeatAt?: string | null;
   attempts?: number;
+  packageId?: string;
 } = {}): void {
   const now = new Date().toISOString();
   database
@@ -109,10 +116,10 @@ function seedRevisionTask(id: string, jobId: string, input: {
       `INSERT INTO revision_tasks
          (id, job_id, package_id, candidate_id, instruction, status, progress, attempt_count,
           rerun_channels_json, created_by, created_at, updated_at, claimed_by, heartbeat_at)
-       VALUES (?, ?, 'pkg-1', 'cand-1', '正文不要有价格', ?, 0, ?, '[]', 'u1', ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, 'cand-1', '正文不要有价格', ?, 0, ?, '[]', 'u1', ?, ?, ?, ?)`,
     )
     .run(
-      id, jobId, input.status ?? 'queued', input.attempts ?? 0, now, now,
+      id, jobId, input.packageId ?? `pkg-${id}`, input.status ?? 'queued', input.attempts ?? 0, now, now,
       input.claimedBy ?? null, input.heartbeatAt ?? null,
     );
 }

@@ -38,12 +38,23 @@ test('建出 revision_tasks 与全部列', () => {
   }
 });
 
-test('两个索引都建在新表上', () => {
+test('三个索引都建在新表上', () => {
   const names = (database
     .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='revision_tasks'")
     .all() as { name: string }[]).map((row) => row.name);
   assert.ok(names.includes('revision_tasks_job_idx'), `实际索引:${names.join(',')}`);
   assert.ok(names.includes('revision_tasks_claim_idx'), `实际索引:${names.join(',')}`);
+  assert.ok(names.includes('revision_tasks_active_pkg_idx'), `实际索引:${names.join(',')}`);
+});
+
+test('活跃修改的唯一索引是部分唯一索引,条件限定在未终态', () => {
+  const sql = (database
+    .prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name='revision_tasks_active_pkg_idx'")
+    .get() as { sql: string } | undefined)?.sql;
+  assert.ok(sql, '缺 revision_tasks_active_pkg_idx');
+  // 少了 WHERE 就成了「一个包一辈子只能改一次」,是比多实例竞态更糟的回归。
+  assert.match(sql, /UNIQUE\s+INDEX/i);
+  assert.match(sql, /WHERE\s+status\s+IN\s*\(\s*'queued'\s*,\s*'running'\s*\)/i);
 });
 
 test('generation_jobs 一列都没加', () => {

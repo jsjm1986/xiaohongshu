@@ -905,6 +905,14 @@ export class DatabaseService implements OnModuleDestroy {
         );
         CREATE INDEX revision_tasks_job_idx ON revision_tasks(job_id, created_at);
         CREATE INDEX revision_tasks_claim_idx ON revision_tasks(status, heartbeat_at);
+        /*
+         * 一个包同时只能有一条未终态的修改。应用层入队前会先查 pending 并给出可读
+         * 的 409,但「先查后写」在多实例下不成立:两个进程能在彼此的查与写之间穿插,
+         * 各插一条,两次改稿写回同一个包、结果互相覆盖。这条部分唯一索引是 DB 层的
+         * 最后防线。终态行不进索引,所以同一个包可以被反复修改。
+         */
+        CREATE UNIQUE INDEX revision_tasks_active_pkg_idx
+          ON revision_tasks(package_id) WHERE status IN ('queued','running');
       `);
       this.db.exec('PRAGMA user_version = 15');
     });
