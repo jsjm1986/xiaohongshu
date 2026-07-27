@@ -1,10 +1,14 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ChevronLeft, ChevronRight, RotateCcw } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Button, useToast } from '../components/Ui';
+import { CandidateSwitch } from '../components/quick/CandidateSwitch';
+import { NoteAlertBar } from '../components/quick/NoteAlertBar';
+import { NoteCard } from '../components/quick/NoteCard';
 import { ReaderDetail, type ExportFormat } from '../components/quick/ReaderDetail';
 import { WaitCard } from '../components/quick/WaitCard';
 import { api } from '../lib/api';
+import { clampCandidateIndex } from '../lib/note-view';
 import { readerCandidateToMarkdown } from '../lib/publish-copy';
 import { readerPath } from '../lib/quick-nav';
 import { areaPath, QUICK_HOME_PATH } from '../lib/quick-routes';
@@ -20,8 +24,9 @@ import type { GenerationJob, Project, ReaderCandidate, ReaderJob } from '../type
  * 别的任务行。读一篇文案要在列表里滚,列表本身也被撑散;而这一屏要同时承载
  * 「第 37 条在排队」和正文全文两种完全不同的阅读姿态。
  *
- * 这里只做一件事:读一篇。顶部是返回原处 + 上一篇/下一篇,正文交给 ReaderDetail
- * (与手风琴时期同一个组件,内容分段没变)。
+ * 这里只做一件事:读一篇。顶部是返回原处 + 上一篇/下一篇;下面分两层——预览区
+ * (候选切换条 + 校验细条 + NoteCard 仿真笔记)在上,工作区(ReaderDetail:校验全文/
+ * 判断依据/发布方案/导出/改稿)在下。
  */
 export function QuickReaderPage() {
   const { jobId = '' } = useParams<{ jobId: string }>();
@@ -36,6 +41,10 @@ export function QuickReaderPage() {
   const [revisingId, setRevisingId] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  /** 候选下标:预览区(NoteCard)与工作区(ReaderDetail)共用,所以归页面持有 */
+  const [activeIndex, setActiveIndex] = useState(0);
+  /** 「看详情」滚到工作区校验全文 */
+  const workbenchRef = useRef<HTMLDivElement | null>(null);
 
   const fail = (e: unknown, fallback: string) =>
     toast.push(e instanceof Error ? e.message : fallback, 'error');
@@ -57,6 +66,10 @@ export function QuickReaderPage() {
   }, [jobId]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // 换一篇要回到第一个候选:上一篇选了第 3 版,下一篇可能只有 1 版,
+  // 沿用旧下标会让 NoteCard 与工作区读到不同候选(Math.min 各自兜底)。
+  useEffect(() => { setActiveIndex(0); }, [jobId]);
 
   // 项目名与相邻任务:拿到 job 才知道 projectId,所以跟在后面拉。
   // 失败不影响阅读——顶栏少一个项目名和翻页,正文照读。
@@ -230,16 +243,37 @@ export function QuickReaderPage() {
         <p className="qc-hint">这次生成没有可展示的候选。</p>
       )}
 
-      {job && job.candidates.length > 0 && (
-        <ReaderDetail
-          job={job}
-          onExport={exportAs}
-          onRevise={revise}
-          revisingId={revisingId}
-          onRetry={() => void retry()}
-          retrying={retrying}
-        />
-      )}
+      {/* 排队中/失败的任务不进 NoteCard:半成品套上笔记外壳会像已经发布过了,
+          这两种状态各自有 WaitCard 与失败块。 */}
+      {job && job.status === 'completed' && job.candidates.length > 0 && (() => {
+        // 与工作区共用同一个夹法,见 clampCandidateIndex 的注释
+        const current = job.candidates[clampCandidateIndex(activeIndex, job.candidates.length)]!;
+        return (
+          <>
+            {/* 标签走 candidateDiffView,与工作区差异表同源;单候选时组件自己不渲染 */}
+            <CandidateSwitch candidates={job.candidates} activeIndex={activeIndex} onPick={setActiveIndex} />
+
+            <NoteAlertBar
+              validation={current.validation}
+              onSeeDetail={() => workbenchRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+            />
+
+            <NoteCard candidate={current} job={job} projectName={project?.name} />
+
+            <div className="xhs-workbench" ref={workbenchRef}>
+              <ReaderDetail
+                job={job}
+                activeIndex={activeIndex}
+                onExport={exportAs}
+                onRevise={revise}
+                revisingId={revisingId}
+                onRetry={() => void retry()}
+                retrying={retrying}
+              />
+            </div>
+          </>
+        );
+      })()}
     </div>
   );
 }

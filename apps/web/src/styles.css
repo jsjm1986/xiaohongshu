@@ -3309,44 +3309,9 @@ div.qc-topic { cursor: default; }
 .qc-fact__text { color: var(--v2-ink-2); }
 .qc-fact__ev { flex: 0 0 auto; margin-left: auto; color: var(--v2-muted); }
 
-/* 评论区:补上谁在说、这条补哪个缺口 */
-.qc-comments__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; counter-reset: qc-c; }
-.qc-comment {
-  padding: 10px 12px; border-radius: var(--v2-radius-sm);
-  background: var(--v2-canvas); border: 1px solid var(--v2-line);
-}
-.qc-comment--owned { border-color: color-mix(in srgb, var(--v2-ok) 30%, var(--v2-line)); }
-.qc-comment__meta { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin-bottom: 6px; }
-.qc-comment__meta > button { margin-left: auto; }
-.qc-comment__fn, .qc-comment__gap {
-  padding: 1px 6px; border-radius: 3px; font-size: var(--v2-fs-micro);
-  background: var(--v2-surface); color: var(--v2-muted); border: 1px solid var(--v2-line);
-}
-.qc-comment__q { margin: 0; font-size: var(--v2-fs-sm); color: var(--v2-ink); }
-.qc-comment__a { display: flex; align-items: baseline; gap: 8px; margin-top: 6px; }
-.qc-comment__a p { margin: 0; font-size: var(--v2-fs-sm); color: var(--v2-ink-2); line-height: 1.7; }
-.qc-comment__side { display: block; margin-top: 4px; font-size: var(--v2-fs-micro); color: var(--v2-muted); }
-/* 编排信息折叠区:计划字段(阶段/功能/缺口/边界/下一步)默认收起,不与发布文案混排。 */
-.qc-comment__plan { margin-top: 6px; font-size: var(--v2-fs-micro); }
-.qc-comment__plan > summary {
-  cursor: pointer; color: var(--v2-muted); list-style: none;
-  display: inline-flex; align-items: center; gap: 4px;
-}
-.qc-comment__plan > summary::marker, .qc-comment__plan > summary::-webkit-details-marker { display: none; }
-.qc-comment__plan > summary::before { content: '▸'; font-size: 9px; }
-.qc-comment__plan[open] > summary::before { content: '▾'; }
-.qc-comment__plan dl {
-  display: grid; grid-template-columns: auto 1fr; gap: 2px 8px;
-  margin: 6px 0 0; padding: 6px 8px;
-  background: var(--v2-surface); border: 1px solid var(--v2-line); border-radius: 4px;
-}
-.qc-comment__plan dt { color: var(--v2-muted); white-space: nowrap; }
-.qc-comment__plan dd { margin: 0; color: var(--v2-ink-2); }
-.qc-comment__follow {
-  list-style: none; margin: 8px 0 0; padding-left: 12px;
-  border-left: 2px solid var(--v2-line); display: flex; flex-direction: column; gap: 6px;
-}
-.qc-comment__follow li { display: flex; flex-direction: column; font-size: var(--v2-fs-xs); color: var(--v2-muted); }
+/* 旧的 .qc-comments* / .qc-comment* 评论区样式已随 CommentSection 组件一起删除,
+   评论改由仿真笔记里的 .xhs-comments 段渲染(见文件末尾「仿真阅读页」)。
+   .qc-disclaimer 与 .qc-uncovered 未删——CommentPlanCard 仍在用。 */
 
 /* 候选差异表 */
 .qc-cdiff { display: flex; flex-direction: column; gap: 8px; }
@@ -3718,8 +3683,11 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .quick-result .qc-issue-line > p, .qc-page .qc-issue-line > p { display: flex; align-items: center; gap: 6px; margin: 0; }
 
 /* ---- 候选完整内容(结果页与历史页共用) ---- */
-.qc-page .qc-disclaimer, .quick-result .qc-disclaimer { margin: 0 0 10px; padding: 8px 10px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius-sm); background: var(--v2-canvas); color: var(--v2-muted); font-size: var(--v2-fs-sm); }
-.qc-page .qc-uncovered, .quick-result .qc-uncovered { display: block; margin-top: 8px; color: var(--v2-muted-2); font-size: var(--v2-fs-xs); }
+/* 选择器里要带 .qc-reader-page:阅读页根元素是 `page qc-reader-page`,不在 .qc-page 下,
+   CommentPlanCard 搬过去以后声明段落变成一段裸文字(实测 background 透明、padding 0)。
+   免责声明没有淡底框就跟正文混在一起,而这句声明是不能被读漏的。 */
+.qc-page .qc-disclaimer, .quick-result .qc-disclaimer, .qc-reader-page .qc-disclaimer { margin: 0 0 10px; padding: 8px 10px; border: 1px solid var(--v2-line); border-radius: var(--v2-radius-sm); background: var(--v2-canvas); color: var(--v2-muted); font-size: var(--v2-fs-sm); }
+.qc-page .qc-uncovered, .quick-result .qc-uncovered, .qc-reader-page .qc-uncovered { display: block; margin-top: 8px; color: var(--v2-muted-2); font-size: var(--v2-fs-xs); }
 
 /* ---- 空态统一(图标在 TSX) ---- */
 .qc-page .qc-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 28px 0; color: var(--v2-muted); font-size: var(--v2-fs-sm); text-align: center; }
@@ -4045,4 +4013,172 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
   background: var(--v2-canvas); color: var(--v2-muted);
   font-family: var(--v2-mono); font-size: var(--v2-fs-xs); line-height: 1.6;
   word-break: break-word;
+}
+
+/* ============ 仿真阅读页 ============
+   预览区照小红书笔记的排版节奏来:窄栏、大标题、蓝色话题、会话流评论。
+   刻意不做的两件事在 NoteCard 组件注释里(点赞数、真配图)。 */
+.quick-shell .xhs-switch { display: flex; gap: 4px; }
+.quick-shell .xhs-switch button {
+  border: 1px solid var(--v2-line); background: var(--v2-surface); color: var(--v2-muted);
+  font-size: var(--v2-fs-xs); padding: 3px 11px; border-radius: 999px; cursor: pointer;
+}
+.quick-shell .xhs-switch button.active {
+  border-color: var(--v2-brand); color: var(--v2-brand-ink); background: var(--v2-brand-soft); font-weight: 500;
+}
+
+.quick-shell .xhs-alert {
+  display: flex; align-items: center; gap: 7px;
+  font-size: var(--v2-fs-xs); padding: 7px 12px; border-radius: var(--v2-radius);
+  border: 1px solid var(--v2-line);
+}
+.quick-shell .xhs-alert--ok { color: var(--v2-ok); background: var(--v2-ok-soft); border-color: transparent; }
+/* info = 可发布但有建议项(实测 46/229 的主路径)。中性色:它不是警告,别让用户以为导不出 */
+.quick-shell .xhs-alert--info { color: var(--v2-ink-2); background: var(--v2-canvas); }
+.quick-shell .xhs-alert--warn { color: var(--v2-warn); background: var(--v2-warn-soft); border-color: transparent; }
+.quick-shell .xhs-alert--error { color: var(--v2-error); background: var(--v2-error-soft); border-color: transparent; }
+.quick-shell .xhs-alert__link {
+  margin-left: auto; background: none; border: none; cursor: pointer;
+  color: inherit; text-decoration: underline; font-size: var(--v2-fs-xs); padding: 0;
+}
+
+/* 笔记卡:宽度按手机笔记的观感收窄,但不钉死 390px——桌面上留白过多反而不像在读 */
+.quick-shell .xhs-note {
+  background: #fff; border: 1px solid var(--v2-line); border-radius: 14px;
+  overflow: hidden; max-width: 560px; width: 100%; margin: 0 auto;
+}
+.quick-shell .xhs-note__head {
+  display: flex; align-items: center; gap: 9px; padding: 11px 14px; border-bottom: 1px solid var(--v2-line);
+}
+.quick-shell .xhs-note__avatar,
+.quick-shell .xhs-comment__avatar {
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%; font-weight: 600; flex: none;
+}
+.quick-shell .xhs-note__avatar { width: 30px; height: 30px; font-size: var(--v2-fs-sm); }
+.quick-shell .xhs-note__account { font-size: var(--v2-fs-sm); font-weight: 600; color: var(--v2-ink); }
+.quick-shell .xhs-note__follow {
+  font-size: var(--v2-fs-micro); color: #ff2e4d; border: 1px solid #ff2e4d;
+  border-radius: 11px; padding: 2px 11px; user-select: none;
+}
+.quick-shell .xhs-note__head .button { margin-left: auto; }
+
+/* 配图位:虚线框 + 拍摄说明。放占位图会让人以为配图已经有了 */
+/* 宽度铺满卡片,高度直接给值,不用 aspect-ratio。
+   原来写的是 aspect-ratio: 3/4 + max-height: 380px,浏览器会反过来用被夹住的高度
+   去推宽度(380 × 3/4 = 285px),配图位缩成卡片左侧一条窄框、右边一大片空白——
+   实测 560px 卡片下正是这个症状。改成 width:100% + aspect-ratio 又会算出 744px 高,
+   把标题和正文全顶到首屏之外。配图位是「待拍摄」的提示而不是真图,不需要占满 3:4,
+   给一个固定高度即可。用 min-height 而不是 height:imageBrief 没有长度上限,
+   长文案会溢出固定高度的框并撞到下面的标题;短文案下两者行为相同(实测 240px)。 */
+.quick-shell .xhs-note__cover {
+  width: 100%; min-height: 240px; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 8px; text-align: center;
+  padding: 22px; border-bottom: 1px solid var(--v2-line);
+  background: var(--v2-canvas);
+  outline: 1px dashed var(--v2-line-dark); outline-offset: -12px;
+}
+.quick-shell .xhs-note__cover p { font-size: var(--v2-fs-xs); color: var(--v2-muted); line-height: 1.65; margin: 0; }
+.quick-shell .xhs-note__cover small { font-size: var(--v2-fs-micro); color: var(--v2-muted-2); }
+/* 配图位里的 unit 不做悬停显形:虚线框里只有这一个按钮,藏起来等于没有。
+   选择器比下面的 .xhs-note__unit .button 多一个类(0,3,0 vs 0,2,0),所以能赢,
+   与书写顺序无关——但别把它改成两类选择器,那样就要靠顺序了。 */
+.quick-shell .xhs-note__cover .xhs-note__unit { width: 100%; justify-content: center; }
+.quick-shell .xhs-note__cover .xhs-note__unit > p { flex: 0 1 auto; }
+.quick-shell .xhs-note__cover .xhs-note__unit .button { opacity: 1; flex: none; padding: 2px 8px; min-height: 0; }
+
+.quick-shell .xhs-note__body { padding: 14px 16px 8px; }
+/* 可复制单元:复制按钮悬停才显现,常亮会让笔记看起来像个表单。
+   min-height: 0 是必须的——全局 .button 有 min-height: 40px,只给 padding 只缩宽不缩高,
+   实测正文里的按钮是 37×40px,评论名字行(flex + align-items:center)整行被撑到 40px。 */
+.quick-shell .xhs-note__unit { display: flex; align-items: flex-start; gap: 6px; }
+.quick-shell .xhs-note__unit > :first-child { flex: 1; min-width: 0; }
+.quick-shell .xhs-note__unit .button { opacity: 0; padding: 2px 6px; flex: none; min-height: 0; transition: opacity .12s; }
+.quick-shell .xhs-note__unit:hover .button,
+.quick-shell .xhs-note__unit .button:focus-visible { opacity: 1; }
+.quick-shell .xhs-note__title {
+  font-size: var(--v2-fs-lg); font-weight: 700; line-height: 1.42;
+  letter-spacing: -.2px; color: var(--v2-ink); margin: 0 0 8px;
+}
+.quick-shell .xhs-note__text {
+  font-size: var(--v2-fs-md); line-height: 1.78; color: var(--v2-ink);
+  white-space: pre-wrap; margin: 0 0 10px;
+}
+.quick-shell .xhs-note__text--empty { color: var(--v2-muted-2); }
+.quick-shell .xhs-note__tags { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 10px; }
+.quick-shell .xhs-note__tags span { font-size: var(--v2-fs-sm); color: #3a6ea8; }
+.quick-shell .xhs-note__date { font-size: var(--v2-fs-micro); color: var(--v2-muted-2); }
+
+.quick-shell .xhs-note__bar {
+  display: flex; gap: 20px; padding: 10px 16px;
+  border-top: 1px solid var(--v2-line); border-bottom: 1px solid var(--v2-line);
+  font-size: var(--v2-fs-xs); color: var(--v2-muted);
+}
+.quick-shell .xhs-note__bar span { display: inline-flex; align-items: center; gap: 5px; }
+
+/* 评论区:会话流 */
+.quick-shell .xhs-comments { padding: 12px 16px 16px; }
+.quick-shell .xhs-comments__head {
+  display: flex; align-items: center; gap: 6px;
+  font-size: var(--v2-fs-xs); color: var(--v2-muted); margin-bottom: 12px;
+}
+/* ⓘ 是真 button(span 上的 aria-label 属于禁止的 author-supplied name,读屏可丢弃),
+   但视觉上仍要是一个不起眼的小图标:去掉浏览器默认的边框/底色/内边距。 */
+.quick-shell .xhs-comments__note {
+  display: inline-flex; padding: 0; border: 0; background: none;
+  color: var(--v2-muted-2); cursor: pointer;
+}
+/* 点开的声明原文:触屏没有 tooltip,这里是它唯一能被读到的地方。 */
+.quick-shell .xhs-comments__disclaimer {
+  margin: -6px 0 12px; font-size: var(--v2-fs-micro); line-height: 1.6; color: var(--v2-muted-2);
+}
+.quick-shell .xhs-comment { display: flex; gap: 9px; margin-bottom: 13px; }
+.quick-shell .xhs-comment__avatar { width: 26px; height: 26px; font-size: var(--v2-fs-micro); }
+.quick-shell .xhs-comment__main { min-width: 0; flex: 1; }
+.quick-shell .xhs-comment__name {
+  display: flex; align-items: center; gap: 6px;
+  font-size: var(--v2-fs-xs); color: var(--v2-muted); margin-bottom: 3px;
+}
+.quick-shell .xhs-comment__name em {
+  font-style: normal; font-size: var(--v2-fs-micro); padding: 0 5px; border-radius: 3px;
+  background: var(--v2-brand-soft); color: var(--v2-brand-ink);
+}
+/* 复制按钮悬停才显现:每条评论挂一个常亮按钮会毁掉会话流的观感。
+   min-height: 0 同上——不覆盖全局的 40px,每一行名字(含答复行、追问行)都会被撑成 40px 高。 */
+.quick-shell .xhs-comment__name .button { opacity: 0; padding: 1px 5px; min-height: 0; transition: opacity .12s; }
+.quick-shell .xhs-comment:hover .xhs-comment__name .button,
+.quick-shell .xhs-comment__name .button:focus-visible { opacity: 1; }
+.quick-shell .xhs-comment__text {
+  font-size: var(--v2-fs-sm); line-height: 1.68; color: var(--v2-ink); margin: 0; white-space: pre-wrap;
+}
+/* 楼层缩进。追问的机构答复会再套一层,靠这条左边线体现「读者问 → 机构答」的层级。
+   原计划还有个 __text--reply 修饰类做淡色答复,已删:那一版把答复当作读者楼层里的
+   第二段文字,而现在答复是独立署名块(带「作者」标),署名比淡色更能说清是谁在说。 */
+.quick-shell .xhs-comment__reply {
+  margin-top: 9px; padding-left: 10px; border-left: 2px solid var(--v2-line);
+}
+
+/* 工作区与预览之间拉开距离:两种阅读姿态,视觉上要能分开。
+   刻意不换底色——同底色 + 一条分隔线就够,给工作区另铺一层灰会让它看起来像被禁用了。 */
+.quick-shell .xhs-workbench { margin-top: 10px; padding-top: 18px; border-top: 1px solid var(--v2-line); }
+
+.quick-shell .qc-planlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.quick-shell .qc-planlist__q { font-size: var(--v2-fs-sm); color: var(--v2-ink); margin: 0 0 4px; }
+.quick-shell .qc-planlist dl {
+  display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 0;
+  font-size: var(--v2-fs-xs);
+}
+.quick-shell .qc-planlist dt { color: var(--v2-muted-2); }
+.quick-shell .qc-planlist dd { color: var(--v2-muted); margin: 0; }
+
+/* 触屏没有 hover,悬停显形在这里等于永久隐藏。实测 390px + hasTouch 下
+   matchMedia('(hover: none)') 为 true,17 个复制按钮里 16 个 opacity:0 却仍占据可点区域
+   ——复制标题/正文/话题/单条评论在触屏这个主场景里等于不存在。 */
+@media (hover: none) {
+  .quick-shell .xhs-note__unit .button,
+  .quick-shell .xhs-comment__name .button { opacity: 1; }
+}
+
+@media (max-width: 560px) {
+  .quick-shell .xhs-note { border-radius: 0; border-left: none; border-right: none; }
 }

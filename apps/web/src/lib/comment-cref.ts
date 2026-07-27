@@ -103,6 +103,8 @@ export const deploymentSla = (plan: DeploymentPlan): string | undefined =>
  */
 export const uncoveredGapLabels = (
   ids: string[] | undefined,
-  cards?: InformationGapPlanningCard[],
+  // 只用到 gapId/label,所以按结构最小面收参:阅读页的 ReaderCandidate.gapCards 是
+  // InformationGapPlanningCard 的窄化投影(没有 category/importance 等),原签名会把它挡在外面。
+  cards?: Array<Pick<InformationGapPlanningCard, "gapId" | "label">>,
 ): string[] =>
   (ids || []).map((id) => cards?.find((card) => card.gapId === id)?.label || id);
