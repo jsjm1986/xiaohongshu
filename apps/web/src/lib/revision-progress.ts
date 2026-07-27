@@ -6,17 +6,19 @@ import type { GenerationJob, RevisionTask } from '../types';
  * 刻意不复用 quick-progress.progressStageText:那套说的是「解析选题」「生成初稿」,
  * 属于首次生成;revise 不解析选题、不生成初稿,它只重跑受影响的通道。套用会说谎。
  *
- * 里程碑对应 engine.ts 里 agent.revise 的真实阶段。70/85 两档是**条件触发**的
- * (仅当机械锚定未命中时才调模型,见 engine.ts:2679、:2687),所以实际进度可能从
- * 40 直接跳到 95——这是真实情况,不为「平滑」而假装经过。
+ * 档位只列后端真正会推进的进度值:10 / 25 / 40 / 95(generation.service.processRevision
+ * 的全部 revisionProgress 调用点)。
+ *
+ * 原来还有 70「证据锚定复核」与 85「声明合规判定」两档,它们描述的是 engine.ts 里
+ * **条件触发**的调用(仅当机械锚定未命中时才调模型),后端一次都不会推进到那两个值,
+ * 所以那两句文案不可达。删掉而不是留着:若将来有人无条件推进 70/85,UI 就会声称做了
+ * 一件被 if 跳过的事——那是过度声称。真要显示,得先让后端在那两步真的发生时才推进。
  */
 export function revisionStageText(progress?: number): string {
   if (progress === undefined || progress < 10) return '排队等待中';
   if (progress < 25) return '分析修改影响范围';
   if (progress < 40) return '载入知识与证据';
-  if (progress < 70) return '重写受影响的环节';
-  if (progress < 85) return '证据锚定复核';
-  if (progress < 95) return '声明合规判定';
+  if (progress < 95) return '重写受影响的环节';
   if (progress < 100) return '质检与落库';
   return '完成';
 }
@@ -24,6 +26,22 @@ export function revisionStageText(progress?: number): string {
 /** 只有 queued/running 算在跑。缺任务视为不在跑,而不是"可能在跑"。 */
 export function isRevisionInFlight(task?: RevisionTask): boolean {
   return task?.status === 'queued' || task?.status === 'running';
+}
+
+/**
+ * 修改失败时该显示的一句话;没失败返回 undefined。
+ *
+ * 抽成纯函数是因为阅读页(QuickReaderPage)原本一处都没渲染 activeRevision.error:
+ * 任务失败时局部 loading 已清、WaitCard 因 job.status 仍是 completed 而返回 null,
+ * 用户只看到"内容没变、按钮解锁",既不知道失败也不知道额度退没退。仓库没有 React
+ * 渲染设施,所以判定逻辑放这里才测得到——与 revisionBoxState 同一做法。
+ *
+ * error 是后端给的中文可行动文案(含"已退还本次额度"这类说明),原样透出、不二次加工:
+ * 改写它就会与真实账目脱节。后端没给原因时只说没完成,不猜原因、更不声称退了额度。
+ */
+export function revisionFailureNotice(task?: RevisionTask): string | undefined {
+  if (task?.status !== 'failed') return undefined;
+  return task.error?.trim() || '这次修改没有完成，可以重新提交。';
 }
 
 /** 内部通道名 → 人话。未知通道原样透出,不猜。 */

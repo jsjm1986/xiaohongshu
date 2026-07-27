@@ -15,7 +15,7 @@ import { areaPath, QUICK_HOME_PATH } from '../lib/quick-routes';
 import { failureReason } from '../lib/retry-plan';
 import { retryJobOnce } from '../lib/single-retry';
 import { readerNeighbors } from '../lib/reader-navigation';
-import { isRevisionInFlight } from '../lib/revision-progress';
+import { isRevisionInFlight, revisionFailureNotice } from '../lib/revision-progress';
 import type { GenerationJob, Project, ReaderCandidate, ReaderJob } from '../types';
 
 /**
@@ -111,6 +111,20 @@ export function QuickReaderPage() {
       toast.push('已受理，正在重新生成受影响的环节');
     } catch (e) { fail(e, '提交修改失败'); } finally { setRevisingId(null); }
   };
+
+  /*
+   * 修改失败要在这一页看得见。
+   *
+   * 异步化之后这条路径原本完全不可见:任务失败时 revising 变 false、revisingId 已在
+   * finally 清空、WaitCard 因 job.status === 'completed' 走 settled 返回 null,于是
+   * activeRevision.error 一处都没有渲染——用户只看到内容没变、按钮解锁,不知道失败了、
+   * 也不知道额度退没退,大概率再提交一次。同步实现时代至少会 toast 一次「修改失败」,
+   * 所以缺这一块是净退步。
+   *
+   * error 已经是后端给的中文可行动文案(含退额度说明),原样显示,不二次加工。判定与兜底
+   * 文案在 revisionFailureNotice(纯函数,有测试)。
+   */
+  const failureNotice = revisionFailureNotice(job?.activeRevision);
 
   const retry = async () => {
     if (!project || !job) return;
@@ -210,6 +224,17 @@ export function QuickReaderPage() {
 
       {job && inFlight && (
         <WaitCard job={job as unknown as GenerationJob} now={now} />
+      )}
+
+      {/* 修改失败:一行常驻提示。用提示区而不是 toast——toast 会在轮询回来那一刻闪一下
+          就没了,而这条信息(尤其"额度退没退")用户可能过一会儿才回来看。 */}
+      {failureNotice && (
+        <div className="quick-card">
+          <div className="quick-card__body">
+            <p className="qc-hint qc-hint--error" role="alert">修改没有完成：{failureNotice}</p>
+            <p className="qc-hint">下面显示的仍是修改前的内容，可以调整措辞后重新提交。</p>
+          </div>
+        </div>
       )}
 
       {job?.status === 'failed' && (() => {
