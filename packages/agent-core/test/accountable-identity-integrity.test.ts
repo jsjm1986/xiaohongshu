@@ -123,13 +123,34 @@ describe("projectBlueprintCompleteness (审批层拦截)", () => {
     expect(result.missing.some((item) => item.startsWith("role_model.accountable"))).toBe(true);
   });
 
-  it("blocks dangling replyDisplayRoles even when both accountable identities exist", () => {
+  /**
+   * 悬空 replyDisplayRoles 不阻断生成:该修,但不该拦。
+   *
+   * 原用例断言它进 missing。但 missing 会让 intelligence.service 读蓝图时抛
+   * BadRequestException,对**已批准的存量蓝图**追溯生效——实测线上两个项目因此
+   * 完全无法生成,而它们 2 个 accountable 身份齐备、只是 replyDisplayRoles 写成了
+   * host_account / assistant_account。
+   *
+   * 这类瑕疵没有实际后果:forcedReplyDisplayRole 不读 replyDisplayRoles,而是从
+   * accountable 角色直接解析。实测那两个项目的三身份全部正确解析为自己的展示名。
+   * 显性化由生成阶段的 accountable_identity_incomplete warning 承担。
+   */
+  it("does not block generation for dangling replyDisplayRoles when both accountable identities exist", () => {
     const result = completenessOf([
       role({ id: "peer", displayRole: "同处境读者", replyDisplayRoles: ["assistant_account"] }),
       IP,
       ASSISTANT,
     ]);
+    expect(result.complete).toBe(true);
+    expect(result.missing).toEqual([]);
+  });
+
+  it("still blocks when an accountable identity is missing: that collapses IP and assistant", () => {
+    const result = completenessOf([
+      role({ id: "peer", displayRole: "同处境读者", replyDisplayRoles: ["项目主创"] }),
+      IP,
+    ]);
     expect(result.complete).toBe(false);
-    expect(result.missing.some((item) => item.includes("assistant_account"))).toBe(true);
+    expect(result.missing.some((item) => item.startsWith("role_model.accountable"))).toBe(true);
   });
 });
