@@ -5,12 +5,16 @@ import { join } from 'node:path';
 import { after, before, beforeEach, test } from 'node:test';
 import { DatabaseService } from '../src/database.service.js';
 import {
+  claimNext,
   claimNextJob,
   heartbeatJob,
+  heartbeatTask,
   queuedJobCount,
   queuedJobPosition,
+  reclaimStale,
   reclaimStaleJobs,
   RESTART_INTERRUPTION_LIMIT,
+  REVISION_TASKS_SPEC,
 } from '../src/job-claim.js';
 
 /**
@@ -92,6 +96,40 @@ function seedJob(id: string, input: {
     );
 }
 
+/** 造一条修改任务。父 job 必须先由 seedJob 建好,否则外键失败。 */
+function seedRevisionTask(id: string, jobId: string, input: {
+  status?: string;
+  claimedBy?: string | null;
+  heartbeatAt?: string | null;
+  attempts?: number;
+} = {}): void {
+  const now = new Date().toISOString();
+  database
+    .prepare(
+      `INSERT INTO revision_tasks
+         (id, job_id, package_id, candidate_id, instruction, status, progress, attempt_count,
+          rerun_channels_json, created_by, created_at, updated_at, claimed_by, heartbeat_at)
+       VALUES (?, ?, 'pkg-1', 'cand-1', '正文不要有价格', ?, 0, ?, '[]', 'u1', ?, ?, ?, ?)`,
+    )
+    .run(
+      id, jobId, input.status ?? 'queued', input.attempts ?? 0, now, now,
+      input.claimedBy ?? null, input.heartbeatAt ?? null,
+    );
+}
+
+function revisionRowOf(id: string) {
+  return database
+    .prepare('SELECT status, progress, attempt_count, claimed_by, heartbeat_at, error FROM revision_tasks WHERE id=?')
+    .get(id) as {
+      status: string; progress: number; attempt_count: number;
+      claimed_by: string | null; heartbeat_at: string | null; error: string | null;
+    };
+}
+
+/** 两张表共用的失败文案生成器,与 revision.service 传的那份保持一致。 */
+const revisionFailMessage = (attempts: number) =>
+  `修改被反复打断（${attempts} 次），已停止自动重跑，请重新提交修改要求`;
+
 function rowOf(id: string) {
   return database
     .prepare('SELECT status, progress, claimed_by, heartbeat_at, error, resolution_snapshot_json FROM generation_jobs WHERE id=?')
@@ -106,6 +144,8 @@ function interruptionsOf(id: string): number {
 }
 
 beforeEach(() => {
+  // revision_tasks 先删:它有 job_id 外键,虽然是 CASCADE,显式顺序更不容易误解。
+  database.prepare('DELETE FROM revision_tasks').run();
   database.prepare('DELETE FROM generation_jobs').run();
 });
 
@@ -282,4 +322,86 @@ test('软删的任务不参与领取与位次:产出区删掉的不该再跑', (
   assert.equal(queuedJobPosition(database, 'deleted'), undefined);
   assert.equal(queuedJobPosition(database, 'kept'), 1);
   assert.equal(claimNextJob(database, INSTANCE_A, new Date().toISOString()), 'kept');
+});
+
+/**
+ * 泛化后的认领实现要同时服务两张表。这里锁三件事:
+ *  1. revision_tasks 的领取同样原子(两次领取不会拿到同一条)
+ *  2. 回收只看 heartbeat_at,不看 claimed_by——instanceId 含 pid,重启即换身份
+ *  3. 两张表互不串扰
+ * 第 3 条是真实风险:claimNextJob 只按 status='queued' 取,drainQueue 拿到 id
+ * 后直接调 process() 跑首次生成全流程,不看任务类型。串表的后果是用全新的 3 个
+ * 候选覆盖用户已有产出。
+ */
+test('revision_tasks:领取是原子的,同一条不会被领两次', () => {
+  seedJob('job-1', { status: 'completed' });
+  seedRevisionTask('rev-1', 'job-1');
+  const first = claimNext(database, REVISION_TASKS_SPEC, INSTANCE_A, new Date().toISOString());
+  const second = claimNext(database, REVISION_TASKS_SPEC, INSTANCE_B, new Date().toISOString());
+  assert.equal(first, 'rev-1');
+  assert.equal(second, undefined, '第二个实例不该领到同一条');
+  const row = revisionRowOf('rev-1');
+  assert.equal(row.status, 'running');
+  assert.equal(row.claimed_by, INSTANCE_A);
+});
+
+test('revision_tasks:心跳新鲜的不回收,心跳超时的才回收', () => {
+  const now = new Date('2026-07-27T12:00:00.000Z');
+  seedJob('job-1', { status: 'completed' });
+  seedRevisionTask('rev-fresh', 'job-1', {
+    status: 'running', claimedBy: INSTANCE_B,
+    heartbeatAt: new Date(now.getTime() - 5_000).toISOString(),
+  });
+  seedRevisionTask('rev-stale', 'job-1', {
+    status: 'running', claimedBy: 'host:999:dead',
+    heartbeatAt: new Date(now.getTime() - 600_000).toISOString(),
+  });
+
+  const result = reclaimStale(database, REVISION_TASKS_SPEC, now.toISOString(), CLAIM_TIMEOUT_MS, revisionFailMessage);
+  assert.deepEqual(result.requeued, ['rev-stale']);
+  assert.deepEqual(result.failed, []);
+  assert.equal(revisionRowOf('rev-fresh').status, 'running', '别的实例正在跑的任务不能被抢走');
+  const stale = revisionRowOf('rev-stale');
+  assert.equal(stale.status, 'queued');
+  assert.equal(stale.attempt_count, 1, '回收即计数 +1');
+  assert.equal(stale.claimed_by, null);
+  assert.equal(stale.heartbeat_at, null);
+});
+
+test('revision_tasks:attempt_count 触顶后判 failed', () => {
+  const now = new Date('2026-07-27T12:00:00.000Z');
+  seedJob('job-1', { status: 'completed' });
+  seedRevisionTask('rev-doomed', 'job-1', {
+    status: 'running', attempts: RESTART_INTERRUPTION_LIMIT,
+    heartbeatAt: new Date(now.getTime() - 600_000).toISOString(),
+  });
+  const result = reclaimStale(database, REVISION_TASKS_SPEC, now.toISOString(), CLAIM_TIMEOUT_MS, revisionFailMessage);
+  assert.deepEqual(result.failed, ['rev-doomed']);
+  const row = revisionRowOf('rev-doomed');
+  assert.equal(row.status, 'failed');
+  assert.match(row.error ?? '', /修改被反复打断（3 次）/u);
+});
+
+test('两张表互不串扰', () => {
+  seedJob('job-1', { status: 'completed' });
+  seedRevisionTask('rev-1', 'job-1');
+  // 没有任何 queued 的 generation_job,claimNextJob 必须什么都领不到
+  assert.equal(claimNextJob(database, INSTANCE_A, new Date().toISOString()), undefined);
+  assert.equal(revisionRowOf('rev-1').status, 'queued', 'revision 任务必须还在排队');
+
+  // 反向也要成立:排队中的 generation_job 不会被 revision 的认领拿走
+  seedJob('job-queued', { status: 'queued' });
+  assert.equal(claimNext(database, REVISION_TASKS_SPEC, INSTANCE_A, new Date().toISOString()), 'rev-1');
+  assert.equal(rowOf('job-queued').status, 'queued', '生成任务不该被修改任务的认领动到');
+});
+
+test('心跳:不持有的实例续约失败', () => {
+  seedJob('job-1', { status: 'completed' });
+  seedRevisionTask('rev-1', 'job-1', { status: 'running', claimedBy: INSTANCE_A });
+  const now = new Date().toISOString();
+  assert.equal(heartbeatTask(database, REVISION_TASKS_SPEC, 'rev-1', INSTANCE_A, now), true);
+  assert.equal(
+    heartbeatTask(database, REVISION_TASKS_SPEC, 'rev-1', INSTANCE_B, now), false,
+    '不持有的实例续约必须返回 false,调用方据此中止写入',
+  );
 });

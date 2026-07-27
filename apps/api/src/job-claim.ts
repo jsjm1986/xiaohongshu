@@ -20,12 +20,46 @@ export const RESTART_INTERRUPTION_LIMIT = 3;
  * 计数仍写在 resolution_snapshot_json.restartInterruptions,避免为此加一列。
  */
 
-interface ClaimableRow {
-  id: string;
-  status: string;
-  claimed_by: string | null;
-  heartbeat_at: string | null;
-  resolution_snapshot_json: string;
+/**
+ * 认领/心跳/回收对哪张表生效。
+ *
+ * 泛化而不是复制:多实例正确性的判据(单条 UPDATE 的 changes、只看心跳不看归属)
+ * 只该有一处实现。仓库里 analysis_tasks 已经是第三份独立实现,它能用,并进来属于
+ * 无关重构、不在本次范围;这里只让 revision_tasks 接到同一份实现上。
+ *
+ * attemptColumn 为 null 表示重试计数写在 resolution_snapshot_json.restartInterruptions
+ * (generation_jobs 的历史做法,当时为了不加列);revision_tasks 有真列。
+ */
+export interface ClaimTableSpec {
+  table: string;
+  /** 重试计数列;null 表示走 resolution_snapshot_json 里的 restartInterruptions */
+  attemptColumn: 'attempt_count' | null;
+  /** 该表是否有 deleted_at 需要过滤。没有这列时带上过滤会直接 SQL 报错。 */
+  softDelete: boolean;
+  /** 该表是否有 claimed_at。revision_tasks 没有:claimed_by + heartbeat_at 已够用。 */
+  hasClaimedAt: boolean;
+  /** 重新入队时一并复位的列(不含 status/claimed_by/heartbeat_at/updated_at) */
+  resetColumns: string;
+}
+
+export const GENERATION_JOBS_SPEC: ClaimTableSpec = {
+  table: 'generation_jobs',
+  attemptColumn: null,
+  softDelete: true,
+  hasClaimedAt: true,
+  resetColumns: 'progress=0, error=NULL, claimed_at=NULL',
+};
+
+export const REVISION_TASKS_SPEC: ClaimTableSpec = {
+  table: 'revision_tasks',
+  attemptColumn: 'attempt_count',
+  softDelete: false,
+  hasClaimedAt: false,
+  resetColumns: 'progress=0, error=NULL',
+};
+
+function aliveClause(spec: ClaimTableSpec): string {
+  return spec.softDelete ? ' AND deleted_at IS NULL' : '';
 }
 
 function interruptionCount(raw: string): number {
@@ -60,25 +94,34 @@ function withInterruptionCount(raw: string, count: number): string {
  *
  * 领取即置 running:让「被领取」和「在跑」成为同一个原子事实,不留中间态。
  */
-export function claimNextJob(database: DatabaseService, instanceId: string, now: string): string | undefined {
+export function claimNext(
+  database: DatabaseService,
+  spec: ClaimTableSpec,
+  instanceId: string,
+  now: string,
+): string | undefined {
   // 先取候选 id 再按 id 更新,而不是「UPDATE ... WHERE id=(SELECT ...)」后回查:
-  // 回查无法可靠区分本实例同一时刻领到的多条(claimed_at 相同),会返回错的 id。
+  // 回查无法可靠区分本实例同一时刻领到的多条,会返回错的 id。
   const candidate = database
     .prepare(
-      `SELECT id FROM generation_jobs
-        WHERE status='queued' AND deleted_at IS NULL
+      `SELECT id FROM ${spec.table}
+        WHERE status='queued'${aliveClause(spec)}
         ORDER BY created_at, id
         LIMIT 1`,
     )
     .get() as { id: string } | undefined;
   if (!candidate) return undefined;
+  const claimedAtAssign = spec.hasClaimedAt ? 'claimed_at=?, ' : '';
+  const params = spec.hasClaimedAt
+    ? [instanceId, now, now, now, candidate.id]
+    : [instanceId, now, now, candidate.id];
   const result = database
     .prepare(
-      `UPDATE generation_jobs
-          SET status='running', claimed_by=?, claimed_at=?, heartbeat_at=?, updated_at=?
+      `UPDATE ${spec.table}
+          SET status='running', claimed_by=?, ${claimedAtAssign}heartbeat_at=?, updated_at=?
         WHERE id=? AND status='queued'`,
     )
-    .run(instanceId, now, now, now, candidate.id);
+    .run(...params);
   // changes===0 说明这一瞬间被别的实例抢先领走了。不重试:调用方在循环里,
   // 下一轮会取到新的候选。
   return result.changes ? candidate.id : undefined;
@@ -88,11 +131,27 @@ export function claimNextJob(database: DatabaseService, instanceId: string, now:
  * 续约心跳。返回 false 表示本实例已经**不再持有**这个任务(被回收过,或被别的
  * 实例接管),调用方应当中止后续写入——否则两个实例会同时写同一个任务的产出。
  */
-export function heartbeatJob(database: DatabaseService, jobId: string, instanceId: string, now: string): boolean {
+export function heartbeatTask(
+  database: DatabaseService,
+  spec: ClaimTableSpec,
+  id: string,
+  instanceId: string,
+  now: string,
+): boolean {
   const result = database
-    .prepare('UPDATE generation_jobs SET heartbeat_at=?, updated_at=? WHERE id=? AND claimed_by=?')
-    .run(now, now, jobId, instanceId);
+    .prepare(`UPDATE ${spec.table} SET heartbeat_at=?, updated_at=? WHERE id=? AND claimed_by=?`)
+    .run(now, now, id, instanceId);
   return result.changes > 0;
+}
+
+/** 保留签名以免动 generation.service 的调用点;实现见 claimNext。 */
+export function claimNextJob(database: DatabaseService, instanceId: string, now: string): string | undefined {
+  return claimNext(database, GENERATION_JOBS_SPEC, instanceId, now);
+}
+
+/** 保留签名以免动 generation.service 的调用点;实现见 heartbeatTask。 */
+export function heartbeatJob(database: DatabaseService, jobId: string, instanceId: string, now: string): boolean {
+  return heartbeatTask(database, GENERATION_JOBS_SPEC, jobId, instanceId, now);
 }
 
 export interface ReclaimResult {
@@ -120,49 +179,77 @@ export interface ReclaimResult {
  * 超过 RESTART_INTERRUPTION_LIMIT 的判 failed:否则一旦进入「打断→重跑→又被
  * 打断」的循环会无上限烧模型调用。现在计数只在真实中断时累加,不再被其它实例的
  * 启动污染。
+ *
+ * failMessage 由调用方给而不是在这里拼:generation_jobs 的原文案带
+ * 「请检查服务稳定性后手动重新生成」尾巴且已被现有用例断言,在此拼一个通用尾巴
+ * 会把它改掉。
  */
+export function reclaimStale(
+  database: DatabaseService,
+  spec: ClaimTableSpec,
+  now: string,
+  claimTimeoutMs: number,
+  failMessage: (attempts: number) => string,
+): ReclaimResult {
+  const deadline = new Date(new Date(now).getTime() - claimTimeoutMs).toISOString();
+  const attemptSelect = spec.attemptColumn ?? 'resolution_snapshot_json';
+  const rows = database
+    .prepare(
+      `SELECT id, ${attemptSelect} AS attempt_source
+         FROM ${spec.table}
+        WHERE status='running'${aliveClause(spec)}
+          AND (heartbeat_at IS NULL OR heartbeat_at < ?)`,
+    )
+    .all(deadline) as unknown as { id: string; attempt_source: string | number | null }[];
+  const result: ReclaimResult = { requeued: [], failed: [] };
+  if (!rows.length) return result;
+
+  const failStatement = database.prepare(
+    `UPDATE ${spec.table} SET status='failed', error=?, claimed_by=NULL, heartbeat_at=NULL, updated_at=? WHERE id=?`,
+  );
+  const requeueStatement = database.prepare(
+    spec.attemptColumn
+      ? `UPDATE ${spec.table}
+            SET status='queued', ${spec.resetColumns}, ${spec.attemptColumn}=?, claimed_by=NULL,
+                heartbeat_at=NULL, updated_at=?
+          WHERE id=?`
+      : `UPDATE ${spec.table}
+            SET status='queued', ${spec.resetColumns}, claimed_by=NULL, heartbeat_at=NULL,
+                resolution_snapshot_json=?, updated_at=?
+          WHERE id=?`,
+  );
+
+  for (const row of rows) {
+    const raw = row.attempt_source;
+    const previous = spec.attemptColumn
+      ? (typeof raw === 'number' ? raw : 0)
+      : interruptionCount(String(raw ?? '{}'));
+    const attempts = previous + 1;
+    if (attempts > RESTART_INTERRUPTION_LIMIT) {
+      failStatement.run(failMessage(attempts - 1), now, row.id);
+      result.failed.push(row.id);
+      continue;
+    }
+    requeueStatement.run(
+      spec.attemptColumn ? attempts : withInterruptionCount(String(raw ?? '{}'), attempts),
+      now,
+      row.id,
+    );
+    result.requeued.push(row.id);
+  }
+  return result;
+}
+
+/** 保留签名以免动 generation.service 的调用点;实现见 reclaimStale。 */
 export function reclaimStaleJobs(
   database: DatabaseService,
   now: string,
   claimTimeoutMs: number,
 ): ReclaimResult {
-  const deadline = new Date(new Date(now).getTime() - claimTimeoutMs).toISOString();
-  const rows = database
-    .prepare(
-      `SELECT id, status, claimed_by, heartbeat_at, resolution_snapshot_json
-         FROM generation_jobs
-        WHERE status='running' AND deleted_at IS NULL
-          AND (heartbeat_at IS NULL OR heartbeat_at < ?)`,
-    )
-    .all(deadline) as unknown as ClaimableRow[];
-  const result: ReclaimResult = { requeued: [], failed: [] };
-  if (!rows.length) return result;
-
-  const failStatement = database.prepare(
-    "UPDATE generation_jobs SET status='failed', error=?, claimed_by=NULL, heartbeat_at=NULL, updated_at=? WHERE id=?",
+  return reclaimStale(
+    database, GENERATION_JOBS_SPEC, now, claimTimeoutMs,
+    (attempts) => `任务被反复打断（${attempts} 次），已停止自动重跑，请检查服务稳定性后手动重新生成`,
   );
-  const requeueStatement = database.prepare(
-    `UPDATE generation_jobs
-        SET status='queued', progress=0, error=NULL, claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL,
-            resolution_snapshot_json=?, updated_at=?
-      WHERE id=?`,
-  );
-
-  for (const row of rows) {
-    const attempts = interruptionCount(row.resolution_snapshot_json) + 1;
-    if (attempts > RESTART_INTERRUPTION_LIMIT) {
-      failStatement.run(
-        `任务被反复打断（${attempts - 1} 次），已停止自动重跑，请检查服务稳定性后手动重新生成`,
-        now,
-        row.id,
-      );
-      result.failed.push(row.id);
-      continue;
-    }
-    requeueStatement.run(withInterruptionCount(row.resolution_snapshot_json, attempts), now, row.id);
-    result.requeued.push(row.id);
-  }
-  return result;
 }
 
 /** 排队总数。队列在 DB 里,这是全局真值,不再是某个实例的内存视角。 */
