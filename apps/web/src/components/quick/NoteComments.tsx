@@ -3,12 +3,24 @@ import { Copy, Info } from 'lucide-react';
 import { Button, useToast } from '../Ui';
 import { commentSectionView, gapNameMap } from '../../lib/comment-view';
 import { avatarTone } from '../../lib/note-view';
-import type { ReaderCandidate } from '../../types';
+import type { ReaderCandidate, ReaderComment } from '../../types';
 
-type Source = Pick<
-  ReaderCandidate,
-  'comments' | 'commentDisclaimer' | 'commentOwnedFirstComment' | 'gapCards' | 'gapLedger'
->;
+/**
+ * 本组件真正读的字段。gapCards / gapLedger 只用于把 gap id 换成名称,可选——
+ * 创作区的候选没有这两项,缺了就不显示缺口名,不影响评论本身的渲染。
+ */
+export type NoteCommentsSource = {
+  /**
+   * followUps 声明为可选:阅读投影里它必有(空数组),而创作区的 QuickComment 是可选的。
+   * commentSectionView 内部本来就 `c.followUps ?? []`,运行时早已容错,只有类型偏严。
+   */
+  comments: Array<Omit<ReaderComment, 'followUps'> & { followUps?: ReaderComment['followUps'] }>;
+  commentDisclaimer?: string;
+  commentOwnedFirstComment?: string;
+} & Partial<Pick<ReaderCandidate, 'gapCards' | 'gapLedger'>>;
+
+/** @deprecated 保留旧名以免外部引用断裂;新代码用 NoteCommentsSource。 */
+type Source = NoteCommentsSource;
 
 export interface NoteCommentsProps {
   candidate: Source;

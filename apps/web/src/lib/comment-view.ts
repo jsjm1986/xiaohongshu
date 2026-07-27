@@ -110,8 +110,17 @@ export interface CommentSectionView {
  * gapNames: gapId → 缺口名。来自 reader 视图的 gapCards / gapLedger;
  * 查不到就不显示,而不是把 UUID 摆给用户看。
  */
+/**
+ * followUps 收成可选:阅读投影里它必有(空数组),创作区的 QuickComment 里是可选的。
+ * 函数体本来就写着 `c.followUps ?? []`,运行时早已容错,把类型放宽到与实现一致,
+ * 好让两条数据源共用同一个展示层——否则创作区只能另写一套评论渲染。
+ */
+type CommentSectionInput = Omit<ReaderComment, 'followUps'> & {
+  followUps?: ReaderComment['followUps'];
+};
+
 export function commentSectionView(
-  comments: ReaderComment[] | undefined,
+  comments: CommentSectionInput[] | undefined,
   gapNames: Map<string, string> = new Map(),
 ): CommentSectionView | null {
   const list = comments ?? [];

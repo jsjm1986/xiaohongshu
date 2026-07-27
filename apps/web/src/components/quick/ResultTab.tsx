@@ -81,6 +81,7 @@ export function ResultTab({ project, opportunityId, presetId, overrides, imageAs
       />
       <QuickResult
         candidates={results}
+        projectName={project?.name}
         onRegenerate={() => void regenerate()}
         onRevise={jobId ? revise : undefined}
         revisingId={revisingId}

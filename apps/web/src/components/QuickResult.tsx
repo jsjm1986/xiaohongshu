@@ -2,7 +2,9 @@ import { Copy } from 'lucide-react';
 import { useState } from 'react';
 import { Button, useToast } from './Ui';
 import { quickCandidateToMarkdown, type QuickCandidateView } from '../lib/quick-generation';
+import { CommentPlanCard } from './quick/CommentPlanCard';
 import { DeploymentPlanCard } from './quick/DeploymentPlanCard';
+import { NoteCard } from './quick/NoteCard';
 import { ValidationVerdict } from './quick/ValidationVerdict';
 
 async function copyText(text: string, toast: ReturnType<typeof useToast>) {
@@ -14,70 +16,10 @@ async function copyText(text: string, toast: ReturnType<typeof useToast>) {
   }
 }
 
-function CopyCard({ title, text, children }: { title: string; text: string; children: React.ReactNode }) {
-  const toast = useToast();
-  return (
-    <section className="quick-card">
-      <header>
-        <h3>{title}</h3>
-        <Button variant="ghost" icon={<Copy size={14} />} onClick={() => void copyText(text, toast)}>复制</Button>
-      </header>
-      <div className="quick-card__body">{children}</div>
-    </section>
-  );
-}
-
-function commentsCopyText(view: QuickCandidateView): string {
-  const body = view.comments
-    .map((c) => `Q: ${c.question}\nA: ${c.answer}${c.boundary ? `\n边界: ${c.boundary}` : ''}${c.nextStep ? `\n下一步: ${c.nextStep}` : ''}`)
-    .join('\n\n');
-  return view.commentDisclaimer ? `免责声明: ${view.commentDisclaimer}\n\n${body}` : body;
-}
-
-/** 单个候选的完整内容卡族:标题/正文/标签/图片简报/可发布首评/问答话术(含免责与未展开缺口)。结果页与历史页共用。 */
-export function QuickCandidateCards({ view }: { view: QuickCandidateView }) {
-  return (
-    <>
-      <CopyCard title="标题" text={view.title}><p>{view.title}</p></CopyCard>
-      <CopyCard title="正文" text={view.body}><p className="quick-body">{view.body}</p></CopyCard>
-      {view.tags.length > 0 && (
-        <CopyCard title="标签" text={view.tags.map((t) => `#${t}`).join(' ')}>
-          <div className="quick-tag-row">{view.tags.map((t) => <span key={t} className="quick-tag">#{t}</span>)}</div>
-        </CopyCard>
-      )}
-      {view.imageBrief && (
-        <CopyCard title="图片简报" text={view.imageBrief}><p>{view.imageBrief}</p></CopyCard>
-      )}
-      {view.commentOwnedFirstComment && (
-        <CopyCard title="可发布首评" text={view.commentOwnedFirstComment}><p>{view.commentOwnedFirstComment}</p></CopyCard>
-      )}
-      {view.comments.length > 0 && (
-        <CopyCard title="问答话术" text={commentsCopyText(view)}>
-          {view.commentDisclaimer && <p className="qc-disclaimer">{view.commentDisclaimer}</p>}
-          <ul className="quick-qa">
-            {view.comments.map((c, i) => (
-              <li key={`${c.question}-${i}`}>
-                <strong>Q: {c.question}</strong>
-                <p>A: {c.answer}</p>
-                {c.boundary && <small>边界：{c.boundary}</small>}
-                {c.nextStep && <small>下一步：{c.nextStep}</small>}
-                {(c.followUps ?? []).map((f, j) => (
-                  <div key={`${f.question}-${j}`} className="quick-followup"><span>追问：{f.question}</span><span>回应：{f.answer}</span></div>
-                ))}
-              </li>
-            ))}
-          </ul>
-          {view.commentUncoveredGaps?.length ? (
-            <small className="qc-uncovered">评论区未展开：{view.commentUncoveredGaps.join('、')}</small>
-          ) : null}
-        </CopyCard>
-      )}
-    </>
-  );
-}
-
-export function QuickResult({ candidates, onRegenerate, onPickAnotherTopic, onRevise, revisingId }: {
+export function QuickResult({ candidates, projectName, onRegenerate, onPickAnotherTopic, onRevise, revisingId }: {
   candidates: QuickCandidateView[];
+  /** 发布账号名,用于仿真笔记与机构答复的署名 */
+  projectName?: string;
   onRegenerate?: () => void;
   onPickAnotherTopic?: () => void;
   onRevise?: (candidateId: string, instruction: string) => Promise<void>;
@@ -117,7 +59,15 @@ export function QuickResult({ candidates, onRegenerate, onPickAnotherTopic, onRe
           当结论,实测 129 个未通过候选里 110 个因此把 warning 当成了结论。 */}
       <ValidationVerdict validation={view.validation} />
 
-      <QuickCandidateCards view={view} />
+      {/* 生成完先给「发出去长什么样」,与阅读页同一个 NoteCard——原来这里是
+          标题/正文/标签/图片简报各一张字段卡,同一份内容在 SaaS 里长两个样,
+          而用户先看到的偏偏是字段清单那套。字段级复制没丢:NoteCard 自带逐字段复制。 */}
+      <NoteCard candidate={view} job={{}} projectName={projectName} />
+
+      {/* 评论核对:边界要求/下一步核验这些编排字段原来平铺在「问答话术」卡里,
+          换成仿真预览后预览区不再展示它们(它们是写给生成器的内部指令,不是发布文案)。
+          运营核对仍然要用,所以在这里补上与阅读页同一张核对卡,不然就是净减一项能力。 */}
+      <CommentPlanCard candidate={view} />
 
       {/* 发布执行方案:生成完当场就能看到「下一步做什么」,不必先去产出区 */}
       <DeploymentPlanCard candidate={view} />
