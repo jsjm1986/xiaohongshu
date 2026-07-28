@@ -8,3 +8,8 @@ export function progressStageText(progress?: number): string {
   if (progress < 100) return '质检与合规校验';
   return '完成';
 }
+
+/** Keep a real queued 0; only missing progress falls back to 0. */
+export function generationProgressValue(progress?: number): number {
+  return progress ?? 0;
+}

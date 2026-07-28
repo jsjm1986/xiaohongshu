@@ -480,6 +480,47 @@ test('approveOpportunitiesForBatch approves blueprint/intelligence once and ever
   assert.ok(calls.indexOf('intel.approve:i1') < calls.indexOf('opp.approve:o2'));
 });
 
+test('approveOpportunitiesForBatch does not approve compatible strategy suggestions', async () => {
+  const calls: string[] = [];
+  const deps = {
+    api: {
+      blueprintModules: { list: async () => [], approve: async () => ({}) },
+      intelligence: { get: async () => ({ id: 'i1', approvalStatus: 'approved' }), approve: async () => ({}) },
+      informationGaps: { list: async () => ({ items: [], total: 0 }), approve: async () => ({}) },
+      expressionStrategies: {
+        list: async () => ({
+          items: [{ id: 'strategy-explicit', status: 'draft' }, { id: 'strategy-compatible', status: 'draft' }],
+          total: 2,
+        }),
+        approve: async (_projectId: string, id: string) => { calls.push(`strategy:${id}`); return { id }; },
+      },
+      opportunities: {
+        list: async () => ({
+          items: [{
+            id: 'o1', title: 'A', gapIds: [], strategyId: 'strategy-explicit',
+            compatibleStrategyIds: ['strategy-compatible'],
+          }],
+          total: 1,
+        }),
+        approve: async (_projectId: string, id: string) => { calls.push(`opportunity:${id}`); return { id }; },
+      },
+    },
+  };
+
+  await approveOpportunitiesForBatch({
+    project: { id: 'proj1', name: 'p' } as any,
+    opportunityIds: ['o1'],
+    deps: deps as any,
+  });
+
+  assert.ok(calls.includes('strategy:strategy-explicit'), '显式 strategyId 必须获批');
+  assert.equal(
+    calls.includes('strategy:strategy-compatible'),
+    false,
+    'compatibleStrategyIds 只是建议，不得产生审批副作用',
+  );
+});
+
 test('approveOpportunitiesForBatch rejects when an opportunity disappeared', async () => {
   const deps = {
     api: {

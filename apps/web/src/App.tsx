@@ -1,36 +1,43 @@
-import { Navigate, Route, Routes } from 'react-router-dom';
-import { AppShell } from './components/AppShell';
+import { lazy, Suspense } from 'react';
+import { Route, Routes } from 'react-router-dom';
 import { ProtectedRoute, RootRedirect } from './components/AuthContext';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ToastProvider } from './components/Ui';
-import { QuickShell } from './components/quick/QuickShell';
-import { AuditPage } from './pages/AuditPage';
-import { DashboardPage } from './pages/DashboardPage';
-import { FormulasPage } from './pages/FormulasPage';
-import { GenerationResultPage } from './pages/GenerationResultPage';
-import { GeneratorPage } from './pages/GeneratorPage';
-import { HistoryPage } from './pages/HistoryPage';
-import { KnowledgePage } from './pages/KnowledgePage';
-import { LoginPage } from './pages/LoginPage';
-import { ProjectsPage } from './pages/ProjectsPage';
-import { QuickAccountPage } from './pages/QuickAccountPage';
-import { QuickChannelPage } from './pages/QuickChannelPage';
-import { QuickReaderPage } from './pages/QuickReaderPage';
-import { QuickWorkspaceLayout } from './pages/quick/QuickWorkspaceLayout';
-import { QuickOverviewPage } from './pages/quick/QuickOverviewPage';
-import { QuickKnowledgePage } from './pages/quick/QuickKnowledgePage';
-import { QuickCreatePage } from './pages/quick/QuickCreatePage';
-import { QuickHistoryPage } from './pages/quick/QuickHistoryPage';
-import { QuickAreaFallback } from './pages/quick/QuickAreaFallback';
-import { RegisterPage } from './pages/RegisterPage';
-import { ResearchPage } from './pages/ResearchPage';
-import { SettingsPage } from './pages/SettingsPage';
-import { TeamPage } from './pages/TeamPage';
+
+const AppShell = lazy(() => import('./components/AppShell').then((module) => ({ default: module.AppShell })));
+const QuickShell = lazy(() => import('./components/quick/QuickShell').then((module) => ({ default: module.QuickShell })));
+const AuditPage = lazy(() => import('./pages/AuditPage').then((module) => ({ default: module.AuditPage })));
+const DashboardPage = lazy(() => import('./pages/DashboardPage').then((module) => ({ default: module.DashboardPage })));
+const FormulasPage = lazy(() => import('./pages/FormulasPage').then((module) => ({ default: module.FormulasPage })));
+const GenerationResultPage = lazy(() => import('./pages/GenerationResultPage').then((module) => ({ default: module.GenerationResultPage })));
+const GeneratorPage = lazy(() => import('./pages/GeneratorPage').then((module) => ({ default: module.GeneratorPage })));
+const HistoryPage = lazy(() => import('./pages/HistoryPage').then((module) => ({ default: module.HistoryPage })));
+const KnowledgePage = lazy(() => import('./pages/KnowledgePage').then((module) => ({ default: module.KnowledgePage })));
+const LoginPage = lazy(() => import('./pages/LoginPage').then((module) => ({ default: module.LoginPage })));
+const ProjectsPage = lazy(() => import('./pages/ProjectsPage').then((module) => ({ default: module.ProjectsPage })));
+const QuickAccountPage = lazy(() => import('./pages/QuickAccountPage').then((module) => ({ default: module.QuickAccountPage })));
+const QuickChannelPage = lazy(() => import('./pages/QuickChannelPage').then((module) => ({ default: module.QuickChannelPage })));
+const QuickReaderPage = lazy(() => import('./pages/QuickReaderPage').then((module) => ({ default: module.QuickReaderPage })));
+const RegisterPage = lazy(() => import('./pages/RegisterPage').then((module) => ({ default: module.RegisterPage })));
+const ResearchPage = lazy(() => import('./pages/ResearchPage').then((module) => ({ default: module.ResearchPage })));
+const SettingsPage = lazy(() => import('./pages/SettingsPage').then((module) => ({ default: module.SettingsPage })));
+const TeamPage = lazy(() => import('./pages/TeamPage').then((module) => ({ default: module.TeamPage })));
+const QuickAreaFallback = lazy(() => import('./pages/quick/QuickAreaFallback').then((module) => ({ default: module.QuickAreaFallback })));
+const QuickCreatePage = lazy(() => import('./pages/quick/QuickCreatePage').then((module) => ({ default: module.QuickCreatePage })));
+const QuickHistoryPage = lazy(() => import('./pages/quick/QuickHistoryPage').then((module) => ({ default: module.QuickHistoryPage })));
+const QuickKnowledgePage = lazy(() => import('./pages/quick/QuickKnowledgePage').then((module) => ({ default: module.QuickKnowledgePage })));
+const QuickOverviewPage = lazy(() => import('./pages/quick/QuickOverviewPage').then((module) => ({ default: module.QuickOverviewPage })));
+const QuickWorkspaceLayout = lazy(() => import('./pages/quick/QuickWorkspaceLayout').then((module) => ({ default: module.QuickWorkspaceLayout })));
+
+function RouteLoading() {
+  return <div className="app-loading"><span className="spinner" /><p>正在加载页面…</p></div>;
+}
 
 export default function App() {
   return (
     <ErrorBoundary>
     <ToastProvider>
+    <Suspense fallback={<RouteLoading />}>
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/register" element={<RegisterPage />} />
@@ -91,6 +98,7 @@ export default function App() {
       {/* 兜底也要按用户类型分叉:统一去 / 会让 SaaS 用户再被弹一次 */}
       <Route path="*" element={<RootRedirect />} />
     </Routes>
+    </Suspense>
     </ToastProvider>
     </ErrorBoundary>
   );
