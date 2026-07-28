@@ -4,9 +4,14 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-const BASE = 'http://127.0.0.1:9090/v1';
-const TOKEN = 'sk-0a930b0f6d82fdf4921a133e2879c564457514b108eddc15997d070f6adc0166';
-const MODEL = 'deepseek-3.2';
+const TOKEN = process.env.PROBE_STAGE1_TOKEN?.trim();
+if (!TOKEN) {
+  console.error('PROBE_STAGE1_TOKEN is required; no probe request was sent.');
+  process.exit(1);
+}
+
+const BASE = (process.env.PROBE_STAGE1_BASE_URL?.trim() || 'http://127.0.0.1:9090/v1').replace(/\/+$/u, '');
+const MODEL = process.env.PROBE_STAGE1_MODEL?.trim() || 'deepseek-3.2';
 const ATTEMPTS = Number(process.argv[2] ?? 3);
 
 const KB = readFileSync(
