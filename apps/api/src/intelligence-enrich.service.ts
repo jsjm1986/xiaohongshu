@@ -5,8 +5,8 @@ import { KnowledgeService } from './knowledge.service.js';
 import type { SessionPrincipal } from './models.js';
 import { ResourceService } from './resource.service.js';
 import { isEnrichConfidence } from './intelligence-enrich.types.js';
-import type { DraftItem, EnrichDraftResult } from './intelligence-enrich.types.js';
-import { parseJson } from './utils.js';
+import type { DraftItem, EnrichDraftResult, MergeItem, MergePreview } from './intelligence-enrich.types.js';
+import { nowIso, parseJson } from './utils.js';
 
 /** 一次最多起草多少条。再多提示词会过长,用户也审不完。 */
 const MAX_DRAFT_GAPS = 15;
@@ -14,6 +14,13 @@ const MAX_DRAFT_GAPS = 15;
 const MAX_CONTEXT_CHARS = 4_000;
 /** 少于这个长度的草稿正文当作模型没写出东西。 */
 const MIN_DRAFT_CHARS = 10;
+/**
+ * 补充版本的证据类型。
+ *
+ * 走 knowledge.service 的 evidenceStatus() 会映射成 'inferred',而不是
+ * 「已知事实」对应的 'observed'。见 saveEnrichedKnowledge 的注释。
+ */
+const ENRICHED_EVIDENCE_STATUS = '猜想';
 
 interface GapRow {
   id: string;
@@ -77,6 +84,118 @@ export class IntelligenceEnrichService {
       throw new BadRequestException('模型没能基于现有资料生成可用内容,请先补充一些原始资料');
     }
     return { gaps: drafts };
+  }
+
+  async mergeEnrichedKnowledge(
+    projectId: string,
+    items: MergeItem[],
+    targetFile: string | undefined,
+    principal: SessionPrincipal,
+  ): Promise<MergePreview> {
+    this.resources.projectRow(projectId);
+
+    const active = items.filter((item) => item.status !== 'deleted');
+    if (active.length === 0) throw new BadRequestException('请至少保留一条补充内容');
+
+    // gapId 必须属于本项目。这既是数据校验也是越权防护:gapId 来自请求体,
+    // 不带 project_id 条件就能拿别的项目的缺口标题去拼提示词。
+    const ids = active.map((item) => item.gapId);
+    const rows = this.database
+      .prepare(
+        `SELECT id, title, priority, data_json FROM information_gaps
+         WHERE project_id = ? AND deleted_at IS NULL AND id IN (${ids.map(() => '?').join(',')})`,
+      )
+      .all(projectId, ...ids) as unknown as GapRow[];
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const missing = ids.filter((id) => !byId.has(id));
+    // 只回条数,不回 id 也不回标题:请求方本来就知道自己传了什么,
+    // 而逐一列出等于把「这个 id 在别的项目里存在吗」变成可探测的。
+    if (missing.length) throw new BadRequestException(`有 ${missing.length} 条缺口不存在或不属于本项目`);
+
+    // 每条都必须有正文。confirmed 表示用户接受了 AI 草稿,前端要把草稿原文回传;
+    // 服务端不缓存草稿,这里拿不到就没法合并。
+    if (active.some((item) => !item.content || item.content.trim().length === 0)) {
+      throw new BadRequestException('确认或编辑过的条目必须带上正文内容');
+    }
+
+    const docs = await this.latestDocuments(projectId);
+    const target = targetFile
+      ?? docs.find((doc) => doc.filename.toUpperCase() === 'INDEX.MD')?.filename
+      ?? 'INDEX.md';
+    const existing = docs.find((doc) => doc.filename === target)?.content ?? '';
+
+    const supplements = active
+      .map((item) => `### ${byId.get(item.gapId)!.title}\n${item.content!.trim()}`)
+      .join('\n\n');
+
+    const payload = await this.intelligence.runEnrichmentModel(
+      projectId,
+      principal,
+      this.mergePrompt(existing, supplements),
+      'merge',
+    );
+
+    // callAnalysisModel 只返回 JSON 对象,所以合并结果要包在字段里,不能直接返 Markdown。
+    const merged = typeof payload.document === 'string' ? payload.document.trim() : '';
+    if (merged.length === 0) throw new BadRequestException('模型没能生成合并结果,请重试');
+
+    return { preview: merged, targetFile: target, isNewFile: existing === '' };
+  }
+
+  /**
+   * 存成同名文件的新版本。
+   *
+   * knowledge.import 内部按 (project_id, filename) 取 MAX(version)+1,所以「新版本」
+   * 只要文件名一致就自动成立。旧版本行保留,用户能回看。
+   *
+   * evidenceStatus 一律落到「猜想」,不沿用原文件的取值。这一条是刻意的:
+   * evidence_status 会经 knowledge.service 的 evidenceStatus() 映射成 observed /
+   * inferred,而 agent-core 的 knowledge.ts 用它判定哪些主张算已知事实。补充内容
+   * 是模型推断、用户逐条审查过——审查不等于核实,继承「已知事实」就是把推断洗成事实,
+   * 恰是这个项目一直在防的事。用户核实后可以在知识库页改回去。
+   *
+   * category 沿用原文件:它只决定这份资料参与哪一类语料(reference-corpus 会被
+   * 排除出生成语料),改掉会让知识库的分类视图错乱。
+   */
+  async saveEnrichedKnowledge(
+    projectId: string,
+    content: string,
+    targetFile: string,
+    principal: SessionPrincipal,
+  ): Promise<Record<string, unknown>> {
+    this.resources.projectRow(projectId);
+    const rows = this.knowledge.list(projectId).filter((row) => String(row.filename) === targetFile);
+    const latest = rows.sort((a, b) => Number(b.version) - Number(a.version)).at(0);
+
+    return this.knowledge.import({
+      projectId,
+      filename: targetFile,
+      content,
+      category: latest ? String(latest.category) : '未分类',
+      evidenceStatus: ENRICHED_EVIDENCE_STATUS,
+      metadata: { source: 'ai-enrichment', enrichedAt: nowIso() },
+      principal,
+    });
+  }
+
+  private mergePrompt(existing: string, supplements: string): string {
+    return `你在把用户确认过的补充内容合并进一份项目知识库文档。
+
+【原文档】
+${existing || '（这是一个新文件，暂无原文）'}
+
+【补充内容（用户已逐条确认）】
+${supplements}
+
+要求：
+1. 输出一份完整的新版文档，把补充内容自然地融进原有结构。
+2. 不要删除原文里的任何信息，只做整合与去重。
+3. 与原文冲突时以补充内容为准，它更新更具体。
+4. 用 Markdown，二级标题分节，结构清晰。
+5. 不要新增原文和补充内容里都没有的事实。
+
+只返回 JSON 对象，不要多余文字：
+{"document":"完整的 Markdown 文档"}`;
   }
 
   /**
