@@ -230,7 +230,6 @@ export function SettingsPage() {
   return (
     <div className="page settings-page">
       <V2Hero
-        index="08"
         status={<>工作区 · 模型与账户</>}
         title="模型与设置"
         description="管理模型来源、平台额度与账户安全。"

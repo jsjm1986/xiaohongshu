@@ -1,19 +1,44 @@
 import type { ReactNode } from 'react';
+import { useLocation } from 'react-router-dom';
+import { ALL_CHANNELS } from '../lib/channels';
+import { navItemForPath } from '../lib/nav-groups';
+
+/**
+ * hero 左侧的频道标记:图标卡片 + 频道名。
+ *
+ * 按当前路径回查频道表。路径不在表里(例如 /generations/:id 这类详情页)时
+ * 整块不渲染——与其显示一个错的频道,不如不显示。
+ */
+function HeroMark() {
+  const { pathname } = useLocation();
+  const channel = navItemForPath(ALL_CHANNELS, pathname);
+  if (!channel) return null;
+  const Icon = channel.icon;
+  return (
+    <span className="v2-hero__mark" aria-hidden="true">
+      <Icon size={21} strokeWidth={1.9} />
+    </span>
+  );
+}
 
 /**
  * v2 设计原语：页面级构图的共享件。
  * 视觉与 DashboardPage 试点完全一致（同一套 .v2-* CSS），供全站页面复用。
  */
 
+/**
+ * 页面 hero。
+ *
+ * mark 取代了原来的 index="01".."10" 幽影巨号:那是十处硬编码序号,靠人工与
+ * 侧边栏顺序对齐,导航一改就指错位置。现在由 <HeroMark /> 按当前路径回查导航
+ * 定义,图标与频道名都来自 AppShell 那一张表,不再需要每页维护一个字符串。
+ */
 export function V2Hero({
-  index,
   status,
   title,
   description,
   actions,
 }: {
-  /** 幽影巨号（页面序号，如 "01"）；不传则不显示 */
-  index?: string;
   /** 状态行（绿点 + 项目/系统状态），如 "去眼袋项目 · 系统正常" */
   status: ReactNode;
   title: ReactNode;
@@ -22,11 +47,15 @@ export function V2Hero({
 }) {
   return (
     <section className="v2-hero">
-      {index && <span className="v2-hero__ghost">{index}</span>}
       <div className="v2-hero__text">
         <div className="v2-hero__status"><i />{status}</div>
-        <h1>{title}</h1>
-        {description && <p>{description}</p>}
+        <div className="v2-hero__headline">
+          <HeroMark />
+          <div>
+            <h1>{title}</h1>
+            {description && <p>{description}</p>}
+          </div>
+        </div>
       </div>
       {actions && <div className="v2-hero__actions">{actions}</div>}
     </section>

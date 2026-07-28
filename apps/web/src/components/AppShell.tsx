@@ -1,56 +1,17 @@
-import {
-  Bell,
-  BookOpenText,
-  Boxes,
-  ChevronDown,
-  FileClock,
-  FlaskConical,
-  Gauge,
-  LayoutDashboard,
-  LogOut,
-  Menu,
-  Microscope,
-  ScrollText,
-  Settings,
-  Sparkles,
-  UsersRound,
-  X,
-} from "lucide-react";
+import { Bell, ChevronDown, Gauge, LogOut, Menu, Settings, Sparkles, X } from "lucide-react";
 import { useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "./AuthContext";
 import { EditionSwitch } from "./EditionSwitch";
-import { groupNavItems, visibleNavItems, type NavGroupId } from "../lib/nav-groups";
+import { CHANNELS, SETTINGS_CHANNEL } from "../lib/channels";
+import { groupNavItems, navItemForPath, visibleNavItems } from "../lib/nav-groups";
 import { ProjectProvider, useProjects } from "./ProjectContext";
 
 /*
-  「极简创作」不在这张表里:它是**版本**,不是频道。放进导航会和知识库、公式版本
-  这些资产入口并列,暗示它是工作台的一个页面;实际点进去是换了整套壳。版本切换
-  移到顶栏 <EditionSwitch />,两个壳同一位置、双向对称。
-
-  每项自报 group(见 lib/nav-groups.ts),不再靠下标切分组。
+  频道表下沉到 lib/channels.ts:页面 hero 也要按当前路径取「图标 + 频道名」,
+  从 AppShell 导出会让 V2.tsx 反向依赖外层壳。
 */
-const navigation: Array<{
-  to: string;
-  label: string;
-  icon: typeof LayoutDashboard;
-  group: NavGroupId;
-  end?: boolean;
-  adminOnly?: boolean;
-}> = [
-  { to: "/", label: "概览", icon: LayoutDashboard, group: "workspace", end: true },
-  { to: "/generate", label: "内容生成", icon: Sparkles, group: "workspace" },
-  // 生成历史是工作台的产出物——「我做过什么」,和概览、内容生成同一组。
-  { to: "/history", label: "生成历史", icon: FileClock, group: "workspace" },
-  { to: "/projects", label: "项目管理", icon: Boxes, group: "assets" },
-  { to: "/knowledge", label: "知识库", icon: BookOpenText, group: "assets" },
-  { to: "/formulas", label: "公式版本", icon: FlaskConical, group: "assets" },
-  { to: "/research", label: "研究与证据", icon: Microscope, group: "assets" },
-  { to: "/team", label: "团队权限", icon: UsersRound, group: "admin", adminOnly: true },
-  // /audit 一直存在(App.tsx 有路由、后端有 audit.read 校验),但此前全站没有任何
-  // 入口指向它,只能手敲 URL。归到管理组补上入口。
-  { to: "/audit", label: "操作审计", icon: ScrollText, group: "admin", adminOnly: true },
-];
+const navigation = CHANNELS;
 
 function ShellContent() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -62,16 +23,11 @@ function ShellContent() {
   const visibleNavigation = visibleNavItems(navigation, user?.role);
   const navSections = groupNavItems(navigation, user?.role);
 
-  const currentNav = [
-    ...visibleNavigation,
-    { to: "/settings", label: "设置", icon: Settings },
-  ]
-    .filter((item) =>
-      item.to === "/"
-        ? location.pathname === "/"
-        : location.pathname.startsWith(item.to),
-    )
-    .at(-1);
+  /*
+    顶栏标题取当前频道。原来是 filter + .at(-1),按表尾序取而非最长前缀——靠
+    「/」恰好排在表首才没出错。navItemForPath 明确按最长匹配,与 hero 同一套逻辑。
+  */
+  const currentNav = navItemForPath([...visibleNavigation, SETTINGS_CHANNEL], location.pathname);
 
   const handleLogout = async () => {
     await logout();

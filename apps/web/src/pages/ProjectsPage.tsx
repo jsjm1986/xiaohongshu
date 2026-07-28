@@ -58,7 +58,6 @@ export function ProjectsPage() {
   return (
     <div className="page">
       <V2Hero
-        index="03"
         status={<>共 {projects.length} 个项目 · 知识与历史相互隔离</>}
         title="项目管理"
         description="每个项目拥有独立的知识库、公式版本与生成历史。"

@@ -234,7 +234,6 @@ export function FormulasPage() {
   return (
     <div className="page formulas-page">
       <V2Hero
-        index="05"
         status={<>{currentProject?.name || "当前项目"} · 当前启用 {versions.find((version) => version.status === "active")?.version || "无"}</>}
         title="公式版本"
         description={`「${currentProject?.name || "当前项目"}」的生产定义、规范边界、待验证推理与行为参数映射。`}
