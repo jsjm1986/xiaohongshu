@@ -138,29 +138,33 @@ const legacyCandidateToMarkdown = (candidate: Candidate) => {
 };
 
 /** Full per-thread audit metadata, shared by the legacy flow and the v1.1 audit appendix. */
-const commentThreadAuditMarkdown = (candidate: Candidate) => candidate.comments.map((item) => [
-  `> 【${item.simulated ? item.simulationLabel || '模拟潜在读者情景' : '历史内容，模拟字段未标注'}】${item.simulated ? '不代表真实评论、消费经历或第三方口碑。' : ''}`,
-  `**评论：${item.question}**`,
-  `> 角色：${commentPersonaLabel(item.personaRole)}；提问方：${commentSpeakerLabel(item.speakerType)}；声明：${commentClaimLabel(item.claimStatus)}；答复身份：${auditAnswerAttribution(item).identity}`,
-  item.threadKind ? `> 互动类型：${commentThreadKindLabel(item.threadKind)}${item.threadKind === 'reader_exchange' && item.replyDisplayName ? `（${item.displayName || '读者A'} → ${item.replyDisplayName}）` : ''}` : '',
-  item.kind || item.answerKind ? `> 节点类型：提问=${item.kind ? commentNodeKindLabel(item.kind) : '问题（默认）'}；答复=${item.answerKind ? commentNodeKindLabel(item.answerKind) : '回答（默认）'}` : '',
-  item.boundary ? `> 答复边界：${item.boundary}` : '',
-  item.evidenceIds?.length ? `> 证据引用：${item.evidenceIds.join('、')}` : '',
-  item.surfaceRoleCard ? `> 可见人物：${item.surfaceRoleCard.displayRole}；与楼主关系=${item.surfaceRoleCard.relationToHost}；身份线索=${item.surfaceRoleCard.identityCue}；处境线索=${item.surfaceRoleCard.situationCue}；说话习惯=${item.surfaceRoleCard.speechPattern}；可选语域=${item.surfaceRoleCard.lexicalCues?.join('、') || '普通口语'}；接话钩子=${item.surfaceRoleCard.interactionHook || '按上一句里的具体细节自然接话'}；知识边界=${item.surfaceRoleCard.knowledgePosition}` : '',
-  item.roleCard ? `> 后台决策状态：阶段=${item.roleCard.stage}；已有知识=${item.roleCard.knowledge.join('、') || '未标注'}；现实约束=${item.roleCard.constraints.join('、') || '无'}；决策任务=${item.roleCard.decisionTask}；证据态度=${commentEvidenceStanceLabel(item.roleCard.evidenceStance)}` : '',
-  item.densityProxy ? `> 信息密度代理：1个主缺口＋${item.densityProxy.auxiliaryDimensionCount}个辅助维度；${item.densityProxy.constraintCount}个约束；短问软目标约${item.densityProxy.questionTargetChars}字（非效果分）` : '',
-  `${auditAnswerAttribution(item).label}：${item.followUps?.length ? item.answer.split(/\n\n追问：/u)[0] || item.answer : item.answer}`,
-  item.replyPlan ? `> 后台答复库存（按人物与关系择需使用，不要求全部写出）：直接回答=${item.replyPlan.directAnswer}；条件=${item.replyPlan.condition}；边界=${item.replyPlan.boundary}；未知=${item.replyPlan.unknown}；下一问=${item.replyPlan.nextQuestion}` : '',
-  item.discoveryPlan ? `> 发现式路径：线索=${item.discoveryPlan.cue}；一步推断=${item.discoveryPlan.inferencePrompt}；同线程揭示=${item.discoveryPlan.reveal}；自检=${item.discoveryPlan.selfCheck}；边界=${item.discoveryPlan.boundary}；难度=${item.discoveryPlan.difficulty === 'low' ? '低' : '中等'}` : '',
-  item.conversationPlan ? `> 对话拓扑：${item.conversationPlan.topology}；目标接话=${item.conversationPlan.targetFollowUps}；延展=${item.conversationPlan.extensionMove}` : '',
-  ...(item.followUps || []).map((followUp) => [
-    `接话：${followUp.question}\n\n回复：${followUp.answer}`,
-    followUp.kind ? `> 接话节点类型：${commentNodeKindLabel(followUp.kind)}` : '',
-    followUp.boundary ? `> 接话边界：${followUp.boundary}` : '',
-    followUp.evidenceIds?.length ? `> 接话证据引用：${followUp.evidenceIds.join('、')}` : '',
-  ].filter(Boolean).join('\n\n')),
-  item.nextStep ? `下一步：${item.nextStep}` : '',
-].filter(Boolean).join('\n\n')).join('\n\n');
+const commentThreadAuditMarkdown = (candidate: Candidate) => candidate.comments.map((item) => {
+  const isOrganicReaction = commentThreadKindOf(item) === 'organic_reaction';
+  const attribution = auditAnswerAttribution(item);
+  return [
+    `> 【${item.simulated ? item.simulationLabel || '模拟潜在读者情景' : '历史内容，模拟字段未标注'}】${item.simulated ? '不代表真实评论、消费经历或第三方口碑。' : ''}`,
+    `**评论：${item.question}**`,
+    `> 角色：${commentPersonaLabel(item.personaRole)}；提问方：${commentSpeakerLabel(item.speakerType)}；声明：${commentClaimLabel(item.claimStatus)}；答复身份：${attribution.identity}`,
+    item.threadKind ? `> 互动类型：${commentThreadKindLabel(item.threadKind)}${item.threadKind === 'reader_exchange' && item.replyDisplayName ? `（${item.displayName || '读者A'} → ${item.replyDisplayName}）` : ''}` : '',
+    item.kind || item.answerKind ? `> 节点类型：提问=${item.kind ? commentNodeKindLabel(item.kind) : '问题（默认）'}；答复=${item.answerKind ? commentNodeKindLabel(item.answerKind) : '回答（默认）'}` : '',
+    item.boundary ? `> 答复边界：${item.boundary}` : '',
+    item.evidenceIds?.length ? `> 证据引用：${item.evidenceIds.join('、')}` : '',
+    item.surfaceRoleCard ? `> 可见人物：${item.surfaceRoleCard.displayRole}；与楼主关系=${item.surfaceRoleCard.relationToHost}；身份线索=${item.surfaceRoleCard.identityCue}；处境线索=${item.surfaceRoleCard.situationCue}；说话习惯=${item.surfaceRoleCard.speechPattern}；可选语域=${item.surfaceRoleCard.lexicalCues?.join('、') || '普通口语'}；接话钩子=${item.surfaceRoleCard.interactionHook || '按上一句里的具体细节自然接话'}；知识边界=${item.surfaceRoleCard.knowledgePosition}` : '',
+    item.roleCard ? `> 后台决策状态：阶段=${item.roleCard.stage}；已有知识=${item.roleCard.knowledge.join('、') || '未标注'}；现实约束=${item.roleCard.constraints.join('、') || '无'}；决策任务=${item.roleCard.decisionTask}；证据态度=${commentEvidenceStanceLabel(item.roleCard.evidenceStance)}` : '',
+    item.densityProxy ? `> 信息密度代理：1个主缺口＋${item.densityProxy.auxiliaryDimensionCount}个辅助维度；${item.densityProxy.constraintCount}个约束；短问软目标约${item.densityProxy.questionTargetChars}字（非效果分）` : '',
+    isOrganicReaction ? '' : `${attribution.label}：${item.followUps?.length ? item.answer.split(/\n\n追问：/u)[0] || item.answer : item.answer}`,
+    item.replyPlan ? `> 后台答复库存（按人物与关系择需使用，不要求全部写出）：直接回答=${item.replyPlan.directAnswer}；条件=${item.replyPlan.condition}；边界=${item.replyPlan.boundary}；未知=${item.replyPlan.unknown}；下一问=${item.replyPlan.nextQuestion}` : '',
+    item.discoveryPlan ? `> 发现式路径：线索=${item.discoveryPlan.cue}；一步推断=${item.discoveryPlan.inferencePrompt}；同线程揭示=${item.discoveryPlan.reveal}；自检=${item.discoveryPlan.selfCheck}；边界=${item.discoveryPlan.boundary}；难度=${item.discoveryPlan.difficulty === 'low' ? '低' : '中等'}` : '',
+    item.conversationPlan ? `> 对话拓扑：${item.conversationPlan.topology}；目标接话=${item.conversationPlan.targetFollowUps}；延展=${item.conversationPlan.extensionMove}` : '',
+    ...(isOrganicReaction ? [] : item.followUps || []).map((followUp) => [
+      `接话：${followUp.question}\n\n回复：${followUp.answer}`,
+      followUp.kind ? `> 接话节点类型：${commentNodeKindLabel(followUp.kind)}` : '',
+      followUp.boundary ? `> 接话边界：${followUp.boundary}` : '',
+      followUp.evidenceIds?.length ? `> 接话证据引用：${followUp.evidenceIds.join('、')}` : '',
+    ].filter(Boolean).join('\n\n')),
+    item.nextStep ? `下一步：${item.nextStep}` : '',
+  ].filter(Boolean).join('\n\n');
+}).join('\n\n');
 
 const imagePlanMarkdown = (candidate: Candidate) => {
   const imagePlan = candidate.imagePlan;
