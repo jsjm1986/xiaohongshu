@@ -62,13 +62,20 @@ export const postingIdentityText = (value?: string): string => {
  * 身份**,不表示谁在说话——这一点 comment-view.answererLabelFor 与
  * NoteComments.replyIdentity 的注释都写过,附录只是没跟上。
  *
- * organic_reaction 的 answer 按设计恒空,走不到这里;threadKind 缺失的历史包按
- * org_answer 兜底,与其余判定同一套口径。
+ * organic_reaction 的 answer 按设计恒空;历史脏 answer 也只能标成不适用,不能被
+ * 重新署成机构发言。threadKind 缺失的历史包按 org_answer 兜底。
  */
 export const auditAnswerAttribution = (
   thread: { threadKind?: string; postingIdentity?: string; replyDisplayName?: string },
 ): { label: string; identity: string } => {
-  if (commentThreadKindOf(thread) === "reader_exchange") {
+  const kind = commentThreadKindOf(thread);
+  if (kind === "organic_reaction") {
+    return {
+      label: "漂浮短反应",
+      identity: "不适用（漂浮短反应，机构不出现）",
+    };
+  }
+  if (kind === "reader_exchange") {
     return {
       label: thread.replyDisplayName?.trim()
         ? `模拟读者接话（${thread.replyDisplayName.trim()}）`

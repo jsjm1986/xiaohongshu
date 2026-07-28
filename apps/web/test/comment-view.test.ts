@@ -173,6 +173,23 @@ test("organic_reaction 不显示回答方标签（按设计无机构答复）", 
   assert.deepEqual(view.identitySummary, []);
 });
 
+test("organic_reaction 的历史脏答复与追问在阅读投影中被丢弃", () => {
+  const view = commentSectionView([
+    {
+      id: "t-dirty",
+      question: "蹲一个",
+      answer: "这句不该出现",
+      threadKind: "organic_reaction",
+      postingIdentity: "publisher",
+      simulated: true,
+      followUps: [{ question: "脏追问", answer: "脏回复" }],
+    },
+  ]);
+  assert.ok(view);
+  assert.equal(view.rows[0]!.answer, "");
+  assert.deepEqual(view.rows[0]!.followUps, []);
+});
+
 test("threadKind 缺失的历史包按 org_answer 处理，保持旧行为", () => {
   const view = commentSectionView([
     { id: "t-1", question: "问", answer: "答", postingIdentity: "staff", simulated: true, followUps: [] },

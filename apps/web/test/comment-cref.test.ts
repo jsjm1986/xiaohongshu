@@ -352,12 +352,13 @@ test("candidate markdown formats reader-exchange and organic-reaction threads by
       },
       {
         question: "蹲一个",
-        answer: "",
+        answer: "历史脏答复不应导出",
         threadKind: "organic_reaction",
         displayName: "半糖去冰",
         simulated: true,
         simulationLabel: "模拟潜在读者情景",
         postingIdentity: "publisher",
+        followUps: [{ question: "历史脏追问", answer: "历史脏回复", evidenceIds: [] }],
       },
       {
         question: "大概多少钱？",
@@ -376,6 +377,7 @@ test("candidate markdown formats reader-exchange and organic-reaction threads by
   // T3 漂浮短反应:轻量单行,机构不出现。
   assert.match(markdown, /漂浮反应：半糖去冰：蹲一个/u);
   assert.match(markdown, /无需机构回复/u);
+  assert.doesNotMatch(markdown, /历史脏答复|历史脏追问|历史脏回复/u);
   // 缺省 kind 的旧线程保持机构问答格式不变。
   assert.match(markdown, /- 回复：以当期确认为准。/u);
   assert.match(markdown, /可追责答复身份：staff/u);

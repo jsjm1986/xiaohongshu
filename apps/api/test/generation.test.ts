@@ -813,7 +813,7 @@ test('formula registry, settings and deterministic generation form one working f
   assert.ok(advancedJob.candidates.every((item: any) => item.productionArtifacts?.imageBrief?.status === 'disabled'));
   assert.ok(advancedJob.candidates.every((item: any) => item.imageBriefKind === 'disabled'));
 
-  const keyValue = 'sk-test-value-that-must-not-be-stored-plainly';
+  const keyValue = ['sk', 'test-placeholder-key-for-encryption-check-0001'].join('-');
   const byok = await request('/api/settings', {
     method: 'PATCH',
     body: JSON.stringify({

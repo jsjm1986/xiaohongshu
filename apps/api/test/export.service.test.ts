@@ -257,6 +257,28 @@ test('keeps historical packages (no v1.1 fields) byte-compatible with the previo
   assert.match(emptyMarkdown, /本篇未展开缺口（规划期投影）：无；所有选中缺口已由评论线程或正文承担。/u);
 });
 
+test('organic_reaction exports never leak historical dirty answers or follow-ups', async () => {
+  const dirty = structuredClone(contentPackage) as any;
+  dirty.schemaVersion = '1.1';
+  Object.assign(dirty.content.Cref.threads[0], {
+    threadKind: 'organic_reaction',
+    question: '蹲一个',
+    answer: '历史脏答复不应导出',
+    postingIdentity: 'publisher',
+    followUps: [{ question: '历史脏追问', answer: '历史脏回复' }],
+  });
+
+  const service = new ExportService();
+  const markdown = (await service.exportPackage(dirty, 'markdown')).toString('utf8');
+  assert.match(markdown, /漂浮反应：蹲一个/u);
+  assert.match(markdown, /答复身份：不适用（漂浮短反应，机构不出现）/u);
+  assert.doesNotMatch(markdown, /历史脏答复|历史脏追问|历史脏回复/u);
+
+  const json = JSON.parse((await service.exportPackage(dirty, 'json')).toString('utf8'));
+  assert.equal(json.content.Cref.threads[0].answer, '');
+  assert.deepEqual(json.content.Cref.threads[0].followUps, []);
+});
+
 test('exports a complete package as Markdown and deterministic JSON', async () => {
   const service = new ExportService();
   const markdown = await service.exportPackage(contentPackage, 'markdown');

@@ -19,13 +19,10 @@ test('threadKind 缺失的历史包按 org_answer 处理', () => {
   });
 });
 
-// 实测库内 organic_reaction 的 answer 是机构口径(「不承诺录取结果…」),
-// 恰恰是在声明合规边界,少了「作者」标就等于那句话没人署名。
-test('organic_reaction 的答复是机构发言,同样带作者标', () => {
-  assert.deepEqual(replyIdentity('organic_reaction', '稳行驾校'), {
-    name: '稳行驾校',
-    badge: '作者',
-  });
+// Core 合同规定 T3 只有一条读者短反应、answer 恒空、机构不出现。历史脏数据即使
+// 带了 answer 也不能靠署「作者」把错误形态合法化。
+test('organic_reaction 不产生任何答复身份', () => {
+  assert.equal(replyIdentity('organic_reaction', '稳行驾校'), undefined);
 });
 
 test('reader_exchange 是唯一署名读者的线程,且永不带作者标', () => {
@@ -59,7 +56,7 @@ test('署名归属只由 threadKind 决定,与 answererLabel 的措辞无关', (
   // replyIdentity 的签名里没有 answererLabel,措辞怎么改都到不了这里。
   assert.equal(replyIdentity('reader_exchange', '稳行驾校').badge, undefined);
   assert.equal(replyIdentity('org_answer', '稳行驾校').badge, '作者');
-  assert.equal(replyIdentity('organic_reaction', '稳行驾校').badge, '作者');
+  assert.equal(replyIdentity('organic_reaction', '稳行驾校'), undefined);
 });
 
 // 互动条「评论 N」与评论区「共 N 条评论」必须同源:同一张卡两个数字打架时,

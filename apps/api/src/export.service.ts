@@ -154,7 +154,7 @@ export class ExportService {
     if (validation.valid !== true) {
       throw new BadRequestException('候选未通过事实、证据与信息闭合校验，禁止导出；请先修复错误或重新生成');
     }
-    return pkg;
+    return sanitizeOrganicReactionThreads(pkg);
   }
 
   private async toDocx(pkg: JsonObject, options: ExportOptions): Promise<Buffer> {
@@ -377,6 +377,8 @@ function appendCommentThreadAudit(lines: string[], threads: JsonObject[], dialog
     const density = asObject(metadata('densityProxy'));
     const replyPlan = asObject(metadata('replyPlan'));
     const discoveryPlan = asObject(metadata('discoveryPlan'));
+    const isOrganicReaction = text(thread.threadKind) === 'organic_reaction';
+    const attribution = auditAnswerAttribution(thread);
     lines.push(
       `### 模拟问答 ${index + 1}`,
       '',
@@ -386,8 +388,8 @@ function appendCommentThreadAudit(lines: string[], threads: JsonObject[], dialog
       `- 声明状态：${text(metadata('claimStatus')) || '未标注'}`,
       `- 回复关系：${text(metadata('replyTo')) || '根线程'} ｜ 深度：${text(metadata('threadDepth')) || '0'}`,
       `- 提问：${text(thread.question) || '未提供'}`,
-      `- ${auditAnswerAttribution(thread).label}：${text(thread.answer) || '未提供'}`,
-      `- 可追责答复身份：${auditAnswerAttribution(thread).identity}`,
+      isOrganicReaction ? '' : `- ${attribution.label}：${text(thread.answer) || '未提供'}`,
+      `- ${isOrganicReaction ? '答复身份' : '可追责答复身份'}：${attribution.identity}`,
     );
     // v1.1 node metadata; each line renders only when the field exists, so
     // historical packages keep their previous output verbatim.
@@ -414,7 +416,7 @@ function appendCommentThreadAudit(lines: string[], threads: JsonObject[], dialog
     if (Object.keys(discoveryPlan).length) lines.push(
       `- 发现式路径：线索=${text(discoveryPlan.cue)}；一步推断=${text(discoveryPlan.inferencePrompt)}；同线程揭示=${text(discoveryPlan.reveal)}；自检=${text(discoveryPlan.selfCheck)}；边界=${text(discoveryPlan.boundary)}；难度=${text(discoveryPlan.difficulty)}`,
     );
-    const followUps = objectArray(thread.followUps);
+    const followUps = isOrganicReaction ? [] : objectArray(thread.followUps);
     for (const followUp of followUps) {
       lines.push(
         `  - 追问：${text(followUp.question) || '未提供'}`,
@@ -871,7 +873,14 @@ function commentReplyOrgName(thread: JsonObject): string {
  * 正确昵称;postingIdentity 是规划层按线程统一赋的预留身份,不表示谁在说话。
  */
 function auditAnswerAttribution(thread: JsonObject): { label: string; identity: string } {
-  if (text(thread.threadKind) === 'reader_exchange') {
+  const kind = text(thread.threadKind);
+  if (kind === 'organic_reaction') {
+    return {
+      label: '漂浮短反应',
+      identity: '不适用（漂浮短反应，机构不出现）',
+    };
+  }
+  if (kind === 'reader_exchange') {
     const nickname = text(thread.replyDisplayName).trim();
     return {
       label: nickname ? `模拟读者接话（${nickname}）` : '模拟读者接话',
@@ -881,6 +890,29 @@ function auditAnswerAttribution(thread: JsonObject): { label: string; identity: 
   return {
     label: '回复',
     identity: postingIdentityText(thread.postingIdentity) || '未标注',
+  };
+}
+
+/**
+ * Core 的 T3 合同只允许单条短反应。历史脏包即使携带 answer/followUps，也不能
+ * 通过任何导出格式重新发布；在验证后统一清洗，确保 JSON 与 Markdown/DOCX/PDF 同源。
+ */
+function sanitizeOrganicReactionThreads(pkg: JsonObject): JsonObject {
+  const content = asObject(pkg.content);
+  const cref = asObject(content.Cref);
+  const threads = objectArray(cref.threads);
+  if (!threads.some((thread) => text(thread.threadKind) === 'organic_reaction')) return pkg;
+  return {
+    ...pkg,
+    content: {
+      ...content,
+      Cref: {
+        ...cref,
+        threads: threads.map((thread) => text(thread.threadKind) === 'organic_reaction'
+          ? { ...thread, answer: '', followUps: [] }
+          : thread),
+      },
+    },
   };
 }
 
