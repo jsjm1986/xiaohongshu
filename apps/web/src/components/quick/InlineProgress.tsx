@@ -9,6 +9,18 @@ interface Props {
   progress?: number;
   /** 「正在生成」/「正在修改」 */
   label?: string;
+  /**
+   * 阶段文案生成器。默认用首次生成那套(progressStageText);修改任务传
+   * revisionStageText——它的阶段完全不同,套用会说谎。
+   */
+  stageText?: (progress?: number) => string;
+  /**
+   * 是否显示「通常 X–Y 分钟」。默认 true(既有调用方行为不变)。
+   *
+   * 修改任务传 false:那个区间来自线上 55 篇首次生成实测,而 revise 目前只有 2 个
+   * 样本,不足以定区间。编一个比不给更糟——等库里积累够样本再补。
+   */
+  showEta?: boolean;
 }
 
 /**
@@ -18,7 +30,7 @@ interface Props {
  * 后半句该说清代价(重复点会多扣一次额度)。实测单篇平均 15 分钟、progress 只有
  * 5 个离散值,所以补一个自己走秒的已等待时长和经验区间,让"没动"可被解释。
  */
-export function InlineProgress({ active, progress, label = '正在生成' }: Props) {
+export function InlineProgress({ active, progress, label = '正在生成', stageText = progressStageText, showEta = true }: Props) {
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -36,10 +48,11 @@ export function InlineProgress({ active, progress, label = '正在生成' }: Pro
   return (
     <div className="qc-progress" role="status">
       <RefreshCw size={15} className="spin" />
-      <span>{label}：{progressStageText(progress)}…</span>
+      <span>{label}：{stageText(progress)}…</span>
       <small>
         {progress !== undefined ? `${progress}% · ` : ''}
-        已等待 {formatDuration(elapsedSeconds)} · 通常 {Math.round(low / 60)}–{Math.round(high / 60)} 分钟
+        已等待 {formatDuration(elapsedSeconds)}
+        {showEta ? ` · 通常 ${Math.round(low / 60)}–${Math.round(high / 60)} 分钟` : ''}
       </small>
       <i className="qc-progress__track"><b style={{ width: `${progress ?? 0}%`, animation: 'none' }} /></i>
       {elapsedSeconds >= LONG_WAIT_SECONDS && (

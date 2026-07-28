@@ -171,6 +171,42 @@ test('reader 响应不夹带完整版的重字段', async () => {
   assert.equal(JSON.stringify(body).includes('xxxxxxxxxx'), false);
 });
 
+/**
+ * 阅读投影必须带 activeRevision。
+ *
+ * 阅读页的 3 秒轮询受「在跑」门控,而改稿期间 job.status 保持 completed;这个字段
+ * 是它唯一的判据。缺了它的表现是「点了修改没反应、稍后自己变了」。
+ *
+ * heartbeat_at 必须写,而且必须是 toISOString() 格式:reclaimStale 按
+ * 「running 且 heartbeat 为空或早于 deadline」判孤儿,回收定时器 15 秒一拍,被判中
+ * 就会 requeue 并真的进 processRevision,测试偶发不稳。
+ *
+ * 那个 deadline 由 `new Date(...).toISOString()` 生成(job-claim.ts),比较是纯字符串
+ * 比较。SQLite 的 datetime('now') 是 '2026-07-27 20:34:19'(空格分隔、无毫秒无 Z),
+ * 而 ' ' < 'T',于是它恒小于任何同日 deadline——写 datetime('now') 等于没写。
+ * 与 job-claim.test.ts 的 seedRevisionTask 同口径,用 new Date().toISOString()。
+ */
+test('reader 响应带 activeRevision:改稿期间 status 仍是 completed,轮询靠它', async () => {
+  const db = app.get(DatabaseService);
+  const admin = db.prepare("SELECT id FROM users WHERE username='admin'").get() as { id: string };
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO revision_tasks
+       (id, job_id, package_id, candidate_id, instruction, status, progress, attempt_count,
+        rerun_channels_json, created_by, created_at, updated_at, heartbeat_at)
+     VALUES ('rev-reader-1', ?, ?, ?, '标题再口语化', 'running', 40, 1, '[]', ?, ?, ?, ?)`,
+  ).run(jobId, `${jobId}-pkg`, `${jobId}-cand`, admin.id, now, now, now);
+  try {
+    const { body } = await request(`/api/generations/${jobId}/reader`);
+    assert.equal(body.status, 'completed', '改稿不改 job.status');
+    assert.equal(body.activeRevision.id, 'rev-reader-1');
+    assert.equal(body.activeRevision.status, 'running');
+    assert.equal(body.activeRevision.candidateId, `${jobId}-cand`);
+  } finally {
+    db.prepare("DELETE FROM revision_tasks WHERE id='rev-reader-1'").run();
+  }
+});
+
 test('SaaS 会话能读 reader:白名单是 /api/generations 前缀,子路径同样放行', async () => {
   const { response, body } = await request(`/api/generations/${jobId}/reader`, {}, saasCookie, '');
   assert.equal(response.status, 200, `SaaS 实际 ${response.status}: ${JSON.stringify(body).slice(0, 200)}`);

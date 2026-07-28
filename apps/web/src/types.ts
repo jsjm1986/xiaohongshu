@@ -1039,6 +1039,11 @@ export interface ReaderJob {
   createdAt?: string;
   completedAt?: string;
   error?: string;
+  /**
+   * 修改任务。改稿期间 status 仍是 completed,所以「有没有在改」由这个字段回答;
+   * 无活跃任务时后端回落成最近一条(含终态),有值 ≠ 正在改,要看 status。
+   */
+  activeRevision?: RevisionTask;
   candidates: ReaderCandidate[];
 }
 
@@ -1585,6 +1590,28 @@ export interface ResearchOverview {
   releases: ResearchReleaseManifest[];
 }
 
+/**
+ * 一次修改任务(revise)。异步化后它与 job 分离:job.status 在改稿期间保持
+ * completed(前端多处按它判定能否查看产出),「有没有在改」由这个对象回答。
+ */
+export interface RevisionTask {
+  id: string;
+  jobId: string;
+  candidateId: string;
+  instruction: string;
+  status: "queued" | "running" | "completed" | "failed";
+  progress: number;
+  attemptCount: number;
+  /** 后端已写成中文用户文案,直接显示,不要二次加工 */
+  error: string | null;
+  /** 实际重跑的通道,如 ["N.body","Cref"];用于完成提示 */
+  rerunChannels: string[];
+  resultPackageId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+
 export interface GenerationJob {
   id: string;
   projectId: string;
@@ -1602,6 +1629,14 @@ export interface GenerationJob {
   /** Total jobs currently queued server-wide, for "第 N/M 位". */
   queueLength?: number;
   candidates?: Candidate[];
+  /**
+   * 最近一次修改任务。进行中时前端显示进度;终态时用于显示「上次修改完成/失败」。
+   *
+   * 名字名不副实:后端在没有活跃任务时会回落成「最近一条」,终态任务也从这个键
+   * 返回。所以有值 ≠ 正在改,必须看 status(用 isRevisionInFlight)。
+   * 另外 job.status 在改稿期间仍是 completed——不要用它判断有没有在改。
+   */
+  activeRevision?: RevisionTask;
   seed?: string;
   formulaVersion?: string;
   createdAt?: string;

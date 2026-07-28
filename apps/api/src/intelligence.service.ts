@@ -40,6 +40,7 @@ import { AuditService } from './audit.service.js';
 import { APP_OPTIONS, type ApiOptions } from './config.js';
 import { DatabaseService } from './database.service.js';
 import type { SessionPrincipal } from './models.js';
+import { AnalysisGatewayError, classifyModelFailure, modelFailureMessage } from './model-failure.js';
 import { ResourceService } from './resource.service.js';
 import { SettingsService, type ResolvedProviderSettings } from './settings.service.js';
 import { nowIso, parseJson, requireObject, requireString } from './utils.js';
@@ -118,11 +119,14 @@ export interface PreparedPlanningContext {
   imageContext: Array<Record<string, unknown>>;
 }
 
-export class AnalysisGatewayError extends Error {
-  constructor(message: string, readonly status?: number) {
-    super(message);
-  }
-}
+/*
+ * AnalysisGatewayError 的定义已搬到 model-failure.ts,这里原地重新导出。
+ *
+ * 原因是循环 import:分类判据(classifyModelFailure)要 instanceof 这个类,而本文件
+ * 又要用那个函数,于是叶子工具模块反向 import 了这个拖着 sharp + agent-core + Nest 的
+ * service。重新导出让外部的 import 点(测试与其它 service)一个都不用改。
+ */
+export { AnalysisGatewayError } from './model-failure.js';
 
 /**
  * 把分析失败翻译成用户看得懂、且能行动的错误。
@@ -140,9 +144,7 @@ export class AnalysisGatewayError extends Error {
 export function analysisFailureException(error: unknown): HttpException {
   const raw = error instanceof Error ? error.message : String(error);
   if (error instanceof HttpException) return error;
-  if (!(error instanceof AnalysisGatewayError)) {
-    return new InternalServerErrorException(`分析失败：${raw}`);
-  }
+  const kind = classifyModelFailure(error);
   /*
    * 技术原文挂在 cause 上,不进用户可见文本。
    *
@@ -153,25 +155,9 @@ export function analysisFailureException(error: unknown): HttpException {
     (exception as { cause?: unknown }).cause = error;
     return exception;
   };
-  const status = error.status;
-  // 5xx / 429 / 网络层失败:不是用户的问题,重试即可
-  if (status === undefined || status === 429 || status >= 500) {
-    return withCause(new ServiceUnavailableException(
-      '模型服务暂时不可用，分析没有完成。已退还本次额度，请稍后重试；若持续失败请联系客服。',
-    ));
-  }
-  if (status === 401 || status === 403) {
-    return withCause(new ServiceUnavailableException(
-      '模型服务凭据异常，分析没有完成。已退还本次额度，请联系客服处理。',
-    ));
-  }
-  // 模型返回了但内容不合契约(缺模块、JSON 坏、缺口为空):重试一次多半能好
-  if (/omitted required|invalid JSON|empty planning resources/i.test(raw)) {
-    return withCause(new ServiceUnavailableException(
-      '模型这次返回的结果不完整，分析没有完成。已退还本次额度，直接重试一次通常就好了。',
-    ));
-  }
-  return withCause(new InternalServerErrorException(`分析失败：${raw}`));
+  const message = modelFailureMessage(kind, '分析', raw);
+  if (kind === 'other') return withCause(new InternalServerErrorException(message));
+  return withCause(new ServiceUnavailableException(message));
 }
 
 @Injectable()

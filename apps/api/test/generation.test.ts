@@ -38,6 +38,17 @@ async function waitForJob(id: string) {
   return job;
 }
 
+/** 等改稿任务到终态。执行是异步的,受理返回时它还在排队。 */
+async function waitForRevisionTask(jobId: string, timeoutMs = 30_000): Promise<any> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const revision = (await request(`/api/generations/${jobId}`)).body.activeRevision;
+    if (revision && ['completed', 'failed'].includes(revision.status)) return revision;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+  }
+  throw new Error('改稿任务没有在超时前到达终态');
+}
+
 function assertVersionCapabilityAudit(formulaRow: any): void {
   assert.equal(formulaRow.auditScope.kind, 'version-default-capabilities');
   assert.equal(formulaRow.auditScope.formulaVersionId, formulaRow.id);
@@ -685,12 +696,30 @@ test('formula registry, settings and deterministic generation form one working f
     method: 'POST',
     body: JSON.stringify({ candidateId: job.candidates[0].id, instruction: '正文更克制，保留标题并复查评论区' }),
   });
+  // revise 已改为入队即返回:受理时模型还没跑,所以这个响应体断言的是「受理成功且
+  // 有活跃修改任务」。改后内容(revisions.length===1)要等执行落地,见下面的等待。
   assert.equal(revised.response.status, 201);
+  assert.ok(revised.body.activeRevision, '受理后投影里要有 activeRevision');
+  assert.equal(revised.body.activeRevision.status, 'queued');
+  assert.equal(revised.body.activeRevision.candidateId, job.candidates[0].id);
+  // job 在改稿期间必须保持 completed,候选仍是旧版本(用户还能看自己的稿子)
+  assert.equal(revised.body.status, 'completed');
   assert.equal(revised.body.candidates.length, 3);
   assert.equal(JSON.stringify(revised.body.candidates[1]), beforeSecond);
   assert.equal(revised.body.candidates[0].title, job.candidates[0].title);
-  assert.equal(revised.body.candidates[0].revisions.length, 1);
-  assert.equal(revised.body.candidates[0].validation?.valid, true, JSON.stringify(revised.body.candidates[0].validation));
+  assert.equal(revised.body.candidates[0].revisions.length, 0, '受理这一刻还没有改稿记录');
+
+  // 等执行落地,再断言改后内容:一条改稿记录、其它候选一个字节没动。
+  const settledRevision = await waitForRevisionTask(jobId);
+  assert.equal(settledRevision.status, 'completed', `改稿失败：${settledRevision.error}`);
+  const afterRevision = await request(`/api/generations/${jobId}`);
+  assert.equal(afterRevision.body.status, 'completed');
+  assert.equal(afterRevision.body.candidates.length, 3);
+  assert.equal(JSON.stringify(afterRevision.body.candidates[1]), beforeSecond, '别的候选不该被改稿动到');
+  const revisedCandidate = afterRevision.body.candidates.find((item: any) => item.packageId === settledRevision.resultPackageId);
+  assert.ok(revisedCandidate, '结果包应出现在候选里');
+  assert.equal(revisedCandidate.revisions.length, 1);
+  assert.equal(revisedCandidate.validation?.valid, true, JSON.stringify(revisedCandidate.validation));
 
   const exportCandidateId = job.candidates[1].id;
   const markdown = await request(`/api/generations/${jobId}/candidates/${encodeURIComponent(exportCandidateId)}/export?format=markdown`);

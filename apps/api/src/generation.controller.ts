@@ -71,13 +71,17 @@ export class GenerationController {
     return this.generations.restore(id);
   }
 
+  /**
+   * 受理一次修改请求。入队即返回,不同步等模型——改稿耗时是分钟级,公网下会撞上
+   * Cloudflare 约 100 秒超时。执行由 RevisionService 的队列负责。
+   */
   @Post(':id/revise')
-  async revise(@Req() request: Request, @Param('id') id: string, @Body() rawBody: unknown) {
+  revise(@Req() request: Request, @Param('id') id: string, @Body() rawBody: unknown) {
     const body = requireObject(rawBody);
     const job = this.generations.jobRow(id);
     this.assert(request, job.project_id, 'generation.chat');
     if (typeof body.candidateId !== 'string' || typeof body.instruction !== 'string') throw new BadRequestException('candidateId 和 instruction 不能为空');
-    return this.generations.revise(id, body.candidateId, body.instruction, this.principal(request));
+    return this.generations.enqueueRevision(id, body.candidateId, body.instruction, this.principal(request));
   }
 
   private assert(rawRequest: Request, projectId: string, permission: Permission): void {

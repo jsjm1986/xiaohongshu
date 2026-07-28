@@ -1,4 +1,5 @@
 import type { Candidate, CommentThread, GenerateInput, GenerationJob, Project, TopicOpportunity } from '../types';
+import { isRevisionInFlight } from './revision-progress';
 import { buildSimpleGenerateInput, resolveSimpleGenerationSettings } from './simple-generation';
 import type { SimpleSettingOverrides } from './simple-generation';
 
@@ -312,8 +313,25 @@ interface ReviseDeps {
   api: ApiClient;
 }
 
-// 按意见局部重生成:后端 revise 目前同步返回更新后的 job,仍沿用与
-// autoApproveAndGenerate 相同的轮询模式兜底(若未来改为异步任务,调用方不用改)。
+/**
+ * 按意见局部重生成。
+ *
+ * revise 已改为异步任务:POST 立即返回,执行在服务端队列里。轮询依据是
+ * job.activeRevision 而不是 job.status——改稿期间 job.status 保持 completed
+ * (前端多处按它判定能否查看产出),用它判断会一次都不轮询就返回旧内容。
+ *
+ * 这段循环在同步实现时代是死代码:那时 revise 返回的 job 已是 completed,
+ * 条件从不成立。现在它才真的开始工作。
+ *
+ * 只认本候选的任务:后端 activeFor(jobId) 是**任务级**的,一个 job 只回一条,而且没有
+ * 活跃任务时投影会带出最近一条**终态**任务(可能属于别的候选)。不过滤就会等别人的任务、
+ * 抛别人的失败原因、把别人的进度画到这里。与 Task 6 的 revisionBoxState(job, candidateId)
+ * 同一口径。
+ *
+ * 入队互斥已收到 job 级(revision_tasks_active_job_idx):同 job 的第二个候选拿到 409,
+ * 由 d.api.generations.revise 抛出,不会走到这段循环。原来的包级互斥允许两个候选并发,
+ * 于是先提交的那个在这里看不到自己的任务、立刻退出并把旧候选当成结果。
+ */
 export async function reviseCandidate(args: {
   jobId: string;
   candidateId: string;
@@ -330,16 +348,24 @@ export async function reviseCandidate(args: {
   const maxPolls = args.maxPolls ?? 333;
   const d = args.deps ?? (await defaultDeps());
 
+  // 本次请求的任务;不是我的就当"我的已经不在跑"处理,而不是去等别人的。
+  // 比对口径:revision_tasks.candidate_id 存的是用户传入的原值,所以直接比参数。
+  const mine = (j: GenerationJob) =>
+    j.activeRevision?.candidateId === candidateId ? j.activeRevision : undefined;
+
   let job = await d.api.generations.revise(jobId, candidateId, instruction);
   args.onProgress?.(job);
   let polls = 0;
-  while (job.status === 'queued' || job.status === 'running') {
+  while (isRevisionInFlight(mine(job))) {
     if (polls >= maxPolls) throw new GenerationStillRunningError(jobId, '修改');
     await sleep(pollIntervalMs);
     job = await d.api.generations.get(jobId);
     args.onProgress?.(job);
     polls += 1;
   }
-  if (job.status === 'failed') throw new Error(job.error || '修改失败，请重试');
+  const settled = mine(job);
+  if (settled?.status === 'failed') {
+    throw new Error(settled.error || '修改失败，请重试');
+  }
   return job;
 }

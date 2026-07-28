@@ -34,18 +34,24 @@ import {
 import { FormulaService } from './formula.service.js';
 import { readerView } from './generation-reader-view.js';
 import {
+  claimNext,
   claimNextJob,
   heartbeatJob,
+  heartbeatTask,
   queuedJobCount,
   queuedJobPosition,
+  reclaimStale,
   reclaimStaleJobs,
+  REVISION_TASKS_SPEC,
 } from './job-claim.js';
+import { classifyModelFailure, modelFailureMessage, shouldRefundQuota } from './model-failure.js';
 import { detectProviderOutage } from './provider-outage.js';
 import { IntelligenceService } from './intelligence.service.js';
 import type { SessionPrincipal } from './models.js';
 import { PresetService } from './preset.service.js';
 import { ResourceService } from './resource.service.js';
 import { ResearchService } from './research.service.js';
+import { RevisionService } from './revision.service.js';
 import { SettingsService } from './settings.service.js';
 import { nowIso, parseJson } from './utils.js';
 
@@ -231,6 +237,11 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
   private readonly maxConcurrentJobs = 2;
   /** 在跑任务的心跳定时器,按 jobId 索引;任务收尾时清掉。 */
   private readonly heartbeats = new Map<string, NodeJS.Timeout>();
+  /** 在跑的修改任务数。与生成任务分开计:改稿是交互式操作,用户在等,不该被排队的批量生成挡住;反过来也不该占满名额饿死新生成。 */
+  private activeRevisions = 0;
+  private readonly maxConcurrentRevisions = 2;
+  /** 修改任务的心跳定时器,按 revisionId 索引。 */
+  private readonly revisionHeartbeats = new Map<string, NodeJS.Timeout>();
   /** 孤儿回收的周期扫描。只在启动时回收不够:实例中途崩掉,它的任务要等下次有人启动才被收回。 */
   private reclaimTimer?: NodeJS.Timeout;
   /** 已关停。定时器回调据此静默放弃,避免撞上已关闭的数据库连接。 */
@@ -245,6 +256,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     @Inject(AuditService) private readonly audit: AuditService,
     @Inject(IntelligenceService) private readonly intelligence: IntelligenceService,
     @Inject(ResearchService) private readonly research: ResearchService,
+    @Inject(RevisionService) private readonly revisions: RevisionService,
     @Inject(APP_OPTIONS) private readonly options: ApiOptions,
   ) {}
 
@@ -260,6 +272,8 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     if (this.reclaimTimer) clearInterval(this.reclaimTimer);
     for (const timer of this.heartbeats.values()) clearInterval(timer);
     this.heartbeats.clear();
+    for (const timer of this.revisionHeartbeats.values()) clearInterval(timer);
+    this.revisionHeartbeats.clear();
   }
 
   /**
@@ -292,6 +306,44 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       this.event(jobId, 'failed', { message: '任务被反复打断，已停止自动重跑' });
     }
     this.drainQueue();
+
+    // 修改任务走同一份认领/回收实现,但队列名额独立(见 maxConcurrentRevisions)。
+    const revisionResult = reclaimStale(
+      this.database, REVISION_TASKS_SPEC, nowIso(), this.options.jobClaimTimeoutMs,
+      (attempts) => `修改被反复打断（${attempts} 次），已停止自动重跑，请重新提交修改要求`,
+    );
+    for (const id of revisionResult.requeued) {
+      const task = this.revisions.row(id);
+      if (task) this.event(task.job_id, 'revision_requeued', { revisionId: id, reason: 'claim_timeout' });
+    }
+    /*
+     * 回收判死这一侧必须退额度,而且要按扣款次数退。
+     *
+     * 扣额度在每次 processRevision 调模型之前发生,重试靠这里重新入队,所以 `kill -9`
+     * 或心跳失速三轮会扣三次,最后触顶判 failed——用户零产出、被扣三次。原实现的这个
+     * 分支只写了一个事件,一次都不退,与规格「只在确认无产出时退」正面冲突。
+     *
+     * keep=0:触顶判死意味着一次产出都没交付(内容包只在成功收尾的单事务里写入),所以
+     * 扣过几次就退几次。这不是 other 类——other 说的是「模型跑完了、结果不合格」,而这里
+     * 模型的每一次调用都被打断在半途。
+     */
+    for (const id of revisionResult.failed) {
+      const task = this.revisions.row(id);
+      if (!task) continue;
+      const workspaceId = this.workspaceIdForJob(task.job_id);
+      const refunded = workspaceId ? this.settleRevisionQuota(id, workspaceId, 0) : 0;
+      // 真退了才说退了。退还次数是运行时才知道的(BYOK 模式一次都没扣),所以这句话
+      // 由这里补,而不是写进 reclaimStale 的固定文案里——那样会变成一句假承诺。
+      if (refunded) {
+        this.database
+          .prepare('UPDATE revision_tasks SET error = error || ?, updated_at=? WHERE id=?')
+          .run(`已退还本次修改消耗的额度（${refunded} 次）。`, nowIso(), id);
+      }
+      this.event(task.job_id, 'revision_failed', {
+        revisionId: id, message: '修改被反复打断，已停止自动重跑', refundedQuota: refunded,
+      });
+    }
+    this.drainRevisions();
   }
 
   create(raw: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
@@ -620,6 +672,10 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       createdAt: row.created_at,
       completedAt: row.completed_at ?? undefined,
       error: row.error ?? undefined,
+      // 与 mapJob 同源同语义:改稿期间 job.status 保持 completed,阅读页要靠这个
+      // 字段才知道「在改」——否则它那个受 inFlight 门控的 3 秒轮询根本不启动,
+      // 用户看到的是「点了没反应、稍后自己变了」。终态也带出来,用于显示上一次失败。
+      activeRevision: this.revisions.activeFor(row.id) ?? this.revisions.latestFor(row.id),
       // 只有 completed 才有候选;其余状态给空数组,前端不用分支判 undefined。
       candidates: row.status === 'completed'
         ? this.packageRows(jobId).map((item) =>
@@ -629,67 +685,17 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async revise(jobId: string, candidateId: string, instruction: string, principal: SessionPrincipal): Promise<Record<string, unknown>> {
-    if (!instruction.trim()) throw new BadRequestException('修改要求不能为空');
-    const job = this.jobRow(jobId);
-    if (job.status !== 'completed') throw new BadRequestException('只有已完成任务可以修改');
-    const rows = this.packageRows(jobId);
-    const selected = rows
-      .map((row) => ({ row, content: parseJson<ContentPackage | null>(row.content_json, null) }))
-      .find((item) => item.content?.candidateId === candidateId || item.content?.id === candidateId);
-    if (!selected?.content) throw new NotFoundException('候选内容不存在');
-    const formula = this.formulas.get(job.formula_version_id).version;
-    const knowledge = await this.loadKnowledge(job.project_id);
-    const project = this.resources.projectRow(job.project_id);
-    const providerSettings = this.settings.provider(String(project.workspace_id), principal.userId);
-    if (providerSettings.mode === 'platform' && providerSettings.apiKey) this.settings.consumePlatformQuota(String(project.workspace_id));
-    const agent = new ContentGenerationAgent({ modelProvider: this.modelProvider(providerSettings) });
-    const jobResolution = parseJson<Record<string, unknown>>(job.resolution_snapshot_json, {});
-    const parameterSelection = isRecord(jobResolution.parameterSelection)
-      ? jobResolution.parameterSelection as GenerationParameterSelection
-      : undefined;
-    const storedPlanningContext = parseJson<PlanningContext | undefined>(job.planning_context_json, undefined);
-    const storedImageAnalyses = parseJson<PlanningContext['imageAnalyses']>(job.image_context_json, []);
-    const revisionPlanningContext: PlanningContext = {
-      ...(storedPlanningContext ?? {}),
-      imageAnalyses: Array.isArray(storedPlanningContext?.imageAnalyses) && storedPlanningContext.imageAnalyses.length
-        ? storedPlanningContext.imageAnalyses
-        : storedImageAnalyses,
-    };
-    const hydratedRevisionContext = await this.intelligence.hydratePlanningContext(job.project_id, revisionPlanningContext);
-    const result = await agent.revise({
-      package: selected.content,
-      instruction: instruction.trim().slice(0, 2_000),
-      formulaVersion: formula,
-      knowledge,
-      parameterSelection,
-      imageAnalyses: hydratedRevisionContext?.imageAnalyses,
-      planningContext: hydratedRevisionContext,
-    });
-    if (!result.package.resolutionSnapshot && selected.content.resolutionSnapshot) {
-      result.package.resolutionSnapshot = selected.content.resolutionSnapshot;
-    }
-    if (!result.package.impactReport && selected.content.impactReport) {
-      result.package.impactReport = selected.content.impactReport;
-    }
-    for (const field of ['imagePlan', 'dialogueThreads', 'deploymentPlan', 'orchestrationSnapshot', 'coverageSignature', 'productionArtifacts', 'opportunitySnapshot']) {
-      const revisedPackage = result.package as unknown as Record<string, unknown>;
-      const selectedPackage = selected.content as unknown as Record<string, unknown>;
-      if (!revisedPackage[field] && selectedPackage[field]) {
-        revisedPackage[field] = selectedPackage[field];
-      }
-    }
-    const now = nowIso();
-    this.database
-      .prepare('UPDATE content_packages SET id = ?, content_json = ?, updated_at = ? WHERE id = ?')
-      .run(result.package.id, JSON.stringify(result.package), now, selected.row.id);
-    this.event(jobId, 'revised', {
-      candidateId,
-      rerunChannels: result.dependency.rerunChannels,
-      revisionId: result.package.revisions.at(-1)?.id,
-      approvedSourceImageAnalysisCount: hydratedRevisionContext?.imageAnalyses?.length ?? 0,
-    });
-    this.audit.record({ workspaceId: String(project.workspace_id), userId: principal.userId, action: 'generation.revise', entityType: 'content_package', entityId: result.package.id, details: { jobId, candidateId, rerunChannels: result.dependency.rerunChannels } });
+  /** 受理修改请求并立即返回;执行由 RevisionService 的队列负责。 */
+  enqueueRevision(jobId: string, candidateId: string, instruction: string, principal: SessionPrincipal): Record<string, unknown> {
+    const task = this.revisions.enqueue(jobId, candidateId, instruction, principal);
+    this.event(jobId, 'revision_queued', { revisionId: task.id, candidateId });
+    // 立刻(下一拍)尝试领取,新任务不必等下一个回收定时器周期。
+    //
+    // 推到 setImmediate 而不是就地调用:claimNext 是同步的,就地调用会在本次响应
+    // 组装之前把状态改成 running,于是「受理」的返回体里 activeRevision 已经是
+    // running——用户按下按钮那一刻拿到的应当是 queued。延后一拍不影响启动速度。
+    setImmediate(() => this.tick(() => this.drainRevisions()));
+    // 返回完整 job:前端拿到的 candidates 仍是旧版本,activeRevision 告诉它在改。
     return this.get(jobId);
   }
 
@@ -787,6 +793,127 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
           });
       });
     }
+  }
+
+  /**
+   * 领取修改任务。名额与 drainQueue 分开:改稿是交互式操作、用户在等,不该被排队的
+   * 批量生成挡住;反过来也不该占满生成名额饿死新生成。
+   */
+  private drainRevisions(): void {
+    // 关停途中不再领新活:领了也跑不完,而且写库会撞上已关闭的连接。
+    if (this.stopped) return;
+    while (this.activeRevisions < this.maxConcurrentRevisions) {
+      const revisionId = claimNext(this.database, REVISION_TASKS_SPEC, this.options.instanceId, nowIso());
+      if (!revisionId) return;
+      this.activeRevisions += 1;
+      setImmediate(() => {
+        void this.processRevision(revisionId)
+          .catch(() => undefined)
+          .finally(() => {
+            this.stopRevisionHeartbeat(revisionId);
+            this.activeRevisions -= 1;
+            this.drainRevisions();
+          });
+      });
+    }
+  }
+
+  private startRevisionHeartbeat(revisionId: string): void {
+    this.stopRevisionHeartbeat(revisionId);
+    const timer = setInterval(() => this.tick(() => {
+      if (!heartbeatTask(this.database, REVISION_TASKS_SPEC, revisionId, this.options.instanceId, nowIso())) {
+        this.stopRevisionHeartbeat(revisionId);
+      }
+    }), this.options.jobHeartbeatMs);
+    timer.unref();
+    this.revisionHeartbeats.set(revisionId, timer);
+  }
+
+  private stopRevisionHeartbeat(revisionId: string): void {
+    const timer = this.revisionHeartbeats.get(revisionId);
+    if (timer) clearInterval(timer);
+    this.revisionHeartbeats.delete(revisionId);
+  }
+
+  /**
+   * 这个 job 所属的 workspace。
+   *
+   * 不走 jobRow/projectRow:它们带 deleted_at IS NULL 过滤并在查不到时抛异常,而退额度
+   * 的场合恰恰包含「项目已被软删」——欠用户的那几次额度不该因为项目被删就不退了。
+   */
+  private workspaceIdForJob(jobId: string): string | undefined {
+    try {
+      const row = this.database
+        .prepare(`SELECT p.workspace_id AS workspace_id
+                    FROM generation_jobs j JOIN projects p ON p.id = j.project_id
+                   WHERE j.id = ?`)
+        .get(jobId) as { workspace_id: string } | undefined;
+      return row ? String(row.workspace_id) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * 结清一条修改任务的额度账。keep 是允许留下的扣款次数:交付了产出留 1,零产出留 0。
+   *
+   * 为什么需要它:扣额度在**每次**执行调模型之前发生,而重试靠孤儿回收重新入队,所以
+   * `kill -9` 或心跳失速三轮会扣三次,最终由 reclaimStale 判 failed——用户零产出、被扣
+   * 三次。原实现的 failed 分支只写了一个事件,一次都不退。
+   *
+   * 判据是「交付了几次产出」,不是「执行了几次」:被打断的那些执行按定义什么都没交付,
+   * 所以成功收尾也要把之前打断掉的那几次退回去,只留成功这一次。
+   *
+   * 读-改-写放在一个事务里,并用 `WHERE quota_consumed_count = ?` 卡住原值:两个实例
+   * 同时结清同一条任务时只有一个的 UPDATE 会命中,另一个退 0 次。这是「扣与退次数配平」
+   * 在多实例下成立的依据。
+   */
+  private settleRevisionQuota(revisionId: string, workspaceId: string, keep: 0 | 1): number {
+    if (!workspaceId) return 0;
+    let refunds = 0;
+    try {
+      refunds = this.database.transaction(() => {
+        const row = this.database
+          .prepare('SELECT quota_consumed_count FROM revision_tasks WHERE id=?')
+          .get(revisionId) as { quota_consumed_count: number } | undefined;
+        const consumed = Number(row?.quota_consumed_count ?? 0);
+        const refund = Math.max(0, consumed - keep);
+        if (!refund) return 0;
+        const result = this.database
+          .prepare('UPDATE revision_tasks SET quota_consumed_count=? WHERE id=? AND quota_consumed_count=?')
+          .run(consumed - refund, revisionId, consumed);
+        return result.changes ? refund : 0;
+      });
+    } catch {
+      // 关停竞态或瞬时锁冲突。宁可不退也不能在账目上退两次:计数没减就等于没退,
+      // 下一次结清(回收判死那一侧)还会看到它。
+      return 0;
+    }
+    for (let i = 0; i < refunds; i += 1) this.settings.refundPlatformQuota(workspaceId);
+    return refunds;
+  }
+
+  /** 本实例是否仍持有这个修改任务。收尾写库前必查:心跳断过就可能已被接管。 */
+  private stillOwnsRevision(revisionId: string): boolean {
+    if (this.stopped) return false;
+    try {
+      const row = this.database.prepare('SELECT claimed_by FROM revision_tasks WHERE id=?').get(revisionId) as
+        { claimed_by: string | null } | undefined;
+      return row?.claimed_by === this.options.instanceId;
+    } catch {
+      // 关停竞态:连接已关闭。当作不再持有,放弃写入。
+      return false;
+    }
+  }
+
+  /** 推进进度。已不持有则静默放弃,不覆盖接管者的进度。 */
+  private revisionProgress(revisionId: string, value: number): void {
+    if (!this.stillOwnsRevision(revisionId)) return;
+    try {
+      this.database
+        .prepare('UPDATE revision_tasks SET progress=?, updated_at=? WHERE id=?')
+        .run(value, nowIso(), revisionId);
+    } catch { /* 关停竞态:任务留在 running,由回收接管 */ }
   }
 
   /**
@@ -984,6 +1111,179 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * 执行一次修改。
+   *
+   * 进度里程碑按 agent.revise 的真实阶段划,不做均匀插值:所以进度可能从 40 直接
+   * 跳到 95。这是真实情况,不为「平滑」而假装经过。
+   *
+   * 写库只在最后一步、单事务内完成:失败则内容包一个字节都不动。原同步实现是
+   * UPDATE content_packages SET id=?, content_json=? 原地覆盖,异步化后若在写库
+   * 阶段失败会留下半个包。
+   */
+  private async processRevision(revisionId: string): Promise<void> {
+    const task = this.revisions.row(revisionId);
+    if (!task) return;
+    this.startRevisionHeartbeat(revisionId);
+    this.event(task.job_id, 'revision_running', { revisionId });
+
+    // workspaceId 在 try 内才拿得到,但 catch 里要用它结额度账。先置空:取到之前就
+    // 失败时 catch 里会回查一次(见 workspaceIdForJob),因为那时余额可能是上一轮欠的。
+    let workspaceId = '';
+    try {
+      // jobRow / projectRow 也在 try 内:项目或任务被软删时它们抛 NotFoundException,
+      // 放在 try 外会被 drainRevisions 的 .catch(() => undefined) 吞掉,任务就停在
+      // running——没有 failed、没有事件,还占着那条部分唯一索引的名额,只能等回收
+      // 跑满 3 轮(每轮 jobClaimTimeoutMs)才收敛。
+      const job = this.jobRow(task.job_id);
+      const project = this.resources.projectRow(job.project_id);
+      workspaceId = String(project.workspace_id);
+      this.revisionProgress(revisionId, 10);
+      const packageRow = this.database
+        .prepare('SELECT id, content_json FROM content_packages WHERE id=?')
+        .get(task.package_id) as { id: string; content_json: string } | undefined;
+      if (!packageRow) throw new Error('候选内容已不存在，可能已被删除');
+      const current = parseJson<ContentPackage | null>(packageRow.content_json, null);
+      if (!current) throw new Error('候选内容无法解析');
+
+      const formula = this.formulas.get(job.formula_version_id).version;
+      const providerSettings = this.settings.provider(workspaceId, task.created_by);
+      /*
+       * 扣额度的时机与原同步实现一致(调用模型前),但每次扣都记账。
+       *
+       * 记账是必需的:重试靠孤儿回收重新入队,所以一条任务可能被执行 N 次、扣 N 次,
+       * 最终由 reclaimStale 判 failed。那一侧要退,就必须知道退几次——退 1 次会少退,
+       * 固定退 3 次会在只扣过 1 次时白送。quota_consumed_count 就是「已扣未退」余额。
+       */
+      if (providerSettings.mode === 'platform' && providerSettings.apiKey) {
+        this.settings.consumePlatformQuota(workspaceId);
+        this.database
+          .prepare('UPDATE revision_tasks SET quota_consumed_count = quota_consumed_count + 1 WHERE id=?')
+          .run(revisionId);
+      }
+
+      this.revisionProgress(revisionId, 25);
+      const knowledge = await this.loadKnowledge(job.project_id);
+      const jobResolution = parseJson<Record<string, unknown>>(job.resolution_snapshot_json, {});
+      const parameterSelection = isRecord(jobResolution.parameterSelection)
+        ? jobResolution.parameterSelection as GenerationParameterSelection
+        : undefined;
+      const storedPlanningContext = parseJson<PlanningContext | undefined>(job.planning_context_json, undefined);
+      const storedImageAnalyses = parseJson<PlanningContext['imageAnalyses']>(job.image_context_json, []);
+      const revisionPlanningContext: PlanningContext = {
+        ...(storedPlanningContext ?? {}),
+        imageAnalyses: Array.isArray(storedPlanningContext?.imageAnalyses) && storedPlanningContext.imageAnalyses.length
+          ? storedPlanningContext.imageAnalyses
+          : storedImageAnalyses,
+      };
+      const hydrated = await this.intelligence.hydratePlanningContext(job.project_id, revisionPlanningContext);
+
+      this.revisionProgress(revisionId, 40);
+      const agent = new ContentGenerationAgent({ modelProvider: this.modelProvider(providerSettings) });
+      const result = await agent.revise({
+        package: current,
+        instruction: task.instruction,
+        formulaVersion: formula,
+        knowledge,
+        parameterSelection,
+        imageAnalyses: hydrated?.imageAnalyses,
+        planningContext: hydrated,
+      });
+
+      this.revisionProgress(revisionId, 95);
+      // 继承原实现的字段回填:局部重跑不会重算这些,缺了会让产出看起来"丢东西"。
+      if (!result.package.resolutionSnapshot && current.resolutionSnapshot) {
+        result.package.resolutionSnapshot = current.resolutionSnapshot;
+      }
+      if (!result.package.impactReport && current.impactReport) {
+        result.package.impactReport = current.impactReport;
+      }
+      for (const field of ['imagePlan', 'dialogueThreads', 'deploymentPlan', 'orchestrationSnapshot', 'coverageSignature', 'productionArtifacts', 'opportunitySnapshot']) {
+        const revised = result.package as unknown as Record<string, unknown>;
+        const previous = current as unknown as Record<string, unknown>;
+        if (!revised[field] && previous[field]) revised[field] = previous[field];
+      }
+
+      // 收尾前确认所有权:心跳断过、任务已被接管并重跑时,再写就会两边互相覆盖。
+      //
+      // 这里不结额度账:本次结果作废,但接管者会重跑并再扣一次,由它那一侧的终态
+      // 结清统一处理(quota_consumed_count 是整条任务的累计值,不是单次执行的)。
+      if (!this.stillOwnsRevision(revisionId)) {
+        this.event(task.job_id, 'revision_claim_lost', { revisionId, message: '任务已被其他实例接管，本次结果丢弃' });
+        return;
+      }
+      const now = nowIso();
+      this.database.transaction(() => {
+        this.database
+          .prepare('UPDATE content_packages SET id=?, content_json=?, updated_at=? WHERE id=?')
+          .run(result.package.id, JSON.stringify(result.package), now, packageRow.id);
+        this.database
+          .prepare(
+            `UPDATE revision_tasks
+                SET status='completed', progress=100, error=NULL, rerun_channels_json=?,
+                    result_package_id=?, completed_at=?, updated_at=?
+              WHERE id=?`,
+          )
+          .run(JSON.stringify(result.dependency.rerunChannels), result.package.id, now, now, revisionId);
+      });
+      /*
+       * 交付了一次产出,所以留一次扣款、把之前被打断的那几次退回去。
+       *
+       * 被打断的执行按定义什么都没交付(内容包在最后一步单事务写入),用户不该为它们
+       * 付费。成功路径也要结账,否则「被打断两次、第三次成功」的用户会为一次产出付
+       * 三次钱。
+       */
+      const refundedOnSuccess = this.settleRevisionQuota(revisionId, workspaceId, 1);
+      if (refundedOnSuccess) {
+        this.event(task.job_id, 'revision_quota_refunded', {
+          revisionId, refunded: refundedOnSuccess, reason: 'interrupted_attempts',
+        });
+      }
+      this.event(task.job_id, 'revised', {
+        revisionId,
+        candidateId: task.candidate_id,
+        rerunChannels: result.dependency.rerunChannels,
+        approvedSourceImageAnalysisCount: hydrated?.imageAnalyses?.length ?? 0,
+      });
+      this.audit.record({
+        workspaceId, userId: task.created_by, action: 'generation.revise',
+        entityType: 'content_package', entityId: result.package.id,
+        details: { jobId: task.job_id, candidateId: task.candidate_id, rerunChannels: result.dependency.rerunChannels },
+      });
+    } catch (error) {
+      const kind = classifyModelFailure(error);
+      const raw = error instanceof Error ? error.message.slice(0, 1_000) : String(error).slice(0, 1_000);
+      /*
+       * 只在「确认无产出」时退额度(shouldRefundQuota:other 类不退)。校验不通过一类
+       * 消耗了真实算力并产出了可判定结果,退它等于白送一次。
+       *
+       * 与分析路径的分歧,已由人类裁定并有意保留:intelligence.service 的
+       * analyzeWithCurrentModel 对**任何**错误都退额度。那是既有的历史行为,改它会让
+       * 现有用户的额度账目发生变化,所以只有 revise 这条新路径用新真源。两处不一致是
+       * 明知的、不是遗漏。
+       */
+      /*
+       * 退几次:按 quota_consumed_count(已扣未退余额)退,不是固定退 1。这条任务可能
+       * 已经被打断重跑过几轮、每轮扣一次,而那些轮次一次产出都没交付。
+       *
+       * other 类保留一次扣款(keep=1):它消耗了真实算力并产出了可判定结果。但只保留
+       * **这一次**——之前被打断的那几轮仍然是零产出,照退。
+       *
+       * 无条件结清,不看本次执行是否扣成:失败发生在扣款之前时余额若非 0,那是上一轮
+       * 欠着的,同样该退。workspaceId 在扣款之前失败时
+       * 是空串,回查一次;余额为 0 时 settle 什么都不做,所以这条路径依然「一分不扣」。
+       */
+      const settleWorkspaceId = workspaceId || this.workspaceIdForJob(task.job_id) || '';
+      this.settleRevisionQuota(revisionId, settleWorkspaceId, shouldRefundQuota(kind) ? 0 : 1);
+      if (!this.stillOwnsRevision(revisionId)) return;
+      const now = nowIso();
+      this.database
+        .prepare("UPDATE revision_tasks SET status='failed', progress=100, error=?, completed_at=?, updated_at=? WHERE id=?")
+        .run(modelFailureMessage(kind, '修改', raw), now, now, revisionId);
+      this.event(task.job_id, 'revision_failed', { revisionId, message: raw });
+    }
+  }
+
   private async loadKnowledge(projectId: string): Promise<KnowledgeDocument[]> {
     const rows = this.database
       .prepare(
@@ -1151,6 +1451,10 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       createdAt: row.created_at,
       completedAt: row.completed_at,
       error: row.error ?? undefined,
+      // 改稿期间 status 仍是 completed(前端 10 处按它判定能否查看产出),所以
+      // 「有没有在改」由这个字段单独回答。终态任务也带出来,前端才能显示
+      // 「上一次修改失败了」。
+      activeRevision: this.revisions.activeFor(row.id) ?? this.revisions.latestFor(row.id),
     };
   }
 

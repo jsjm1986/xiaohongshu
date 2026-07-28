@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { QuickResult } from '../QuickResult';
 import { useToast } from '../Ui';
 import { autoApproveAndGenerate, quickCandidateFields, reviseCandidate, type QuickCandidateView } from '../../lib/quick-generation';
+import { revisionStageText } from '../../lib/revision-progress';
 import { InlineProgress } from './InlineProgress';
 import type { SimpleSettingOverrides } from '../../lib/simple-generation';
 import type { Project } from '../../types';
@@ -54,7 +55,16 @@ export function ResultTab({ project, opportunityId, presetId, overrides, imageAs
     setRevisingId(candidateId);
     setProgress(undefined);
     try {
-      const job = await reviseCandidate({ jobId, candidateId, instruction, onProgress: (j) => setProgress(j.progress) });
+      // 进度取 activeRevision 而不是 job.progress:改稿期间后者恒为 100(job 本身
+      // 早已 completed),照它画条会全程停在 100%,读起来像卡住了。
+      const job = await reviseCandidate({
+        jobId, candidateId, instruction,
+        // 同一个 job 的两个候选能并发改稿(后端互斥是 per package),所以还要
+        // 认 candidateId,否则画的是别人的进度。
+        onProgress: (j) => setProgress(
+          j.activeRevision?.candidateId === candidateId ? j.activeRevision.progress : undefined,
+        ),
+      });
       // revise 后候选位置(candidate_index)不变;候选 id 目前也保持不变,但按
       // GenerationResultPage 的兜底思路兼容 id 变化:先按原位置取,再找没见过的 id
       const oldIndex = results.findIndex((r) => r.id === candidateId);
@@ -74,10 +84,14 @@ export function ResultTab({ project, opportunityId, presetId, overrides, imageAs
 
   return (
     <div className="qc-step">
+      {/* 修改中换成 revisionStageText 并关掉 ETA:首次生成那套阶段名与耗时区间
+          对 revise 都不成立,套用会说谎(见 InlineProgress 的注释)。 */}
       <InlineProgress
         active={Boolean(generating || revisingId)}
         progress={progress}
         label={revisingId ? '正在修改' : '正在生成'}
+        stageText={revisingId ? revisionStageText : undefined}
+        showEta={!revisingId}
       />
       <QuickResult
         candidates={results}

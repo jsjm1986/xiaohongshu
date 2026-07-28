@@ -1343,11 +1343,26 @@ test('planning CRUD, explicit approvals, image safety and generation snapshots w
     body: JSON.stringify({ candidateId: imageJob.candidates[0].id, instruction: 'make the image brief more concise' }),
   });
   assert.equal(revisedImageJob.response.status, 201, JSON.stringify(revisedImageJob.body));
+  // revise 已改为入队即返回。受理这一刻模型还没跑,产出物快照仍是改稿前那份 —— 断言它
+  // 没被入队动作破坏(图像观察仍已批准、未部署),这本身就是「改稿期间用户还能
+  // 看旧稿」的要求。
+  assert.ok(revisedImageJob.body.activeRevision, '受理后投影里要有 activeRevision');
+  assert.equal(revisedImageJob.body.activeRevision.status, 'queued');
   assert.equal(revisedImageJob.body.candidates[0].productionArtifacts.imageObservation.status, 'approved');
   assert.ok(revisedImageJob.body.candidates[0].productionArtifacts.imageObservation.analysisAssetIds.includes(uploaded.body.id));
   assert.equal(revisedImageJob.body.candidates[0].productionArtifacts.finalImageAsset.status, 'absent');
   assert.equal(revisedImageJob.body.candidates[0].productionArtifacts.entrySnapshot.status, 'absent');
   assert.equal(revisedImageJob.body.candidates[0].productionArtifacts.deployment.status, 'not_deployed');
+  // revised 事件由执行阶段写,所以要等改稿任务到终态再查。
+  const revisionDeadline = Date.now() + 30_000;
+  let settledImageRevision: any;
+  while (Date.now() < revisionDeadline) {
+    const current = (await request(`/api/generations/${imageJob.id}`)).body.activeRevision;
+    if (current && ['completed', 'failed'].includes(current.status)) { settledImageRevision = current; break; }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+  }
+  assert.ok(settledImageRevision, '改稿任务没有在超时前到达终态');
+  assert.equal(settledImageRevision.status, 'completed', `改稿失败：${settledImageRevision.error}`);
   const revisionEvent = database.prepare(
     `SELECT details_json FROM generation_events WHERE job_id=? AND event='revised' ORDER BY id DESC LIMIT 1`,
   ).get(imageJob.id) as { details_json: string };

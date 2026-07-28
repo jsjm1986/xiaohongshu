@@ -13,7 +13,7 @@ export type SqlValue = string | number | bigint | Uint8Array | null;
  * 无关的测试变红——那不是回归信号,是维护噪声。测试断言这个常量,真正想验的
  * 「迁移到最新且表结构对得上」不变。
  */
-export const SCHEMA_VERSION = 14;
+export const SCHEMA_VERSION = 15;
 
 @Injectable()
 export class DatabaseService implements OnModuleDestroy {
@@ -861,6 +861,77 @@ export class DatabaseService implements OnModuleDestroy {
       `);
     });
     if (version < 14) version = 14;
+
+    if (version < 15) this.transaction(() => {
+      /*
+       * 修改任务(revise)的异步化。
+       *
+       * revise 原来是同步请求-响应:全程不落中间状态,前端只能显示一个转圈。而它
+       * 耗时是分钟级(实测两次 revised 事件相隔 299s),公网下会撞上 Cloudflare 约
+       * 100 秒超时——隧道日志已记录一次 context canceled。掐断后前端把指令追加进
+       * 正文并提示「演示模式:已记录」,用户以为改好了,拿到的是被污染的正文。
+       *
+       * 状态放独立表而不是给 generation_jobs 加列:一个 job 会被改 N 次,单组列
+       * 只记得住最后一次;而且 status 与 revision_status 并存会让所有读 job 状态
+       * 的代码都要先问「你说的哪个状态」。generation_jobs.status 在改稿期间保持
+       * completed——前端有 10 处按它判定能否查看产出,改它会让用户在改稿期间打不开
+       * 自己的稿子。
+       *
+       * package_id 是执行时的权威目标(入队时一次性解析),candidate_id 保留用户
+       * 传入的原值供追溯与前端匹配活跃任务。
+       *
+       * 没有 claimed_at 列:claimed_by + heartbeat_at 已足够判定归属与存活,
+       * generation_jobs 的 claimed_at 至今没有消费方。
+       */
+      this.db.exec(`
+        CREATE TABLE revision_tasks (
+          id                  TEXT PRIMARY KEY,
+          job_id              TEXT NOT NULL REFERENCES generation_jobs(id) ON DELETE CASCADE,
+          package_id          TEXT NOT NULL,
+          candidate_id        TEXT NOT NULL,
+          instruction         TEXT NOT NULL,
+          status              TEXT NOT NULL,
+          progress            INTEGER NOT NULL DEFAULT 0,
+          attempt_count       INTEGER NOT NULL DEFAULT 0,
+          error               TEXT,
+          rerun_channels_json TEXT NOT NULL DEFAULT '[]',
+          result_package_id   TEXT,
+          created_by          TEXT NOT NULL REFERENCES users(id),
+          created_at          TEXT NOT NULL,
+          updated_at          TEXT NOT NULL,
+          completed_at        TEXT,
+          claimed_by          TEXT,
+          heartbeat_at        TEXT,
+          /*
+           * 这条任务累计扣了几次额度。
+           *
+           * 扣额度发生在每次执行(processRevision)调用模型之前,而重试是靠孤儿回收
+           * 重新入队——kill -9 三次就扣三次,最后由回收判 failed,用户零产出。没有这个
+           * 计数,回收那一侧无从知道该退几次:退 1 次会少退,固定退 3 次会在只扣过 1 次
+           * 时白送。计数只在真正 consume 成功后 +1,退还时按退还的次数减,所以任何时刻
+           * 它就是「已扣未退」的余额。
+           */
+          quota_consumed_count INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX revision_tasks_job_idx ON revision_tasks(job_id, created_at);
+        CREATE INDEX revision_tasks_claim_idx ON revision_tasks(status, heartbeat_at);
+        /*
+         * 一个 job 同时只能有一条未终态的修改。应用层入队前会先查 pending 并给出可读
+         * 的 409,但「先查后写」在多实例下不成立:两个进程能在彼此的查与写之间穿插,
+         * 各插一条。这条部分唯一索引是 DB 层的最后防线。终态行不进索引,所以同一个
+         * job 可以被反复修改。
+         *
+         * 互斥收在 job 级而不是 package 级:投影 activeFor(jobId) 是任务级的(一个 job
+         * 只回一条活跃任务),包级互斥允许同一 job 的两个候选并发改稿,于是 A 候选的
+         * 轮询会看不到自己的任务、立刻判「已完成」并把**未更新的旧候选**当成改稿结果
+         * 报给用户。三个前端实际都是单飞行(一次只改一个候选),job 级互斥不减功能。
+         */
+        CREATE UNIQUE INDEX revision_tasks_active_job_idx
+          ON revision_tasks(job_id) WHERE status IN ('queued','running');
+      `);
+      this.db.exec('PRAGMA user_version = 15');
+    });
+    if (version < 15) version = 15;
   }
 
   onModuleDestroy(): void {
