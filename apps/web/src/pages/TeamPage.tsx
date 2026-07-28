@@ -18,6 +18,7 @@ import {
 } from "../components/Ui";
 import { V2Hero } from "../components/V2";
 import { api } from "../lib/api";
+import { auditActionCopy, auditResourceText } from "../lib/audit-copy";
 import { PERMISSION_ORDER, groupPermissions, permissionCopy } from "../lib/permission-copy";
 import type {
   AuditEntry,
@@ -362,10 +363,9 @@ export function TeamPage() {
             {audit.slice(0, 20).map((entry) => (
               <div key={entry.id}>
                 <span>
-                  <strong>{entry.action}</strong>
-                  <small>
-                    {entry.entityType}
-                    {entry.entityId ? ` · ${entry.entityId.slice(0, 12)}` : ""}
+                  <strong>{auditActionCopy(entry.action).label}</strong>
+                  <small title={entry.entityId || undefined}>
+                    {auditResourceText(entry.entityType, entry.entityId)}
                   </small>
                 </span>
                 <span>{entry.username || "system"}</span>

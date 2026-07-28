@@ -956,7 +956,14 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .data-table__row:hover { background: #fbfcfa; }
 .knowledge-table { overflow-x: auto; }
 .knowledge-table .data-table__head, .knowledge-table .data-table__row { grid-template-columns: minmax(300px, 1.8fr) 130px 120px 120px 72px; gap: 12px; }
-.audit-table .data-table__head, .audit-table .data-table__row { grid-template-columns: 180px minmax(120px, .8fr) minmax(160px, 1fr) minmax(200px, 1.4fr); gap: 12px; }
+.audit-table .data-table__head, .audit-table .data-table__row { grid-template-columns: 180px minmax(120px, .8fr) minmax(190px, 1.1fr) minmax(180px, 1.2fr); gap: 12px; }
+/* 中文动作名在上、标识符在下:标识符要留着(和后端日志对得上),但不该抢主位。 */
+.audit-action { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.audit-action code { color: var(--muted); font-size: 8px; opacity: .7; overflow-wrap: anywhere; }
+/* 「自动」标注系统自行触发的动作,免得读者以为是某个人做的。 */
+.audit-action em { padding: 1px 5px; border-radius: 99px; background: var(--line); color: var(--muted); font-size: 8px; font-style: normal; }
+.v2 .audit-action code { font-family: var(--v2-mono); font-size: 10px; }
+.v2 .audit-action em { font-size: 10px; }
 .file-cell { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .file-cell > i { width: 35px; height: 37px; flex: 0 0 auto; display: flex; align-items: center; justify-content: center; border-radius: 8px; background: var(--blue-soft); color: var(--blue); font-size: 8px; font-style: normal; font-weight: 700; }
 .file-cell > i.txt { color: var(--purple); background: var(--purple-soft); }
