@@ -10,6 +10,7 @@ import {
   LogOut,
   Menu,
   Microscope,
+  ScrollText,
   Settings,
   Sparkles,
   UsersRound,
@@ -19,22 +20,36 @@ import { useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "./AuthContext";
 import { EditionSwitch } from "./EditionSwitch";
+import { groupNavItems, visibleNavItems, type NavGroupId } from "../lib/nav-groups";
 import { ProjectProvider, useProjects } from "./ProjectContext";
 
 /*
   「极简创作」不在这张表里:它是**版本**,不是频道。放进导航会和知识库、公式版本
   这些资产入口并列,暗示它是工作台的一个页面;实际点进去是换了整套壳。版本切换
   移到顶栏 <EditionSwitch />,两个壳同一位置、双向对称。
+
+  每项自报 group(见 lib/nav-groups.ts),不再靠下标切分组。
 */
-const navigation = [
-  { to: "/", label: "概览", icon: LayoutDashboard, end: true },
-  { to: "/generate", label: "内容生成", icon: Sparkles },
-  { to: "/projects", label: "项目管理", icon: Boxes },
-  { to: "/knowledge", label: "知识库", icon: BookOpenText },
-  { to: "/formulas", label: "公式版本", icon: FlaskConical },
-  { to: "/research", label: "研究与证据", icon: Microscope },
-  { to: "/history", label: "生成历史", icon: FileClock },
-  { to: "/team", label: "团队权限", icon: UsersRound, adminOnly: true },
+const navigation: Array<{
+  to: string;
+  label: string;
+  icon: typeof LayoutDashboard;
+  group: NavGroupId;
+  end?: boolean;
+  adminOnly?: boolean;
+}> = [
+  { to: "/", label: "概览", icon: LayoutDashboard, group: "workspace", end: true },
+  { to: "/generate", label: "内容生成", icon: Sparkles, group: "workspace" },
+  // 生成历史是工作台的产出物——「我做过什么」,和概览、内容生成同一组。
+  { to: "/history", label: "生成历史", icon: FileClock, group: "workspace" },
+  { to: "/projects", label: "项目管理", icon: Boxes, group: "assets" },
+  { to: "/knowledge", label: "知识库", icon: BookOpenText, group: "assets" },
+  { to: "/formulas", label: "公式版本", icon: FlaskConical, group: "assets" },
+  { to: "/research", label: "研究与证据", icon: Microscope, group: "assets" },
+  { to: "/team", label: "团队权限", icon: UsersRound, group: "admin", adminOnly: true },
+  // /audit 一直存在(App.tsx 有路由、后端有 audit.read 校验),但此前全站没有任何
+  // 入口指向它,只能手敲 URL。归到管理组补上入口。
+  { to: "/audit", label: "操作审计", icon: ScrollText, group: "admin", adminOnly: true },
 ];
 
 function ShellContent() {
@@ -44,9 +59,8 @@ function ShellContent() {
   const { projects, projectId, setProjectId, loading } = useProjects();
   const location = useLocation();
   const navigate = useNavigate();
-  const visibleNavigation = navigation.filter(
-    (item) => !item.adminOnly || ["系统管理员", "Owner", "Admin"].includes(user?.role || ""),
-  );
+  const visibleNavigation = visibleNavItems(navigation, user?.role);
+  const navSections = groupNavItems(navigation, user?.role);
 
   const currentNav = [
     ...visibleNavigation,
@@ -84,31 +98,25 @@ function ShellContent() {
           </button>
         </div>
 
-        <div className="sidebar__section-label">01 · 工作台</div>
-        <nav className="sidebar__nav">
-          {visibleNavigation.slice(0, 2).map(({ to, label, icon: Icon, end }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={end}
-              onClick={() => setSidebarOpen(false)}
-            >
-              <Icon size={18} />
-              <span>{label}</span>
-              {to === "/generate" && <i>快捷</i>}
-            </NavLink>
-          ))}
-        </nav>
-
-        <div className="sidebar__section-label">02 · 资产与规则</div>
-        <nav className="sidebar__nav">
-          {visibleNavigation.slice(2).map(({ to, label, icon: Icon }) => (
-            <NavLink key={to} to={to} onClick={() => setSidebarOpen(false)}>
-              <Icon size={18} />
-              <span>{label}</span>
-            </NavLink>
-          ))}
-        </nav>
+        {navSections.map(({ group, items }) => (
+          <div key={group.id}>
+            <div className="sidebar__section-label">{group.label}</div>
+            <nav className="sidebar__nav">
+              {items.map(({ to, label, icon: Icon, end }) => (
+                <NavLink
+                  key={to}
+                  to={to}
+                  end={end}
+                  onClick={() => setSidebarOpen(false)}
+                >
+                  <Icon size={18} />
+                  <span>{label}</span>
+                  {to === "/generate" && <i>快捷</i>}
+                </NavLink>
+              ))}
+            </nav>
+          </div>
+        ))}
 
         <div className="sidebar__spacer" />
         <div className="quota-mini">
