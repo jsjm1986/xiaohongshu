@@ -4,6 +4,7 @@ import { useProjects } from '../components/ProjectContext';
 import { Badge, EmptyState, Skeleton, useToast } from '../components/Ui';
 import { V2Hero } from '../components/V2';
 import { api } from '../lib/api';
+import { auditActionCopy, auditResourceText } from '../lib/audit-copy';
 import { formatDate } from '../lib/utils';
 import type { AuditEntry } from '../types';
 
@@ -61,14 +62,23 @@ export function AuditPage() {
             <span>动作</span>
             <span>资源</span>
           </div>
-          {entries.map((entry) => (
-            <div className="data-table__row" key={entry.id}>
-              <span>{formatDate(entry.createdAt, true)}</span>
-              <span>{entry.username || '系统'}</span>
-              <span><Badge>{entry.action}</Badge></span>
-              <span>{entry.entityType}{entry.entityId ? ` · ${entry.entityId}` : ''}</span>
-            </div>
-          ))}
+          {entries.map((entry) => {
+            const action = auditActionCopy(entry.action);
+            return (
+              <div className="data-table__row" key={entry.id}>
+                <span>{formatDate(entry.createdAt, true)}</span>
+                <span>{entry.username || '系统'}</span>
+                <span className="audit-action">
+                  <Badge>{action.label}</Badge>
+                  {action.automatic && <em>自动</em>}
+                  {/* 标识符是和后端日志、API 对得上的唯一凭据,不能只留中文 */}
+                  {action.known && <code>{entry.action}</code>}
+                </span>
+                {/* 列表里只放短 id;完整 id 放 title,需要时可复制 */}
+                <span title={entry.entityId || undefined}>{auditResourceText(entry.entityType, entry.entityId)}</span>
+              </div>
+            );
+          })}
         </div>
       ) : (
         <EmptyState icon={<ShieldCheck size={24} />} title="暂无审计记录" description="该工作区还没有产生关键操作留痕。" />
