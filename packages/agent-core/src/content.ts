@@ -1816,13 +1816,54 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     // 说法,一律判 error 就是误伤。判断权归项目分析
     // 阶段:蓝图按 serviceModel 与行业产出 prohibitedUnsupportedHistories /
     // claimType=historical_action 的 terms,本校验照真源生效,不另立第二套词表。
+
+    // Build testimonial pattern dynamically from project blueprint to avoid industry-specific hardcodes.
+    // Extract completion verbs from domain_model.actions and outcome terms from claim_policy.
+    const buildTestimonialPattern = (blueprint?: ProjectCreativeBlueprint): RegExp => {
+      if (!blueprint) {
+        // Fallback to generic pattern when blueprint is unavailable
+        return /(?:我|本人).{0,12}(?:做了|做过|买过了?|用过|体验过).{0,12}(?:效果|恢复|满意|值|靠谱)/u;
+      }
+
+      // Extract completion verbs from domain_model.actions (e.g. "装修" → "装修了|装修过")
+      const actions = blueprint.domainModel.actions.filter((action) => /^[一-龥]{1,4}$/.test(action));
+      const completionVerbs = actions.length
+        ? actions.flatMap((action) => [`${action}了`, `${action}过`]).join('|')
+        : '';
+
+      // Extract prohibited histories that imply completion
+      const prohibitedCompletions = blueprint.scenarioModel.families
+        .flatMap((family) => family.prohibitedUnsupportedHistories ?? [])
+        .filter((phrase) => /(?:了|过)/.test(phrase))
+        .join('|');
+
+      // Combine sources, fallback to generic verbs if both are empty
+      const actionPattern = completionVerbs || prohibitedCompletions || '做了|做过|买过了?|用过|体验过';
+
+      // Extract outcome terms from claim_policy outcome rules
+      const outcomeRules = blueprint.claimPolicy.rules.filter((rule) => rule.claimType === 'outcome');
+      const outcomeTerms = outcomeRules.length
+        ? outcomeRules.flatMap((rule) => rule.terms).filter((term) => /^[一-龥]{1,6}$/.test(term)).join('|')
+        : '';
+
+      // Fallback to generic outcome terms
+      const outcomePattern = outcomeTerms || '效果|恢复|满意|值|靠谱|有用';
+
+      // Build first-person completion + outcome pattern
+      const firstPersonPattern = `(?:我|本人).{0,12}(?:${actionPattern}).{0,12}(?:${outcomePattern})`;
+
+      // Add standalone outcome testimonial pattern (no subject needed)
+      const standalonePattern = `(?:效果(?:很好|真的不错|超预期)|恢复得(?:很好|很快)|亲测(?:有效|好用|靠谱))`;
+
+      return new RegExp(`(?:${firstPersonPattern}|${standalonePattern})`, 'u');
+    };
+
     const prohibitedHit = visibleNodes.find((node) => assertsProhibitedHistory(node, prohibitedHistories));
     if (prohibitedHit) {
       add("fabricated_operational_experience", "error", "Cref", `A simulated role claims a prohibited unsupported history: ${prohibitedHit}`);
     }
-    const testimonialShape = visibleNodes.find((node) =>
-      /(?:我|本人).{0,12}(?:做了|做过|买过了?|用过|体验过).{0,12}(?:效果|恢复|满意|值|靠谱)/u.test(node)
-      || /(?:效果(?:很好|真的不错|超预期)|恢复得(?:很好|很快)|亲测(?:有效|好用|靠谱))/u.test(node));
+    const testimonialPattern = buildTestimonialPattern(input.projectBlueprint);
+    const testimonialShape = visibleNodes.find((node) => testimonialPattern.test(node));
     if (testimonialShape) {
       add("fabricated_operational_experience", "error", "Cref", `A visible comment states a first-person experience as an outcome testimonial (independent word-of-mouth, not a situation): ${testimonialShape}`);
     }
