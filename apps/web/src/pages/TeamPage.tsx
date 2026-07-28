@@ -18,6 +18,7 @@ import {
 } from "../components/Ui";
 import { V2Hero } from "../components/V2";
 import { api } from "../lib/api";
+import { PERMISSION_ORDER, groupPermissions, permissionCopy } from "../lib/permission-copy";
 import type {
   AuditEntry,
   RegistrationRequest,
@@ -34,28 +35,12 @@ const roles: WorkspaceMember["role"][] = [
   "ContentEditor",
   "Viewer",
 ];
-const permissions = [
-  "workspace.manage",
-  "member.manage",
-  "provider.manage",
-  "quota.manage",
-  "project.read",
-  "project.write",
-  "project.delete",
-  "knowledge.read",
-  "knowledge.write",
-  "knowledge.import",
-  "knowledge.delete",
-  "formula.read",
-  "formula.manage",
-  "formula.activate",
-  "generation.run",
-  "generation.chat",
-  "generation.edit",
-  "generation.export",
-  "audit.read",
-  "api.read",
-];
+/*
+  原来这里手抄了一份权限清单,抄漏了 research.read / research.write /
+  research.approve / release.manage 四条——它们在后端真实生效,但管理员在这个
+  弹窗里既看不到也调不了。改为用 PERMISSION_ORDER,并由测试守住与后端同集合。
+*/
+const permissions = PERMISSION_ORDER;
 
 export function TeamPage() {
   const [workspaces, setWorkspaces] = useState<Array<{ id: string; name: string }>>([]);
@@ -538,27 +523,42 @@ export function TeamPage() {
         }
       >
         {permissionMember && (
-          <div className="permission-grid">
-            {permissions.map((permission) => (
-              <div key={permission}>
-                <code>{permission}</code>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={permissionMember.grants.includes(permission)}
-                    onChange={() => toggle("grants", permission)}
-                  />
-                  授权
-                </label>
-                <label className="deny">
-                  <input
-                    type="checkbox"
-                    checked={permissionMember.denies.includes(permission)}
-                    onChange={() => toggle("denies", permission)}
-                  />
-                  拒绝
-                </label>
-              </div>
+          <div className="permission-sections">
+            {groupPermissions(permissions).map((group) => (
+              <section key={group.id}>
+                <h4>{group.label}</h4>
+                <div className="permission-grid">
+                  {group.permissions.map((permission) => {
+                    const copy = permissionCopy(permission);
+                    return (
+                      <div key={permission}>
+                        <span className="permission-name">
+                          <strong>{copy.label}</strong>
+                          <small>{copy.hint}</small>
+                          {/* 标识符仍是审计日志与 API 里的真名,排查问题要对得上 */}
+                          <code>{permission}</code>
+                        </span>
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={permissionMember.grants.includes(permission)}
+                            onChange={() => toggle("grants", permission)}
+                          />
+                          授权
+                        </label>
+                        <label className="deny">
+                          <input
+                            type="checkbox"
+                            checked={permissionMember.denies.includes(permission)}
+                            onChange={() => toggle("denies", permission)}
+                          />
+                          拒绝
+                        </label>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
             ))}
           </div>
         )}

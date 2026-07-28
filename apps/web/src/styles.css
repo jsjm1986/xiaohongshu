@@ -801,13 +801,19 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .deployment-details strong { font-size: 9px; }
 .deployment-details ul { margin: 6px 0 0; padding-left: 17px; color: var(--muted); font-size: 8px; line-height: 1.65; }
 .deployment-details .deployment-stop { border-color: #ebd5ac; background: #fffcf4; }
+/* 编排摘要里混着机器标识符(narrative_sequence、channel_allocation 这类),
+   它们是长串无断点的 ASCII,不给 overflow-wrap 就会顶出卡片——实测
+   「随机化维度:strategy、opening、state_seed、narrative_sequence…」那段
+   正是这样溢出的。与本文件其余 13 处同一处理方式。 */
 .orchestration-summary { padding: 12px 14px; }
-.orchestration-summary > strong { font-size: 10px; }
-.orchestration-summary > p { margin: 5px 0 10px; color: var(--muted); font-size: 8px; line-height: 1.55; }
+.orchestration-summary > strong { font-size: 10px; overflow-wrap: anywhere; }
+.orchestration-summary > p { margin: 5px 0 10px; color: var(--muted); font-size: 8px; line-height: 1.55; overflow-wrap: anywhere; }
 .orchestration-summary dl { margin: 0; display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
-.orchestration-summary dl > div { padding: 7px; border-radius: 7px; background: #f5f7f4; }
+/* min-width: 0 是必需的:grid item 默认 min-width 是 auto,长标识符会把轨道
+   撑宽而不是换行,于是整个 dl 横向溢出。 */
+.orchestration-summary dl > div { min-width: 0; padding: 7px; border-radius: 7px; background: #f5f7f4; }
 .orchestration-summary dt { color: var(--muted); font-size: 7px; }
-.orchestration-summary dd { margin: 2px 0 0; font-size: 8px; font-weight: 600; }
+.orchestration-summary dd { margin: 2px 0 0; font-size: 8px; font-weight: 600; overflow-wrap: anywhere; }
 .final-gap-placements { margin-top: 9px; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
 .final-gap-placements > summary { padding: 8px; display: flex; align-items: center; gap: 5px; list-style: none; cursor: pointer; font-size: 8px; font-weight: 700; }
 .final-gap-placements > summary > svg { margin-left: auto; }
@@ -833,8 +839,10 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .diagnostic-status--warn { color: var(--amber); background: var(--amber-soft); }
 .diagnostic-status--fail { color: var(--red); background: var(--red-soft); }
 .diagnostic-list > div > span:nth-child(2) { min-width: 0; flex: 1; display: flex; flex-direction: column; }
-.diagnostic-list strong { font-size: 9px; }
-.diagnostic-list small { color: var(--muted); font-size: 7px; }
+/* 硬约束名与校验消息是英文标识符(hard_constraints 的 key、英文 message),
+   同样无断点,需要 overflow-wrap 才不会顶破右栏卡片。 */
+.diagnostic-list strong { font-size: 9px; overflow-wrap: anywhere; }
+.diagnostic-list small { color: var(--muted); font-size: 7px; overflow-wrap: anywhere; }
 .diagnostic-list b { color: var(--ink-2); font-size: 10px; }
 .validation-readiness-copy { margin: 0; padding: 10px 14px; display: flex; flex-direction: column; gap: 3px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 7px; line-height: 1.55; }
 .validation-readiness-copy strong { color: var(--ink-2); font-size: 8px; }
@@ -888,8 +896,9 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
    选择器带上 .revision-box p 是为了压过上面那条 8px 的通用段落规则。字号只在这条
    规则生效的范围内是 12px:`.v2 .revision-box p`(见下方 v2 段)特异性相同且更靠后,
    实际渲染 11.5px。这里真正保证的是颜色。 */
-.revision-box p.revision-box__error { color: var(--danger); font-size: 12px; line-height: 1.5; }
-.revision-box p.revision-box__done { color: var(--muted); font-size: 12px; line-height: 1.5; }
+/* task.error 可能是网关原文(英文、URL、错误码),需要 overflow-wrap 兜住。 */
+.revision-box p.revision-box__error { color: var(--danger); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.revision-box p.revision-box__done { color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .generation-loading, .generation-progress-page { min-height: calc(100vh - 64px); padding: 50px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
 .generation-loading__orb { width: 60px; height: 60px; margin-bottom: 18px; display: flex; align-items: center; justify-content: center; border-radius: 18px; background: var(--coral-soft); color: var(--coral); animation: breathe 1.8s ease-in-out infinite; }
 @keyframes breathe { 50% { transform: scale(1.06); box-shadow: 0 0 0 13px rgb(240 93 82 / 5%); } }
@@ -1212,9 +1221,17 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .team-actions { display: flex; gap: 6px; }
 .team-actions button { padding: 7px 9px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--line); border-radius: 7px; background: #fff; color: var(--ink-2); cursor: pointer; font-size: 8px; }
 .team-actions button.danger { color: var(--danger); }
-.permission-grid { max-height: 52vh; overflow-y: auto; display: grid; gap: 6px; padding-right: 4px; }
+/* 滚动容器在外层:分组后如果还让每个 .permission-grid 各自 overflow,
+   7 个分组会变成 7 个独立滚动区。 */
+.permission-sections { max-height: 52vh; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; padding-right: 4px; }
+.permission-sections > section > h4 { margin: 0 0 6px; color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .08em; }
+.permission-grid { display: grid; gap: 6px; }
 .permission-grid > div { display: grid; grid-template-columns: minmax(210px, 1fr) 72px 72px; align-items: center; gap: 8px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: #fafbf9; }
-.permission-grid code { color: var(--ink-2); font-size: 9px; }
+.permission-name { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.permission-name strong { color: var(--ink); font-size: 11px; }
+.permission-name small { color: var(--muted); font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
+/* 标识符降为辅助信息:它是审计与 API 的真名,要留着,但不该再抢主标题的位置。 */
+.permission-grid code { color: var(--muted); font-size: 8px; opacity: .75; overflow-wrap: anywhere; }
 .permission-grid label { display: flex; align-items: center; gap: 5px; color: var(--green); font-size: 8px; }
 .permission-grid label.deny { color: var(--danger); }
 .audit-panel { margin-top: 16px; overflow: hidden; }
@@ -1310,8 +1327,8 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   .advanced-viewbar { align-items: flex-start; flex-direction: column; }
   .view-switch { width: 100%; }
   .view-switch button { flex: 1; }
-  .result-layout { grid-template-columns: 1fr; }
-  .result-sidebar { position: static; display: grid; grid-template-columns: repeat(2, 1fr); align-items: start; }
+  .result-layout { grid-template-columns: minmax(0, 1fr); }
+  .result-sidebar { position: static; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
   .revision-box { grid-column: 1 / -1; }
   .login-page { grid-template-columns: 1fr; }
   .login-story { display: none; }
@@ -2481,8 +2498,12 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .v2 .team-row { min-height: 64px; border-top: 0; border-bottom: 1px solid var(--v2-line); font-size: 12px; }
 .v2 .team-row--head { min-height: 38px; background: transparent; border-bottom: 1px solid var(--v2-line-dark); font-family: var(--v2-mono); font-size: 10px; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: var(--v2-muted-2); }
 .v2 .team-row select { font-size: 12px; }
-.v2 .permission-grid code { font-family: var(--v2-mono); font-size: 11px; }
+/* v2 壳下 code 原本 11px,和中文名同级会再次抢主标题;压到 10px 保持副标题地位。 */
+.v2 .permission-grid code { font-family: var(--v2-mono); font-size: 10px; }
 .v2 .permission-grid label { font-size: 11px; }
+.v2 .permission-name strong { font-size: 12.5px; font-weight: 650; }
+.v2 .permission-name small { font-size: 11px; }
+.v2 .permission-sections > section > h4 { font-family: var(--v2-mono); font-size: 10px; letter-spacing: .14em; color: var(--v2-muted-2); }
 .v2 .api-key-list > div { border-top: 0; border-bottom: 1px solid var(--v2-line); font-size: 12px; }
 .v2 .api-key-list code { font-size: 11px; }
 .v2 .api-key-list button { font-size: 11px; }
@@ -3469,11 +3490,19 @@ div.qc-topic { cursor: default; }
 .candidate-matrix-fold[open] > summary > svg { transform: rotate(180deg); }
 
 .sidebar-fold { margin-top: 10px; }
-.sidebar-fold > summary { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 10px; font-weight: 600; list-style: none; }
+/* summary 原来没有内边距,而同卡片内的 .result-insight > header / .diagnostic-list
+   都有 14px 横向内边距,于是折叠标题贴在卡片边框上。这里对齐卡片正文。 */
+.sidebar-fold > summary { padding: 10px 14px; display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 10px; font-weight: 600; list-style: none; }
 .sidebar-fold > summary::-webkit-details-marker { display: none; }
 .sidebar-fold > summary > svg:last-child { margin-left: auto; color: var(--muted); transition: transform .15s ease; }
 .sidebar-fold[open] > summary > svg:last-child { transform: rotate(180deg); }
 .sidebar-fold > summary:hover { color: var(--text); }
+/* orchestration-insight 的 summary 自己就是卡头(它本身是一张 .result-insight 卡),
+   所以对齐 .result-insight > header 的 14px 15px,并在展开时补分隔线;
+   卡间距由 .result-sidebar 的 gap 负责,不要再叠 margin-top。 */
+details.sidebar-fold.orchestration-insight { margin-top: 0; }
+details.sidebar-fold.orchestration-insight > summary { padding: 14px 15px; }
+details.sidebar-fold.orchestration-insight[open] > summary { border-bottom: 1px solid var(--line); }
 details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: inline; }
 
 .production-fold { margin-top: 10px; }
