@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { progressStageText } from '../src/lib/quick-progress.js';
+import { generationProgressValue, progressStageText } from '../src/lib/quick-progress.js';
 
 test('progressStageText maps each progress range to a stage label', () => {
   assert.equal(progressStageText(undefined), '排队等待中');
@@ -16,4 +16,10 @@ test('progressStageText maps each progress range to a stage label', () => {
   assert.equal(progressStageText(99), '质检与合规校验');
   assert.equal(progressStageText(100), '完成');
   assert.equal(progressStageText(120), '完成');
+});
+
+test('generationProgressValue preserves a real queued 0 instead of inventing progress', () => {
+  assert.equal(generationProgressValue(0), 0);
+  assert.equal(generationProgressValue(12), 12);
+  assert.equal(generationProgressValue(undefined), 0);
 });

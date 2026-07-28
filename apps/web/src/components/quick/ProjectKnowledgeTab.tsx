@@ -231,7 +231,7 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
             {busy && pending.length > 0 && <small className="qc-hint">正在上传 {pending.length} 个文件…</small>}
           </Field>
           <details className="qc-advanced">
-            <summary>上传分类（默认：未分类 / 已知事实；改分类需删除后重传）</summary>
+            <summary>上传分类（默认：未分类 / 已知事实；上传后仍可调整分类）</summary>
             <div className="qc-advanced-grid">
               <Field label="分类"><select value={category} onChange={(e) => setCategory(e.target.value)}>{CATEGORIES.map((c) => <option key={c}>{c}</option>)}</select></Field>
               <Field label="证据类型"><select value={kind} onChange={(e) => setKind(e.target.value)}>{KINDS.map((k) => <option key={k}>{k}</option>)}</select></Field>

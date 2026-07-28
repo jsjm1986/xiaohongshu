@@ -64,6 +64,7 @@ import {
 import { resolveProductionArtifactView } from "../lib/image-production";
 import { resolveOpportunitySelectionAuditView } from "../lib/opportunity-rank";
 import { resolveReaderStateView } from "../lib/reader-state";
+import { generationProgressValue } from "../lib/quick-progress";
 import { resolveHistoricalTrendFitSnapshot } from "../lib/trend-fit";
 import { candidateToMarkdown, formatDate } from "../lib/utils";
 import { validationIssueLabel } from "../lib/validation-labels";
@@ -629,7 +630,7 @@ export function GenerationResultPage() {
                   </div>}
                   {threadKind !== "organic_reaction" && comment.boundary && <div className="comment-next-step"><Info size={14} /><span>答复边界：{comment.boundary}</span></div>}
                   {threadKind !== "organic_reaction" && comment.evidenceIds?.length ? <div className="comment-next-step"><Info size={14} /><span>证据引用：{comment.evidenceIds.join("、")}</span></div> : null}
-                  {comment.followUps?.map((followUp, followUpIndex) => (
+                  {threadKind !== "organic_reaction" && comment.followUps?.map((followUp, followUpIndex) => (
                     <div className="comment-follow-up" key={`${followUp.question}-${followUpIndex}`}>
                       {followUp.threadDepth !== undefined && <div className="comment-meta"><Badge>第 {followUp.threadDepth} 层</Badge></div>}
                       <strong>{followUp.displayName ? `${followUp.displayName} · 接话：` : "接话："}{followUp.question}</strong>
@@ -1261,7 +1262,7 @@ function GenerationRunning({ job }: { job: GenerationJob }) {
     "并行生成 3 个候选",
     "系统规则校验与修复",
   ];
-  const progress = job.progress || 24;
+  const progress = generationProgressValue(job.progress);
   return (
     <div className="generation-progress-page">
       <Link to="/history">

@@ -1,14 +1,10 @@
 import type { Candidate, CommentThread, GenerateInput, GenerationJob, Project, TopicOpportunity } from '../types';
+import { api } from './api';
 import { isRevisionInFlight } from './revision-progress';
 import { buildSimpleGenerateInput, resolveSimpleGenerationSettings } from './simple-generation';
 import type { SimpleSettingOverrides } from './simple-generation';
 
-// `./api` reads document.cookie / sessionStorage at module load, so it is
-// browser-only and must not be imported eagerly (it crashes under the Node test
-// runner). We reference its type via `typeof import(...)` and load the real
-// implementation lazily inside defaultDeps, which only runs when no deps are
-// injected. Tests inject deps and therefore never touch the real api module.
-type ApiClient = typeof import('./api')['api'];
+type ApiClient = typeof api;
 
 export interface QuickComment {
   question: string;
@@ -17,7 +13,7 @@ export interface QuickComment {
   nextStep?: string;
   /**
    * 线程互动形态。必须带上:只有 org_answer 的 answer 出自可追责身份,
-   * reader_exchange/organic_reaction 的 answer 是模拟读者接话。丢掉这个字段,
+   * reader_exchange 的 answer 是模拟读者接话,organic_reaction 没有 answer。丢掉这个字段,
    * 展示层只能一律按 org_answer 渲染,于是读者互聊被署名成机构发言——
    * 这正是方法论禁止的假冒消费者。
    */
@@ -58,21 +54,24 @@ export interface QuickCandidateView {
 }
 
 function mapComment(thread: CommentThread): QuickComment {
+  const isOrganicReaction = thread.threadKind === 'organic_reaction';
   return {
     question: thread.question,
-    answer: thread.answer,
-    boundary: thread.boundary,
-    nextStep: thread.nextStep,
+    answer: isOrganicReaction ? '' : thread.answer,
+    boundary: isOrganicReaction ? undefined : thread.boundary,
+    nextStep: isOrganicReaction ? undefined : thread.nextStep,
     // 身份三字段原样透传:创作区的仿真预览要靠它们区分「机构答复」与「读者接话」。
     // 原来这里把它们丢掉了,而丢掉的后果不是少个徽标,是署名错位。
     threadKind: thread.threadKind,
     displayName: thread.displayName,
     replyDisplayName: thread.replyDisplayName,
-    followUps: thread.followUps?.map((f) => ({
-      question: f.question,
-      answer: f.answer,
-      boundary: f.boundary,
-    })),
+    followUps: isOrganicReaction
+      ? []
+      : thread.followUps?.map((f) => ({
+          question: f.question,
+          answer: f.answer,
+          boundary: f.boundary,
+        })),
   };
 }
 
@@ -126,6 +125,11 @@ export function quickCandidateToMarkdown(view: QuickCandidateView): string {
     }
     for (const c of view.comments) {
       parts.push('');
+      if (c.threadKind === 'organic_reaction') {
+        const speaker = c.displayName?.trim() ? `${c.displayName.trim()}: ` : '';
+        parts.push(`漂浮短反应: ${speaker}${c.question}`);
+        continue;
+      }
       parts.push(`Q: ${c.question}`);
       parts.push(`A: ${c.answer}`);
       if (c.boundary) parts.push(`边界: ${c.boundary}`);
@@ -171,7 +175,7 @@ interface AutoDeps {
 }
 
 const defaultDeps = async (): Promise<AutoDeps> => ({
-  api: (await import('./api')).api,
+  api,
   buildInput: buildSimpleGenerateInput,
   resolveSettings: resolveSimpleGenerationSettings,
 });
@@ -218,9 +222,7 @@ export async function approveOpportunitiesForBatch(args: {
   ]);
   const neededGapIds = new Set(targets.flatMap((o) => o.gapIds ?? []));
   const neededStrategyIds = new Set(
-    targets
-      .flatMap((o) => [o.strategyId, ...(o.compatibleStrategyIds ?? [])])
-      .filter(Boolean) as string[],
+    targets.map((o) => o.strategyId).filter(Boolean) as string[],
   );
   await Promise.all([
     ...gaps.items

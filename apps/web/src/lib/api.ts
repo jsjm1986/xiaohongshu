@@ -53,14 +53,35 @@ export class ApiError extends Error {
   }
 }
 
-const cookieValue = (name: string) =>
-  document.cookie
+const cookieValue = (name: string) => {
+  if (typeof document === "undefined") return "";
+  return document.cookie
     .split("; ")
     .find((item) => item.startsWith(`${name}=`))
     ?.slice(name.length + 1) || "";
+};
+
+const readStoredCsrf = () => {
+  if (typeof window === "undefined") return "";
+  try {
+    return window.sessionStorage.getItem("content-agent-csrf") || "";
+  } catch {
+    return "";
+  }
+};
+
+const storeCsrf = (value: string) => {
+  if (typeof window === "undefined") return;
+  try {
+    if (value) window.sessionStorage.setItem("content-agent-csrf", value);
+    else window.sessionStorage.removeItem("content-agent-csrf");
+  } catch {
+    // Storage can be unavailable in restricted browser contexts.
+  }
+};
 
 let csrfToken =
-  sessionStorage.getItem("content-agent-csrf") ||
+  readStoredCsrf() ||
   decodeURIComponent(cookieValue("ca_csrf"));
 
 // The API never wraps responses in a { data: T } envelope — endpoints return the
@@ -640,7 +661,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const activeCsrf = decodeURIComponent(cookieValue("ca_csrf")) || csrfToken;
   if (activeCsrf && activeCsrf !== csrfToken) {
     csrfToken = activeCsrf;
-    sessionStorage.setItem("content-agent-csrf", activeCsrf);
+    storeCsrf(activeCsrf);
   }
   const response = await fetch(path, {
     credentials: "include",
@@ -697,7 +718,7 @@ export const api = {
       );
       if ("user" in result) {
         csrfToken = result.csrfToken || "";
-        if (csrfToken) sessionStorage.setItem("content-agent-csrf", csrfToken);
+        storeCsrf(csrfToken);
         return normalizeUser(result.user as unknown as JsonRecord);
       }
       return normalizeUser(result as unknown as JsonRecord);
@@ -707,7 +728,7 @@ export const api = {
         method: "POST",
       });
       csrfToken = "";
-      sessionStorage.removeItem("content-agent-csrf");
+      storeCsrf("");
       return result;
     },
     changePassword: (currentPassword: string, newPassword: string) =>
