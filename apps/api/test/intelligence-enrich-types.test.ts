@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { BadRequestException } from '@nestjs/common';
 import {
+  countHedges,
   MAX_MERGE_ITEMS,
   MAX_TOTAL_CONTENT_CHARS,
   isEnrichConfidence,
@@ -155,5 +156,28 @@ describe('isEnrichConfidence', () => {
     for (const value of ['LOW', 'unknown', '', null, undefined, 1, {}]) {
       assert.equal(isEnrichConfidence(value), false);
     }
+  });
+});
+
+describe('countHedges', () => {
+  it('数出常见的不确定标记', () => {
+    assert.ok(countHedges('待确认:主材是否达到 E1 级?') >= 3);
+    assert.equal(countHedges('主材达到 E1 级。'), 0);
+  });
+
+  it('重复出现要累计,不是去重', () => {
+    assert.equal(countHedges('待确认'), 1);
+    assert.equal(countHedges('待确认。待确认。待确认。'), 3);
+  });
+
+  it('实测那次退化能被检出:限定词被改写成断言后计数下降', () => {
+    // 这两段取自真实的一次合并前后(装修项目,主材环保等级)
+    const before = '**待确认**：建议明确公司合作的主材品牌是否达到国家环保标准（如E1级、ENF级）。';
+    const after = '公司合作的主材品牌达到国家环保标准（如E1级、ENF级）。';
+    assert.ok(countHedges(before) > countHedges(after), '退化必须表现为计数下降');
+  });
+
+  it('空串为 0', () => {
+    assert.equal(countHedges(''), 0);
   });
 });

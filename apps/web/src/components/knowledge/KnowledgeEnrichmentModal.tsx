@@ -35,6 +35,7 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete 
   const [preview, setPreview] = useState('');
   const [targetFile, setTargetFile] = useState('');
   const [isNewFile, setIsNewFile] = useState(false);
+  const [hedgeLoss, setHedgeLoss] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const toast = useToast();
 
@@ -69,6 +70,7 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete 
       setPreview(result.preview);
       setTargetFile(result.targetFile);
       setIsNewFile(result.isNewFile);
+      setHedgeLoss(result.hedgeLossCount);
       setStep('preview');
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : '合并失败');
@@ -172,6 +174,16 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete 
               保存后这份资料的证据类型是「猜想」,核实过再改成「已知事实」。
             </span>
           </p>
+          {hedgeLoss > 0 && (
+            <p className="enrich-warning" role="alert">
+              <TriangleAlert size={15} aria-hidden="true" />
+              <span>
+                合并时有 {hedgeLoss} 处「待确认 / 是否 / 可能」这类不确定说法消失了。
+                模型偶尔会把「待确认:主材是否达到 E1 级」改写成「主材达到 E1 级」,
+                <strong>凭空变成事实</strong>。保存前请重点核对下面这份文档里的肯定句。
+              </span>
+            </p>
+          )}
           <pre className="enrich-preview__body">{preview}</pre>
         </div>
       )}

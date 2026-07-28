@@ -30,6 +30,35 @@ export interface MergePreview {
   preview: string;
   targetFile: string;
   isNewFile: boolean;
+  /**
+   * 合并把不确定标记吃掉了多少条。
+   *
+   * 这是**提示**,不是门:不阻断保存,只在预览页提醒用户重点看哪里。
+   * 实测发现的问题——合并那一步会把「待确认:主材是否达到 E1 级」改写成
+   * 「主材达到 E1 级」,凭空造出一条事实。提示词已经明确禁止,但模型不总是听,
+   * 而这类改写用户扫一眼预览很难发现。
+   */
+  hedgeLossCount: number;
+}
+
+/**
+ * 不确定标记。合并前后各数一次,少了就说明模型把限定词吃掉了。
+ *
+ * 只做计数,不做语义判断:词面统计够用来提示「这里值得重看」,
+ * 而判断某句话是否真的从推断变成了断言需要理解上下文,不是正则能干的事。
+ */
+export const HEDGE_MARKERS = [
+  '待确认', '建议补充', '建议明确', '建议确认', '尚未提供', '未提及', '未包含',
+  '信息缺失', '属信息空白', '请用户补充', '需与', '需确认', '有待',
+  '是否', '可能', '通常', '一般', '应会', '原则上', '?', '？',
+] as const;
+
+export function countHedges(text: string): number {
+  let total = 0;
+  for (const marker of HEDGE_MARKERS) {
+    total += text.split(marker).length - 1;
+  }
+  return total;
 }
 
 /*

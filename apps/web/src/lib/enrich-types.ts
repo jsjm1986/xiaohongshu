@@ -44,6 +44,8 @@ export interface EnrichMergeResponse {
   preview: string;
   targetFile: string;
   isNewFile: boolean;
+  /** 合并吃掉了多少条不确定标记。>0 时提醒用户重点核对,不阻断保存。 */
+  hedgeLossCount: number;
 }
 
 export interface EnrichSaveRequest {

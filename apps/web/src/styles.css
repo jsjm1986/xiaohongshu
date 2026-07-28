@@ -4291,3 +4291,5 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
   .enrich-editing { grid-template-columns: minmax(0, 1fr); }
   .enrich-original { max-height: 240px; }
 }
+/* 不确定标记被合并吃掉的提示。用 amber 而非 red:这是「值得重看」而不是「出错了」 */
+.enrich-warning { display: flex; align-items: flex-start; gap: 9px; margin: 0 0 13px; padding: 11px 13px; border-radius: 8px; background: var(--amber-soft); color: var(--amber); font-size: var(--font-sm); line-height: 1.6; }

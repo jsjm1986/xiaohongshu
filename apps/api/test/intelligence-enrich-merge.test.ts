@@ -252,3 +252,58 @@ test('保存到新文件时分类落到未分类', async () => {
   assert.equal(saved.category, '未分类');
   assert.equal(saved.evidenceStatus, '猜想');
 });
+
+test('合并吃掉不确定标记时回报 hedgeLossCount', async () => {
+  // 实测过的退化:把「待确认:是否达到 E1 级」改写成「达到 E1 级」,凭空造出事实。
+  // 这里只要求「能报出来」,不要求阻断——判断某句是否真从推断变成断言需要理解上下文。
+  const gapId = await createGap(projectId, '环保标准');
+  modelReply = { document: '## 环保标准\n\n主材达到国家环保标准 E1 级。' };
+  const result = await enrich.mergeEnrichedKnowledge(
+    projectId,
+    [{ gapId, status: 'confirmed', content: '**待确认**:建议明确主材是否达到国家环保标准（如 E1 级）?' }],
+    '环保.md',
+    principal as never,
+  );
+  assert.ok(result.hedgeLossCount > 0, `应报出限定词丢失,实际 ${result.hedgeLossCount}`);
+});
+
+test('限定词原样保留时 hedgeLossCount 为 0', async () => {
+  const gapId = await createGap(projectId, '保留标记');
+  const content = '**待确认**:主材是否达到 E1 级?';
+  modelReply = { document: `## 保留标记\n\n${content}` };
+  const result = await enrich.mergeEnrichedKnowledge(
+    projectId,
+    [{ gapId, status: 'confirmed', content }],
+    '保留.md',
+    principal as never,
+  );
+  assert.equal(result.hedgeLossCount, 0);
+});
+
+test('模型多加限定词不会报成负数', async () => {
+  const gapId = await createGap(projectId, '不会负数');
+  modelReply = { document: '## 不会负数\n\n待确认:是否可能?通常一般应会原则上。' };
+  const result = await enrich.mergeEnrichedKnowledge(
+    projectId,
+    [{ gapId, status: 'confirmed', content: '一句陈述。' }],
+    '负数.md',
+    principal as never,
+  );
+  assert.equal(result.hedgeLossCount, 0);
+});
+
+test('合并提示词明确要求保留不确定说法', async () => {
+  // 这条是回归防护:第 6 条约束被删掉的话,退化会重新出现,而它不容易被别的测试发现。
+  const gapId = await createGap(projectId, '提示词约束');
+  capturedPrompts = [];
+  modelReply = { document: '## 提示词约束\n\n正文。' };
+  await enrich.mergeEnrichedKnowledge(
+    projectId,
+    [{ gapId, status: 'confirmed', content: '内容' }],
+    '约束.md',
+    principal as never,
+  );
+  const prompt = capturedPrompts.at(-1)!;
+  assert.match(prompt, /不确定的说法必须保持不确定/);
+  assert.match(prompt, /不要改写成陈述句/);
+});

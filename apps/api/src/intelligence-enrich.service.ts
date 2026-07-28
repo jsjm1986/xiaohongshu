@@ -4,7 +4,7 @@ import { IntelligenceService } from './intelligence.service.js';
 import { KnowledgeService } from './knowledge.service.js';
 import type { SessionPrincipal } from './models.js';
 import { ResourceService } from './resource.service.js';
-import { isEnrichConfidence } from './intelligence-enrich.types.js';
+import { countHedges, isEnrichConfidence } from './intelligence-enrich.types.js';
 import type { DraftItem, EnrichDraftResult, MergeItem, MergePreview } from './intelligence-enrich.types.js';
 import { nowIso, parseJson } from './utils.js';
 
@@ -139,7 +139,17 @@ export class IntelligenceEnrichService {
     const merged = typeof payload.document === 'string' ? payload.document.trim() : '';
     if (merged.length === 0) throw new BadRequestException('模型没能生成合并结果,请重试');
 
-    return { preview: merged, targetFile: target, isNewFile: existing === '' };
+    /*
+     * 数一下不确定标记有没有变少。
+     *
+     * 实测:合并那一步会把「待确认:主材是否达到 E1 级」改写成「主材达到 E1 级」,
+     * 把疑问句改成陈述句——凭空造出事实。提示词已明确禁止(第 6 条),但不能只靠
+     * 提示词。这里只做计数并提示,不阻断保存:判断某句是否真从推断变成断言需要理解
+     * 上下文,词面统计做不到,当门会误伤(模型合并同类项时正常会去掉重复的限定词)。
+     */
+    const hedgeLoss = Math.max(0, countHedges(`${existing}\n${supplements}`) - countHedges(merged));
+
+    return { preview: merged, targetFile: target, isNewFile: existing === '', hedgeLossCount: hedgeLoss };
   }
 
   /**
@@ -193,6 +203,12 @@ ${supplements}
 3. 与原文冲突时以补充内容为准，它更新更具体。
 4. 用 Markdown，二级标题分节，结构清晰。
 5. 不要新增原文和补充内容里都没有的事实。
+6. 【最重要】不确定的说法必须保持不确定。补充内容里凡是「待确认」「建议补充」
+   「尚未提供」「是否…」「可能」「通常」「应」这类限定词和疑问句，一律原样保留，
+   不要改写成陈述句、不要删掉限定词、不要把疑问句变成肯定句。
+   例如「待确认：主材是否达到 E1 级」不可以写成「主材达到 E1 级」——
+   后者是凭空造出来的事实。这类标记是给用户看的待办，不是可以精简的赘语。
+7. 不要替原文或补充内容做判断：没有依据的地方保持空白并标注出来。
 
 只返回 JSON 对象，不要多余文字：
 {"document":"完整的 Markdown 文档"}`;
