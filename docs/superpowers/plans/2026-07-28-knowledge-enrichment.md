@@ -2189,33 +2189,35 @@ confidence，看不出功能在真实资料上表现如何。用一份两三千�
 
 ### 规格覆盖
 
-- [ ] 三档统计（有据 / 推断 / 空白）已实现，判据与后端 `pendingGaps` 一致
-- [ ] 起草只取待补充缺口，且 `answer` 键缺失的情况没被漏掉
-- [ ] 用户可逐条确认 / 编辑 / 删除 / 恢复，改动不会被静默丢弃
-- [ ] 合并自动选 `INDEX.md` 或新建，预览不落库
-- [ ] 保存走 `knowledge.import`，同名文件版本递增，旧版本保留
-- [ ] 全程停在知识库区，不自动跳转到创作区
+- [x] 三档统计（有据 / 推断 / 空白）已实现，判据与后端 `pendingGaps` 一致
+- [x] 起草只取待补充缺口，且 `answer` 键缺失的情况没被漏掉
+- [x] 用户可逐条确认 / 编辑 / 删除 / 恢复，改动不会被静默丢弃
+- [x] 合并自动选 `INDEX.md` 或新建，预览不落库
+- [x] 保存走 `knowledge.import`，同名文件版本递增，旧版本保留
+- [x] 全程停在知识库区，不自动跳转到创作区
 
 ### 与既有代码的一致性
 
-- [ ] 校验是 `utils.ts` 风格的手写函数，没有引入 `class-validator`
-- [ ] 错误用 `BadRequestException` / `AnalysisGatewayError`，没有自造 `ValidationError`
-- [ ] 模型调用走 `IntelligenceService`，没有绕开 `analysis_tasks` 生命周期
-- [ ] 前端组件从 `../Ui` 导入，没有引入 vitest / testing-library / react-markdown
-- [ ] 所有新测试文件都登记进了对应 `package.json` 的 `test` 脚本
+- [x] 校验是 `utils.ts` 风格的手写函数，没有引入 `class-validator`
+- [x] 错误用 `BadRequestException` / `AnalysisGatewayError`，没有自造 `ValidationError`
+- [x] 模型调用走 `IntelligenceService`，没有绕开 `analysis_tasks` 生命周期
+- [x] 前端组件从 `../Ui` 导入，没有引入 vitest / testing-library / react-markdown
+- [x] 所有新测试文件都登记进了对应 `package.json` 的 `test` 脚本
+      ⚠ 附带问题:登记时整份 package.json 一起 add,卷入了别的会话的 3 行依赖改动。
+      已在 PR #61 留言披露,选择保留而非回退(见留言)。
 
 ### 安全
 
-- [ ] `targetFile` 在入口和 `knowledge.service` 两处都挡了路径穿越
-- [ ] `gapId` 查询带 `project_id` 条件，不能跨项目取缺口
-- [ ] `save` 判 `knowledge.import` 权限，与知识库上传同一把锁
-- [ ] 长度上限：单条、总量、2 MiB（按字节）都有校验
+- [x] `targetFile` 在入口和 `knowledge.service` 两处都挡了路径穿越
+- [x] `gapId` 查询带 `project_id` 条件，不能跨项目取缺口
+- [x] `save` 判 `knowledge.import` 权限，与知识库上传同一把锁
+- [x] 长度上限：单条、总量、2 MiB（按字节）都有校验
 
 ### 表述纪律
 
-- [ ] UI 上没有把 AI 推断说成已核实事实
-- [ ] 没有显示假的 token 消耗数字
-- [ ] 「依据强弱」的措辞不会诱导用户跳过审查
+- [x] UI 上没有把 AI 推断说成已核实事实
+- [x] 没有显示假的 token 消耗数字
+- [x] 「依据强弱」的措辞不会诱导用户跳过审查
 
 ---
 
