@@ -31,6 +31,28 @@ export interface GroupableNavItem {
   adminOnly?: boolean;
 }
 
+/**
+ * 页面 hero 上的频道标记(图标 + 频道名)取自哪一条导航。
+ *
+ * hero 原来显示 index="01".."10" 的幽影巨号,是十处硬编码字符串,靠人工和
+ * 侧边栏顺序保持一致。改分组之后就对不上了——「生成历史」还是 07、「项目管理」
+ * 还是 03,数字指向的位置已经不存在。所以 hero 的标记改为按路径回查导航定义,
+ * 图标与频道名都来自 AppShell 的那一张表,导航改了 hero 自动跟着改。
+ *
+ * 这里只负责「按路径找到是哪条导航」;图标组件本身仍由 AppShell 持有,免得
+ * 这个纯函数模块被迫依赖 react/lucide(测试就跑不起来了)。
+ */
+export function navItemForPath<T extends GroupableNavItem>(items: readonly T[], pathname: string): T | undefined {
+  /*
+    最长前缀优先。根路径 '/' 是所有路径的前缀,若按顺序取第一个匹配,任何页面
+    都会命中「概览」;取最长匹配则只有 '/' 本身会命中它。
+  */
+  return items
+    .filter((item) => (item.to === '/' ? pathname === '/' : pathname === item.to || pathname.startsWith(`${item.to}/`)))
+    .sort((a, b) => b.to.length - a.to.length)
+    .at(0);
+}
+
 /** 能看到管理组频道的角色。 */
 const ADMIN_ROLES = ['系统管理员', 'Owner', 'Admin'];
 

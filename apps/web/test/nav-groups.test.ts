@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { NAV_GROUPS, canSeeAdminNav, groupNavItems, visibleNavItems, type GroupableNavItem } from '../src/lib/nav-groups';
+import {
+  NAV_GROUPS,
+  canSeeAdminNav,
+  groupNavItems,
+  navItemForPath,
+  visibleNavItems,
+  type GroupableNavItem,
+} from '../src/lib/nav-groups';
 
 /* 用一份最小夹具,而不是导入 AppShell 的真表——分组算法和具体频道清单该各测各的。 */
 const ITEMS: GroupableNavItem[] = [
@@ -60,4 +67,29 @@ test('分组不丢频道:每个可见项恰好落在一组里', () => {
     assert.equal(grouped.length, visible.length, `${role} 分组前后数量不一致`);
     assert.deepEqual(new Set(grouped.map((item) => item.to)), new Set(visible.map((item) => item.to)));
   }
+});
+
+test('navItemForPath 取最长前缀,根路径不吞掉其他页面', () => {
+  // '/' 是所有路径的前缀,按顺序取首个匹配会让每个页面都命中「概览」
+  assert.equal(navItemForPath(ITEMS, '/')?.to, '/');
+  assert.equal(navItemForPath(ITEMS, '/projects')?.to, '/projects');
+  assert.equal(navItemForPath(ITEMS, '/history')?.to, '/history');
+});
+
+test('navItemForPath 认子路径,但不认前缀相同的兄弟路径', () => {
+  assert.equal(navItemForPath(ITEMS, '/projects/abc123')?.to, '/projects');
+  // '/generate' 不该匹配到 '/generations/:id'——那是详情页,不是频道
+  assert.equal(navItemForPath(ITEMS, '/generations/abc')?.to, undefined);
+  assert.equal(navItemForPath(ITEMS, '/nowhere')?.to, undefined);
+});
+
+test('navItemForPath 在候选重叠时取更具体的那条', () => {
+  const nested = [
+    { to: '/research', group: 'assets' as const },
+    { to: '/research/claims', group: 'assets' as const },
+  ];
+  assert.equal(navItemForPath(nested, '/research/claims')?.to, '/research/claims');
+  assert.equal(navItemForPath(nested, '/research')?.to, '/research');
+  // 反向对照:表序颠倒不影响结果,证明靠的是长度而非顺序
+  assert.equal(navItemForPath([...nested].reverse(), '/research/claims')?.to, '/research/claims');
 });

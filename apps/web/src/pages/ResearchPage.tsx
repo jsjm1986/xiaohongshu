@@ -215,7 +215,6 @@ export function ResearchPage() {
 
   return <div className="page research-page">
     <V2Hero
-      index="06"
       status={<>{currentProject?.name || "当前项目"} · 研究边界已启用</>}
       title="研究与证据中心"
       description={`管理 ${currentProject?.name || "当前项目"} 的理论、论文、实践数据、实验、校准和发布基线。`}

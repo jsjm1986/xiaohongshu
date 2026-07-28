@@ -148,7 +148,6 @@ export function KnowledgePage() {
   return (
     <div className="page knowledge-page">
       <V2Hero
-        index="04"
         status={<>{currentProject?.name || '当前项目'} · {indexFile ? '知识地图已就绪 · 可全量注入' : '等待建立索引'}</>}
         title="项目知识库"
         description={`「${currentProject?.name || '当前项目'}」的事实、样本、方法与表达边界。`}

@@ -31,7 +31,6 @@ export function HistoryPage() {
 
   return <div className="page history-page">
     <V2Hero
-      index="07"
       status={<>{scope === 'current' ? '当前项目' : '全部项目'} · 共 {jobs.length} 次运行</>}
       title="生成历史"
       description="每次运行都保存知识、公式、配置与随机种子快照。"

@@ -2229,6 +2229,10 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   .v2-instrument { grid-template-columns: 1fr; }
   .v2-instrument__cell + .v2-instrument__cell { border-left: 0; border-top: 1px solid var(--v2-line); }
   .v2-hero h1 { font-size: 28px; }
+  /* h1 降到 28px 后行高约 32px,标记同步收窄才不会比标题高出一截 */
+  .v2-hero__headline { gap: 11px; }
+  .v2-hero__mark { width: 36px; height: 36px; margin-top: 0; border-radius: 10px; }
+  .v2-hero__mark svg { width: 18px; height: 18px; }
 }
 
 /* ---- v2 润色：有纪律的多色点缀 + 呼吸感 ---- */
@@ -2269,13 +2273,23 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   background-position: -6px -6px;
 }
 .v2-hero { overflow: hidden; }
-.v2-hero__ghost {
-  position: absolute; right: 12px; top: -38px;
-  font-size: 190px; font-weight: 800; letter-spacing: -0.05em; line-height: 1;
-  color: rgb(30 41 36 / 4%); font-variant-numeric: tabular-nums;
-  pointer-events: none; user-select: none; z-index: 0;
-}
 .v2-hero__text, .v2-hero__actions { position: relative; z-index: 1; }
+/*
+  频道标记取代了原来 190px 的幽影巨号(.v2-hero__ghost)。巨号是十处硬编码序号,
+  改导航分组后已指错位置;标记按路径回查频道表,不需要每页维护。
+
+  尺寸、描边、圆角全站同一套,不按页面区分颜色——统一由结构保证,图标本身
+  提供辨识度。
+*/
+.v2-hero__headline { display: flex; align-items: flex-start; gap: 14px; }
+.v2-hero__headline > div { min-width: 0; }
+.v2-hero__mark {
+  flex: 0 0 auto; width: 44px; height: 44px; margin-top: 2px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--v2-line-dark); border-radius: 12px;
+  background: var(--v2-surface); color: var(--v2-ink-2);
+  box-shadow: 0 1px 2px rgb(30 41 36 / 4%);
+}
 .v2-hero__status i { box-shadow: 0 0 0 3px rgb(37 131 98 / 16%); }
 .v2 .button--primary {
   background: linear-gradient(180deg, #f47066 0%, var(--v2-brand) 55%, var(--v2-brand-strong) 100%);
@@ -2555,6 +2569,9 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .v2-back-link { display: inline-flex; align-items: center; gap: 5px; margin-bottom: 4px; color: var(--v2-muted); font-size: 12.5px; text-decoration: none; }
 .v2-back-link:hover { color: var(--v2-brand-ink); }
 .result-page .v2-hero h1 { font-size: 30px; max-width: 760px; }
+/* 结果页 h1 是 30px(行高约 35px),标记按比例收窄。它的路径 /generations/:id
+   不在频道表里,HeroMark 会整块不渲染,这条只在将来被纳入时生效。 */
+.result-page .v2-hero__mark { width: 38px; height: 38px; margin-top: 0; border-radius: 11px; }
 
 /* ---- 登录页：公式条 mono 小标 ---- */
 .login-formula small { font-family: "SF Mono", ui-monospace, Consolas, monospace; font-size: 9.5px; letter-spacing: 0.08em; }

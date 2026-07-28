@@ -45,7 +45,6 @@ export function AuditPage() {
   return (
     <div className="page audit-page">
       <V2Hero
-        index="10"
         status={<>{currentProject?.name || '当前工作区'} · 操作留痕</>}
         title="操作审计"
         description="关键操作留痕：谁在什么时间对哪个资源做了什么。"

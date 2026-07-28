@@ -93,7 +93,6 @@ export function DashboardPage() {
   return (
     <div className="page dashboard-page">
       <V2Hero
-        index="01"
         status={<>{currentProject?.name || "当前项目"} · 系统正常</>}
         title={<>上午好，继续完善「{currentProject?.name || "当前项目"}」</>}
         description="从项目知识出发，把每一次生成变成可解释、可复用的内容资产。"
