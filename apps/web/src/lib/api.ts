@@ -40,6 +40,12 @@ import type {
   WorkspaceMember,
   WorkspaceApiKey,
 } from "../types";
+import type {
+  EnrichDraftResponse,
+  EnrichMergeRequest,
+  EnrichMergeResponse,
+  EnrichSaveRequest,
+} from "./enrich-types";
 import { gapPayload, opportunityPayload } from "./metric-payload";
 import type { QuotaSnapshot } from "./quota-view";
 
@@ -923,6 +929,31 @@ export const api = {
         request<AnalysisTask[]>(`/api/projects/${encodeURIComponent(projectId)}/intelligence/analysis-tasks`),
       get: (projectId: string, taskId: string) =>
         request<AnalysisTask>(`/api/projects/${encodeURIComponent(projectId)}/intelligence/analysis-tasks/${encodeURIComponent(taskId)}`),
+    },
+    /**
+     * 知识库 AI 补充。draft 起草、merge 生成合并预览(不落库)、save 存新版本。
+     *
+     * 草稿不在服务端缓存:merge 时前端要把正文回传。所以「用户确认了 AI 原稿」
+     * 也得带上 content,后端拿不到就没法合并。
+     */
+    enrich: {
+      draft: (projectId: string) =>
+        request<EnrichDraftResponse>(
+          `/api/projects/${encodeURIComponent(projectId)}/intelligence/enrich/draft`,
+          { method: "POST" },
+        ),
+      merge: (projectId: string, body: EnrichMergeRequest) =>
+        request<EnrichMergeResponse>(
+          `/api/projects/${encodeURIComponent(projectId)}/intelligence/enrich/merge`,
+          { method: "POST", body: JSON.stringify(body) },
+        ),
+      // 返回的是知识文件行,走 normalizeKnowledge 让形状与 knowledge.list 一致,
+      // 调用方可以直接塞回文件列表。
+      save: async (projectId: string, body: EnrichSaveRequest) =>
+        normalizeKnowledge(await request<JsonRecord>(
+          `/api/projects/${encodeURIComponent(projectId)}/intelligence/enrich/save`,
+          { method: "POST", body: JSON.stringify(body) },
+        )),
     },
   },
   blueprintModules: {

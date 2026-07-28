@@ -7,19 +7,20 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "test": "node --import tsx --test test/presets.test.ts test/formula-ui.test.ts test/reader-state.test.ts test/generation-fallback.test.ts test/research-governance.test.ts test/metric-payload.property.test.ts test/comment-cref.test.ts test/gap-evidence.test.ts test/quick-generation.test.ts test/quick-channel-state.test.ts test/quick-progress.test.ts test/preset-save.test.ts test/validation-labels.test.ts test/saas-access.test.ts test/quick-batch.test.ts test/quick-recipe.test.ts test/batch-polling.test.ts test/topic-card.test.ts test/quota-view.test.ts test/overview-digest.test.ts test/retry-plan.test.ts test/deployment-plan.test.ts test/batch-export.test.ts test/wait-status.test.ts test/issue-verdict.test.ts test/gap-ledger.test.ts test/fact-ledger.test.ts test/candidate-diff.test.ts test/comment-view.test.ts test/single-retry.test.ts test/publish-copy.test.ts test/edition.test.ts test/reader-navigation.test.ts test/quick-nav.test.ts test/quick-routes.test.ts test/note-view.test.ts test/note-comments.test.ts test/revision-progress.test.ts test/revision-box.test.ts test/nav-groups.test.ts test/permission-copy.test.ts test/audit-copy.test.ts test/channels.test.ts",
+    "test": "node --import tsx --test test/presets.test.ts test/formula-ui.test.ts test/reader-state.test.ts test/generation-fallback.test.ts test/research-governance.test.ts test/metric-payload.property.test.ts test/comment-cref.test.ts test/gap-evidence.test.ts test/quick-generation.test.ts test/quick-channel-state.test.ts test/quick-progress.test.ts test/preset-save.test.ts test/validation-labels.test.ts test/saas-access.test.ts test/quick-batch.test.ts test/quick-recipe.test.ts test/batch-polling.test.ts test/topic-card.test.ts test/quota-view.test.ts test/overview-digest.test.ts test/retry-plan.test.ts test/deployment-plan.test.ts test/batch-export.test.ts test/wait-status.test.ts test/issue-verdict.test.ts test/gap-ledger.test.ts test/fact-ledger.test.ts test/candidate-diff.test.ts test/comment-view.test.ts test/single-retry.test.ts test/publish-copy.test.ts test/edition.test.ts test/reader-navigation.test.ts test/quick-nav.test.ts test/quick-routes.test.ts test/note-view.test.ts test/note-comments.test.ts test/revision-progress.test.ts test/revision-box.test.ts test/nav-groups.test.ts test/permission-copy.test.ts test/audit-copy.test.ts test/channels.test.ts test/enrich-api.test.ts",
     "typecheck": "tsc --noEmit --pretty false"
   },
   "dependencies": {
     "lucide-react": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "react-router-dom": "latest"
+    "react-router-dom": "^7.18.1"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "latest",
+    "postcss": "^8.5.23",
     "tsx": "^4.20.6",
     "typescript": "latest",
     "vite": "latest"
