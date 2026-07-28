@@ -143,6 +143,16 @@ export { AnalysisGatewayError } from './model-failure.js';
  *  - 模型返回的结果不完整 → 重试一次通常能好(采样波动)
  *  - 其余 → 原文透出,至少比 "Internal server error" 多一点线索
  */
+/**
+ * 知识库补充任务在 analysis_tasks.source_fingerprint 上的前缀。
+ *
+ * analysis_tasks 的 kind 只允许 'project' | 'image'(CHECK 约束),加第三种值要改
+ * schema 加迁移。补充任务借用 'project',靠这个前缀区分用途——与
+ * refreshTopicOpportunities 的 `:topic-refresh:` 同一套做法。前端据此把它从
+ * 「分析进度」里排除,否则点「AI 帮我补充」会让知识库页的分析进度条动起来。
+ */
+export const ENRICH_FINGERPRINT_PREFIX = 'enrich:';
+
 export function analysisFailureException(error: unknown): HttpException {
   const raw = error instanceof Error ? error.message : String(error);
   if (error instanceof HttpException) return error;
@@ -219,13 +229,16 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     const map = isRecord(body.map) ? body.map : body;
     const id = randomUUID();
     const now = nowIso();
-    const version = this.nextVersion('project_intelligence', projectId);
     const fingerprint = this.fingerprint(map);
-    this.database.prepare(
-      `INSERT INTO project_intelligence
-       (id, project_id, version, status, source_fingerprint, map_json, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?)`,
-    ).run(id, projectId, version, fingerprint, JSON.stringify(map), principal.userId, now, now);
+    const version = this.database.transaction(() => {
+      const allocated = this.nextVersion('project_intelligence', projectId);
+      this.database.prepare(
+        `INSERT INTO project_intelligence
+         (id, project_id, version, status, source_fingerprint, map_json, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?)`,
+      ).run(id, projectId, allocated, fingerprint, JSON.stringify(map), principal.userId, now, now);
+      return allocated;
+    });
     this.record(project, principal, 'intelligence.create', 'project_intelligence', id, { projectId, version });
     return this.getIntelligence(projectId, id);
   }
@@ -1147,6 +1160,39 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * 给知识库补充功能用的模型入口。
+   *
+   * 为什么不让 enrich 服务自己调模型:analyzeWithCurrentModel 依赖一条真实的
+   * analysis_tasks 行(retryAnalysis 第一句就 UPDATE attempt_count),而建行、心跳、
+   * 收尾全在这个类的 private 方法里。与其把四个方法改成 public、把任务生命周期散到
+   * 两个服务,不如在这里留一个窄入口。
+   *
+   * 不做缓存:每次都建新任务(fingerprint 带 randomUUID)。补充是人在环里的交互,
+   * 用户点第二次就是想要新草稿,命中缓存反而是错的。
+   */
+  async runEnrichmentModel(
+    projectId: string,
+    principal: SessionPrincipal,
+    prompt: string,
+    purpose: 'draft' | 'merge',
+  ): Promise<Record<string, unknown>> {
+    const project = this.resources.projectRow(projectId);
+    const fingerprint = `${ENRICH_FINGERPRINT_PREFIX}${purpose}:${randomUUID()}`;
+    const task = this.createTask(projectId, 'project', null, fingerprint, principal);
+    try {
+      const payload = await this.analyzeWithCurrentModel(project, principal, prompt, [], task.id);
+      // result_id 为 null:补充不产生 project_intelligence 之类的结果行。
+      // cachedTask 要求 result_id 非空,所以这些任务天然不会被当成缓存命中。
+      this.completeTask(task.id, null, nowIso());
+      this.record(project, principal, 'knowledge.enrich.model', 'analysis_task', task.id, { projectId, purpose });
+      return payload;
+    } catch (error) {
+      this.failTask(task.id, error);
+      throw analysisFailureException(error);
+    }
+  }
+
   listTasks(projectId: string): Record<string, unknown>[] {
     this.resources.projectRow(projectId);
     return (this.database.prepare(
@@ -1859,7 +1905,8 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   }
 
   // 终态清空归属与心跳:留着会让已完成的分析看起来仍有实例在跑。
-  private completeTask(id: string, resultId: string, now: string): void {
+  // resultId 允许 null:知识库补充任务没有结果行(见 runEnrichmentModel)。
+  private completeTask(id: string, resultId: string | null, now: string): void {
     this.stopTaskHeartbeat(id);
     this.database.prepare(
       `UPDATE analysis_tasks SET status='completed', result_id=?, error=NULL, completed_at=?, updated_at=?,

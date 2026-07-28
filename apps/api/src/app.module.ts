@@ -15,6 +15,7 @@ import {
 } from './guards.js';
 import { HealthController } from './health.controller.js';
 import { IntelligenceController } from './intelligence.controller.js';
+import { IntelligenceEnrichService } from './intelligence-enrich.service.js';
 import { IntelligenceService } from './intelligence.service.js';
 import { ExportController } from './export.controller.js';
 import { ExportService } from './export.service.js';
@@ -72,6 +73,7 @@ export class AppModule {
         AuditService,
         ResourceService,
         IntelligenceService,
+        IntelligenceEnrichService,
         KnowledgeService,
         FormulaService,
         ResearchService,
@@ -93,6 +95,7 @@ export class AppModule {
         AuditService,
         ResourceService,
         IntelligenceService,
+        IntelligenceEnrichService,
         KnowledgeService,
         FormulaService,
         ResearchService,

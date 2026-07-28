@@ -56,7 +56,9 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
     if (!project) return Promise.resolve();
     return api.intelligence.tasks.list(project.id).then((tasks) => {
       const sorted = [...tasks].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-      setAnalysisTask(sorted.find((t) => t.kind === 'project') ?? null);
+      // 知识库补充也建 kind='project' 的任务(analysis_tasks 的 kind 只允许两种值),
+      // 不排除的话点「AI 帮我补充」会让这里的分析进度条动起来,看着像在重跑分析。
+      setAnalysisTask(sorted.find((t) => t.kind === 'project' && !t.sourceFingerprint?.startsWith('enrich:')) ?? null);
     }).catch(() => { /* 非致命 */ });
   };
 

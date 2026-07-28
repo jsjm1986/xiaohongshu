@@ -1113,6 +1113,8 @@ export interface AnalysisTask {
   kind: "project" | "image";
   targetId: string | null;
   status: "queued" | "running" | "completed" | "failed";
+  /** 后端一直在返回,前端类型此前漏了。知识库补充任务靠 `enrich:` 前缀区分。 */
+  sourceFingerprint: string;
   attemptCount: number;
   resultId: string | null;
   error: string | null;
