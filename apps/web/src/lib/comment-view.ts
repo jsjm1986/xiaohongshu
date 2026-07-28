@@ -126,27 +126,29 @@ export function commentSectionView(
   const list = comments ?? [];
   if (list.length === 0) return null;
 
-  const rows: CommentRow[] = list.map((c) => ({
-    id: c.id,
-    question: c.question,
-    answer: c.answer,
-    threadKind: c.threadKind,
-    // simulated 缺失的历史包不能默认成"真实读者"——那是更强的断言。
-    askerLabel: c.simulated === false ? '未标记为模拟' : '模拟读者',
-    // 只有 org_answer 的 answer 出自可追责身份。reader_exchange/organic_reaction
-    // 的 answer 是模拟读者接话,却同样带着 postingIdentity(规划层按线程统一赋值),
-    // 无条件打标签会把读者发言渲染成员工/机构发言——实测三篇 20/20 条全部错标。
-    // threadKind 缺失的历史包按 org_answer 处理,保持旧行为。
-    answererLabel: answererLabelFor(c),
-    personaRole: c.personaRole,
-    functionLabel: commentFunctionLabel(c.function),
-    stageLabel: stageLabel(c.stage),
-    gapLabel: c.gap ? gapNames.get(c.gap) : undefined,
-    boundary: c.boundary,
-    nextStep: c.nextStep,
-    displayName: c.displayName,
-    followUps: c.followUps ?? [],
-  }));
+  const rows: CommentRow[] = list.map((c) => {
+    const isOrganicReaction = c.threadKind === 'organic_reaction';
+    return {
+      id: c.id,
+      question: c.question,
+      answer: isOrganicReaction ? '' : c.answer,
+      threadKind: c.threadKind,
+      // simulated 缺失的历史包不能默认成"真实读者"——那是更强的断言。
+      askerLabel: c.simulated === false ? '未标记为模拟' : '模拟读者',
+      // 只有 org_answer 的 answer 出自可追责身份。reader_exchange 的 answer 是
+      // 模拟读者接话;organic_reaction 按合同没有 answer。threadKind 缺失的历史包
+      // 按 org_answer 处理,保持旧行为。
+      answererLabel: answererLabelFor(c),
+      personaRole: c.personaRole,
+      functionLabel: commentFunctionLabel(c.function),
+      stageLabel: stageLabel(c.stage),
+      gapLabel: c.gap ? gapNames.get(c.gap) : undefined,
+      boundary: c.boundary,
+      nextStep: c.nextStep,
+      displayName: c.displayName,
+      followUps: isOrganicReaction ? [] : c.followUps ?? [],
+    };
+  });
 
   // identitySummary 回答的是「答复都由哪些可追责身份发」,所以只统计 org_answer
   // 线程的身份;把「模拟读者接话」混进去会让这份声明失真。

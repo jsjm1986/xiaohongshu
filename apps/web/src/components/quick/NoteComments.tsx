@@ -34,12 +34,10 @@ export const COMMENT_DISCLAIMER_FALLBACK = '情景演练与答复参考，不代
 /**
  * 答复(主答复与追问答复共用)的署名由所属线程的 threadKind 决定。
  *
- * 只有 reader_exchange 的 answer 是另一位模拟读者接话,署名机构就是假冒机构表态;
- * 其余线程的 answer 都是机构发言,必须带可追责身份:
+ * reader_exchange 的 answer 是另一位模拟读者接话;organic_reaction 按合同没有
+ * answer,即使历史脏数据带了答复也不能为它分配发布身份。只有 org_answer 的
+ * answer 是机构发言,必须带可追责身份:
  * - org_answer:机构答复与补充口径(「只要是教练私下额外收费…一样是换教练、全额退」)。
- * - organic_reaction:实测库内 6 条线程的 answer 全是机构口径(如「不承诺录取结果、
- *   不承诺奖学金、不承诺签证通过」,postingIdentity=publisher),恰恰是在声明合规边界,
- *   缺了「作者」标等于把担责的那句话摘掉署名。
  * - threadKind 缺失的历史包按 org_answer 处理,与 comment-view 的 answererLabelFor 同一套兜底。
  *
  * 刻意不看 answererLabel:那是给人看的中文标签,按它比字符串会让「改个措辞」变成
@@ -50,8 +48,10 @@ export function replyIdentity(
   threadKind: string | undefined,
   accountLabel: string,
   displayName?: string,
-): { name: string; badge?: string } {
-  if ((threadKind ?? 'org_answer') === 'reader_exchange') {
+): { name: string; badge?: string } | undefined {
+  const kind = threadKind ?? 'org_answer';
+  if (kind === 'organic_reaction') return undefined;
+  if (kind === 'reader_exchange') {
     // 提问者已用 displayName 署名,答复者是「另一位」才说得通;没昵称时只能说「读者」。
     return { name: displayName ? '另一位读者' : '读者' };
   }
@@ -129,29 +129,32 @@ export function NoteComments({ candidate, accountLabel }: NoteCommentsProps) {
         />
       )}
 
-      {view.rows.map((row, i) => (
-        <Row
-          key={row.id ?? `${row.question}-${i}`}
-          name={row.displayName || '读者'}
-          text={row.question}
-          onCopy={() => void copyOne(row.question)}
-          reply={
-            row.answer?.trim()
-              ? {
-                  // 主答复与追问答复走同一个 replyIdentity:身份归属只能由 threadKind 决定。
-                  // 曾经这里比对 answererLabel === '模拟读者接话',把合规判定绑在一句中文
-                  // 文案上——改个措辞就会把读者接话集体署名成机构。
-                  ...replyIdentity(row.threadKind, accountLabel, row.displayName),
-                  text: row.answer,
-                  onCopy: () => void copyOne(row.answer),
-                }
-              : undefined
-          }
-          followUps={row.followUps.filter((f) => f.question?.trim())}
-          onCopyFollow={(text) => void copyOne(text)}
-          followReply={replyIdentity(row.threadKind, accountLabel, row.displayName)}
-        />
-      ))}
+      {view.rows.map((row, i) => {
+        const identity = replyIdentity(row.threadKind, accountLabel, row.displayName);
+        return (
+          <Row
+            key={row.id ?? `${row.question}-${i}`}
+            name={row.displayName || '读者'}
+            text={row.question}
+            onCopy={() => void copyOne(row.question)}
+            reply={
+              row.answer?.trim() && identity
+                ? {
+                    // 主答复与追问答复走同一个 replyIdentity:身份归属只能由 threadKind 决定。
+                    // 曾经这里比对 answererLabel === '模拟读者接话',把合规判定绑在一句中文
+                    // 文案上——改个措辞就会把读者接话集体署名成机构。
+                    ...identity,
+                    text: row.answer,
+                    onCopy: () => void copyOne(row.answer),
+                  }
+                : undefined
+            }
+            followUps={row.followUps.filter((f) => f.question?.trim())}
+            onCopyFollow={(text) => void copyOne(text)}
+            followReply={identity}
+          />
+        );
+      })}
     </section>
   );
 }
