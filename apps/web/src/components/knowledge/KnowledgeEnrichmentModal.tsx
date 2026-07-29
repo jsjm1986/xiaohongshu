@@ -3,6 +3,7 @@ import { Info, TriangleAlert } from 'lucide-react';
 import { Button, Modal, useToast } from '../Ui';
 import { api } from '../../lib/api';
 import { canMerge, hasUnsavedEdits, toDraftItems, toMergeItems } from '../../lib/enrich-flow';
+import { draftShortfallNote } from '../../lib/enrich-types';
 import type { DraftItem, ModalStep } from '../../lib/enrich-types';
 import { EnrichmentDraftList } from './EnrichmentDraftList';
 import { OriginalKnowledgePreview } from './OriginalKnowledgePreview';
@@ -42,6 +43,10 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete,
   const [isNewFile, setIsNewFile] = useState(false);
   const [hedgeLoss, setHedgeLoss] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  /** 起草条数少于待补总数时的说明(超出单次上限,或模型漏答)。 */
+  const [shortfall, setShortfall] = useState<string | null>(null);
+  /** 正文读不出来的知识文件。模型没看到它们,推断质量会受影响。 */
+  const [unreadable, setUnreadable] = useState<string[]>([]);
   const toast = useToast();
 
   // 每次打开都重新起草。草稿不落库,复用上次的会让用户以为编辑被保存了。
@@ -52,10 +57,14 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete,
     setItems([]);
     setPreview('');
     setError(null);
+    setShortfall(null);
+    setUnreadable([]);
     api.intelligence.enrich.draft(projectId, gapIds)
       .then((result) => {
         if (cancelled) return;
         setItems(toDraftItems(result.gaps));
+        setShortfall(draftShortfallNote(result));
+        setUnreadable(result.unreadableFiles ?? []);
         setStep('editing');
       })
       .catch((e: unknown) => {
@@ -166,6 +175,28 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete,
               以下内容由 AI 推断,<strong>不是已核实的事实</strong>。请逐条审查:
               准确的直接保留,有偏差的改掉,不需要的删除。
             </p>
+            {/*
+              起草条数少于按钮上写的待补数时必须说清楚。
+              入口按钮写的是真实待补总数,而单次起草有上限,不说明的话用户看到
+              「补充 17 项」点进来只有 15 条,少了哪两条无从得知。
+            */}
+            {shortfall && (
+              <p className="enrich-notice" role="status">
+                <Info size={15} aria-hidden="true" />
+                <span>{shortfall}</span>
+              </p>
+            )}
+            {unreadable.length > 0 && (
+              <p className="enrich-warning" role="alert">
+                <TriangleAlert size={15} aria-hidden="true" />
+                <span>
+                  有 {unreadable.length} 份资料读不出来(
+                  <code>{unreadable.join('、')}</code>
+                  ),这次起草<strong>没有参考它们</strong>。
+                  请确认文件是否还在,必要时重新上传后再起草。
+                </span>
+              </p>
+            )}
             <EnrichmentDraftList items={items} onChange={setItems} />
           </div>
           <aside className="enrich-original">

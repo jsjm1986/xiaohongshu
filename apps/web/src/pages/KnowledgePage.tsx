@@ -21,10 +21,9 @@ import { useProjects } from '../components/ProjectContext';
 import { Badge, Button, EmptyState, Field, Modal, Skeleton, useToast } from '../components/Ui';
 import { V2Hero, V2Instrument, V2InstrumentCell, V2SecLabel } from '../components/V2';
 import { api } from '../lib/api';
-import { errorMessage } from '../lib/errors';
 import { formatBytes, formatDate } from '../lib/utils';
 import { KnowledgeEnrichmentModal } from '../components/knowledge/KnowledgeEnrichmentModal';
-import { gapStats, pendingCount } from '../lib/enrich-types';
+import { enrichButtonLabel, gapStats, pendingCount } from '../lib/enrich-types';
 import type { EvidenceStatus, InformationGap, KnowledgeFile } from '../types';
 
 const categories = ['未分类', '知识地图', '项目与服务', '用户与场景', '案例样本', '方法论', '约束'];
@@ -71,7 +70,7 @@ export function KnowledgePage() {
     setLoadError(null);
     api.knowledge.list(projectId)
       .then((result) => setFiles(result.items))
-      .catch((error) => setLoadError(errorMessage(error, '知识文件加载失败')))
+      .catch((error) => setLoadError(error instanceof Error ? error.message : '知识文件加载失败'))
       .finally(() => setLoading(false));
     // 缺口加载失败不算页面失败:这个页面的主体是文件列表,补充入口是附加能力
     api.informationGaps.list(projectId).then((r) => setGaps(r.items)).catch(() => setGaps([]));
@@ -114,7 +113,7 @@ export function KnowledgePage() {
       setPendingFile(null);
       if (inputRef.current) inputRef.current.value = '';
     } catch (error) {
-      toast.push(errorMessage(error, '知识文件导入失败'), 'error');
+      toast.push(error instanceof Error ? error.message : '知识文件导入失败', 'error');
     } finally {
       setUploading(false);
     }
@@ -180,7 +179,7 @@ export function KnowledgePage() {
           <>
 {pendingGapCount > 0 && (
               <button type="button" className="v2-hero__link" onClick={() => setEnrichOpen(true)}>
-                <WandSparkles size={15} /> AI 帮我补充（{pendingGapCount} 项）
+                <WandSparkles size={15} /> {enrichButtonLabel(pendingGapCount)}
               </button>
             )}
             <button type="button" className="v2-hero__link" onClick={() => setEntryOpen(true)}>

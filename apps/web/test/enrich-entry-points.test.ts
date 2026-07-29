@@ -23,7 +23,14 @@ test('三个知识库入口都挂了补充弹窗', () => {
   for (const entry of ENTRY_POINTS) {
     const source = read(entry.path);
     assert.match(source, /KnowledgeEnrichmentModal/, `${entry.name} 缺少补充弹窗`);
-    assert.match(source, /AI 帮我补充|用 AI 补充/, `${entry.name} 缺少入口按钮文案`);
+    /*
+     * 按钮文案走 enrichButtonLabel(),不在各页面写字面量。
+     *
+     * 原先这里认字面量「AI 帮我补充」,三处于是各拷一份,括号还拷歪了:
+     * 专业版全角「（1 项）」、另两处半角「(11 项)」。同一个按钮在不同页面长得
+     * 不一样,用户会以为是两个功能。认函数名能同时挡住「没有入口」和「又拷了一份」。
+     */
+    assert.match(source, /enrichButtonLabel\(/, `${entry.name} 缺少入口按钮(应调用 enrichButtonLabel)`);
   }
 });
 

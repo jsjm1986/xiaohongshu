@@ -18,6 +18,23 @@ export interface DraftItem {
 
 export interface EnrichDraftResult {
   gaps: DraftItem[];
+  /**
+   * 本项目当前待补充的缺口总数(未截断)。
+   *
+   * 一次起草有上限(MAX_DRAFT_GAPS),超出的部分不会进提示词。入口按钮上写的是
+   * 真实待补数,如果不把总数回传,用户看到「补充 17 项」点进去只有 15 条,
+   * 少了哪两条无从得知。前端据此显示「这次只起草了前 N 条」。
+   */
+  totalPending: number;
+  /** 单次起草上限。与 totalPending 一起用于判断有没有被截断。 */
+  limit: number;
+  /**
+   * 正文读不出来的知识文件名。
+   *
+   * 存储层丢文件、权限变更都会让某个文件读不到。整批起草不该因为一个文件挂掉,
+   * 但也不能装作无事发生——模型少看了一份资料,推断质量会变,用户有权知道。
+   */
+  unreadableFiles: string[];
 }
 
 export interface MergeItem {

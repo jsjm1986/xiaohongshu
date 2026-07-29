@@ -27,6 +27,12 @@ export interface DraftItem extends EnrichDraft {
 
 export interface EnrichDraftResponse {
   gaps: EnrichDraft[];
+  /** 待补充缺口总数(未截断)。和 limit 比较就知道这次有没有起草完。 */
+  totalPending: number;
+  /** 单次起草上限。 */
+  limit: number;
+  /** 正文读不出来的知识文件名。模型少看了这些资料。 */
+  unreadableFiles: string[];
 }
 
 export interface EnrichMergeItem {
@@ -89,4 +95,39 @@ export function gapStats(gaps: InformationGap[]): GapStats {
 /** 待补充 = 未知 + 推断。入口按钮上的数字。 */
 export function pendingCount(stats: GapStats): number {
   return stats.unknown + stats.inferred;
+}
+
+/**
+ * 入口按钮文案。三个入口共用一个函数,不各自拼字符串。
+ *
+ * 原先三处分别写,括号还不一致:专业版用全角「（1 项）」,快捷版和缺口池用半角
+ * 「(11 项)」。同一个按钮在不同页面长得不一样,用户会怀疑是两个功能。
+ * 全角是中文排版里括号的正常写法,也是本仓界面文案里的多数写法,所以统一取全角。
+ */
+export function enrichButtonLabel(pending: number): string {
+  return `AI 帮我补充（${pending} 项）`;
+}
+
+/**
+ * 起草结果和请求量对不上时的说明,没有落差就返回 null。
+ *
+ * 分两种落差,措辞不同:
+ * - 超出单次上限:必然发生,再跑一轮就能补完,要给出还剩多少。
+ * - 模型漏答:不该发生,重试通常就好,不说「还剩」免得用户以为要再跑一轮才对。
+ */
+export function draftShortfallNote(result: {
+  gaps: unknown[];
+  totalPending: number;
+  limit: number;
+}): string | null {
+  const drafted = result.gaps.length;
+  if (result.totalPending > result.limit) {
+    const remaining = result.totalPending - drafted;
+    return `本次起草了 ${drafted} 条。单次最多 ${result.limit} 条，还有 ${remaining} 条没起草，保存后可以再点一次补完。`;
+  }
+  if (drafted < result.totalPending) {
+    const missing = result.totalPending - drafted;
+    return `有 ${missing} 条缺口模型这次没能给出可用内容，保存后可以再试一次。`;
+  }
+  return null;
 }
