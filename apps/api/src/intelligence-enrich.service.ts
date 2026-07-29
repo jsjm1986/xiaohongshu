@@ -60,14 +60,23 @@ export class IntelligenceEnrichService {
     const byId = new Map(gaps.map((gap) => [gap.id, gap]));
     const rawItems = Array.isArray(payload.items) ? payload.items : [];
     const drafts: DraftItem[] = [];
+    /*
+     * 已收下的 gapId。模型偶尔会把同一个缺口答两遍,重复的后果是实际的:
+     * 前端列表用 gapId 当 React key(重复 key 渲染行为未定义)、applyDraftChange
+     * 按 gapId 匹配(改一条会同时改掉两条)、合并时同一缺口的内容进去两遍。
+     * 保留第一条:模型通常把最完整的答案放在前面。
+     */
+    const seen = new Set<string>();
     for (const raw of rawItems) {
       if (!raw || typeof raw !== 'object') continue;
       const item = raw as Record<string, unknown>;
       const gap = byId.get(String(item.gapId));
       // 模型有时会自己编 gapId。不在请求列表里的直接丢——落库的东西必须对得上缺口。
       if (!gap) continue;
+      if (seen.has(gap.id)) continue;
       const content = typeof item.content === 'string' ? item.content.trim() : '';
       if (content.length < MIN_DRAFT_CHARS) continue;
+      seen.add(gap.id);
       const data = parseJson<Record<string, unknown>>(gap.data_json, {});
       drafts.push({
         gapId: gap.id,
@@ -94,7 +103,15 @@ export class IntelligenceEnrichService {
   ): Promise<MergePreview> {
     this.resources.projectRow(projectId);
 
-    const active = items.filter((item) => item.status !== 'deleted');
+    /*
+     * 同一个 gapId 只取一条。
+     *
+     * 前端正常不会发重复,但这是公开端点,请求体由调用方给。重复的话同一个缺口的
+     * 标题和正文会进提示词两遍,合并出来的文档里就有两段几乎一样的内容。
+     * 取最后一条:如果调用方先发 confirmed 再发 deleted,后者是更新的意图。
+     */
+    const deduped = [...new Map(items.map((item) => [item.gapId, item])).values()];
+    const active = deduped.filter((item) => item.status !== 'deleted');
     if (active.length === 0) throw new BadRequestException('请至少保留一条补充内容');
 
     // gapId 必须属于本项目。这既是数据校验也是越权防护:gapId 来自请求体,

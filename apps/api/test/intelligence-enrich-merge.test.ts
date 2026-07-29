@@ -307,3 +307,43 @@ test('合并提示词明确要求保留不确定说法', async () => {
   assert.match(prompt, /不确定的说法必须保持不确定/);
   assert.match(prompt, /不要改写成陈述句/);
 });
+
+test('merge 收到重复 gapId 时只取最后一条,不让同一缺口进提示词两遍', async () => {
+  /*
+   * 边界探查发现的。这是公开端点,请求体由调用方给,重复时同一个缺口的标题和正文
+   * 会进提示词两遍,合并出来就有两段几乎一样的内容。取最后一条:后发的是更新的意图。
+   */
+  const gapId = await createGap(projectId, '重复合并项');
+  capturedPrompts = [];
+  modelReply = { document: '# 结果\n\n正文。' };
+  await enrich.mergeEnrichedKnowledge(
+    projectId,
+    [
+      { gapId, status: 'confirmed', content: '第一份内容' },
+      { gapId, status: 'edited', content: '第二份内容才是最终的' },
+    ],
+    '重复.md',
+    principal as never,
+  );
+  const prompt = capturedPrompts.at(-1)!;
+  assert.equal((prompt.match(/### 重复合并项/g) || []).length, 1, '标题只能出现一次');
+  assert.match(prompt, /第二份内容才是最终的/, '应取最后一条');
+  assert.doesNotMatch(prompt, /第一份内容/, '第一条应被丢弃');
+});
+
+test('merge 同一 gapId 先 confirmed 后 deleted 时按 deleted 处理', async () => {
+  const gapId = await createGap(projectId, '先确认后删除');
+  await assert.rejects(
+    () => enrich.mergeEnrichedKnowledge(
+      projectId,
+      [
+        { gapId, status: 'confirmed', content: '这份要被后面的 deleted 覆盖' },
+        { gapId, status: 'deleted' },
+      ],
+      '覆盖.md',
+      principal as never,
+    ),
+    /至少保留一条/,
+    '唯一一条被删掉后应拒绝合并,而不是拿被删的内容去合并',
+  );
+});
