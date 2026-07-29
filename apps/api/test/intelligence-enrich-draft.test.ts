@@ -229,6 +229,28 @@ test('提示词只带入与缺口相关的资料段落', async () => {
   assert.match(prompt, /不要编造具体数字/, '禁止编造事实的约束必须在提示词里');
 });
 
+test('模型把同一个 gapId 返回两次时只保留第一条', async () => {
+  /*
+   * 边界探查发现的缺陷。重复的后果是实际的:
+   * - 前端 EnrichmentDraftList 用 key={item.gapId},重复 key 让 React 渲染行为未定义
+   * - applyDraftChange 按 gapId 匹配,用户改一条会同时改掉两条
+   * - 合并时同一个缺口的内容会进去两遍
+   * 保留第一条而不是最后一条:模型通常把最完整的答案放在前面。
+   */
+  const gapId = await createGap('重复缺口', { question: '会重复吗?', sourceStatus: 'unknown' });
+  modelReply = {
+    items: [
+      { gapId, content: '## 第一次\n\n这是第一段足够长的内容。', confidence: 'high' },
+      { gapId, content: '## 第二次\n\n这是第二段足够长的内容。', confidence: 'low' },
+    ],
+  };
+  const result = await enrich.generateEnrichmentDraft(projectId, principal as never);
+  const dupes = result.gaps.filter((gap) => gap.gapId === gapId);
+  assert.equal(dupes.length, 1, '同一 gapId 只能出现一次');
+  assert.match(dupes[0].aiDraft, /第一次/, '保留的应是第一条');
+  assert.equal(dupes[0].confidence, 'high');
+});
+
 test('起草提示词禁止把「资料没写」写成「这项不存在」', async () => {
   /*
    * 冒烟测试(宠物医院)发现的真问题:原文完全没提线上问诊、微信支付、多宠折扣,
