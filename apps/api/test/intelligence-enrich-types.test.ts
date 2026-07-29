@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import { BadRequestException } from '@nestjs/common';
 import {
   countHedges,
+  parseDraftRequest,
   MAX_MERGE_ITEMS,
   MAX_TOTAL_CONTENT_CHARS,
   isEnrichConfidence,
@@ -179,5 +180,32 @@ describe('countHedges', () => {
 
   it('空串为 0', () => {
     assert.equal(countHedges(''), 0);
+  });
+});
+
+describe('parseDraftRequest', () => {
+  it('body 缺省或不带 gapIds 时为整批模式', () => {
+    for (const body of [undefined, null, {}, { gapIds: null }]) {
+      assert.deepEqual(parseDraftRequest(body), {});
+    }
+  });
+
+  it('接受 gapIds 并去重', () => {
+    const parsed = parseDraftRequest({ gapIds: ['a', 'b', 'a'] });
+    assert.deepEqual(parsed.gapIds, ['a', 'b']);
+  });
+
+  it('拒绝空数组:不指定就该整批,空数组是调用方搞错了', () => {
+    assert.throws(() => parseDraftRequest({ gapIds: [] }), BadRequestException);
+  });
+
+  it('拒绝非数组与非字符串元素', () => {
+    assert.throws(() => parseDraftRequest({ gapIds: 'a' }), BadRequestException);
+    assert.throws(() => parseDraftRequest({ gapIds: [42] }), BadRequestException);
+  });
+
+  it('拒绝超过上限', () => {
+    const gapIds = Array.from({ length: MAX_MERGE_ITEMS + 1 }, (_, i) => `g${i}`);
+    assert.throws(() => parseDraftRequest({ gapIds }), BadRequestException);
   });
 });

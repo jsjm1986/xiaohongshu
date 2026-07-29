@@ -130,6 +130,25 @@ export function parseMergeRequest(body: unknown): { items: MergeItem[]; targetFi
   return { items, targetFile };
 }
 
+/**
+ * 解析 draft 请求。
+ *
+ * body 可以整个缺省(整批模式)。给了 gapIds 就是单条/多条精补,
+ * 上限沿用 MAX_MERGE_ITEMS——再多提示词也放不下。
+ */
+export function parseDraftRequest(body: unknown): { gapIds?: string[] } {
+  if (body === undefined || body === null) return {};
+  const raw = requireObject(body);
+  if (raw.gapIds === undefined || raw.gapIds === null) return {};
+  if (!Array.isArray(raw.gapIds)) throw new BadRequestException('gapIds 必须是数组');
+  if (raw.gapIds.length === 0) throw new BadRequestException('gapIds 不能是空数组;不指定就整批起草');
+  if (raw.gapIds.length > MAX_MERGE_ITEMS) {
+    throw new BadRequestException(`gapIds 最多 ${MAX_MERGE_ITEMS} 条`);
+  }
+  const gapIds = raw.gapIds.map((id, index) => requireString(id, `gapIds[${index}]`, { max: 200 }));
+  return { gapIds: [...new Set(gapIds)] };
+}
+
 /** 解析 save 请求。content 按字节校验——2 MiB 是 knowledge.import 的硬上限。 */
 export function parseSaveRequest(body: unknown): { content: string; targetFile: string } {
   const raw = requireObject(body);

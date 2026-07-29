@@ -43,10 +43,25 @@ export class IntelligenceEnrichService {
     @Inject(IntelligenceService) private readonly intelligence: IntelligenceService,
   ) {}
 
-  async generateEnrichmentDraft(projectId: string, principal: SessionPrincipal): Promise<EnrichDraftResult> {
+  /**
+   * 起草补充内容。
+   *
+   * gapIds 缺省时按优先级取全部待补充缺口(整批模式);给了就只补这几条
+   * (缺口池里的单条精补)。指名的 id 同样要过归属与待补充判据。
+   */
+  async generateEnrichmentDraft(
+    projectId: string,
+    principal: SessionPrincipal,
+    gapIds?: readonly string[],
+  ): Promise<EnrichDraftResult> {
     this.resources.projectRow(projectId);
-    const gaps = this.pendingGaps(projectId);
-    if (gaps.length === 0) throw new BadRequestException('当前没有需要补充的信息缺口');
+    const gaps = this.pendingGaps(projectId, gapIds);
+    if (gaps.length === 0) {
+      // 指名了却一条都没匹配上,和「整个项目没缺口」是两件事,提示要说清楚是哪种。
+      throw new BadRequestException(gapIds?.length
+        ? '指定的缺口不存在、不属于本项目,或已经有答案了'
+        : '当前没有需要补充的信息缺口');
+    }
 
     const docs = await this.latestDocuments(projectId);
     const context = this.extractRelevantContext(docs, gaps);
@@ -237,7 +252,7 @@ ${supplements}
    * 过滤放在 JS 里而不是 SQL 的 json_extract:data_json 里 answer 键可能整个不存在,
    * 那时 json_extract 返回 NULL,`= ''` 判不出来,真正该补的行反而被漏掉。
    */
-  private pendingGaps(projectId: string): GapRow[] {
+  private pendingGaps(projectId: string, onlyIds?: readonly string[]): GapRow[] {
     const rows = this.database
       .prepare(
         `SELECT id, title, priority, data_json FROM information_gaps
@@ -245,8 +260,16 @@ ${supplements}
          ORDER BY priority DESC, updated_at DESC`,
       )
       .all(projectId) as unknown as GapRow[];
+    /*
+     * onlyIds 是「单条精补」用的:缺口池里每条卡片都能单独补,不必整批跑。
+     *
+     * 仍然过 project_id 条件与待补充判据,不因为调用方指名了 id 就放行——
+     * id 来自请求体,既要防跨项目取,也要防「这条已经有答案了还拿去重写」。
+     */
+    const wanted = onlyIds && onlyIds.length ? new Set(onlyIds) : undefined;
     return rows
       .filter((row) => {
+        if (wanted && !wanted.has(row.id)) return false;
         const data = parseJson<Record<string, unknown>>(row.data_json, {});
         const answer = typeof data.answer === 'string' ? data.answer.trim() : '';
         const status = typeof data.sourceStatus === 'string' ? data.sourceStatus : '';

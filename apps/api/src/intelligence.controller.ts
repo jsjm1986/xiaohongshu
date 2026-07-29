@@ -20,7 +20,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import type { Request, Response } from 'express';
 import { CsrfGuard, PermissionGuard, RequirePermission, SessionAuthGuard } from './guards.js';
 import { IntelligenceEnrichService } from './intelligence-enrich.service.js';
-import { parseMergeRequest, parseSaveRequest } from './intelligence-enrich.types.js';
+import { parseDraftRequest, parseMergeRequest, parseSaveRequest } from './intelligence-enrich.types.js';
 import { IntelligenceService } from './intelligence.service.js';
 import type { AuthenticatedRequest, SessionPrincipal } from './models.js';
 import { requireObject } from './utils.js';
@@ -58,8 +58,10 @@ export class IntelligenceController {
    */
   @Post('intelligence/enrich/draft')
   @RequirePermission({ permission: 'project.write', projectParam: 'projectId' })
-  enrichDraft(@Req() request: Request, @Param('projectId') projectId: string) {
-    return this.enrich.generateEnrichmentDraft(projectId, this.principal(request));
+  enrichDraft(@Req() request: Request, @Param('projectId') projectId: string, @Body() body?: unknown) {
+    // body 可缺省:不带就整批起草,带 gapIds 就只补指定的几条(缺口池的单条精补)
+    const { gapIds } = parseDraftRequest(body);
+    return this.enrich.generateEnrichmentDraft(projectId, this.principal(request), gapIds);
   }
 
   @Post('intelligence/enrich/merge')

@@ -21,6 +21,7 @@ import {
   Trash2,
   TriangleAlert,
   Unlock,
+  WandSparkles,
 } from "lucide-react";
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, EmptyState, Field, Modal, Skeleton, useToast } from "../components/Ui";
@@ -37,6 +38,8 @@ import {
 import { inspectOpportunityApprovalDependencies, opportunityRequiresReview } from "../lib/opportunity-approval";
 import { resolveOpportunityRankView } from "../lib/opportunity-rank";
 import { TREND_FIT_SIMPLE_BOUNDARY_COPY } from "../lib/trend-fit";
+import { KnowledgeEnrichmentModal } from "../components/knowledge/KnowledgeEnrichmentModal";
+import { gapStats, pendingCount } from "../lib/enrich-types";
 import {
   buildSimpleGenerateInput,
   COMMENT_RICHNESS_PROFILES,
@@ -314,6 +317,9 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const [preparing, setPreparing] = useState(false);
   const [poolOpen, setPoolOpen] = useState(false);
   const [poolTab, setPoolTab] = useState<PoolTab>("gaps");
+  /** 知识库 AI 补充。gapIds 为空 = 整批;有值 = 只补那几条(单条精补)。 */
+  const [enrichOpen, setEnrichOpen] = useState(false);
+  const [enrichGapIds, setEnrichGapIds] = useState<string[] | undefined>(undefined);
   const [search, setSearch] = useState("");
   const [editingGap, setEditingGap] = useState<Partial<InformationGap> | null>(null);
   // Gap answer evidence is picked from knowledge sections, never typed as a raw
@@ -522,6 +528,23 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const missingDependencyCount = opportunityDependencies.missingGapIds.length
     + opportunityDependencies.missingStrategyIds.length;
   const lockedStrategy = strategies.find((strategy) => strategy.enabled && strategy.locked && strategy.status === "approved");
+  /*
+   * 与后端 pendingGaps 同一判据(答案为空,或来源属 unknown/inference/hypothesis)。
+   * 已有答案的缺口不显示精补按钮:后端会拒,显示了就是误导。
+   */
+  const isGapPending = (gap: InformationGap) => {
+    const answered = Boolean(gap.answer?.trim());
+    const status = gap.sourceStatus;
+    return !answered || status === "unknown" || status === "inference" || status === "hypothesis";
+  };
+  const gapTiers = useMemo(() => gapStats(gaps), [gaps]);
+  const pendingGapCount = pendingCount(gapTiers);
+  const openEnrich = (ids?: string[]) => { setEnrichGapIds(ids); setEnrichOpen(true); };
+  /** 补充保存后重拉缺口:补进去的内容要经重新分析才会改变缺口状态,但文件已变。 */
+  const refreshGapsAfterEnrich = () => {
+    void api.informationGaps.list(projectId).then((r) => setGaps(r.items)).catch(() => {});
+  };
+
   const filteredGaps = useMemo(() => gaps.filter((item) => !search || `${item.label}${item.question}${item.category}`.toLowerCase().includes(search.toLowerCase())), [gaps, search]);
   const filteredStrategies = useMemo(() => strategies.filter((item) => !search || `${item.name}${item.description}`.toLowerCase().includes(search.toLowerCase())), [strategies, search]);
 
@@ -1169,8 +1192,8 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     </Modal>
 
     <Modal open={poolOpen} onClose={() => setPoolOpen(false)} title="内容智能资源池" description="信息缺口决定写什么，完整表达策略决定标签、图文与评论怎样协同。" size="wide">
-      <div className="pool-manager"><div className="pool-tabs"><button type="button" className={poolTab === "gaps" ? "active" : ""} onClick={() => setPoolTab("gaps")}>信息缺口池 <b>{gaps.length}</b></button><button type="button" className={poolTab === "strategies" ? "active" : ""} onClick={() => setPoolTab("strategies")}>完整表达策略池 <b>{strategies.length}</b></button></div><div className="pool-toolbar"><label><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索资源" /></label><Button icon={<Plus size={15} />} onClick={() => { if (poolTab === "gaps") { setEditingGap({}); } else { setEditingStrategy({}); } }}>新增</Button></div>
-        {poolTab === "gaps" ? <div className="pool-list">{filteredGaps.map((gap) => <article key={gap.id} className={!gap.enabled ? "disabled" : ""}><div><Badge>{gap.category}</Badge><Badge tone={gap.status === "approved" ? "positive" : "warning"}>{gap.status === "approved" ? "已确认" : "待确认"}</Badge></div><h3>{gap.label}</h3><p>{gap.question}</p><small>{gap.sourceType} · 优先级 {gap.priority}</small><footer>{gap.status !== "approved" && <button type="button" onClick={() => void api.informationGaps.approve(projectId, gap.id).then((saved) => setGaps((current) => current.map((item) => item.id === saved.id ? saved : item)))}>确认使用</button>}<button type="button" onClick={() => void api.informationGaps.update(projectId, gap.id, { ...gap, enabled: !gap.enabled }).then((saved) => setGaps((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{gap.enabled ? "已启用" : "已停用"}</button><button type="button" aria-label={gap.locked ? "解锁" : "锁定"} onClick={() => void api.informationGaps.update(projectId, gap.id, { ...gap, locked: !gap.locked }).then((saved) => setGaps((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{gap.locked ? <Lock size={13} /> : <Unlock size={13} />}</button><button type="button" aria-label="编辑" onClick={() => setEditingGap(gap)}><Pencil size={13} /></button><button type="button" aria-label="删除" onClick={() => { if (!window.confirm(`确定删除信息缺口「${gap.label}」吗？`)) return; void api.informationGaps.remove(projectId, gap.id).then(() => setGaps((current) => current.filter((item) => item.id !== gap.id))).catch((error) => toast.push(error instanceof Error ? error.message : "删除失败", "error")); }}><Trash2 size={13} /></button></footer></article>)}</div> : <div className="pool-list">{filteredStrategies.map((strategy) => <article key={strategy.id} className={!strategy.enabled ? "disabled" : ""}><div><Badge>{strategy.source}</Badge><Badge tone={strategy.status === "approved" ? "positive" : "warning"}>{strategy.status === "approved" ? "已确认" : "待确认"}</Badge></div><h3>{strategy.name}</h3><p>{strategy.description}</p><small>{strategy.imagePolicy}</small><footer>{strategy.status !== "approved" && <button type="button" onClick={() => void api.expressionStrategies.approve(projectId, strategy.id).then((saved) => setStrategies((current) => current.map((item) => item.id === saved.id ? saved : item)))}>确认使用</button>}<button type="button" onClick={() => void api.expressionStrategies.update(projectId, strategy.id, { ...strategy, enabled: !strategy.enabled }).then((saved) => setStrategies((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{strategy.enabled ? "已启用" : "已停用"}</button><button type="button" aria-label={strategy.locked ? "解锁" : "锁定"} onClick={() => void api.expressionStrategies.update(projectId, strategy.id, { ...strategy, locked: !strategy.locked }).then((saved) => setStrategies((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{strategy.locked ? <Lock size={13} /> : <Unlock size={13} />}</button><button type="button" aria-label="编辑" onClick={() => setEditingStrategy(strategy)}><Pencil size={13} /></button>{strategy.source !== "builtin" && <button type="button" aria-label="删除" onClick={() => { if (!window.confirm(`确定删除表达策略「${strategy.name}」吗？`)) return; void api.expressionStrategies.remove(projectId, strategy.id).then(() => setStrategies((current) => current.filter((item) => item.id !== strategy.id))).catch((error) => toast.push(error instanceof Error ? error.message : "删除失败", "error")); }}><Trash2 size={13} /></button>}</footer></article>)}</div>}
+      <div className="pool-manager"><div className="pool-tabs"><button type="button" className={poolTab === "gaps" ? "active" : ""} onClick={() => setPoolTab("gaps")}>信息缺口池 <b>{gaps.length}</b></button><button type="button" className={poolTab === "strategies" ? "active" : ""} onClick={() => setPoolTab("strategies")}>完整表达策略池 <b>{strategies.length}</b></button></div><div className="pool-toolbar"><label><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索资源" /></label><Button icon={<Plus size={15} />} onClick={() => { if (poolTab === "gaps") { setEditingGap({}); } else { setEditingStrategy({}); } }}>新增</Button>{poolTab === "gaps" && pendingGapCount > 0 && <Button variant="secondary" icon={<WandSparkles size={15} />} onClick={() => openEnrich()}>AI 帮我补充({pendingGapCount} 项)</Button>}</div>
+        {poolTab === "gaps" ? <div className="pool-list">{filteredGaps.map((gap) => <article key={gap.id} className={!gap.enabled ? "disabled" : ""}><div><Badge>{gap.category}</Badge><Badge tone={gap.status === "approved" ? "positive" : "warning"}>{gap.status === "approved" ? "已确认" : "待确认"}</Badge></div><h3>{gap.label}</h3><p>{gap.question}</p><small>{gap.sourceType} · 优先级 {gap.priority}</small><footer>{gap.status !== "approved" && <button type="button" onClick={() => void api.informationGaps.approve(projectId, gap.id).then((saved) => setGaps((current) => current.map((item) => item.id === saved.id ? saved : item)))}>确认使用</button>}<button type="button" onClick={() => void api.informationGaps.update(projectId, gap.id, { ...gap, enabled: !gap.enabled }).then((saved) => setGaps((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{gap.enabled ? "已启用" : "已停用"}</button><button type="button" aria-label={gap.locked ? "解锁" : "锁定"} onClick={() => void api.informationGaps.update(projectId, gap.id, { ...gap, locked: !gap.locked }).then((saved) => setGaps((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{gap.locked ? <Lock size={13} /> : <Unlock size={13} />}</button>{isGapPending(gap) && <button type="button" aria-label={`用 AI 补充「${gap.label}」`} title="用 AI 补充这一条" onClick={() => openEnrich([gap.id])}><WandSparkles size={13} /></button>}<button type="button" aria-label="编辑" onClick={() => setEditingGap(gap)}><Pencil size={13} /></button><button type="button" aria-label="删除" onClick={() => { if (!window.confirm(`确定删除信息缺口「${gap.label}」吗？`)) return; void api.informationGaps.remove(projectId, gap.id).then(() => setGaps((current) => current.filter((item) => item.id !== gap.id))).catch((error) => toast.push(error instanceof Error ? error.message : "删除失败", "error")); }}><Trash2 size={13} /></button></footer></article>)}</div> : <div className="pool-list">{filteredStrategies.map((strategy) => <article key={strategy.id} className={!strategy.enabled ? "disabled" : ""}><div><Badge>{strategy.source}</Badge><Badge tone={strategy.status === "approved" ? "positive" : "warning"}>{strategy.status === "approved" ? "已确认" : "待确认"}</Badge></div><h3>{strategy.name}</h3><p>{strategy.description}</p><small>{strategy.imagePolicy}</small><footer>{strategy.status !== "approved" && <button type="button" onClick={() => void api.expressionStrategies.approve(projectId, strategy.id).then((saved) => setStrategies((current) => current.map((item) => item.id === saved.id ? saved : item)))}>确认使用</button>}<button type="button" onClick={() => void api.expressionStrategies.update(projectId, strategy.id, { ...strategy, enabled: !strategy.enabled }).then((saved) => setStrategies((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{strategy.enabled ? "已启用" : "已停用"}</button><button type="button" aria-label={strategy.locked ? "解锁" : "锁定"} onClick={() => void api.expressionStrategies.update(projectId, strategy.id, { ...strategy, locked: !strategy.locked }).then((saved) => setStrategies((current) => current.map((item) => item.id === saved.id ? saved : item)))}>{strategy.locked ? <Lock size={13} /> : <Unlock size={13} />}</button><button type="button" aria-label="编辑" onClick={() => setEditingStrategy(strategy)}><Pencil size={13} /></button>{strategy.source !== "builtin" && <button type="button" aria-label="删除" onClick={() => { if (!window.confirm(`确定删除表达策略「${strategy.name}」吗？`)) return; void api.expressionStrategies.remove(projectId, strategy.id).then(() => setStrategies((current) => current.filter((item) => item.id !== strategy.id))).catch((error) => toast.push(error instanceof Error ? error.message : "删除失败", "error")); }}><Trash2 size={13} /></button>}</footer></article>)}</div>}
       </div>
     </Modal>
 
@@ -1248,6 +1271,14 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
         <Field label="评论线程职责"><textarea rows={2} value={editingStrategy?.commentPolicy || ""} onChange={(event) => setEditingStrategy((current) => ({ ...current, commentPolicy: event.target.value }))} /></Field>
       </div>
     </Modal>
+
+    <KnowledgeEnrichmentModal
+      open={enrichOpen}
+      projectId={projectId}
+      gapIds={enrichGapIds}
+      onClose={() => { setEnrichOpen(false); setEnrichGapIds(undefined); }}
+      onComplete={refreshGapsAfterEnrich}
+    />
     </div>
   </div>;
 }

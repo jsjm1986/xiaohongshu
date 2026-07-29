@@ -11,8 +11,13 @@ interface Props {
   open: boolean;
   projectId: string;
   onClose: () => void;
-  /** 保存成功后回调,让知识库页刷新文件列表与缺口。 */
+  /** 保存成功后回调,让调用方刷新文件列表与缺口。 */
   onComplete: () => void;
+  /**
+   * 只补这几条缺口。缺省 = 整批起草。
+   * 缺口池里单条精补时传一个 id;标题也会跟着变,免得用户以为在跑全量。
+   */
+  gapIds?: readonly string[];
 }
 
 const TITLES: Record<ModalStep, string> = {
@@ -29,7 +34,7 @@ const LOADING_TEXT: Record<'drafting' | 'merging' | 'saving', string> = {
   saving: '正在保存新版本',
 };
 
-export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete }: Props) {
+export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete, gapIds }: Props) {
   const [step, setStep] = useState<ModalStep>('drafting');
   const [items, setItems] = useState<DraftItem[]>([]);
   const [preview, setPreview] = useState('');
@@ -47,7 +52,7 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete 
     setItems([]);
     setPreview('');
     setError(null);
-    api.intelligence.enrich.draft(projectId)
+    api.intelligence.enrich.draft(projectId, gapIds)
       .then((result) => {
         if (cancelled) return;
         setItems(toDraftItems(result.gaps));
@@ -60,7 +65,9 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete 
         setError(e instanceof Error ? e.message : '起草失败');
       });
     return () => { cancelled = true; };
-  }, [open, projectId]);
+    // gapIds 是数组,直接进依赖会因每次渲染新引用而反复重跑;用 join 取其内容。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, projectId, gapIds?.join(',')]);
 
   const merge = async () => {
     setStep('merging');
