@@ -309,8 +309,10 @@ ${supplements}
       parts.push(item.text);
       used += item.text.length + 2;
     }
+    const best = scored[0];
+    if (!best) return '';
     // 预算连最相关的一段都放不下时,截断它,而不是返回空。
-    return parts.length ? parts.join('\n\n') : scored[0].text.slice(0, MAX_CONTEXT_CHARS);
+    return parts.length ? parts.join('\n\n') : best.text.slice(0, MAX_CONTEXT_CHARS);
   }
 
   private draftPrompt(gaps: GapRow[], context: string): string {
@@ -336,7 +338,11 @@ ${list}
 3. 能从资料合理推断的，谨慎推断并说明依据，confidence=medium。
 4. 没有任何依据的，写成待用户确认的假设并明确标注，confidence=low。
 5. 不要编造具体数字、人名、地址、资质编号、成交价这类事实信息；缺就写「待确认」。
-6. gapId 必须原样使用上面给出的值，不要新增缺口。
+6. 【重要】"资料里没写"不等于"这项不存在"。资料没提到的服务、渠道、优惠，
+   一律写成"资料未提及，待确认"，**不要**写成"暂未开通""目前不支持""未提供"
+   ——那是在替对方否认一项他可能确实有的服务，和编造事实一样是凭空断言。
+   同理，不要把"资料只提到 A"扩写成"支持 A、B、C"。
+7. gapId 必须原样使用上面给出的值，不要新增缺口。
 
 只返回 JSON 对象，不要多余文字：
 {"items":[{"gapId":"...","content":"## 小标题\\n\\n正文...","confidence":"medium","reasoning":"推断依据"}]}`;

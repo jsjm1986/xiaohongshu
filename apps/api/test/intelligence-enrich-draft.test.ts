@@ -229,6 +229,24 @@ test('提示词只带入与缺口相关的资料段落', async () => {
   assert.match(prompt, /不要编造具体数字/, '禁止编造事实的约束必须在提示词里');
 });
 
+test('起草提示词禁止把「资料没写」写成「这项不存在」', async () => {
+  /*
+   * 冒烟测试(宠物医院)发现的真问题:原文完全没提线上问诊、微信支付、多宠折扣,
+   * 草稿却写成「暂未开通线上咨询」「支付方式包括现金、微信、支付宝」
+   * 「目前未针对多宠家庭提供折扣」——把信息缺失说成了事实上的否认。
+   * 这等于替商家否认了它可能确实有的服务,和编造事实一样是凭空断言。
+   */
+  const gapId = await createGap(projectId, '线上咨询', { question: '是否支持线上问诊?', sourceStatus: 'unknown' });
+  capturedPrompts = [];
+  modelReply = { items: [{ gapId, content: '## 线上咨询\n\n资料未提及,待确认。', confidence: 'low' }] };
+  await enrich.generateEnrichmentDraft(projectId, principal as never);
+
+  const prompt = capturedPrompts.at(-1)!.prompt;
+  assert.match(prompt, /"资料里没写"不等于"这项不存在"|资料里没写.{0,4}不等于.{0,4}这项不存在/);
+  assert.match(prompt, /暂未开通/, '要明确点出这类禁用说法');
+  assert.match(prompt, /资料未提及/, '要给出正确的替代写法');
+});
+
 test('起草任务用 enrich: 前缀记账,不污染分析进度', async () => {
   // 走真实的 runEnrichmentModel 会打模型,这里只验前缀常量与前端过滤的契约一致。
   const { ENRICH_FINGERPRINT_PREFIX } = await import('../src/intelligence.service.js');
