@@ -4241,3 +4241,55 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 @media (max-width: 560px) {
   .quick-shell .xhs-note { border-radius: 0; border-left: none; border-right: none; }
 }
+
+/* ---- 知识库 AI 补充 ---- */
+/* 弹窗是 modal--wide(920px)。原文栏 280px 够对照,再宽草稿区就放不下正文了。 */
+.enrich-editing { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 18px; }
+.enrich-drafts { min-width: 0; }
+.enrich-hint { margin: 0 0 14px; padding: 11px 13px; border-radius: 8px; background: var(--blue-soft); color: var(--ink-2); font-size: var(--font-sm); line-height: 1.6; }
+.enrich-list { display: flex; flex-direction: column; gap: 13px; }
+
+.enrich-original { align-self: start; max-height: 460px; overflow-y: auto; padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-soft); }
+.enrich-original h4 { margin: 0 0 9px; font-size: var(--font-sm); }
+.enrich-original summary { cursor: pointer; font-size: var(--font-xs); font-weight: 600; padding: 5px 0; }
+/* overflow-wrap:资料里常有长 URL 和无空格的中英混排,不断行会顶破窄栏 */
+.enrich-original__body { margin: 4px 0 10px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--font-2xs); line-height: 1.65; color: var(--muted); }
+
+.draft-item { padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+/* 左边框编码依据强弱。颜色只是辅助,Badge 的文字才是主要信息载体——
+   只靠颜色区分对色觉障碍用户不可达。 */
+.draft-item--high { border-left: 3px solid var(--green); }
+.draft-item--medium { border-left: 3px solid var(--amber); }
+.draft-item--low { border-left: 3px solid var(--red); }
+.draft-item--deleted { display: flex; align-items: center; gap: 10px; opacity: .6; background: var(--surface-soft); }
+.draft-item--deleted h4 { margin: 0; font-size: var(--font-sm); }
+.draft-item__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.draft-item__header h4 { margin: 0; font-size: var(--font-sm); }
+.draft-item__question { margin: 0 0 10px; color: var(--muted); font-size: var(--font-xs); }
+.draft-item__body { margin: 0; padding: 11px; border-radius: 7px; background: var(--surface-soft); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--font-sm); line-height: 1.7; }
+.draft-item__label { display: block; margin-bottom: 5px; font-size: var(--font-xs); font-weight: 600; color: var(--ink-2); }
+.draft-item__textarea { width: 100%; padding: 11px; border: 1px solid var(--line); border-radius: 7px; font: inherit; font-size: var(--font-sm); line-height: 1.7; resize: vertical; }
+.draft-item__actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; margin-top: 11px; flex-wrap: wrap; }
+.draft-item__note { margin-right: auto; color: var(--muted); font-size: var(--font-2xs); }
+.draft-item__confirmed { margin-right: auto; display: inline-flex; align-items: center; gap: 5px; color: var(--green); font-size: var(--font-xs); }
+.draft-item__action { display: inline-flex; align-items: center; gap: 4px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--muted); font-size: var(--font-xs); cursor: pointer; }
+.draft-item__action:hover { border-color: var(--line-dark); color: var(--ink); }
+.draft-item__action--primary { border-color: var(--coral); background: var(--coral-soft); color: var(--coral-dark); }
+
+.enrich-loading { min-height: 220px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 11px; text-align: center; }
+.enrich-loading p { margin: 0; font-size: var(--font-sm); }
+.enrich-loading small { color: var(--muted); }
+
+.enrich-notice { display: flex; align-items: flex-start; gap: 9px; margin: 0 0 13px; padding: 11px 13px; border-radius: 8px; background: var(--blue-soft); color: var(--ink-2); font-size: var(--font-sm); line-height: 1.6; }
+.enrich-notice code { padding: 1px 5px; border-radius: 4px; background: rgb(30 41 36 / 6%); font-size: var(--font-xs); }
+.enrich-preview__body { margin: 0; max-height: 460px; overflow: auto; padding: 15px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--font-sm); line-height: 1.75; }
+
+/* 内边距不带横向值:它渲染在 .modal__body 里,那里已有 23px */
+.enrich-error { display: flex; align-items: flex-start; gap: 9px; margin-bottom: 13px; padding: 11px 13px; border-radius: 8px; background: var(--red-soft); color: var(--red); font-size: var(--font-sm); }
+
+@media (max-width: 900px) {
+  .enrich-editing { grid-template-columns: minmax(0, 1fr); }
+  .enrich-original { max-height: 240px; }
+}
+/* 不确定标记被合并吃掉的提示。用 amber 而非 red:这是「值得重看」而不是「出错了」 */
+.enrich-warning { display: flex; align-items: flex-start; gap: 9px; margin: 0 0 13px; padding: 11px 13px; border-radius: 8px; background: var(--amber-soft); color: var(--amber); font-size: var(--font-sm); line-height: 1.6; }

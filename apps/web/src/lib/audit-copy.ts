@@ -50,6 +50,9 @@ export const AUDIT_ACTION_COPY: Record<string, AuditCopy> = {
   'knowledge.import': { label: '导入知识库资料' },
   'knowledge.recategorize': { label: '重新归类知识库资料' },
   'knowledge.delete': { label: '删除知识库资料' },
+  // 起草与合并各记一次。这是模型调用的记账,不是「写入了知识库」——
+  // 真正落库的是随后的 knowledge.import。
+  'knowledge.enrich.model': { label: 'AI 补充知识库(模型调用)' },
   'formula.create': { label: '新建公式版本' },
   'formula.activate': { label: '启用公式版本' },
   'formula.auto-upgrade': { label: '公式变更后自动失效相关发布', automatic: true },

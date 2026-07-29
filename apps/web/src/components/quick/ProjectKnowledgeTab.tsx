@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
-import { Trash2, Sparkles, Building2, Lightbulb, Eye, TriangleAlert, Info, FileText } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Trash2, Sparkles, Building2, Lightbulb, Eye, TriangleAlert, Info, FileText, WandSparkles } from 'lucide-react';
 import { Button, Field, Modal, useToast } from '../Ui';
 import { api } from '../../lib/api';
+import { gapStats, pendingCount } from '../../lib/enrich-types';
 import { V2Instrument, V2InstrumentCell } from '../V2';
+import { KnowledgeEnrichmentModal } from '../knowledge/KnowledgeEnrichmentModal';
 import { QuickTaskProgress } from './QuickTaskProgress';
-import type { AnalysisTask, KnowledgeFile, Project, ProjectIntelligence, TopicOpportunity } from '../../types';
+import type { AnalysisTask, InformationGap, KnowledgeFile, Project, ProjectIntelligence, TopicOpportunity } from '../../types';
 
 const CATEGORIES = ['未分类', '知识地图', '项目与服务', '用户与场景', '案例样本', '方法论', '约束'];
 const KINDS = ['已知事实', '案例样本', '用户观点', '方法论推理', '猜想', '信息不足', '禁止表达'];
@@ -32,19 +34,25 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
   const [analysisTask, setAnalysisTask] = useState<AnalysisTask | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [recategorizing, setRecategorizing] = useState<string | null>(null);
+  const [gaps, setGaps] = useState<InformationGap[]>([]);
+  const [enrichOpen, setEnrichOpen] = useState(false);
 
   useEffect(() => {
-    if (!project) { setFiles([]); setIntel(null); setTopicCount(0); return; }
+    if (!project) { setFiles([]); setIntel(null); setTopicCount(0); setGaps([]); return; }
     let cancelled = false;
     setIntel(null);
     setTopicCount(0);
+    setGaps([]);
     api.knowledge.list(project.id).then((r) => { if (!cancelled) setFiles(r.items); }).catch(() => { if (!cancelled) setFiles([]); });
     api.intelligence.get(project.id).then((r) => { if (!cancelled && r.status !== 'missing') setIntel(r); }).catch(() => {});
     api.opportunities.list(project.id).then((r) => { if (!cancelled) setTopicCount(r.items.length); }).catch(() => {});
+    api.informationGaps.list(project.id).then((r) => { if (!cancelled) setGaps(r.items); }).catch(() => { if (!cancelled) setGaps([]); });
     return () => { cancelled = true; };
   }, [project]);
 
   const analyzed = Boolean(intel?.id);
+  const stats = useMemo(() => gapStats(gaps), [gaps]);
+  const pendingGaps = pendingCount(stats);
 
   // stale 感知:知识增删/图片审批/项目资料更新后,后端把审批链置 stale(规则 2);
   // ready 但带 staleReasons 同属「建议重新分析」。draft(已分析未确认)不阻塞,仅提示。
@@ -56,7 +64,9 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
     if (!project) return Promise.resolve();
     return api.intelligence.tasks.list(project.id).then((tasks) => {
       const sorted = [...tasks].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-      setAnalysisTask(sorted.find((t) => t.kind === 'project') ?? null);
+      // 知识库补充也建 kind='project' 的任务(analysis_tasks 的 kind 只允许两种值),
+      // 不排除的话点「AI 帮我补充」会让这里的分析进度条动起来,看着像在重跑分析。
+      setAnalysisTask(sorted.find((t) => t.kind === 'project' && !t.sourceFingerprint?.startsWith('enrich:')) ?? null);
     }).catch(() => { /* 非致命 */ });
   };
 
@@ -164,7 +174,7 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
       {project && (
         <>
           {analyzed ? (
-            <V2Instrument columns={isStale || isDraft ? 4 : 3}>
+            <V2Instrument columns={isStale || pendingGaps > 0 || isDraft ? 4 : 3}>
               {/* text:值是词组不是读数,不该用 31px 读数字号(见 V2InstrumentCell) */}
               <V2InstrumentCell text tone="brand" icon={<Sparkles size={14} />} label="实体" value={intel?.entity || '已分析'} />
               <V2InstrumentCell text tone="ai" icon={<Building2 size={14} />} label="行业" value={intel?.industry || '已建立内容地图'} />
@@ -172,7 +182,16 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
               {isStale && (
                 <V2InstrumentCell text tone="warn" icon={<TriangleAlert size={14} />} label="需要更新" value="内容地图待刷新" note={staleReasons.join('；') || '资料有更新'} />
               )}
-              {!isStale && isDraft && (
+              {/* 第四格只有一个位置,按优先级让位:资料有缺口比「待确认」更需要用户动手
+                  (「待确认」本身写着「不阻塞使用」) */}
+              {!isStale && pendingGaps > 0 && (
+                <V2InstrumentCell
+                  text tone="warn" icon={<Info size={14} />} label="资料完整度"
+                  value={`${stats.supplied}/${stats.total}`}
+                  note={`${stats.unknown} 项没有资料,${stats.inferred} 项靠推断`}
+                />
+              )}
+              {!isStale && pendingGaps === 0 && isDraft && (
                 <V2InstrumentCell text tone="ai" icon={<Info size={14} />} label="状态" value="待确认" note="生成时会自动确认,不阻塞使用" />
               )}
             </V2Instrument>
@@ -257,6 +276,12 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
             {analyzed ? (
               <>
                 {topicCount > 0 && <Button variant={isStale ? 'secondary' : 'primary'} loading={busy} onClick={() => void goToTopics()}>去创作</Button>}
+                {/* 放在「重新分析」旁边:补充完就该重新分析,两个动作挨着最顺 */}
+                {pendingGaps > 0 && (
+                  <Button variant="secondary" icon={<WandSparkles size={15} />} disabled={busy || analyzing} onClick={() => setEnrichOpen(true)}>
+                    AI 帮我补充({pendingGaps} 项)
+                  </Button>
+                )}
                 <Button variant={isStale ? 'primary' : 'ghost'} loading={busy} disabled={busy || analyzing} onClick={() => void analyze()}>重新分析</Button>
               </>
             ) : (
@@ -269,6 +294,20 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
       <Modal open={preview !== null} title={preview?.name ?? '预览'} description="只读预览,内容按原文展示" onClose={() => setPreview(null)} size="wide">
         {previewLoading ? <p className="qc-hint">正在加载内容…</p> : <pre className="qc-knowledge-preview">{preview?.content || '(文件没有文本内容)'}</pre>}
       </Modal>
+
+      {project && (
+        <KnowledgeEnrichmentModal
+          open={enrichOpen}
+          projectId={project.id}
+          onClose={() => setEnrichOpen(false)}
+          onComplete={() => {
+            // 补充只改知识文件,不动分析结果。刷新文件列表与缺口即可;
+            // 「建议重新分析」的提示由弹窗自己弹,这里不重复。
+            void api.knowledge.list(project.id).then((r) => setFiles(r.items)).catch(() => {});
+            void api.informationGaps.list(project.id).then((r) => setGaps(r.items)).catch(() => {});
+          }}
+        />
+      )}
     </div>
   );
 }

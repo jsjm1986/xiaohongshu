@@ -45,6 +45,8 @@ import { ResourceService } from './resource.service.js';
 import { SettingsService, type ResolvedProviderSettings } from './settings.service.js';
 import { nowIso, parseJson, requireObject, requireString } from './utils.js';
 
+type ImageMetadata = Awaited<ReturnType<ReturnType<typeof sharp>['metadata']>>;
+
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_IMAGE_EDGE = 2_048;
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
@@ -141,6 +143,16 @@ export { AnalysisGatewayError } from './model-failure.js';
  *  - 模型返回的结果不完整 → 重试一次通常能好(采样波动)
  *  - 其余 → 原文透出,至少比 "Internal server error" 多一点线索
  */
+/**
+ * 知识库补充任务在 analysis_tasks.source_fingerprint 上的前缀。
+ *
+ * analysis_tasks 的 kind 只允许 'project' | 'image'(CHECK 约束),加第三种值要改
+ * schema 加迁移。补充任务借用 'project',靠这个前缀区分用途——与
+ * refreshTopicOpportunities 的 `:topic-refresh:` 同一套做法。前端据此把它从
+ * 「分析进度」里排除,否则点「AI 帮我补充」会让知识库页的分析进度条动起来。
+ */
+export const ENRICH_FINGERPRINT_PREFIX = 'enrich:';
+
 export function analysisFailureException(error: unknown): HttpException {
   const raw = error instanceof Error ? error.message : String(error);
   if (error instanceof HttpException) return error;
@@ -217,13 +229,16 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     const map = isRecord(body.map) ? body.map : body;
     const id = randomUUID();
     const now = nowIso();
-    const version = this.nextVersion('project_intelligence', projectId);
     const fingerprint = this.fingerprint(map);
-    this.database.prepare(
-      `INSERT INTO project_intelligence
-       (id, project_id, version, status, source_fingerprint, map_json, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?)`,
-    ).run(id, projectId, version, fingerprint, JSON.stringify(map), principal.userId, now, now);
+    const version = this.database.transaction(() => {
+      const allocated = this.nextVersion('project_intelligence', projectId);
+      this.database.prepare(
+        `INSERT INTO project_intelligence
+         (id, project_id, version, status, source_fingerprint, map_json, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?)`,
+      ).run(id, projectId, allocated, fingerprint, JSON.stringify(map), principal.userId, now, now);
+      return allocated;
+    });
     this.record(project, principal, 'intelligence.create', 'project_intelligence', id, { projectId, version });
     return this.getIntelligence(projectId, id);
   }
@@ -765,7 +780,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     const project = this.resources.projectRow(input.projectId);
     if (input.buffer.byteLength > MAX_IMAGE_BYTES) throw new PayloadTooLargeException('Image files cannot exceed 8 MiB.');
     const filename = this.validateImageFilename(input.filename);
-    let metadata: sharp.Metadata;
+    let metadata: ImageMetadata;
     try {
       metadata = await sharp(input.buffer, { failOn: 'error', limitInputPixels: 40_000_000 }).metadata();
     } catch {
@@ -980,6 +995,17 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       const opportunities = recordArray(opportunityPayload.topicOpportunities);
       const resultId = randomUUID();
       const now = nowIso();
+      // Normalize domain_model schema: objects/actions/concepts must be string[], not {id, label, description}[].
+      // Some model outputs use structured format; extract .label to match type definition.
+      const domainModel = blueprintModules.domain_model;
+      if (isRecord(domainModel)) {
+        for (const field of ['objects', 'actions', 'concepts', 'decisionTasks', 'vocabulary'] as const) {
+          const value = domainModel[field];
+          if (Array.isArray(value) && value.length && isRecord(value[0])) {
+            domainModel[field] = value.map((item) => String(item.label ?? item.name ?? '')).filter(Boolean);
+          }
+        }
+      }
       // 审批检查点/schema 保留（需求 6.4/6.5）：三阶段串联（6.1）与 fail-fast（6.2）仅改变各阶段的提示输入上下文，
       // 不改变落库与审批。各阶段产物（intelligence / blueprintModules 七键 / gap / strategy / opportunity）
       // 仍以 status='draft' 独立落库，各自经 approve* 独立审批（无隐式级联）；下游依赖的输出 schema 不变；
@@ -1129,6 +1155,39 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       return { task: this.mapTask(this.taskRow(task.id)), analysis: this.mapImageAnalysis(this.row('image_analysis_versions', projectId, id)), cached: false };
     } catch (error) {
       // 同 analyzeProject:任务表记原始技术信息,抛给用户的是能行动的那句
+      this.failTask(task.id, error);
+      throw analysisFailureException(error);
+    }
+  }
+
+  /**
+   * 给知识库补充功能用的模型入口。
+   *
+   * 为什么不让 enrich 服务自己调模型:analyzeWithCurrentModel 依赖一条真实的
+   * analysis_tasks 行(retryAnalysis 第一句就 UPDATE attempt_count),而建行、心跳、
+   * 收尾全在这个类的 private 方法里。与其把四个方法改成 public、把任务生命周期散到
+   * 两个服务,不如在这里留一个窄入口。
+   *
+   * 不做缓存:每次都建新任务(fingerprint 带 randomUUID)。补充是人在环里的交互,
+   * 用户点第二次就是想要新草稿,命中缓存反而是错的。
+   */
+  async runEnrichmentModel(
+    projectId: string,
+    principal: SessionPrincipal,
+    prompt: string,
+    purpose: 'draft' | 'merge',
+  ): Promise<Record<string, unknown>> {
+    const project = this.resources.projectRow(projectId);
+    const fingerprint = `${ENRICH_FINGERPRINT_PREFIX}${purpose}:${randomUUID()}`;
+    const task = this.createTask(projectId, 'project', null, fingerprint, principal);
+    try {
+      const payload = await this.analyzeWithCurrentModel(project, principal, prompt, [], task.id);
+      // result_id 为 null:补充不产生 project_intelligence 之类的结果行。
+      // cachedTask 要求 result_id 非空,所以这些任务天然不会被当成缓存命中。
+      this.completeTask(task.id, null, nowIso());
+      this.record(project, principal, 'knowledge.enrich.model', 'analysis_task', task.id, { projectId, purpose });
+      return payload;
+    } catch (error) {
       this.failTask(task.id, error);
       throw analysisFailureException(error);
     }
@@ -1846,7 +1905,8 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   }
 
   // 终态清空归属与心跳:留着会让已完成的分析看起来仍有实例在跑。
-  private completeTask(id: string, resultId: string, now: string): void {
+  // resultId 允许 null:知识库补充任务没有结果行(见 runEnrichmentModel)。
+  private completeTask(id: string, resultId: string | null, now: string): void {
     this.stopTaskHeartbeat(id);
     this.database.prepare(
       `UPDATE analysis_tasks SET status='completed', result_id=?, error=NULL, completed_at=?, updated_at=?,
@@ -2426,8 +2486,8 @@ function projectBlueprintAnalysisPrompt(sourceJson: string): string {
     'knowledge_map={"entries":[{"id":"","sourceName":"","section":"","purpose":"project_fact|domain_note|dynamic_information|boundary|reference_style|unknown","factEligible":false,"source":{"status":"supplied_fact|approved_observation|inference|hypothesis|unknown","evidenceIds":[],"note":""}}]}. When an entry maps to a passage in a knowledge file, cite that passage\'s id from the file\'s `evidenceSections` in source.evidenceIds.',
     'domain_model={"projectNoun":"","industry":"","domain":"","objects":[],"actions":[],"concepts":[],"decisionTasks":[],"vocabulary":[]}.',
     'audience_model={"states":[{"id":"","label":"","stages":["discovering|collecting|comparing|hesitating|ready"],"goals":[],"constraints":[],"knowledgeState":"","hesitationReasons":[],"actionConditions":[],"source":{"status":"inference","evidenceIds":[]}}]}. These are conditional states, not population distributions.',
-    'scenario_model={"families":[{"id":"","label":"","prototype":"narrow_request|live_moment|expectation_reversal|process_log|outcome_observation|retrospective_update|relationship_moment|option_comparison","applicableStages":[],"hostIdentityCues":[],"lifeContexts":[],"timeAnchors":[],"settings":[],"triggers":[],"observableActions":[],"frictions":[],"emotionalAftertastes":[],"imageMoments":[],"prohibitedUnsupportedHistories":[],"source":{"status":"hypothesis","evidenceIds":[]}}]}. Produce materially different, project-derived scene families. prohibitedUnsupportedHistories must be filled, not left empty: list the concrete wordings a simulated reader or an accountable responder must never use to claim a project history the supplied source cannot support. Derive them from this project\'s industry and service model rather than from a generic list, and judge repeat-purchase vocabulary (老用户 / 回购 / 复购 / 续做 / 第二次做 and the project\'s own equivalents) by that service model: for one_time projects (renovation, study-abroad, wedding planning, legal consultation) such wording describes a history the project structurally cannot have, so prohibit it; for recurring or mixed projects it is an identity claim that needs evidence, so prohibit it unless the source supports it; where the project language treats it as an ordinary neutral phrase, leave it out instead of prohibiting it. Also include first-person completion and third-party word-of-mouth wordings specific to this project\'s actions (e.g. the domain verb for having undergone or purchased the service, plus 亲测 / 亲身经历 / 朋友做过 style endorsements when they would read as independent testimony here). Keep every entry a surface wording that could literally appear in copy, and keep it consistent with the claim_policy rule whose claimType is historical_action.',
-    'role_model={"serviceModel":"one_time|recurring|mixed","hostVoiceTraits":[],"hostSpeechMarkers":[],"roles":[{"id":"","displayRole":"","relationToHost":"","identityCues":[],"situationCues":[],"motives":[],"knowledgePosition":"","speechPatterns":[],"lexicalCues":[],"interactionHooks":[],"permittedContributions":[],"utteranceModes":["direct_question|shared_concern|experience_fragment|counterexample|social_reaction|detail_spotter|knowledge_translation|identity_route|service_answer"],"replyDisplayRoles":[],"targetChars":[4,30],"accountable":false,"source":{"status":"hypothesis","evidenceIds":[]}}]}. First judge the project service model from the supplied source and record it in serviceModel. Judge by whether the same customer has REPEAT CONTACT with the provider over time, not by whether they buy twice: one_time = the decision is made once and the engagement ends (a single visit, or one signed engagement that simply runs to completion with no ongoing return visits); recurring = the same customer keeps coming back over an extended period (multi-session courses, monthly follow-ups, maintenance or review phases, renewals) even when they signed only once and paid once; mixed = both patterns coexist. A long engagement with scheduled return visits is recurring, NOT one_time. Cross-check against domain_model.actions and concepts: if they contain follow-up, review, maintenance, retention or repeat-visit stages, serviceModel must not be one_time. Produce diverse social positions and accountable roles only where supported; never fabricate real users. Give at least 6 question-side roles covering the decision-stage (discovering/collecting/comparing/hesitating/ready) x social-position matrix (e.g. first-time researcher, cautious comparer, risk worrier, same-city action seeker, lurking follower, dissenting skeptic, pure-reaction empathizer; trim to what the project actually supports), each with at least 3 utteranceModes. Choose question-side marketing-flavored roles from this candidate pool, trimmed by serviceModel: 心动种草/拼单询价/同城行动/探店打卡/术后回访/转介绍/围观共鸣 for every model, plus 老客复购 only when serviceModel is recurring or mixed. Produce exactly 2 accountable=true public identities for the two-account operation: (1) the publishing IP / host, its displayRole named as the organization IP in project language; (2) an open assistant, its displayRole named organization name + 助理, its utteranceModes centered on service_answer and identity_route, its permittedContributions distilled only from claims the claim_policy allows — every price, number or promise it may state must anchor to a knowledge entry, and when knowledge is missing it must route to human staff instead of improvising; both identities answer in public organization identities and never pose as ordinary users. hostVoiceTraits must match the publishing account\'s real identity (an amateur personal account gets an amateur voice, never an institutional tone). '
+    'scenario_model={"families":[{"id":"","label":"","prototype":"narrow_request|live_moment|expectation_reversal|process_log|outcome_observation|retrospective_update|relationship_moment|option_comparison","applicableStages":[],"hostIdentityCues":[],"lifeContexts":[],"timeAnchors":[],"settings":[],"triggers":[],"observableActions":[],"frictions":[],"emotionalAftertastes":[],"imageMoments":[],"prohibitedUnsupportedHistories":[],"source":{"status":"hypothesis","evidenceIds":[]}}]}. Produce materially different, project-derived scene families. prohibitedUnsupportedHistories must be filled, not left empty: list the concrete wordings a simulated reader or an accountable responder must never use to claim a project history the supplied source cannot support. Derive them from this project\'s service model and domain actions identified in domain_model. Identify repeat-engagement vocabulary (老用户 / 回购 / 复购 / 续做 / 第二次做 and project-specific equivalents from domain_model.actions and concepts) and judge by serviceModel: for one_time projects such wording structurally cannot occur, so prohibit it; for recurring or mixed projects it is an identity claim that needs evidence, so prohibit it unless the source supports it; where the project language treats it as an ordinary neutral phrase, leave it out instead of prohibiting it. Also include first-person completion and third-party word-of-mouth wordings specific to this project\'s actions (derive completion verbs from domain_model.actions — e.g. if actions include "装修", the completion form is "装修了/装修过" — plus 亲测 / 亲身经历 / 朋友做过 style endorsements when they would read as independent testimony here). Keep every entry a surface wording that could literally appear in copy, and keep it consistent with the claim_policy rule whose claimType is historical_action.',
+    'role_model={"serviceModel":"one_time|recurring|mixed","hostVoiceTraits":[],"hostSpeechMarkers":[],"roles":[{"id":"","displayRole":"","relationToHost":"","identityCues":[],"situationCues":[],"motives":[],"knowledgePosition":"","speechPatterns":[],"lexicalCues":[],"interactionHooks":[],"permittedContributions":[],"utteranceModes":["direct_question|shared_concern|experience_fragment|counterexample|social_reaction|detail_spotter|knowledge_translation|identity_route|service_answer"],"replyDisplayRoles":[],"targetChars":[4,30],"accountable":false,"source":{"status":"hypothesis","evidenceIds":[]}}]}. First judge the project service model from the supplied source and record it in serviceModel. Judge by whether the same customer has REPEAT CONTACT with the provider over time, not by whether they buy twice: one_time = the decision is made once and the engagement ends (a single visit, or one signed engagement that simply runs to completion with no ongoing return visits); recurring = the same customer keeps coming back over an extended period (multi-session courses, monthly follow-ups, maintenance or review phases, renewals) even when they signed only once and paid once; mixed = both patterns coexist. A long engagement with scheduled return visits is recurring, NOT one_time. Cross-check against domain_model.actions and concepts: if they contain follow-up, review, maintenance, retention or repeat-visit stages, serviceModel must not be one_time. Produce diverse social positions and accountable roles only where supported; never fabricate real users. Give at least 6 question-side roles covering the decision-stage (discovering/collecting/comparing/hesitating/ready) x social-position matrix (e.g. first-time researcher, cautious comparer, risk worrier, same-city action seeker, lurking follower, dissenting skeptic, pure-reaction empathizer; trim to what the project actually supports), each with at least 3 utteranceModes. Choose question-side marketing-flavored roles from this candidate pool, trimmed by serviceModel: 心动种草/拼单询价/同城行动/探店打卡/服务后回访/转介绍/围观共鸣 for every model, plus 老客复购 only when serviceModel is recurring or mixed. Produce exactly 2 accountable=true public identities for the two-account operation: (1) the publishing IP / host, its displayRole named as the organization IP in project language; (2) an open assistant, its displayRole named organization name + 助理, its utteranceModes centered on service_answer and identity_route, its permittedContributions distilled only from claims the claim_policy allows — every price, number or promise it may state must anchor to a knowledge entry, and when knowledge is missing it must route to human staff instead of improvising; both identities answer in public organization identities and never pose as ordinary users. hostVoiceTraits must match the publishing account\'s real identity (an amateur personal account gets an amateur voice, never an institutional tone). '
     // 两条硬约束单独提出:埋在上面长段落里时,产出的 role_model 半数以上只给
     // 0 或 1 个 accountable 身份,且 replyDisplayRoles 写内部 id(host_account /
     // role_IP / role_01),生成阶段无法路由,答复展示名回落通用兜底名。

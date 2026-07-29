@@ -19,6 +19,8 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Request, Response } from 'express';
 import { CsrfGuard, PermissionGuard, RequirePermission, SessionAuthGuard } from './guards.js';
+import { IntelligenceEnrichService } from './intelligence-enrich.service.js';
+import { parseMergeRequest, parseSaveRequest } from './intelligence-enrich.types.js';
 import { IntelligenceService } from './intelligence.service.js';
 import type { AuthenticatedRequest, SessionPrincipal } from './models.js';
 import { requireObject } from './utils.js';
@@ -31,7 +33,10 @@ interface UploadedImage {
 @Controller('api/projects/:projectId')
 @UseGuards(SessionAuthGuard, CsrfGuard, PermissionGuard)
 export class IntelligenceController {
-  constructor(@Inject(IntelligenceService) private readonly intelligence: IntelligenceService) {}
+  constructor(
+    @Inject(IntelligenceService) private readonly intelligence: IntelligenceService,
+    @Inject(IntelligenceEnrichService) private readonly enrich: IntelligenceEnrichService,
+  ) {}
 
   @Get('intelligence')
   @RequirePermission({ permission: 'project.read', projectParam: 'projectId' })
@@ -43,6 +48,38 @@ export class IntelligenceController {
   @RequirePermission({ permission: 'project.read', projectParam: 'projectId' })
   listTasks(@Param('projectId') projectId: string) {
     return this.intelligence.listTasks(projectId);
+  }
+
+  /*
+   * 知识库 AI 补充:起草 → 合并预览 → 保存新版本。
+   *
+   * 路由注册在「intelligence/」下而不是「knowledge/」下,因为这三步全靠
+   * information_gaps 驱动,而缺口是分析产物。
+   */
+  @Post('intelligence/enrich/draft')
+  @RequirePermission({ permission: 'project.write', projectParam: 'projectId' })
+  enrichDraft(@Req() request: Request, @Param('projectId') projectId: string) {
+    return this.enrich.generateEnrichmentDraft(projectId, this.principal(request));
+  }
+
+  @Post('intelligence/enrich/merge')
+  @RequirePermission({ permission: 'project.write', projectParam: 'projectId' })
+  enrichMerge(@Req() request: Request, @Param('projectId') projectId: string, @Body() body: unknown) {
+    const { items, targetFile } = parseMergeRequest(body);
+    return this.enrich.mergeEnrichedKnowledge(projectId, items, targetFile, this.principal(request));
+  }
+
+  /*
+   * save 判 knowledge.import,不判 project.write。
+   *
+   * 它写的是知识文件,和 KnowledgeController.handleUpload 是同一件事,必须同一把锁——
+   * 否则会出现「没有上传知识库的权限,但能通过补充功能往知识库写入」的绕过。
+   */
+  @Post('intelligence/enrich/save')
+  @RequirePermission({ permission: 'knowledge.import', projectParam: 'projectId' })
+  enrichSave(@Req() request: Request, @Param('projectId') projectId: string, @Body() body: unknown) {
+    const { content, targetFile } = parseSaveRequest(body);
+    return this.enrich.saveEnrichedKnowledge(projectId, content, targetFile, this.principal(request));
   }
 
   @Get('intelligence/analysis-tasks/:taskId')

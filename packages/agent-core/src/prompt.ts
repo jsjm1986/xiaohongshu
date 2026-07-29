@@ -684,7 +684,7 @@ ${commonPrefix}
 - fact 的每个 sourceSpans.quote 必须是对应 evidenceId 所指证据中的逐字连续原文；evidenceIds 必须与 sourceSpans 中去重后的 evidenceId 完全一致。非事实项可以 sourceSpans=[]；没有依据则列入 unknowns 或明确写成 hypothesis，不能伪造引文。
 - 根级 evidenceIds 必须等于全部 reasoning.sourceSpans 使用的证据 ID 去重集合；不可把“本次看过但未支持任何可见声明”的上下文文件塞进证据台账。
 - personaScenePlan 是可见成品的第一写作合同。标题、图片、正文和楼主回复必须属于同一个人物、同一个阶段、同一件刚发生的小事；人物与生活事件是明确的创作情境，不是事实证据。
-- 正文自然、具体、短句优先；生活细节可以按 personaScenePlan 拟人创作，但不能把项目疗效、消费结果或他人口碑写成已证实事实，也不要故意制造错别字。
+- 正文自然、具体、短句优先；生活细节可以按 personaScenePlan 拟人创作，但不能把项目结果、消费记录或他人口碑写成已证实事实，也不要故意制造错别字。
 ${compiledParameterInstruction}
 - selectedTopicOpportunity 是本次已选定选题，不得擅自换题。必须实际执行 orchestrationPlan 的 strategy、sequence、gapPlanningCards、imagePlan 和 dialogueThreads；候选差异来自完整结构，而不只是换词。
 - orchestrationPlan.stateSeed 只是可修正的写作情景：preContactKnown 才是用户明确提供的接触前已知；availableEvidence 是模型可用项目证据，绝不能改写成“读者原本就知道”。history.status=unknown 时不得补写浏览/搜索/消费经历。stateHypotheses 的等级和区间均未校准，只能调节表达，不得写成真实个人心理判断或人群比例。
@@ -872,7 +872,7 @@ ${safeJson(readerCast)}
 - 禁讲清单：以下受控类型的具体说法读者一律不说，只能提问、同款担心或说自己打算去核实：${safeJson(forbiddenClaims)}${blueprint?.claimPolicy.prohibitedClaims.length ? `；禁止宣称：${safeJson(blueprint.claimPolicy.prohibitedClaims)}` : ""}。
 - 不得声称自己完成过这些动作（用户明确提供的除外）：${safeJson(prohibitedHistories)}。人物可以说当前限制、打算怎么问或为什么犹豫，不把创作情景伪装成历史经历。
 - 读者只说自己的处境、感受、疑问或轻反应；不说项目事实、价格数字、效果证词，也不透露只有项目方才知道的信息。
-- 第一人称亲历：可以说自己的处境和已经做过的功课，但不得写成效果证词——不给效果数字、不做背书、不说“做完之后效果如何”。真正被禁的是把创作情景当成独立口碑，不是提到自己。
+- 第一人称亲历：可以说自己的处境和已经做过的功课，但不得写成效果证词——不给效果数字、不做背书、不说”完成后效果如何”。真正被禁的是把创作情景当成独立口碑，不是提到自己。
 - 逐角色禁止代替的证据：每条线程的规格里给了该线程人物自己那条禁令，按它执行。
 - 转述不限：任何线程都可以说“朋友做过/我打听过了”这类转述，但必须模糊、不背书、不给数字。
 - 评论网络形态要求：${safeJson(network ? {
