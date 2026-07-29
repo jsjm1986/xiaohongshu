@@ -90,8 +90,13 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete,
     setError(null);
     try {
       await api.intelligence.enrich.save(projectId, { content: preview, targetFile });
-      // 「建议重新分析」不是客套:补充内容要经过一次分析才会进生成语料。
-      toast.push('知识库已更新,建议重新分析以让补充内容生效');
+      /*
+       * 不说「生效」。冒烟实测:补充保存后重新分析,原先空白的缺口仍是 unknown——
+       * 这是对的,草稿如实写的是「此项资料缺失」,分析器据此标 factEligible=false。
+       * 但「生效」会让用户以为重新分析后缺口就消失,发现还在就以为功能坏了。
+       * 如实说清它做到了什么(整理出该问什么)、没做到什么(填不上真事实)。
+       */
+      toast.push('已保存为新版本。补充内容整理了「还缺什么」,缺口要等你补上真实资料才会关闭');
       onComplete();
       onClose();
     } catch (e: unknown) {
@@ -179,6 +184,21 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete,
               <code>{targetFile}</code>
               {isNewFile ? '' : ' 的新版本(旧版本仍可查看)'}。
               保存后这份资料的证据类型是「猜想」,核实过再改成「已知事实」。
+            </span>
+          </p>
+          {/*
+            必须说清这一点,否则用户会以为「补充一次缺口就消失」。
+            草稿如实写的是「资料未提及,待确认」,而不是编造答案,所以重新分析时
+            这些内容会被正确判成不可引用,缺口仍然开着——这是对的,不是没生效。
+            实测(宠物医院冒烟)确认:分析确实读到了新文件,但标成 factEligible:false。
+          */}
+          <p className="enrich-notice">
+            <Info size={15} aria-hidden="true" />
+            <span>
+              补充理清的是<strong>该问什么</strong>,不是替你答出真事实。
+              这些内容标注的多是「资料未提及,待确认」,所以重新分析后
+              <strong>缺口通常仍然开着</strong>——这是正常的。
+              要让缺口真正闭合,得把核实过的事实填进去,再把证据类型改成「已知事实」。
             </span>
           </p>
           {hedgeLoss > 0 && (
