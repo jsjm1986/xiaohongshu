@@ -229,6 +229,38 @@ test('提示词只带入与缺口相关的资料段落', async () => {
   assert.match(prompt, /不要编造具体数字/, '禁止编造事实的约束必须在提示词里');
 });
 
+test('指定 gapIds 时只起草那几条,不整批跑', async () => {
+  const a = await createGap('精补A', { question: 'a?', sourceStatus: 'unknown' });
+  const b = await createGap('精补B', { question: 'b?', sourceStatus: 'unknown' });
+  await createGap('不该出现的C', { question: 'c?', sourceStatus: 'unknown' });
+
+  capturedPrompts = [];
+  modelReply = { items: [a, b].map((gapId) => ({
+    gapId, content: '## 标题\n\n这是一段足够长的补充内容。', confidence: 'medium',
+  })) };
+  const result = await enrich.generateEnrichmentDraft(projectId, principal as never, [a, b]);
+
+  assert.equal(result.gaps.length, 2);
+  const prompt = capturedPrompts.at(-1)!.prompt;
+  assert.doesNotMatch(prompt, /不该出现的C/, '未指定的缺口不该进提示词');
+  assert.equal((prompt.match(/gapId=/g) || []).length, 2);
+});
+
+test('指定的 gapId 属于别的项目或已有答案时拒绝,且提示区分两种情况', async () => {
+  const answered = await createGap('已有答案的', {
+    question: 'x?', answer: '已经填好了。', sourceStatus: 'supplied_fact',
+  });
+  await assert.rejects(
+    () => enrich.generateEnrichmentDraft(projectId, principal as never, [answered]),
+    /指定的缺口不存在.*或已经有答案/,
+    '指名一条已有答案的缺口,不能拿去重写',
+  );
+  await assert.rejects(
+    () => enrich.generateEnrichmentDraft(projectId, principal as never, ['00000000-0000-0000-0000-000000000000']),
+    /指定的缺口不存在/,
+  );
+});
+
 test('模型把同一个 gapId 返回两次时只保留第一条', async () => {
   /*
    * 边界探查发现的缺陷。重复的后果是实际的:

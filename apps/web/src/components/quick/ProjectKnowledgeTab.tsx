@@ -52,7 +52,7 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
 
   const analyzed = Boolean(intel?.id);
   const stats = useMemo(() => gapStats(gaps), [gaps]);
-  const pendingGaps = pendingCount(stats);
+  const pendingGapCount = pendingCount(stats);
 
   // stale 感知:知识增删/图片审批/项目资料更新后,后端把审批链置 stale(规则 2);
   // ready 但带 staleReasons 同属「建议重新分析」。draft(已分析未确认)不阻塞,仅提示。
@@ -174,7 +174,7 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
       {project && (
         <>
           {analyzed ? (
-            <V2Instrument columns={isStale || pendingGaps > 0 || isDraft ? 4 : 3}>
+            <V2Instrument columns={isStale || pendingGapCount > 0 || isDraft ? 4 : 3}>
               {/* text:值是词组不是读数,不该用 31px 读数字号(见 V2InstrumentCell) */}
               <V2InstrumentCell text tone="brand" icon={<Sparkles size={14} />} label="实体" value={intel?.entity || '已分析'} />
               <V2InstrumentCell text tone="ai" icon={<Building2 size={14} />} label="行业" value={intel?.industry || '已建立内容地图'} />
@@ -184,14 +184,14 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
               )}
               {/* 第四格只有一个位置,按优先级让位:资料有缺口比「待确认」更需要用户动手
                   (「待确认」本身写着「不阻塞使用」) */}
-              {!isStale && pendingGaps > 0 && (
+              {!isStale && pendingGapCount > 0 && (
                 <V2InstrumentCell
                   text tone="warn" icon={<Info size={14} />} label="资料完整度"
                   value={`${stats.supplied}/${stats.total}`}
                   note={`${stats.unknown} 项没有资料,${stats.inferred} 项靠推断`}
                 />
               )}
-              {!isStale && pendingGaps === 0 && isDraft && (
+              {!isStale && pendingGapCount === 0 && isDraft && (
                 <V2InstrumentCell text tone="ai" icon={<Info size={14} />} label="状态" value="待确认" note="生成时会自动确认,不阻塞使用" />
               )}
             </V2Instrument>
@@ -277,9 +277,9 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
               <>
                 {topicCount > 0 && <Button variant={isStale ? 'secondary' : 'primary'} loading={busy} onClick={() => void goToTopics()}>去创作</Button>}
                 {/* 放在「重新分析」旁边:补充完就该重新分析,两个动作挨着最顺 */}
-                {pendingGaps > 0 && (
+                {pendingGapCount > 0 && (
                   <Button variant="secondary" icon={<WandSparkles size={15} />} disabled={busy || analyzing} onClick={() => setEnrichOpen(true)}>
-                    AI 帮我补充({pendingGaps} 项)
+                    AI 帮我补充({pendingGapCount} 项)
                   </Button>
                 )}
                 <Button variant={isStale ? 'primary' : 'ghost'} loading={busy} disabled={busy || analyzing} onClick={() => void analyze()}>重新分析</Button>

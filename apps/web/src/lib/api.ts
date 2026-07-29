@@ -937,10 +937,11 @@ export const api = {
      * 也得带上 content,后端拿不到就没法合并。
      */
     enrich: {
-      draft: (projectId: string) =>
+      // gapIds 缺省 = 整批起草;给了就只补那几条(缺口池的单条精补)
+      draft: (projectId: string, gapIds?: readonly string[]) =>
         request<EnrichDraftResponse>(
           `/api/projects/${encodeURIComponent(projectId)}/intelligence/enrich/draft`,
-          { method: "POST" },
+          { method: "POST", body: JSON.stringify(gapIds?.length ? { gapIds } : {}) },
         ),
       merge: (projectId: string, body: EnrichMergeRequest) =>
         request<EnrichMergeResponse>(
