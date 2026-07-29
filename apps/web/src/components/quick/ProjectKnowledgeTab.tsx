@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Trash2, Sparkles, Building2, Lightbulb, Eye, TriangleAlert, Info, FileText, WandSparkles } from 'lucide-react';
 import { Button, Field, Modal, useToast } from '../Ui';
 import { api } from '../../lib/api';
-import { gapStats, pendingCount } from '../../lib/enrich-types';
+import { enrichButtonLabel, gapStats, pendingCount } from '../../lib/enrich-types';
 import { V2Instrument, V2InstrumentCell } from '../V2';
 import { KnowledgeEnrichmentModal } from '../knowledge/KnowledgeEnrichmentModal';
 import { QuickTaskProgress } from './QuickTaskProgress';
@@ -279,7 +279,7 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
                 {/* 放在「重新分析」旁边:补充完就该重新分析,两个动作挨着最顺 */}
                 {pendingGapCount > 0 && (
                   <Button variant="secondary" icon={<WandSparkles size={15} />} disabled={busy || analyzing} onClick={() => setEnrichOpen(true)}>
-                    AI 帮我补充({pendingGapCount} 项)
+                    {enrichButtonLabel(pendingGapCount)}
                   </Button>
                 )}
                 <Button variant={isStale ? 'primary' : 'ghost'} loading={busy} disabled={busy || analyzing} onClick={() => void analyze()}>重新分析</Button>

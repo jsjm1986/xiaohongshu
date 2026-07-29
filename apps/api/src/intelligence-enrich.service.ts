@@ -34,6 +34,32 @@ interface KnowledgeDoc {
   content: string;
 }
 
+/** Markdown ATX 标题行:行首 1-6 个 #,后跟空格。 */
+const HEADING_LINE = /^(#{1,6})(\s)/gmu;
+
+/**
+ * 把草稿正文里的标题整体下移到三级以下。
+ *
+ * 合并时每条补充被包在 `## 缺口标题` 里,而草稿正文自己也带小标题。两边都用 `##`
+ * 的话,小标题会和小节标题同级,读起来像并列的两节;草稿写 `##`、小节写 `###`
+ * 更糟——深级标题下挂浅级,大纲工具里直接断层(实测产出过
+ * 「### 终身质保具体条款」下面挂「## 终身质保的具体含义」)。
+ *
+ * 按最浅的一级对齐到 `###`,整体平移,保留正文内部原有的层级关系。
+ * 六级是 Markdown 上限,超出的钳在六级——层级挤在一起也比生成 `#######`(不再是
+ * 标题,会被当普通文本渲染)好。
+ */
+export function demoteHeadings(markdown: string): string {
+  const levels = [...markdown.matchAll(HEADING_LINE)].map((match) => match[1]!.length);
+  if (levels.length === 0) return markdown;
+  const shift = 3 - Math.min(...levels);
+  if (shift <= 0) return markdown;
+  return markdown.replace(
+    HEADING_LINE,
+    (_full, hashes: string, space: string) => `${'#'.repeat(Math.min(6, hashes.length + shift))}${space}`,
+  );
+}
+
 @Injectable()
 export class IntelligenceEnrichService {
   constructor(
@@ -55,7 +81,8 @@ export class IntelligenceEnrichService {
     gapIds?: readonly string[],
   ): Promise<EnrichDraftResult> {
     this.resources.projectRow(projectId);
-    const gaps = this.pendingGaps(projectId, gapIds);
+    const allPending = this.pendingGaps(projectId, gapIds);
+    const gaps = allPending.slice(0, MAX_DRAFT_GAPS);
     if (gaps.length === 0) {
       // 指名了却一条都没匹配上,和「整个项目没缺口」是两件事,提示要说清楚是哪种。
       throw new BadRequestException(gapIds?.length
@@ -63,7 +90,17 @@ export class IntelligenceEnrichService {
         : '当前没有需要补充的信息缺口');
     }
 
-    const docs = await this.latestDocuments(projectId);
+    const { docs, unreadable } = await this.latestDocuments(projectId);
+    /*
+     * 有知识文件行、却一份正文都读不出来:这不是「没有资料」,是存储层出了问题。
+     * 让它继续跑等于让模型完全凭空写,而错误信息还会说成「请先补充原始资料」,
+     * 把运维故障说成用户没传资料。
+     */
+    if (docs.length === 0 && unreadable.length > 0) {
+      throw new BadRequestException(
+        `知识文件读取失败(${unreadable.join('、')}),无法基于现有资料起草。请检查文件是否还在,或重新上传。`,
+      );
+    }
     const context = this.extractRelevantContext(docs, gaps);
     const payload = await this.intelligence.runEnrichmentModel(
       projectId,
@@ -107,7 +144,18 @@ export class IntelligenceEnrichService {
     if (drafts.length === 0) {
       throw new BadRequestException('模型没能基于现有资料生成可用内容,请先补充一些原始资料');
     }
-    return { gaps: drafts };
+    /*
+     * totalPending 报的是截断前的条数,不是 drafts.length。
+     *
+     * 模型有时会漏答几条(gapId 对不上、正文太短都会被丢),那种缺失和「超出单次
+     * 上限」是两件事:前者重试可能就好了,后者必须再跑一轮才能补完。前端要能分开说。
+     */
+    return {
+      gaps: drafts,
+      totalPending: allPending.length,
+      limit: MAX_DRAFT_GAPS,
+      unreadableFiles: unreadable,
+    };
   }
 
   async mergeEnrichedKnowledge(
@@ -150,14 +198,33 @@ export class IntelligenceEnrichService {
       throw new BadRequestException('确认或编辑过的条目必须带上正文内容');
     }
 
-    const docs = await this.latestDocuments(projectId);
+    const { docs, unreadable } = await this.latestDocuments(projectId);
     const target = targetFile
       ?? docs.find((doc) => doc.filename.toUpperCase() === 'INDEX.MD')?.filename
       ?? 'INDEX.md';
+    /*
+     * 合并目标读不出来必须拒。
+     *
+     * 下面 `docs.find(target)?.content ?? ''` 分不清「文件不存在」(新建,空原文是对的)
+     * 和「文件在但读不出来」。后者继续跑会把原文当空的,合并结果里整份既有内容凭空
+     * 消失,而用户点「确认保存」时新版本已经落库了。
+     */
+    if (unreadable.includes(target)) {
+      throw new BadRequestException(
+        `目标知识文件读取失败(${target}),为避免覆盖并丢失原文,请恢复文件或重新上传后再合并。`,
+      );
+    }
     const existing = docs.find((doc) => doc.filename === target)?.content ?? '';
 
+    /*
+     * 小节标题用二级,正文里的标题整体压到三级以下。
+     *
+     * 原先小节写 `###`、而草稿正文自己常带 `##` 小标题,拼出来就是深级标题下面挂
+     * 浅级标题(实测:「### 终身质保具体条款」下面跟着「## 终身质保的具体含义」)。
+     * 层级倒置会让合并后的文档在大纲视图里断层,模型也容易跟着这个错误结构写下去。
+     */
     const supplements = active
-      .map((item) => `### ${byId.get(item.gapId)!.title}\n${item.content!.trim()}`)
+      .map((item) => `## ${byId.get(item.gapId)!.title}\n${demoteHeadings(item.content!.trim())}`)
       .join('\n\n');
 
     const payload = await this.intelligence.runEnrichmentModel(
@@ -233,7 +300,8 @@ ${supplements}
 1. 输出一份完整的新版文档，把补充内容自然地融进原有结构。
 2. 不要删除原文里的任何信息，只做整合与去重。
 3. 与原文冲突时以补充内容为准，它更新更具体。
-4. 用 Markdown，二级标题分节，结构清晰。
+4. 用 Markdown，二级标题（##）分节，小节内部要再分层时用三级（###）及更深。
+   标题层级不可倒置：三级标题下面不能出现二级标题。
 5. 不要新增原文和补充内容里都没有的事实。
 6. 【最重要】不确定的说法必须保持不确定。补充内容里凡是「待确认」「建议补充」
    「尚未提供」「是否…」「可能」「通常」「应」这类限定词和疑问句，一律原样保留，
@@ -251,6 +319,10 @@ ${supplements}
    *
    * 过滤放在 JS 里而不是 SQL 的 json_extract:data_json 里 answer 键可能整个不存在,
    * 那时 json_extract 返回 NULL,`= ''` 判不出来,真正该补的行反而被漏掉。
+   *
+   * 不在这里截断到 MAX_DRAFT_GAPS。截断是调用方的事:它要拿真实总数和上限对比,
+   * 才能告诉用户「这次只起草了前 15 条,还剩 2 条」。在这里切掉的话总数就永远
+   * 等于上限,截断对上层不可见——按钮写 17 项、实得 15 条的静默丢失就是这么来的。
    */
   private pendingGaps(projectId: string, onlyIds?: readonly string[]): GapRow[] {
     const rows = this.database
@@ -274,12 +346,19 @@ ${supplements}
         const answer = typeof data.answer === 'string' ? data.answer.trim() : '';
         const status = typeof data.sourceStatus === 'string' ? data.sourceStatus : '';
         return answer === '' || status === 'unknown' || status === 'inference' || status === 'hypothesis';
-      })
-      .slice(0, MAX_DRAFT_GAPS);
+      });
   }
 
-  /** 取每个文件名的最新版本正文。list() 只给元数据,正文得逐个读。 */
-  private async latestDocuments(projectId: string): Promise<KnowledgeDoc[]> {
+  /**
+   * 取每个文件名的最新版本正文。list() 只给元数据,正文得逐个读。
+   *
+   * 单个文件读不出来不抛错,记进 unreadable 继续。
+   * 原先是直接 await,任何一个文件缺失都让 ENOENT 冒到 500——前端弹窗于是显示
+   * 服务端英文原文「Internal server error」。一份资料读不到不该让整批起草失败,
+   * 但也不能静默跳过:调用方按用途决定是提示还是拒绝(合并目标读不到必须拒,
+   * 否则会把原文当空的,合并结果直接丢掉整份既有内容)。
+   */
+  private async latestDocuments(projectId: string): Promise<{ docs: KnowledgeDoc[]; unreadable: string[] }> {
     const rows = this.knowledge.list(projectId);
     const latest = new Map<string, Record<string, unknown>>();
     for (const row of rows) {
@@ -288,11 +367,16 @@ ${supplements}
       if (!previous || Number(row.version) > Number(previous.version)) latest.set(filename, row);
     }
     const docs: KnowledgeDoc[] = [];
+    const unreadable: string[] = [];
     for (const row of latest.values()) {
-      const full = await this.knowledge.getWithContent(String(row.id));
-      docs.push({ filename: String(full.filename), content: String(full.content ?? '') });
+      try {
+        const full = await this.knowledge.getWithContent(String(row.id));
+        docs.push({ filename: String(full.filename), content: String(full.content ?? '') });
+      } catch {
+        unreadable.push(String(row.filename));
+      }
     }
-    return docs;
+    return { docs, unreadable };
   }
 
   /**
@@ -374,6 +458,8 @@ ${list}
 
 要求：
 1. 每个缺口写 2-4 段 Markdown，回答该缺口的问题。
+   正文里如果要加小标题，用三级（###）或更深：合并时每条会被放进一个二级小节，
+   正文用二级标题会和小节标题同级。
 2. 资料里明确写了的，直接提取，confidence=high。
 3. 能从资料合理推断的，谨慎推断并说明依据，confidence=medium。
 4. 没有任何依据的，写成待用户确认的假设并明确标注，confidence=low。
@@ -385,6 +471,6 @@ ${list}
 7. gapId 必须原样使用上面给出的值，不要新增缺口。
 
 只返回 JSON 对象，不要多余文字：
-{"items":[{"gapId":"...","content":"## 小标题\\n\\n正文...","confidence":"medium","reasoning":"推断依据"}]}`;
+{"items":[{"gapId":"...","content":"### 小标题\\n\\n正文...","confidence":"medium","reasoning":"推断依据"}]}`;
   }
 }

@@ -129,7 +129,8 @@ test('目标文件缺省时优先选 INDEX.md,并标为已有文件', async () =
   // 原文与补充都要进提示词,否则「不要删除原文信息」这条无从执行
   assert.match(capturedPrompts.at(-1)!, /已有的内容/);
   assert.match(capturedPrompts.at(-1)!, /费用约 3 万起/);
-  assert.match(capturedPrompts.at(-1)!, /### 申请费用/, '补充内容应带缺口标题');
+  // 小节标题是二级:草稿正文里的标题会被压到三级以下,不能和小节标题同级
+  assert.match(capturedPrompts.at(-1)!, /^## 申请费用$/mu, '补充内容应带二级缺口标题');
 });
 
 test('项目里没有 INDEX.md 时目标为 INDEX.md 且标为新文件', async () => {
@@ -326,7 +327,7 @@ test('merge 收到重复 gapId 时只取最后一条,不让同一缺口进提示
     principal as never,
   );
   const prompt = capturedPrompts.at(-1)!;
-  assert.equal((prompt.match(/### 重复合并项/g) || []).length, 1, '标题只能出现一次');
+  assert.equal((prompt.match(/^## 重复合并项$/gmu) || []).length, 1, '标题只能出现一次');
   assert.match(prompt, /第二份内容才是最终的/, '应取最后一条');
   assert.doesNotMatch(prompt, /第一份内容/, '第一条应被丢弃');
 });
