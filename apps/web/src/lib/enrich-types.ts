@@ -131,3 +131,26 @@ export function draftShortfallNote(result: {
   }
   return null;
 }
+
+/**
+ * 补充保存成功后的提示。
+ *
+ * 保存本身不关闭缺口——存进去的是模型推测(证据类型「猜想」),没有人背书过。
+ * 但它不再是死路:认可的内容填进缺口答案并选「我确认过」,那一刻缺口才关闭,
+ * 且生成端会给它人工背书证据。这句话要把这条路说出来。
+ */
+export function enrichSavedHint(): string {
+  return '已保存为新版本。缺口不会因此关闭——把你认可的内容填进缺口答案并选「我确认过」,才算补上了。';
+}
+
+/**
+ * 「保存到」可选的文件名。
+ *
+ * 两个入口传进来的列表语义不同:专业版传的是折叠到最新版的 currentFiles,
+ * 快捷版传的是 knowledge.list 原样返回的行——后端 SQL 不按 filename 去重,
+ * 同名文件每个版本一行。不去重的话快捷版会出现重复选项和重复的 React key。
+ * 历史版本不是可选的保存目标:保存总是产生新版本,选"哪一份"只看文件名。
+ */
+export function enrichTargetOptions(files: ReadonlyArray<{ name: string }>): string[] {
+  return [...new Set(files.map((file) => file.name).filter((name) => name.trim()))];
+}

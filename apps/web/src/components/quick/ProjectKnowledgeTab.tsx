@@ -299,6 +299,9 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
         <KnowledgeEnrichmentModal
           open={enrichOpen}
           projectId={project.id}
+          /* 让用户选补充并入哪一份资料,否则补充只会独立成 INDEX.md,和原始资料不合流。
+             这里的 files 含同名文件的历史版本,弹窗内部按文件名去重。 */
+          files={files}
           onClose={() => setEnrichOpen(false)}
           onComplete={() => {
             // 补充只改知识文件,不动分析结果。刷新文件列表与缺口即可;

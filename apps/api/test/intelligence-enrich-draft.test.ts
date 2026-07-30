@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { createApplication } from '../src/app.js';
+import { DatabaseService } from '../src/database.service.js';
 import { IntelligenceEnrichService } from '../src/intelligence-enrich.service.js';
 import { IntelligenceService } from '../src/intelligence.service.js';
 
@@ -49,6 +50,22 @@ async function createGap(title: string, data: Record<string, unknown>) {
   });
   assert.equal(res.response.status, 201, JSON.stringify(res.body));
   return res.body.id as string;
+}
+
+/*
+ * 分析器判定「资料里有出处」的缺口。
+ *
+ * supplied_fact 只能由分析器基于 evidenceSections 写,人工路径(POST/PATCH)
+ * 会被 assertNoAnalyzerOnlySource 拦成 400。这里直接改库模拟分析器落库,
+ * 而不是放宽那道门禁——待补充判据要覆盖的正是分析器写出来的这一档。
+ */
+async function createAnalyzerFactGap(title: string, data: Record<string, unknown>) {
+  const { sourceStatus: _dropped, ...rest } = data;
+  const id = await createGap(title, rest);
+  app.get(DatabaseService).prepare(
+    "UPDATE information_gaps SET data_json = json_set(data_json, '$.sourceStatus', 'supplied_fact') WHERE id=?",
+  ).run(id);
+  return id;
 }
 
 async function upload(filename: string, content: string) {
@@ -121,7 +138,7 @@ test('没有任何缺口时拒绝起草', async () => {
 });
 
 test('只挑答案为空或来源是推断/假设/未知的缺口', async () => {
-  const done = await createGap('已有答案的缺口', {
+  const done = await createAnalyzerFactGap('已有答案的缺口', {
     question: '工期多久？',
     answer: '常规两居 45 天。',
     sourceStatus: 'supplied_fact',
@@ -247,7 +264,7 @@ test('指定 gapIds 时只起草那几条,不整批跑', async () => {
 });
 
 test('指定的 gapId 属于别的项目或已有答案时拒绝,且提示区分两种情况', async () => {
-  const answered = await createGap('已有答案的', {
+  const answered = await createAnalyzerFactGap('已有答案的', {
     question: 'x?', answer: '已经填好了。', sourceStatus: 'supplied_fact',
   });
   await assert.rejects(

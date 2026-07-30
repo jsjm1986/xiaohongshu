@@ -100,6 +100,13 @@ import type {
 
 const TASK_PROJECT_EVIDENCE_ID = "evidence_task_project";
 const PLANNING_CONTEXT_EVIDENCE_ID = "evidence_approved_planning_context";
+/**
+ * 人工背书。人在缺口编辑器填了答案并确认(sourceStatus=user_supplied)时给出。
+ *
+ * 与资料支撑同等有效,但保持独立 id——证据台账里要能区分「资料背书」与「人工背书」,
+ * 否则以后审「哪些结论是人说的」就查不出来。
+ */
+const HUMAN_APPROVED_EVIDENCE_ID = "evidence_human_approved";
 
 function imageAnalysisEvidenceId(analysis: ImageAssetAnalysis): string {
   const observed = JSON.stringify({
@@ -556,6 +563,7 @@ function bindGapEvidence(
     const mapped = findSupportingSectionEvidenceIds([statement], context);
     if (taskEvidenceSupports(input.config, [statement])) mapped.push(TASK_PROJECT_EVIDENCE_ID);
     if (planningEvidenceSupports(input, [statement])) mapped.push(PLANNING_CONTEXT_EVIDENCE_ID);
+    if (gap.sourceStatus === "user_supplied") mapped.push(HUMAN_APPROVED_EVIDENCE_ID);
     return [...new Set(mapped)];
   };
   const answerEvidenceIds = evidenceFor(gap.answer);

@@ -21,6 +21,7 @@ import { CsrfGuard, PermissionGuard, SessionAuthGuard } from './guards.js';
 import { KnowledgeService } from './knowledge.service.js';
 import type { AuthenticatedRequest, Permission, SessionPrincipal } from './models.js';
 import { ResourceService } from './resource.service.js';
+import { assertJsonComplexity, requireObject } from './utils.js';
 
 interface UploadedKnowledgeFile {
   originalname: string;
@@ -33,7 +34,7 @@ interface KnowledgeUploadBody {
   content?: string;
   category?: string;
   evidenceStatus?: string;
-  metadata?: string | Record<string, unknown>;
+  metadata?: unknown;
 }
 
 // multer/Express decodes multipart originalname as Latin-1, mangling UTF-8
@@ -70,7 +71,7 @@ export class KnowledgeController {
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 2 * 1024 * 1024, files: 1 } }))
   async upload(
     @Req() rawRequest: Request,
-    @Body() body: KnowledgeUploadBody,
+    @Body() body?: unknown,
     @UploadedFile() file?: UploadedKnowledgeFile,
   ) {
     return this.handleUpload(rawRequest, body, file);
@@ -98,10 +99,11 @@ export class KnowledgeController {
 
   private async handleUpload(
     rawRequest: Request,
-    body: KnowledgeUploadBody,
+    rawBody: unknown,
     file?: UploadedKnowledgeFile,
     forcedProjectId?: string,
   ) {
+    const body = uploadBody(rawBody);
     const projectId = forcedProjectId ?? body.projectId;
     if (!projectId) throw new BadRequestException('projectId 不能为空');
     this.assert(rawRequest, projectId, 'knowledge.import');
@@ -110,16 +112,7 @@ export class KnowledgeController {
     if (!filename || (typeof content !== 'string' && !Buffer.isBuffer(content))) {
       throw new BadRequestException('请提供 file，或 filename + content');
     }
-    let metadata: Record<string, unknown> = {};
-    if (typeof body.metadata === 'string' && body.metadata) {
-      try {
-        metadata = JSON.parse(body.metadata) as Record<string, unknown>;
-      } catch {
-        throw new BadRequestException('metadata 必须是有效 JSON');
-      }
-    } else if (body.metadata && typeof body.metadata === 'object') {
-      metadata = body.metadata;
-    }
+    const metadata = parseMetadata(body.metadata);
     return this.knowledge.import({
       projectId,
       filename,
@@ -174,30 +167,29 @@ export class ProjectKnowledgeController {
     return this.knowledge.evidenceSections(projectId);
   }
 
+  /** 完善度预检。纯本地计算,不调模型,所以读权限即可。 */
+  @Get('preflight')
+  preflight(@Req() rawRequest: Request, @Param('projectId') projectId: string) {
+    this.assert(rawRequest, projectId, 'project.read');
+    return this.knowledge.preflight(projectId);
+  }
+
   @Post()
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 2 * 1024 * 1024, files: 1 } }))
   async upload(
     @Req() rawRequest: Request,
     @Param('projectId') projectId: string,
-    @Body() body: KnowledgeUploadBody,
+    @Body() rawBody?: unknown,
     @UploadedFile() file?: UploadedKnowledgeFile,
   ) {
+    const body = uploadBody(rawBody);
     this.assert(rawRequest, projectId, 'knowledge.import');
     const filename = file ? decodeMultipartFilename(file.originalname) : body.filename;
     const content = file?.buffer ?? body.content;
     if (!filename || (typeof content !== 'string' && !Buffer.isBuffer(content))) {
       throw new BadRequestException('请提供 file，或 filename + content');
     }
-    let metadata: Record<string, unknown> = {};
-    if (typeof body.metadata === 'string' && body.metadata) {
-      try {
-        metadata = JSON.parse(body.metadata) as Record<string, unknown>;
-      } catch {
-        throw new BadRequestException('metadata 必须是有效 JSON');
-      }
-    } else if (body.metadata && typeof body.metadata === 'object') {
-      metadata = body.metadata;
-    }
+    const metadata = parseMetadata(body.metadata);
     return this.knowledge.import({
       projectId,
       filename,
@@ -265,4 +257,26 @@ export class ProjectKnowledgeController {
   private principal(rawRequest: Request): SessionPrincipal {
     return (rawRequest as unknown as AuthenticatedRequest).principal as SessionPrincipal;
   }
+}
+
+function uploadBody(value: unknown): KnowledgeUploadBody {
+  if (value === undefined || value === null) return {};
+  return requireObject(value) as KnowledgeUploadBody;
+}
+
+function parseMetadata(value: unknown): Record<string, unknown> {
+  if (value === undefined || value === null || value === '') return {};
+  let parsed: unknown = value;
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value) as unknown;
+    } catch {
+      throw new BadRequestException('metadata 必须是有效 JSON');
+    }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new BadRequestException('metadata 必须是 JSON 对象');
+  }
+  assertJsonComplexity(parsed, 'metadata');
+  return parsed as Record<string, unknown>;
 }
