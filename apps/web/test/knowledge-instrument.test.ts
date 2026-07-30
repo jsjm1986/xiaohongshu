@@ -8,7 +8,9 @@ import {
   historyVersions,
   latestFiles,
   preflightHeadline,
+  TIER_LABEL,
   TIER_NOTE,
+  TIER_TONE,
 } from '../src/lib/knowledge-instrument';
 import type { KnowledgeFile, KnowledgePreflight, KnowledgePreflightGap } from '../src/types';
 
@@ -116,7 +118,7 @@ function preflight(overrides: Partial<KnowledgePreflight> = {}): KnowledgePrefli
     analysis: 'approved',
     canGenerate: true,
     requiredOpen: [],
-    tiers: { evidence_backed: 0, approved_only: 0, will_be_dropped: 0, blank: 0 },
+    tiers: { evidence_backed: 0, approved_only: 0, evidence_stale: 0, will_be_dropped: 0, blank: 0 },
     byCategory: [],
     gaps: [],
     warnings: [],
@@ -196,7 +198,7 @@ test('分析未就绪时,即便缺口层面没问题也不说可以生成', () =
 test('分析已确认且缺口都落实 → 才说可以生成,且不再提示去分析', () => {
   const view = preflightHeadline(preflight({
     analysis: 'approved',
-    tiers: { evidence_backed: 8, approved_only: 9, will_be_dropped: 0, blank: 0 },
+    tiers: { evidence_backed: 8, approved_only: 9, evidence_stale: 0, will_be_dropped: 0, blank: 0 },
   }));
   assert.equal(view?.tone, 'ok');
   assert.equal(view?.needsAnalysis, false);
@@ -207,7 +209,7 @@ test('必答缺口没落实 → 主结论说还不能生成', () => {
   const view = preflightHeadline(preflight({
     canGenerate: false,
     requiredOpen: [{ id: 'g1', label: '资质编号', tier: 'will_be_dropped' }],
-    tiers: { evidence_backed: 3, approved_only: 0, will_be_dropped: 1, blank: 0 },
+    tiers: { evidence_backed: 3, approved_only: 0, evidence_stale: 0, will_be_dropped: 1, blank: 0 },
   }));
   assert.equal(view?.tone, 'error');
   assert.match(view!.text, /还不能生成/u);
@@ -215,7 +217,7 @@ test('必答缺口没落实 → 主结论说还不能生成', () => {
 
 test('能生成但有答案会被丢弃 → 仍要告警,不能只说可以生成', () => {
   const view = preflightHeadline(preflight({
-    tiers: { evidence_backed: 5, approved_only: 2, will_be_dropped: 2, blank: 0 },
+    tiers: { evidence_backed: 5, approved_only: 2, evidence_stale: 0, will_be_dropped: 2, blank: 0 },
   }));
   assert.equal(view?.tone, 'warn');
   assert.match(view!.text, /2 条答案会被丢弃/u);
@@ -224,7 +226,7 @@ test('能生成但有答案会被丢弃 → 仍要告警,不能只说可以生�
 
 test('全部落实 → ok', () => {
   const view = preflightHeadline(preflight({
-    tiers: { evidence_backed: 8, approved_only: 9, will_be_dropped: 0, blank: 0 },
+    tiers: { evidence_backed: 8, approved_only: 9, evidence_stale: 0, will_be_dropped: 0, blank: 0 },
   }));
   assert.equal(view?.tone, 'ok');
   assert.equal(view?.actionable, 0);
@@ -232,7 +234,7 @@ test('全部落实 → ok', () => {
 
 test('主结论不使用「N/M」比率:分母是模型每轮随机给的,跨轮不可比', () => {
   const view = preflightHeadline(preflight({
-    tiers: { evidence_backed: 16, approved_only: 0, will_be_dropped: 0, blank: 1 },
+    tiers: { evidence_backed: 16, approved_only: 0, evidence_stale: 0, will_be_dropped: 0, blank: 1 },
   }));
   assert.doesNotMatch(view!.text, /\d+\s*\/\s*\d+/u, '不得出现 16/17 这类比率');
 });
@@ -277,6 +279,87 @@ test('仅人工确认这一档的说明必须点明它不是资料里的事实',
   // 这是整个功能的要点:此前界面把它和「已知事实」一起显示成「可直接引用」。
   assert.match(TIER_NOTE.approved_only, /不是资料里的事实/u);
   assert.match(TIER_NOTE.will_be_dropped, /丢掉/u);
+});
+
+test('三张档位表都有 evidence_stale 的格子,说明要指向重新分析', () => {
+  assert.ok(TIER_LABEL.evidence_stale.trim().length > 0);
+  assert.ok(TIER_NOTE.evidence_stale.trim().length > 0);
+  // tone 是字符串联合,断言非空没意义,直接钉具体值:它可修复且重新分析能自愈,
+  // 与 blank 同级,不该用 error 吓人
+  assert.equal(TIER_TONE.evidence_stale, 'warn');
+  // 这一档唯一的出路是重新分析,说明里必须说出来
+  assert.match(TIER_NOTE.evidence_stale, /重新分析/u);
+  // 不能沿用「你填写并确认过」那套说法——本次修的就是这个谎
+  assert.ok(!/你填写|确认过/u.test(TIER_NOTE.evidence_stale), TIER_NOTE.evidence_stale);
+});
+
+test('待处理排序:引用失效比「会被丢弃」轻,比「仅人工确认」重', () => {
+  const gaps = [
+    { id: 'a', label: '仅人工确认的', status: 'approved', required: false, category: '', tier: 'approved_only' as const, sectionEvidenceIds: [], staleDeclaredEvidenceIds: ['x'], reasons: [] },
+    { id: 'b', label: '引用失效的', status: 'approved', required: false, category: '', tier: 'evidence_stale' as const, sectionEvidenceIds: [], staleDeclaredEvidenceIds: ['x'], reasons: [] },
+    { id: 'c', label: '会被丢弃的', status: 'approved', required: false, category: '', tier: 'will_be_dropped' as const, sectionEvidenceIds: [], staleDeclaredEvidenceIds: [], reasons: [] },
+  ];
+  const ordered = actionableGaps(preflight({ gaps })).map((gap) => gap.id);
+  assert.deepEqual(ordered, ['c', 'b', 'a']);
+});
+
+/**
+ * 分析已确认 + 引用失效,是真实存在的组合(项目「眼袋王」:analysis 为 approved、
+ * 零个知识文件、49 条 supplied_fact 缺口)。旧文案在这里说「改掉会被丢弃的答案
+ * 格式」——改格式没用,要做的是重新分析。
+ */
+test('分析已确认但必答缺口引用失效 → 指向重新分析,并给出跳转', () => {
+  const view = preflightHeadline(preflight({
+    analysis: 'approved',
+    canGenerate: false,
+    requiredOpen: [{ id: 'g1', label: '易用性', tier: 'evidence_stale' }],
+  }));
+  assert.match(view!.nextStep, /重新分析/u);
+  assert.equal(view?.needsAnalysis, true);
+  // 不该让用户去改格式
+  assert.ok(!/格式/u.test(view!.nextStep), view!.nextStep);
+});
+
+test('必答缺口不是引用失效时,仍走原来的补资料/改格式文案', () => {
+  const view = preflightHeadline(preflight({
+    analysis: 'approved',
+    canGenerate: false,
+    // 混一条 evidence_stale:只有这样才能区分「全部失效」和「有失效」两个判据。
+    // fixture 若只放 blank,把 === requiredOpen.length 写成 > 0 也照样绿。
+    requiredOpen: [
+      { id: 'g1', label: '价格信息', tier: 'blank' },
+      { id: 'g2', label: '易用性', tier: 'evidence_stale' },
+    ],
+  }));
+  // 混合情形不能整条说成「引用已失效」:另一条 blank 缺口重新分析救不回来,
+  // 用户仍得去补资料/改格式。这里必须留住格式那半句,否则等于漏掉一半出路。
+  assert.match(view!.nextStep, /格式/u);
+  assert.match(view!.text, /没落实/u);
+  assert.doesNotMatch(view!.text, /引用已失效/u);
+  // 但也要点出其中有引用失效,并给跳转:重新分析是那部分缺口的唯一出路
+  assert.match(view!.nextStep, /重新分析/u);
+  assert.equal(view?.needsAnalysis, true);
+});
+
+test('必答缺口全无引用问题时,不提重新分析也不给跳转', () => {
+  const view = preflightHeadline(preflight({
+    analysis: 'approved',
+    canGenerate: false,
+    requiredOpen: [{ id: 'g1', label: '价格信息', tier: 'blank' }],
+  }));
+  assert.match(view!.nextStep, /资料|格式/u);
+  assert.equal(view?.needsAnalysis, false);
+});
+
+/**
+ * actionable 是「需要你动手的条数」,而 actionableGaps 是对应的清单。
+ * 漏算 evidence_stale 会让这个数字比清单短——用户看到「2 条要处理」却列出 5 条。
+ */
+test('引用失效计入需要动手的条数,不能和待处理清单打架', () => {
+  const view = preflightHeadline(preflight({
+    tiers: { evidence_backed: 1, approved_only: 0, evidence_stale: 3, will_be_dropped: 2, blank: 1 },
+  }));
+  assert.equal(view?.actionable, 6);
 });
 
 /**
