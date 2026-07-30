@@ -282,7 +282,9 @@ test('仅人工确认这一档的说明必须点明它不是资料里的事实',
 });
 
 test('三张档位表都有 evidence_stale 的格子,说明要指向重新分析', () => {
-  assert.ok(TIER_LABEL.evidence_stale.trim().length > 0);
+  // 标签不能只验非空:换成「有资料支撑」这种自相矛盾的说法也是非空的,
+  // 而那正是本档要否认的意思——必须看得出引用出了问题。
+  assert.match(TIER_LABEL.evidence_stale, /失效|引用/u);
   assert.ok(TIER_NOTE.evidence_stale.trim().length > 0);
   // tone 是字符串联合,断言非空没意义,直接钉具体值:它可修复且重新分析能自愈,
   // 与 blank 同级,不该用 error 吓人
@@ -318,6 +320,14 @@ test('分析已确认但必答缺口引用失效 → 指向重新分析,并给�
   assert.equal(view?.needsAnalysis, true);
   // 不该让用户去改格式
   assert.ok(!/格式/u.test(view!.nextStep), view!.nextStep);
+  /*
+   * 主结论本身也要钉住。只断言 nextStep 的话,把 text 改成「可以生成,缺口都已落实」、
+   * tone 改成 ok 都能活下来——一个引用全失效的项目被告知可以生成,恰是本次要根治的谎报。
+   */
+  assert.match(view!.text, /还不能生成/u);
+  assert.match(view!.text, /引用已失效/u);
+  assert.doesNotMatch(view!.text, /可以生成,/u);
+  assert.equal(view?.tone, 'error');
 });
 
 test('必答缺口不是引用失效时,仍走原来的补资料/改格式文案', () => {
