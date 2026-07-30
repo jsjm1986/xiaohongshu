@@ -5,7 +5,7 @@
  * 真正的硬门在 engine.ts:892——`required && !((answer || framework) && evidenceIds.length)`。
  * 两边不是同一个标准,于是仪表盘显示「已确认,可直接引用」的缺口,生成时可能被丢掉。
  *
- * 这里复刻生成端 `bindGapEvidence` 的判定,把缺口分成四档,其中 `will_be_dropped`
+ * 这里复刻生成端 `bindGapEvidence` 的判定,把缺口分成五档,其中 `will_be_dropped`
  * 是当前界面完全看不见的一档。
  *
  * 能复刻到什么程度:`bindGapEvidence` 走三条证据路径——
@@ -143,7 +143,12 @@ export function classifyGap(input: PreflightGapInput): PreflightGapResult {
     && selfProofSurvives(proposed)
   ) {
     tier = 'evidence_stale';
-    reasons.push('原本有资料出处,但引用随资料的新版本失效了。重新分析会重建引用。');
+    /*
+     * 不承诺「会重建引用」。资料被整份删掉时重建不出来——实测项目「眼袋王」活的知识
+     * 文件为 0、47 条缺口落在本档,重新分析没有任何资料可引。措辞与 :174 那条通用提示
+     * 取同一口径:把「存过新版本」和「被删除」两种可能都说出来,只承诺「一并更新」。
+     */
+    reasons.push('原本有资料出处,但引用已失效(资料存过新版本或被删除)。重新分析会一并更新;资料已删除的,要重新上传才能再有出处。');
   } else if (selfProofSurvives(proposed)) {
     tier = 'approved_only';
     reasons.push('答案没有对应的上传资料,依据是你填写并确认过。生成会采用,但它不是来自资料的事实。');
@@ -211,7 +216,7 @@ export interface PreflightSummary {
   /** 所有必答缺口都站得住。与 engine.ts:892 同判据。分析未就绪时恒为 false。 */
   canGenerate: boolean;
   /**
-   * 站不住的必答缺口。
+   * 站不住的必答缺口,**只含 status='approved' 的行**(见 blocksGeneration)。
    *
    * `blank` / `will_be_dropped` 会让生成时正文出现「关于X我还没问明白」;
    * `evidence_stale` 不会(答案仍被采用),但它的结论无法用当前资料复核,
@@ -226,6 +231,22 @@ export interface PreflightSummary {
 /** 一条缺口是否算「站得住」:生成端会保留它的答案。 */
 function settled(tier: PreflightTier): boolean {
   return tier === 'evidence_backed' || tier === 'approved_only';
+}
+
+/**
+ * 这一行会不会真的进生成。
+ *
+ * 预检取数不过滤 status(stale 的缺口恰恰最该提醒用户),但生成端只消费
+ * status='approved' 的行(intelligence.service.approvedRows)。所以「挣住生成」
+ * 只能由 approved 行决定,否则会造出一个用户消不掉的错误结论:
+ * insertAnalyzedGap 只插入、从不清理被取代的旧行,一条 status='stale' 的必答缺口
+ * 会永远显示「还不能生成」,而重新分析也清不掉它。
+ *
+ * 注意:分档计数与 byCategory 仍统计全部行——用户要看见知识库全貌,
+ * 被裁掉的只有 requiredOpen 这个硬门。
+ */
+function blocksGeneration(row: PreflightGapResult): boolean {
+  return row.status === 'approved' && row.required && !settled(row.tier);
 }
 
 /**
@@ -255,7 +276,7 @@ export function summarize(
   for (const row of rows) tiers[row.tier] += 1;
 
   const requiredOpen = rows
-    .filter((row) => row.required && !settled(row.tier))
+    .filter(blocksGeneration)
     .map((row) => ({ id: row.id, label: row.label, tier: row.tier }));
 
   const byCategoryMap = new Map<string, { total: number; settled: number }>();

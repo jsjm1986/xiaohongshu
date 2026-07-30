@@ -976,6 +976,7 @@ export const api = {
      *
      * 与生成端同判据,纯服务端计算不调模型。分档含义见 knowledge-preflight.ts:
      * evidence_backed(有资料支撑)/ approved_only(仅人工确认)/
+     * evidence_stale(分析器给过出处但引用已失效)/
      * will_be_dropped(生成会丢弃)/ blank(无答案)。
      */
     preflight: async (projectId: string) => {

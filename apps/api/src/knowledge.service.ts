@@ -440,8 +440,10 @@ export class KnowledgeService {
    * 与生成端 engine.ts:892 同判据(答案必须有证据支撑),纯本地计算不调模型。
    * 分档逻辑在 knowledge-preflight.ts,这里只负责取数据、跑证据匹配。
    *
-   * 不过滤 status:补充判据一向不看 status(见 intelligence-enrich.service.pendingGaps),
+   * 取数不过滤 status:补充判据一向不看 status(见 intelligence-enrich.service.pendingGaps),
    * 而且 stale 的缺口恰恰是最需要提醒用户的。status 原样回给前端自行区分。
+   * 但「挣住生成」只由 approved 行决定 —— 见 summarize 的 blocksGeneration,
+   * 生成端只消费 approved 行,拿别的行去翻 canGenerate 会造出消不掉的错误结论。
    */
   async preflight(projectId: string): Promise<Record<string, unknown>> {
     const { selection, warnings } = await this.evidenceDocumentSelection(projectId, '完善度预检');

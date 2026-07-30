@@ -112,8 +112,17 @@ export interface PreflightHeadline {
 export function preflightHeadline(preflight: KnowledgePreflight | null): PreflightHeadline | null {
   if (!preflight) return null;
   const { tiers, requiredOpen, canGenerate, analysis } = preflight;
-  // 引用失效同样需要用户动手(去重新分析),不计入的话这个数字会和
-  // actionableGaps 的清单长度打架——那个 filter 已经 admit 了这类缺口。
+  /*
+   * 引用失效同样需要用户动手(去重新分析),所以计入。
+   *
+   * 但这个数字和 actionableGaps 的清单长度**并不相等**,别当成同一口径:
+   * 那个 filter 还会收纳「档位已落实、可引用却有失效引用」的缺口
+   * (evidence_backed / approved_only 带 staleDeclaredEvidenceIds),
+   * 实测 8 个项目共 35 行属于这种——它们会被列出但不计入本数。
+   *
+   * 可以接受:本数回答「有多少条答案生成时立不住」,清单回答「有多少条值得你去看」,
+   * 后者本就该更宽。要紧的是别反过来——列表里少于计数才是藏问题。
+   */
   const actionable = tiers.will_be_dropped + tiers.evidence_stale + tiers.blank;
   const base = { actionable, needsAnalysis: false };
 

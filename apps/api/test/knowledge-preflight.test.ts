@@ -324,3 +324,41 @@ test('必答缺口落在 evidence_stale → 不算已落实,挣住生成', () =>
   assert.equal(summary.requiredOpen.length, 1);
   assert.equal(summary.tiers.evidence_stale, 1);
 });
+
+/**
+ * 非 approved 的必答缺口不该挣住生成。
+ *
+ * preflight() 读任何 status 的缺口行,而生成端只消费 status='approved' 的行
+ * (intelligence.service.approvedRows)。一条 status='stale' 的必答缺口落进
+ * evidence_stale 后会翻掉 canGenerate,面板说「还不能生成」并让用户去重新分析——
+ * 但 insertAnalyzedGap 只插入、从不清理被取代的旧行,这条提示永远消不掉。
+ * 实测项目「眼袋王」61 条 stale 缺口里正有 1 条必答。
+ *
+ * 分档展示仍要包含所有行(用户要看见全貌),但挣住生成只能由生成端真会消费的行决定。
+ */
+test('非 approved 的必答缺口不挣住生成:生成端根本不消费它', () => {
+  const staleRow = classifyGap(gap({
+    id: 'ghost',
+    status: 'stale',
+    required: true,
+    answer: '一句能自证的单行答案',
+    declaredEvidenceIds: ['evidence_section_deadbeef'],
+    sourceStatus: 'supplied_fact',
+  }));
+  const summary = summarize([staleRow], 'approved');
+  assert.equal(staleRow.tier, 'evidence_stale', '分档本身不变');
+  assert.equal(summary.tiers.evidence_stale, 1, '仍要计入分档展示:用户要看见全貌');
+  assert.equal(summary.requiredOpen.length, 0, '不该进 requiredOpen');
+  assert.equal(summary.canGenerate, true, '生成端不消费这行,不能因它说不能生成');
+});
+
+test('非 approved 的行仍计入 byCategory,展示口径不缩水', () => {
+  const rows = [
+    classifyGap(gap({ id: 'a', status: 'draft', category: 'risk', answer: '多行\n答案' })),
+    classifyGap(gap({ id: 'b', status: 'approved', category: 'risk', answer: 'x', sectionEvidenceIds: ['e1'] })),
+  ];
+  const summary = summarize(rows, 'approved');
+  const risk = summary.byCategory.find((item) => item.category === 'risk');
+  assert.equal(risk?.total, 2, '两行都要出现在覆盖统计里');
+  assert.equal(risk?.settled, 1);
+});
