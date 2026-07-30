@@ -409,7 +409,10 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     const title = requireString(body.title ?? body.question, 'title', { max: 300 });
     const description = optionalText(body.description, 4_000);
     const priority = percentage(body.priority, 50);
-    const data = JSON.stringify(resourceData(body));
+    const incoming = resourceData(body);
+    // 新建时没有既有值可继承，任何 supplied_fact 都是人工新声称
+    assertNoAnalyzerOnlySource(incoming);
+    const data = JSON.stringify(incoming);
     return this.database.transaction(() => {
       const project = this.resources.projectRow(projectId);
       this.database.prepare(
@@ -426,6 +429,10 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     return this.database.transaction(() => {
       const project = this.resources.projectRow(projectId);
       const current = this.row('information_gaps', projectId, id);
+      assertNoAnalyzerOnlySource(
+        resourceData(body),
+        parseJson<Record<string, unknown>>(current.data_json, {}).sourceStatus,
+      );
       const updated = this.database.prepare(
         `UPDATE information_gaps SET title=?, description=?, priority=?, data_json=?, status='draft',
          approved_by=NULL, approved_at=NULL, updated_at=?
@@ -2437,6 +2444,22 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     return this.database.transaction(() => {
       const project = this.resources.projectRow(projectId);
       const current = this.row(table, projectId, id);
+      /*
+       * 失效的项目分析不能直接确认。
+       *
+       * 此前只翻 status，于是资料变动后点一下「确认」就能把 stale 变回 approved，
+       * 而缺口与 evidenceId 全是变动之前算出来的——用户看到的「引用已失效」正源于此。
+       *
+       * 只拦 project_intelligence：缺口/策略/选题的 stale 是分析级联下来的，
+       * 重新分析会重建它们，拦住只会把用户堵死。
+       */
+      if (
+        table === 'project_intelligence'
+        && requested === 'approved'
+        && String(current.status) === 'stale'
+      ) {
+        throw new BadRequestException('资料已变动，这份分析已失效。请重新分析后再确认。');
+      }
       // 组件 B · M2（需求 2.3）：未知度量不再作硬门禁，但仍保留统一校验调用点。
       if (requested === 'approved') assertResourceMetricsReady(table, current);
       const now = nowIso();
@@ -3107,6 +3130,27 @@ function resourceData(body: Record<string, unknown>): Record<string, unknown> {
 
 function mergeResourceData(current: unknown, body: Record<string, unknown>): Record<string, unknown> {
   return { ...parseJson<Record<string, unknown>>(current, {}), ...resourceData(body) };
+}
+
+/**
+ * 人工路径不得**新声称**资料出处。
+ *
+ * resourceData 无白名单地展开请求体，所以不在这里拦就等于放开。supplied_fact
+ * 表示「资料里有出处」，只能由分析器基于 evidenceSections 判定；人工写它等于
+ * 声称有证据而实际没有，而 pendingGaps 会据此把缺口从补充流程里移除。
+ *
+ * 只拦「原本不是 supplied_fact，这次要变成」。原本就是的原样提交要放过——
+ * 缺口编辑器会显示并回传分析器的判定，把它拦掉就等于该缺口再也存不了。
+ * 传入的是 resourceData(body) 的结果而非原始 body：它已把 body.data 与顶层键
+ * 合并，所以 UI 的 {data:{sourceStatus}} 与手写顶层字段两种载荷都盖得住。
+ */
+function assertNoAnalyzerOnlySource(
+  incoming: Record<string, unknown>,
+  existingSourceStatus?: unknown,
+): void {
+  if (incoming.sourceStatus !== 'supplied_fact') return;
+  if (existingSourceStatus === 'supplied_fact') return;
+  throw new BadRequestException('supplied_fact 表示资料里有出处，只能由项目分析判定；人工填写请选「我确认过」。');
 }
 
 const OPPORTUNITY_SERVER_DERIVED_FIELDS = new Set([
