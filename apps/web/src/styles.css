@@ -4305,8 +4305,17 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .inline-load-error small { color: inherit; opacity: .8; }
 .empty-state__actions { display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; }
 
-/* 知识库完善建议:预检分档的待处理清单。沿用 .qc-gap 的左边框语义色做法。 */
-.preflight-gap-list { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+/*
+ * 知识库完善建议:预检分档的待处理清单。沿用 .qc-gap 的左边框语义色做法。
+ *
+ * 自带内边距,不套通用 body 类——.panel__body 在本仓库里并不存在,
+ * 之前误用它导致整块内容零内边距、卡片直接贴到面板边缘。
+ * 同页兄弟面板(.table-toolbar / .data-table)也是各自带内边距的具体类。
+ */
+.preflight-body { padding: 0 22px 20px; }
+/* 三句口径说明满宽一行读不动;限宽换行,行高跟着放宽 */
+.preflight-note { max-width: 68ch; line-height: 1.7; }
+.preflight-gap-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .preflight-gap {
   padding: 10px 12px; border-radius: var(--v2-radius-sm);
   background: var(--v2-canvas); border-left: 3px solid var(--v2-line);
@@ -4315,15 +4324,18 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .preflight-gap--blank { border-left-color: var(--v2-warn); }
 .preflight-gap--approved_only { border-left-color: var(--v2-ai, var(--v2-line)); }
 .preflight-gap--evidence_backed { border-left-color: var(--v2-ok); }
-.preflight-gap__top { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: var(--v2-fs-sm); }
-.preflight-gap__reasons { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 3px; }
-.preflight-gap__reasons li { font-size: var(--v2-fs-micro); color: var(--v2-ink-soft); }
-.preflight-gap__reasons li::before { content: '· '; }
+.preflight-gap__top { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; font-size: var(--v2-fs-sm); }
+/* 档位不用 Badge:左边框已经在表达同一件事,再加个色块就是两层装饰说一句话 */
+.preflight-gap__tier { margin-left: auto; font-size: var(--v2-fs-micro); color: var(--v2-muted); }
+.preflight-gap__reasons { list-style: none; margin: 5px 0 0; padding: 0; display: grid; gap: 3px; }
+.preflight-gap__reasons li { font-size: var(--v2-fs-micro); color: var(--v2-ink-soft); line-height: 1.65; }
 
-.preflight-coverage { margin-top: 4px; font-size: var(--v2-fs-sm); }
-.preflight-coverage ul { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 10px; }
+.preflight-body > .upload-note { margin: 10px 0 0; }
+.preflight-coverage { margin-top: 14px; display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 10px; }
+.preflight-coverage__label { font-size: var(--v2-fs-micro); color: var(--v2-muted); }
+.preflight-coverage ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
 .preflight-coverage li {
-  display: flex; gap: 6px; padding: 3px 9px; border-radius: 999px;
+  display: flex; gap: 6px; padding: 2px 8px; border-radius: 999px;
   background: var(--v2-canvas); font-size: var(--v2-fs-micro); color: var(--v2-ink-soft);
 }
 /* 缺得多的那几项要看得见,不能和已齐备的长一样 */
