@@ -26,6 +26,7 @@ import {
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, EmptyState, Field, Modal, Skeleton, useToast } from "../components/Ui";
 import { api } from "../lib/api";
+import { GAP_SOURCE_OPTIONS, sourceForAnswer } from "../lib/gap-source";
 import { gapMetricsInput, imageQualityPayload } from "../lib/metric-payload";
 import {
   countEvidenceSections,
@@ -1204,7 +1205,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
       </div>
     </Modal>
 
-    <Modal open={Boolean(editingGap)} onClose={() => setEditingGap(null)} title={editingGap?.id ? "编辑信息缺口" : "新增信息缺口"} description={editingGap?.id ? "保存后该缺口回到待确认状态，需重新确认后才会进入生成。" : undefined} footer={<Button disabled={staleGapEvidenceCount > 0} onClick={() => void saveGap()}>保存</Button>}><div className="form-stack"><Field label="缺口名称" required><input value={editingGap?.label || ""} onChange={(event) => setEditingGap((current) => ({ ...current, label: event.target.value }))} /></Field><Field label="自然问题" required><textarea rows={3} value={editingGap?.question || ""} onChange={(event) => setEditingGap((current) => ({ ...current, question: event.target.value }))} /></Field><Field label="已有批准答案"><textarea rows={3} value={editingGap?.answer || ""} onChange={(event) => setEditingGap((current) => ({ ...current, answer: event.target.value, answerability: event.target.value ? "approved" : "verifiable" }))} /></Field>
+    <Modal open={Boolean(editingGap)} onClose={() => setEditingGap(null)} title={editingGap?.id ? "编辑信息缺口" : "新增信息缺口"} description={editingGap?.id ? "保存后该缺口回到待确认状态，需重新确认后才会进入生成。" : undefined} footer={<Button disabled={staleGapEvidenceCount > 0} onClick={() => void saveGap()}>保存</Button>}><div className="form-stack"><Field label="缺口名称" required><input value={editingGap?.label || ""} onChange={(event) => setEditingGap((current) => ({ ...current, label: event.target.value }))} /></Field><Field label="自然问题" required><textarea rows={3} value={editingGap?.question || ""} onChange={(event) => setEditingGap((current) => ({ ...current, question: event.target.value }))} /></Field><Field label="已有批准答案"><textarea rows={3} value={editingGap?.answer || ""} onChange={(event) => setEditingGap((current) => ({ ...current, answer: event.target.value, answerability: event.target.value ? "approved" : "verifiable", sourceStatus: sourceForAnswer(event.target.value, current?.sourceStatus) }))} /></Field><Field label="资料来源" hint="决定这条答案能否被生成采用"><select value={editingGap?.sourceStatus === "supplied_fact" ? "supplied_fact" : (editingGap?.sourceStatus || "unknown")} onChange={(event) => setEditingGap((current) => ({ ...current, sourceStatus: event.target.value as InformationGap["sourceStatus"] }))}>{/* 分析器判定的资料支撑要能显示,但不作为可选项提供 */}{editingGap?.sourceStatus === "supplied_fact" && <option value="supplied_fact">资料里有出处(分析器判定)</option>}{GAP_SOURCE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></Field>
       {/* 不用 Field（渲染为 <label>）：点选器内含多个 checkbox，嵌套 label 会导致点击穿透到首个 checkbox。className 与 Field 保持一致。 */}
       <div className="field">
         <span className="field__label">答案证据</span>

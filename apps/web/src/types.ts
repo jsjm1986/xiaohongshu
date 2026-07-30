@@ -1228,7 +1228,7 @@ export interface InformationGap {
   unknownMetrics?: string[];
   reviewRequired?: boolean;
   /** Evidence-strength label the model assigns to this gap's estimates. */
-  sourceStatus?: "supplied_fact" | "inference" | "hypothesis" | "unknown";
+  sourceStatus?: "supplied_fact" | "user_supplied" | "inference" | "hypothesis" | "unknown";
   framework?: string;
   preferredChannels?: string[];
   audienceStages?: string[];
@@ -1324,7 +1324,7 @@ export interface TopicOpportunity {
   metricStatus?: "complete" | "unknown";
   audienceStage?: string;
   entry?: string;
-  sourceStatus?: "supplied_fact" | "inference" | "hypothesis" | "unknown";
+  sourceStatus?: "supplied_fact" | "user_supplied" | "inference" | "hypothesis" | "unknown";
   /**
    * Explainable ordering snapshot returned by the server. This is an
    * uncalibrated product heuristic, not F28 and not a causal performance
