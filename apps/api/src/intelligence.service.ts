@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { basename, extname, join, relative, resolve } from 'node:path';
+import { mkdir, rename, unlink, writeFile } from 'node:fs/promises';
+import { basename, extname, join, relative } from 'node:path';
 import {
   BadRequestException,
   ConflictException,
@@ -16,10 +16,13 @@ import {
 } from '@nestjs/common';
 import {
   PROJECT_BLUEPRINT_MODULE_KEYS,
+  assertModelJsonComplexity,
+  estimateTokens,
   normalizeProjectCreativeBlueprint,
   projectBlueprintCompleteness,
   rankTopicOpportunities,
   normalizeOpenAIBaseUrl,
+  readBoundedModelResponseText,
   OpportunityRankHeuristicV1DefaultPolicy,
   indexKnowledgeSource,
   selectKnowledgeContext,
@@ -39,18 +42,34 @@ import sharp from 'sharp';
 import { AuditService } from './audit.service.js';
 import { APP_OPTIONS, type ApiOptions } from './config.js';
 import { DatabaseService } from './database.service.js';
+import {
+  assertKnowledgeContextBudget,
+  assertKnowledgeRowsBudget,
+} from './knowledge-budget.js';
 import type { SessionPrincipal } from './models.js';
 import { AnalysisGatewayError, classifyModelFailure, modelFailureMessage } from './model-failure.js';
 import { ResourceService } from './resource.service.js';
+import { createSafeModelFetch } from './safe-model-fetch.js';
 import { SettingsService, type ResolvedProviderSettings } from './settings.service.js';
-import { nowIso, parseJson, requireObject, requireString } from './utils.js';
+import { readStoredFile, readStoredText } from './storage-file.js';
+import { nowIso, parseJson, requireObject, requireString, type Pagination } from './utils.js';
 
 type ImageMetadata = Awaited<ReturnType<ReturnType<typeof sharp>['metadata']>>;
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_KNOWLEDGE_BYTES = 2 * 1024 * 1024;
+const MAX_APPROVED_IMAGE_OBSERVATIONS = 64;
+const MAX_APPROVED_IMAGE_OBSERVATION_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGE_EDGE = 2_048;
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 const APPROVAL_STATUSES = new Set(['draft', 'approved', 'rejected', 'stale']);
+/**
+ * 缺口答案的来源。supplied_fact 只能由分析器基于 evidenceSections 判定;
+ * user_supplied 表示人工填写并确认过,只能由人设置——分析提示词不列出它。
+ */
+const GAP_SOURCE_STATUSES = new Set([
+  'supplied_fact', 'user_supplied', 'inference', 'hypothesis', 'unknown',
+]);
 const BLUEPRINT_MODULE_KEYS = new Set<string>(PROJECT_BLUEPRINT_MODULE_KEYS);
 const CONTENT_PROTOTYPES = new Set([
   'narrow_request', 'live_moment', 'expectation_reversal', 'process_log',
@@ -94,6 +113,9 @@ interface AnalysisTaskRow {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  claimed_by: string | null;
+  heartbeat_at: string | null;
+  quota_consumed_count: number;
 }
 
 interface ImageRow {
@@ -131,6 +153,17 @@ export interface PreparedPlanningContext {
 export { AnalysisGatewayError } from './model-failure.js';
 
 /**
+ * The task is still present, but this process no longer owns its execution lease.
+ * Keep the detail private: callers only need to know that retrying is safe.
+ */
+class AnalysisClaimLostError extends Error {
+  constructor() {
+    super('Analysis task execution ownership was lost.');
+    this.name = 'AnalysisClaimLostError';
+  }
+}
+
+/**
  * 把分析失败翻译成用户看得懂、且能行动的错误。
  *
  * 实测缺陷:AnalysisGatewayError 是普通 Error,Nest 一律包成
@@ -156,6 +189,11 @@ export const ENRICH_FINGERPRINT_PREFIX = 'enrich:';
 export function analysisFailureException(error: unknown): HttpException {
   const raw = error instanceof Error ? error.message : String(error);
   if (error instanceof HttpException) return error;
+  if (error instanceof AnalysisClaimLostError) {
+    const exception = new ServiceUnavailableException('The analysis was interrupted or taken over; retry is safe.');
+    (exception as { cause?: unknown }).cause = error;
+    return exception;
+  }
   const kind = classifyModelFailure(error);
   /*
    * 技术原文挂在 cause 上,不进用户可见文本。
@@ -202,11 +240,28 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   onModuleInit(): void {
     const now = nowIso();
     const deadline = new Date(Date.now() - this.options.jobClaimTimeoutMs).toISOString();
-    this.database.prepare(
-      `UPDATE analysis_tasks SET status='failed', error=?, completed_at=?, updated_at=?
-       WHERE status IN ('queued', 'running')
-         AND (heartbeat_at IS NULL OR heartbeat_at < ?)`,
-    ).run('Application restart interrupted the analysis; retry is safe.', now, now, deadline);
+    this.database.transaction(() => {
+      const interrupted = this.database.prepare(
+        `SELECT t.quota_consumed_count, p.workspace_id
+           FROM analysis_tasks t
+           JOIN projects p ON p.id = t.project_id
+          WHERE t.status IN ('queued', 'running') AND t.deleted_at IS NULL
+            AND (t.heartbeat_at IS NULL OR t.heartbeat_at < ?)`,
+      ).all(deadline) as unknown as Array<{ quota_consumed_count: number; workspace_id: string }>;
+      const refunds = new Map<string, number>();
+      for (const row of interrupted) {
+        const count = Math.max(0, Number(row.quota_consumed_count));
+        if (count > 0) refunds.set(row.workspace_id, (refunds.get(row.workspace_id) ?? 0) + count);
+      }
+      for (const [workspaceId, count] of refunds) this.settings.refundPlatformQuota(workspaceId, count);
+
+      this.database.prepare(
+        `UPDATE analysis_tasks SET status='failed', error=?, completed_at=?, updated_at=?,
+                claimed_by=NULL, heartbeat_at=NULL, quota_consumed_count=0
+         WHERE status IN ('queued', 'running') AND deleted_at IS NULL
+           AND (heartbeat_at IS NULL OR heartbeat_at < ?)`,
+      ).run('Application restart interrupted the analysis; retry is safe.', now, now, deadline);
+    });
   }
 
   onModuleDestroy(): void {
@@ -225,40 +280,45 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   }
 
   createIntelligence(projectId: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
-    const project = this.resources.projectRow(projectId);
     const map = isRecord(body.map) ? body.map : body;
     const id = randomUUID();
     const now = nowIso();
     const fingerprint = this.fingerprint(map);
-    const version = this.database.transaction(() => {
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
       const allocated = this.nextVersion('project_intelligence', projectId);
       this.database.prepare(
         `INSERT INTO project_intelligence
          (id, project_id, version, status, source_fingerprint, map_json, created_by, created_at, updated_at)
          VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?)`,
       ).run(id, projectId, allocated, fingerprint, JSON.stringify(map), principal.userId, now, now);
-      return allocated;
+      this.record(project, principal, 'intelligence.create', 'project_intelligence', id, { projectId, version: allocated });
+      return this.getIntelligence(projectId, id);
     });
-    this.record(project, principal, 'intelligence.create', 'project_intelligence', id, { projectId, version });
-    return this.getIntelligence(projectId, id);
   }
 
   updateIntelligence(projectId: string, id: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
-    const project = this.resources.projectRow(projectId);
-    const current = this.row('project_intelligence', projectId, id);
-    const map = isRecord(body.map) ? body.map : { ...parseJson(String(current.map_json), {}), ...body };
-    this.database.prepare(
-      `UPDATE project_intelligence SET map_json=?, source_fingerprint=?, status='draft',
-       approved_by=NULL, approved_at=NULL, updated_at=? WHERE id=?`,
-    ).run(JSON.stringify(map), this.fingerprint(map), nowIso(), id);
-    this.record(project, principal, 'intelligence.update', 'project_intelligence', id, { projectId });
-    return this.getIntelligence(projectId, id);
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      const current = this.row('project_intelligence', projectId, id);
+      const map = isRecord(body.map) ? body.map : { ...parseJson(String(current.map_json), {}), ...body };
+      const updated = this.database.prepare(
+        `UPDATE project_intelligence SET map_json=?, source_fingerprint=?, status='draft',
+         approved_by=NULL, approved_at=NULL, updated_at=?
+         WHERE id=? AND project_id=? AND deleted_at IS NULL`,
+      ).run(JSON.stringify(map), this.fingerprint(map), nowIso(), id, projectId);
+      if (Number(updated.changes) !== 1) throw new NotFoundException('Project resource not found.');
+      this.record(project, principal, 'intelligence.update', 'project_intelligence', id, { projectId });
+      return this.getIntelligence(projectId, id);
+    });
   }
 
   removeIntelligence(projectId: string, id: string, principal: SessionPrincipal): void {
-    const project = this.resources.projectRow(projectId);
-    this.softDelete('project_intelligence', projectId, id);
-    this.record(project, principal, 'intelligence.delete', 'project_intelligence', id, { projectId });
+    this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      this.softDelete('project_intelligence', projectId, id);
+      this.record(project, principal, 'intelligence.delete', 'project_intelligence', id, { projectId });
+    });
   }
 
   approveIntelligence(projectId: string, id: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
@@ -282,20 +342,21 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   }
 
   updateBlueprintModule(projectId: string, id: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
-    const project = this.resources.projectRow(projectId);
-    const current = this.row('project_blueprint_modules', projectId, id);
     const data = isRecord(body.data) ? body.data : body;
     const revision = this.fingerprint(data);
     const now = nowIso();
     const nextId = randomUUID();
-    const moduleKey = String(current.module_key) as ProjectBlueprintModuleKey;
-    const intelligenceId = stringOrNull(current.intelligence_id);
-    if (!intelligenceId) throw new BadRequestException('Blueprint module is not linked to a project analysis.');
-    this.database.transaction(() => {
-      this.database.prepare(
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      const current = this.row('project_blueprint_modules', projectId, id);
+      const moduleKey = String(current.module_key) as ProjectBlueprintModuleKey;
+      const intelligenceId = stringOrNull(current.intelligence_id);
+      if (!intelligenceId) throw new BadRequestException('Blueprint module is not linked to a project analysis.');
+      const replaced = this.database.prepare(
         `UPDATE project_blueprint_modules SET status='stale', updated_at=?
          WHERE id=? AND project_id=? AND deleted_at IS NULL`,
       ).run(now, id, projectId);
+      if (Number(replaced.changes) !== 1) throw new NotFoundException('Project resource not found.');
       this.database.prepare(
         `INSERT INTO project_blueprint_modules
          (id, project_id, intelligence_id, source_analysis_id, module_key, version, status,
@@ -316,14 +377,14 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
         now,
       );
       this.invalidateBlueprintDependents(projectId, moduleKey, now);
+      this.record(project, principal, 'blueprint-module.update', 'project_blueprint_module', nextId, {
+        projectId,
+        previousVersionId: id,
+        moduleKey,
+        contentRevision: revision,
+      });
+      return this.getBlueprintModule(projectId, nextId);
     });
-    this.record(project, principal, 'blueprint-module.update', 'project_blueprint_module', nextId, {
-      projectId,
-      previousVersionId: id,
-      moduleKey,
-      contentRevision: revision,
-    });
-    return this.getBlueprintModule(projectId, nextId);
   }
 
   approveBlueprintModule(projectId: string, id: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
@@ -343,50 +404,53 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   }
 
   createGap(projectId: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
-    const project = this.resources.projectRow(projectId);
     const id = randomUUID();
     const now = nowIso();
-    this.database.prepare(
-      `INSERT INTO information_gaps
-       (id, project_id, title, description, priority, status, data_json, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?)`,
-    ).run(
-      id,
-      projectId,
-      requireString(body.title ?? body.question, 'title', { max: 300 }),
-      optionalText(body.description, 4_000),
-      percentage(body.priority, 50),
-      JSON.stringify(resourceData(body)),
-      principal.userId,
-      now,
-      now,
-    );
-    this.record(project, principal, 'information-gap.create', 'information_gap', id, { projectId });
-    return this.getGap(projectId, id);
+    const title = requireString(body.title ?? body.question, 'title', { max: 300 });
+    const description = optionalText(body.description, 4_000);
+    const priority = percentage(body.priority, 50);
+    const data = JSON.stringify(resourceData(body));
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      this.database.prepare(
+        `INSERT INTO information_gaps
+         (id, project_id, title, description, priority, status, data_json, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?)`,
+      ).run(id, projectId, title, description, priority, data, principal.userId, now, now);
+      this.record(project, principal, 'information-gap.create', 'information_gap', id, { projectId });
+      return this.getGap(projectId, id);
+    });
   }
 
   updateGap(projectId: string, id: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
-    const project = this.resources.projectRow(projectId);
-    const current = this.row('information_gaps', projectId, id);
-    this.database.prepare(
-      `UPDATE information_gaps SET title=?, description=?, priority=?, data_json=?, status='draft',
-       approved_by=NULL, approved_at=NULL, updated_at=? WHERE id=?`,
-    ).run(
-      body.title === undefined && body.question === undefined ? String(current.title) : requireString(body.title ?? body.question, 'title', { max: 300 }),
-      body.description === undefined ? String(current.description) : optionalText(body.description, 4_000),
-      body.priority === undefined ? Number(current.priority) : percentage(body.priority, Number(current.priority)),
-      JSON.stringify(mergeResourceData(current.data_json, body)),
-      nowIso(),
-      id,
-    );
-    this.record(project, principal, 'information-gap.update', 'information_gap', id, { projectId });
-    return this.getGap(projectId, id);
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      const current = this.row('information_gaps', projectId, id);
+      const updated = this.database.prepare(
+        `UPDATE information_gaps SET title=?, description=?, priority=?, data_json=?, status='draft',
+         approved_by=NULL, approved_at=NULL, updated_at=?
+         WHERE id=? AND project_id=? AND deleted_at IS NULL`,
+      ).run(
+        body.title === undefined && body.question === undefined ? String(current.title) : requireString(body.title ?? body.question, 'title', { max: 300 }),
+        body.description === undefined ? String(current.description) : optionalText(body.description, 4_000),
+        body.priority === undefined ? Number(current.priority) : percentage(body.priority, Number(current.priority)),
+        JSON.stringify(mergeResourceData(current.data_json, body)),
+        nowIso(),
+        id,
+        projectId,
+      );
+      if (Number(updated.changes) !== 1) throw new NotFoundException('Project resource not found.');
+      this.record(project, principal, 'information-gap.update', 'information_gap', id, { projectId });
+      return this.getGap(projectId, id);
+    });
   }
 
   removeGap(projectId: string, id: string, principal: SessionPrincipal): void {
-    const project = this.resources.projectRow(projectId);
-    this.softDelete('information_gaps', projectId, id);
-    this.record(project, principal, 'information-gap.delete', 'information_gap', id, { projectId });
+    this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      this.softDelete('information_gaps', projectId, id);
+      this.record(project, principal, 'information-gap.delete', 'information_gap', id, { projectId });
+    });
   }
 
   approveGap(projectId: string, id: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
@@ -403,48 +467,51 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   }
 
   createStrategy(projectId: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
-    const project = this.resources.projectRow(projectId);
     const id = randomUUID();
     const now = nowIso();
-    this.database.prepare(
-      `INSERT INTO expression_strategies
-       (id, project_id, name, description, status, data_json, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?)`,
-    ).run(
-      id,
-      projectId,
-      requireString(body.name ?? body.title, 'name', { max: 200 }),
-      optionalText(body.description, 4_000),
-      JSON.stringify(resourceData(body)),
-      principal.userId,
-      now,
-      now,
-    );
-    this.record(project, principal, 'expression-strategy.create', 'expression_strategy', id, { projectId });
-    return this.getStrategy(projectId, id);
+    const name = requireString(body.name ?? body.title, 'name', { max: 200 });
+    const description = optionalText(body.description, 4_000);
+    const data = JSON.stringify(resourceData(body));
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      this.database.prepare(
+        `INSERT INTO expression_strategies
+         (id, project_id, name, description, status, data_json, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?)`,
+      ).run(id, projectId, name, description, data, principal.userId, now, now);
+      this.record(project, principal, 'expression-strategy.create', 'expression_strategy', id, { projectId });
+      return this.getStrategy(projectId, id);
+    });
   }
 
   updateStrategy(projectId: string, id: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
-    const project = this.resources.projectRow(projectId);
-    const current = this.row('expression_strategies', projectId, id);
-    this.database.prepare(
-      `UPDATE expression_strategies SET name=?, description=?, data_json=?, status='draft',
-       approved_by=NULL, approved_at=NULL, updated_at=? WHERE id=?`,
-    ).run(
-      body.name === undefined && body.title === undefined ? String(current.name) : requireString(body.name ?? body.title, 'name', { max: 200 }),
-      body.description === undefined ? String(current.description) : optionalText(body.description, 4_000),
-      JSON.stringify(mergeResourceData(current.data_json, body)),
-      nowIso(),
-      id,
-    );
-    this.record(project, principal, 'expression-strategy.update', 'expression_strategy', id, { projectId });
-    return this.getStrategy(projectId, id);
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      const current = this.row('expression_strategies', projectId, id);
+      const updated = this.database.prepare(
+        `UPDATE expression_strategies SET name=?, description=?, data_json=?, status='draft',
+         approved_by=NULL, approved_at=NULL, updated_at=?
+         WHERE id=? AND project_id=? AND deleted_at IS NULL`,
+      ).run(
+        body.name === undefined && body.title === undefined ? String(current.name) : requireString(body.name ?? body.title, 'name', { max: 200 }),
+        body.description === undefined ? String(current.description) : optionalText(body.description, 4_000),
+        JSON.stringify(mergeResourceData(current.data_json, body)),
+        nowIso(),
+        id,
+        projectId,
+      );
+      if (Number(updated.changes) !== 1) throw new NotFoundException('Project resource not found.');
+      this.record(project, principal, 'expression-strategy.update', 'expression_strategy', id, { projectId });
+      return this.getStrategy(projectId, id);
+    });
   }
 
   removeStrategy(projectId: string, id: string, principal: SessionPrincipal): void {
-    const project = this.resources.projectRow(projectId);
-    this.softDelete('expression_strategies', projectId, id);
-    this.record(project, principal, 'expression-strategy.delete', 'expression_strategy', id, { projectId });
+    this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      this.softDelete('expression_strategies', projectId, id);
+      this.record(project, principal, 'expression-strategy.delete', 'expression_strategy', id, { projectId });
+    });
   }
 
   approveStrategy(projectId: string, id: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
@@ -491,13 +558,17 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     status: 'active' | 'collected' | 'archived',
     principal: SessionPrincipal,
   ): Record<string, unknown> {
-    const project = this.resources.projectRow(projectId);
-    this.row('topic_opportunities', projectId, opportunityId);
-    this.database.prepare(
-      `UPDATE topic_opportunities SET collection_status=?, updated_at=? WHERE id=?`,
-    ).run(status, nowIso(), opportunityId);
-    this.record(project, principal, 'topic-opportunity.collection', 'topic_opportunity', opportunityId, { projectId, status });
-    return this.mapOpportunity(this.row('topic_opportunities', projectId, opportunityId));
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      this.row('topic_opportunities', projectId, opportunityId);
+      const updated = this.database.prepare(
+        `UPDATE topic_opportunities SET collection_status=?, updated_at=?
+         WHERE id=? AND project_id=? AND deleted_at IS NULL`,
+      ).run(status, nowIso(), opportunityId, projectId);
+      if (Number(updated.changes) !== 1) throw new NotFoundException('Project resource not found.');
+      this.record(project, principal, 'topic-opportunity.collection', 'topic_opportunity', opportunityId, { projectId, status });
+      return this.mapOpportunity(this.row('topic_opportunities', projectId, opportunityId));
+    });
   }
 
   listPromptTemplates(projectId: string): Record<string, unknown>[] {
@@ -515,26 +586,32 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   }
 
   createPromptTemplate(projectId: string, label: string, guidance: string, principal: SessionPrincipal): Record<string, unknown> {
-    const project = this.resources.projectRow(projectId);
     const cleanLabel = label.trim().slice(0, 80);
     const cleanGuidance = guidance.trim().slice(0, 600);
     if (!cleanLabel || !cleanGuidance) throw new BadRequestException('模板名称和引导词不能为空');
     const id = randomUUID();
     const now = nowIso();
-    this.database.prepare(
-      `INSERT INTO opportunity_prompt_templates (id, project_id, label, guidance, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run(id, projectId, cleanLabel, cleanGuidance, principal.userId, now, now);
-    this.record(project, principal, 'prompt-template.create', 'prompt_template', id, { projectId });
-    return this.listPromptTemplates(projectId).find((template) => template.id === id)!;
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      this.database.prepare(
+        `INSERT INTO opportunity_prompt_templates (id, project_id, label, guidance, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(id, projectId, cleanLabel, cleanGuidance, principal.userId, now, now);
+      this.record(project, principal, 'prompt-template.create', 'prompt_template', id, { projectId });
+      return this.listPromptTemplates(projectId).find((template) => template.id === id)!;
+    });
   }
 
   deletePromptTemplate(projectId: string, templateId: string, principal: SessionPrincipal): void {
-    const project = this.resources.projectRow(projectId);
-    this.database.prepare(
-      `UPDATE opportunity_prompt_templates SET deleted_at=? WHERE id=? AND project_id=?`,
-    ).run(nowIso(), templateId, projectId);
-    this.record(project, principal, 'prompt-template.delete', 'prompt_template', templateId, { projectId });
+    this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      const removed = this.database.prepare(
+        `UPDATE opportunity_prompt_templates SET deleted_at=?, updated_at=?
+         WHERE id=? AND project_id=? AND deleted_at IS NULL`,
+      ).run(nowIso(), nowIso(), templateId, projectId);
+      if (Number(removed.changes) !== 1) throw new NotFoundException('Prompt template not found.');
+      this.record(project, principal, 'prompt-template.delete', 'prompt_template', templateId, { projectId });
+    });
   }
 
   getOpportunity(projectId: string, id: string): Record<string, unknown> {
@@ -545,63 +622,66 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   }
 
   createOpportunity(projectId: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
-    const project = this.resources.projectRow(projectId);
     const id = randomUUID();
     const now = nowIso();
-    this.database.prepare(
-      `INSERT INTO topic_opportunities
-       (id, project_id, title, angle, rationale, status, data_json, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?)`,
-    ).run(
-      id,
-      projectId,
-      requireString(body.title, 'title', { max: 300 }),
-      optionalText(body.angle, 1_000),
-      optionalText(body.rationale, 4_000),
-      JSON.stringify(canonicalOpportunityData(opportunityResourceData(body), {
-        source: 'user',
-        sourceRef: 'api:user_input',
-        assertedFields: opportunityInputFields(body),
-      })),
-      principal.userId,
-      now,
-      now,
-    );
-    this.record(project, principal, 'topic-opportunity.create', 'topic_opportunity', id, { projectId });
-    return this.getOpportunity(projectId, id);
+    const title = requireString(body.title, 'title', { max: 300 });
+    const angle = optionalText(body.angle, 1_000);
+    const rationale = optionalText(body.rationale, 4_000);
+    const data = JSON.stringify(canonicalOpportunityData(opportunityResourceData(body), {
+      source: 'user',
+      sourceRef: 'api:user_input',
+      assertedFields: opportunityInputFields(body),
+    }));
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      this.database.prepare(
+        `INSERT INTO topic_opportunities
+         (id, project_id, title, angle, rationale, status, data_json, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?)`,
+      ).run(id, projectId, title, angle, rationale, data, principal.userId, now, now);
+      this.record(project, principal, 'topic-opportunity.create', 'topic_opportunity', id, { projectId });
+      return this.getOpportunity(projectId, id);
+    });
   }
 
   updateOpportunity(projectId: string, id: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
-    const project = this.resources.projectRow(projectId);
-    const current = this.row('topic_opportunities', projectId, id);
-    const updatedData = mergeOpportunityResourceData(current.data_json, body);
-    // Editing invalidates both dependency approval and the immutable ranking
-    // audit captured at the previous approval event.
-    delete updatedData.dependencySnapshot;
-    delete updatedData.approvalRankAudit;
-    this.database.prepare(
-      `UPDATE topic_opportunities SET title=?, angle=?, rationale=?, data_json=?, status='draft',
-       approved_by=NULL, approved_at=NULL, updated_at=? WHERE id=?`,
-    ).run(
-      body.title === undefined ? String(current.title) : requireString(body.title, 'title', { max: 300 }),
-      body.angle === undefined ? String(current.angle) : optionalText(body.angle, 1_000),
-      body.rationale === undefined ? String(current.rationale) : optionalText(body.rationale, 4_000),
-      JSON.stringify(canonicalOpportunityData(updatedData, {
-        source: 'user',
-        sourceRef: 'api:user_input',
-        assertedFields: opportunityInputFields(body),
-      })),
-      nowIso(),
-      id,
-    );
-    this.record(project, principal, 'topic-opportunity.update', 'topic_opportunity', id, { projectId });
-    return this.getOpportunity(projectId, id);
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      const current = this.row('topic_opportunities', projectId, id);
+      const updatedData = mergeOpportunityResourceData(current.data_json, body);
+      // Editing invalidates both dependency approval and the immutable ranking
+      // audit captured at the previous approval event.
+      delete updatedData.dependencySnapshot;
+      delete updatedData.approvalRankAudit;
+      const updated = this.database.prepare(
+        `UPDATE topic_opportunities SET title=?, angle=?, rationale=?, data_json=?, status='draft',
+         approved_by=NULL, approved_at=NULL, updated_at=?
+         WHERE id=? AND project_id=? AND deleted_at IS NULL`,
+      ).run(
+        body.title === undefined ? String(current.title) : requireString(body.title, 'title', { max: 300 }),
+        body.angle === undefined ? String(current.angle) : optionalText(body.angle, 1_000),
+        body.rationale === undefined ? String(current.rationale) : optionalText(body.rationale, 4_000),
+        JSON.stringify(canonicalOpportunityData(updatedData, {
+          source: 'user',
+          sourceRef: 'api:user_input',
+          assertedFields: opportunityInputFields(body),
+        })),
+        nowIso(),
+        id,
+        projectId,
+      );
+      if (Number(updated.changes) !== 1) throw new NotFoundException('Project resource not found.');
+      this.record(project, principal, 'topic-opportunity.update', 'topic_opportunity', id, { projectId });
+      return this.getOpportunity(projectId, id);
+    });
   }
 
   removeOpportunity(projectId: string, id: string, principal: SessionPrincipal): void {
-    const project = this.resources.projectRow(projectId);
-    this.softDelete('topic_opportunities', projectId, id);
-    this.record(project, principal, 'topic-opportunity.delete', 'topic_opportunity', id, { projectId });
+    this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      this.softDelete('topic_opportunities', projectId, id);
+      this.record(project, principal, 'topic-opportunity.delete', 'topic_opportunity', id, { projectId });
+    });
   }
 
   approveOpportunity(projectId: string, id: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
@@ -611,6 +691,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   }
 
   selectOpportunity(projectId: string, id: string, principal: SessionPrincipal): Record<string, unknown> {
+    return this.database.transaction(() => {
     const project = this.resources.projectRow(projectId);
     const opportunity = this.row('topic_opportunities', projectId, id);
     const normalized = normalizeOpportunity(opportunity);
@@ -688,8 +769,9 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     // 抛出 BadRequestException 终止——拒绝早于持久化，绝不写入 status='approved'，错误信息指明所命中门禁。
     // 这些门禁只读取结构字段，从不读取任何性能度量；故含未知度量（null / undefined）的选题同样必须
     // 逐一通过全部门禁，不因未知度量获得任何豁免。仅在全部结构门禁通过后，才执行此唯一的选题审批写入。
-    this.database.prepare(
-      `UPDATE topic_opportunities SET status='approved', data_json=?, approved_by=?, approved_at=?, updated_at=? WHERE id=?`,
+    const selected = this.database.prepare(
+      `UPDATE topic_opportunities SET status='approved', data_json=?, approved_by=?, approved_at=?, updated_at=?
+       WHERE id=? AND project_id=? AND deleted_at IS NULL`,
     ).run(
       JSON.stringify(canonicalOpportunityData({
         ...data,
@@ -702,7 +784,9 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       now,
       now,
       id,
+      projectId,
     );
+    if (Number(selected.changes) !== 1) throw new NotFoundException('Project resource not found.');
     this.record(project, principal, 'topic-opportunity.select', 'topic_opportunity', id, {
       projectId,
       referencedApprovedGapIds: gapIds,
@@ -715,6 +799,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       informationGaps: gapIds.map((gapId) => this.getGap(projectId, gapId)),
       expressionStrategy: strategyId ? this.getStrategy(projectId, strategyId) : undefined,
     };
+    });
   }
 
   listCoverage(projectId: string): Record<string, unknown>[] {
@@ -723,52 +808,53 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   }
 
   createCoverage(projectId: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
-    const project = this.resources.projectRow(projectId);
-    this.assertProjectReference('generation_jobs', body.generationJobId, projectId);
-    this.assertProjectReference('content_packages', body.contentPackageId, projectId);
-    this.assertProjectReference('topic_opportunities', body.opportunityId, projectId);
     const id = randomUUID();
     const now = nowIso();
-    this.database.prepare(
-      `INSERT INTO coverage_records
-       (id, project_id, generation_job_id, content_package_id, opportunity_id, signature_json,
-        created_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      id,
-      projectId,
-      stringOrNull(body.generationJobId),
-      stringOrNull(body.contentPackageId),
-      stringOrNull(body.opportunityId),
-      JSON.stringify(isRecord(body.signature) ? body.signature : body),
-      principal.userId,
-      now,
-      now,
-    );
-    this.record(project, principal, 'coverage.create', 'coverage_record', id, { projectId });
-    return this.mapCoverage(this.row('coverage_records', projectId, id));
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      this.assertProjectReference('generation_jobs', body.generationJobId, projectId);
+      this.assertProjectReference('content_packages', body.contentPackageId, projectId);
+      this.assertProjectReference('topic_opportunities', body.opportunityId, projectId);
+      this.database.prepare(
+        `INSERT INTO coverage_records
+         (id, project_id, generation_job_id, content_package_id, opportunity_id, signature_json,
+          created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        id, projectId, stringOrNull(body.generationJobId), stringOrNull(body.contentPackageId),
+        stringOrNull(body.opportunityId), JSON.stringify(isRecord(body.signature) ? body.signature : body),
+        principal.userId, now, now,
+      );
+      this.record(project, principal, 'coverage.create', 'coverage_record', id, { projectId });
+      return this.mapCoverage(this.row('coverage_records', projectId, id));
+    });
   }
 
   updateCoverage(projectId: string, id: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
-    const project = this.resources.projectRow(projectId);
-    const current = this.row('coverage_records', projectId, id);
-    if (body.opportunityId !== undefined) this.assertProjectReference('topic_opportunities', body.opportunityId, projectId);
-    this.database.prepare(
-      `UPDATE coverage_records SET opportunity_id=?, signature_json=?, updated_at=? WHERE id=?`,
-    ).run(
-      body.opportunityId === undefined ? stringOrNull(current.opportunity_id) : stringOrNull(body.opportunityId),
-      body.signature === undefined ? String(current.signature_json) : JSON.stringify(requireObject(body.signature)),
-      nowIso(),
-      id,
-    );
-    this.record(project, principal, 'coverage.update', 'coverage_record', id, { projectId });
-    return this.mapCoverage(this.row('coverage_records', projectId, id));
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      const current = this.row('coverage_records', projectId, id);
+      if (body.opportunityId !== undefined) this.assertProjectReference('topic_opportunities', body.opportunityId, projectId);
+      const updated = this.database.prepare(
+        `UPDATE coverage_records SET opportunity_id=?, signature_json=?, updated_at=?
+         WHERE id=? AND project_id=? AND deleted_at IS NULL`,
+      ).run(
+        body.opportunityId === undefined ? stringOrNull(current.opportunity_id) : stringOrNull(body.opportunityId),
+        body.signature === undefined ? String(current.signature_json) : JSON.stringify(requireObject(body.signature)),
+        nowIso(), id, projectId,
+      );
+      if (Number(updated.changes) !== 1) throw new NotFoundException('Project resource not found.');
+      this.record(project, principal, 'coverage.update', 'coverage_record', id, { projectId });
+      return this.mapCoverage(this.row('coverage_records', projectId, id));
+    });
   }
 
   removeCoverage(projectId: string, id: string, principal: SessionPrincipal): void {
-    const project = this.resources.projectRow(projectId);
-    this.softDelete('coverage_records', projectId, id);
-    this.record(project, principal, 'coverage.delete', 'coverage_record', id, { projectId });
+    this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      this.softDelete('coverage_records', projectId, id);
+      this.record(project, principal, 'coverage.delete', 'coverage_record', id, { projectId });
+    });
   }
 
   async uploadImage(input: {
@@ -808,12 +894,14 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     ).get(input.projectId, sha256) as unknown as ImageRow | undefined;
     if (existing) {
       if (existing.deleted_at) {
-        this.database.prepare('UPDATE image_assets SET deleted_at=NULL, updated_at=? WHERE id=?').run(nowIso(), existing.id);
-        this.record(project, input.principal, 'image-asset.restore', 'image_asset', existing.id, {
-          projectId: input.projectId,
-          sha256,
-          assetKind: 'source_material',
-          isFinalAsset: false,
+        this.database.transaction(() => {
+          this.database.prepare('UPDATE image_assets SET deleted_at=NULL, updated_at=? WHERE id=?').run(nowIso(), existing.id);
+          this.record(project, input.principal, 'image-asset.restore', 'image_asset', existing.id, {
+            projectId: input.projectId,
+            sha256,
+            assetKind: 'source_material',
+            isFinalAsset: false,
+          });
         });
       }
       return { ...this.getImage(input.projectId, existing.id), deduplicated: true };
@@ -825,125 +913,216 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     await mkdir(projectDir, { recursive: true });
     const target = join(projectDir, `${id}${extension}`);
     const temporary = `${target}.tmp`;
-    await writeFile(temporary, normalized, { flag: 'wx' });
-    await rename(temporary, target);
-    const now = nowIso();
-    this.database.prepare(
-      `INSERT INTO image_assets
-       (id, project_id, filename, storage_path, media_type, bytes, sha256, width, height,
-        created_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      id,
-      input.projectId,
-      filename,
-      relative(this.database.options.dataDir, target).replaceAll('\\', '/'),
-      metadata.format === 'jpeg' ? 'image/jpeg' : `image/${metadata.format}`,
-      normalized.byteLength,
-      sha256,
-      normalizedMetadata.width,
-      normalizedMetadata.height,
-      input.principal.userId,
-      now,
-      now,
-    );
-    this.record(project, input.principal, 'image-asset.create', 'image_asset', id, {
-      projectId: input.projectId,
-      sha256,
-      width: normalizedMetadata.width,
-      height: normalizedMetadata.height,
-      assetKind: 'source_material',
-      isFinalAsset: false,
-    });
+    try {
+      await writeFile(temporary, normalized, { flag: 'wx' });
+      await rename(temporary, target);
+      const now = nowIso();
+      this.database.transaction(() => {
+        this.database.prepare(
+          `INSERT INTO image_assets
+           (id, project_id, filename, storage_path, media_type, bytes, sha256, width, height,
+            created_by, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          id,
+          input.projectId,
+          filename,
+          relative(this.database.options.dataDir, target).replaceAll('\\', '/'),
+          metadata.format === 'jpeg' ? 'image/jpeg' : `image/${metadata.format}`,
+          normalized.byteLength,
+          sha256,
+          normalizedMetadata.width,
+          normalizedMetadata.height,
+          input.principal.userId,
+          now,
+          now,
+        );
+        this.record(project, input.principal, 'image-asset.create', 'image_asset', id, {
+          projectId: input.projectId,
+          sha256,
+          width: normalizedMetadata.width,
+          height: normalizedMetadata.height,
+          assetKind: 'source_material',
+          isFinalAsset: false,
+        });
+      });
+    } catch (error) {
+      await Promise.all([
+        unlink(temporary).catch(() => undefined),
+        unlink(target).catch(() => undefined),
+      ]);
+      throw error;
+    }
     return this.getImage(input.projectId, id);
   }
 
-  listImages(projectId: string): Record<string, unknown>[] {
+  listImages(projectId: string, pagination: Pagination): {
+    items: Record<string, unknown>[];
+    total: number;
+    limit: number;
+    offset: number;
+  } {
     this.resources.projectRow(projectId);
-    return (this.database.prepare(
-      `SELECT a.*,
-        (SELECT id FROM image_analysis_versions v WHERE v.image_asset_id=a.id AND v.deleted_at IS NULL ORDER BY v.version DESC LIMIT 1) AS latest_analysis_id,
-        (SELECT status FROM image_analysis_versions v WHERE v.image_asset_id=a.id AND v.deleted_at IS NULL ORDER BY v.version DESC LIMIT 1) AS analysis_status
-       FROM image_assets a WHERE a.project_id=? AND a.deleted_at IS NULL ORDER BY a.created_at DESC`,
-    ).all(projectId) as unknown as Record<string, unknown>[]).map((row) => this.mapImage(row));
+    const total = Number((this.database.prepare(
+      'SELECT COUNT(*) AS value FROM image_assets WHERE project_id=? AND deleted_at IS NULL',
+    ).get(projectId) as { value: number }).value);
+    const rows = this.database.prepare(
+        `SELECT a.*,
+          v.id AS latest_analysis_id,
+          v.version AS latest_analysis_version,
+          v.status AS analysis_status,
+          v.source_fingerprint AS latest_source_fingerprint,
+          v.observation_json AS latest_observation_json,
+          v.created_by AS latest_analysis_created_by,
+          v.approved_by AS latest_analysis_approved_by,
+          v.created_at AS latest_analysis_created_at,
+          v.updated_at AS latest_analysis_updated_at,
+          v.approved_at AS latest_analysis_approved_at
+         FROM image_assets a
+         LEFT JOIN image_analysis_versions v ON v.id=(
+           SELECT selected.id FROM image_analysis_versions selected
+           WHERE selected.image_asset_id=a.id AND selected.deleted_at IS NULL
+           ORDER BY selected.version DESC LIMIT 1
+         )
+         WHERE a.project_id=? AND a.deleted_at IS NULL
+         ORDER BY a.created_at DESC, a.id DESC LIMIT ? OFFSET ?`,
+    ).all(projectId, pagination.limit, pagination.offset) as unknown as Record<string, unknown>[];
+    const items = rows.map((row) => {
+      const latestAnalysis = row.latest_analysis_id
+        ? this.mapImageAnalysisForAsset(row as unknown as ImageRow, {
+              id: row.latest_analysis_id,
+              image_asset_id: row.id,
+              project_id: row.project_id,
+              version: row.latest_analysis_version,
+              status: row.analysis_status,
+              source_fingerprint: row.latest_source_fingerprint,
+              observation_json: row.latest_observation_json,
+              created_by: row.latest_analysis_created_by,
+              approved_by: row.latest_analysis_approved_by,
+              created_at: row.latest_analysis_created_at,
+              updated_at: row.latest_analysis_updated_at,
+              approved_at: row.latest_analysis_approved_at,
+          })
+        : undefined;
+      return {
+        ...this.mapImage(row),
+        ...(latestAnalysis ? { latestAnalysis } : {}),
+      };
+    });
+    return { items, total, ...pagination };
   }
 
   getImage(projectId: string, id: string): Record<string, unknown> {
     const row = this.imageRow(projectId, id);
-    const analyses = this.listImageAnalyses(projectId, id);
-    const latestAnalysis = analyses[0];
+    const latestRow = this.database.prepare(
+      `SELECT * FROM image_analysis_versions
+       WHERE project_id=? AND image_asset_id=? AND deleted_at IS NULL
+       ORDER BY version DESC LIMIT 1`,
+    ).get(projectId, id) as Record<string, unknown> | undefined;
+    const latestAnalysis = latestRow ? this.mapImageAnalysisForAsset(row, latestRow) : undefined;
     return {
       ...this.mapImage(row as unknown as Record<string, unknown>),
       latestAnalysis,
       latestAnalysisId: latestAnalysis?.id,
       analysisStatus: latestAnalysis?.approvalStatus ?? latestAnalysis?.status ?? 'not_analyzed',
-      analyses,
     };
   }
 
   async imageContent(projectId: string, id: string): Promise<{ buffer: Buffer; mediaType: string; filename: string }> {
     const row = this.imageRow(projectId, id);
     return {
-      buffer: await readFile(this.absoluteStoragePath(row.storage_path)),
+      buffer: await readStoredFile({
+        dataDir: this.database.options.dataDir,
+        projectDir: join(this.database.imageDir, projectId),
+        storagePath: row.storage_path,
+      }, MAX_IMAGE_BYTES),
       mediaType: row.media_type,
       filename: row.filename,
     };
   }
 
   removeImage(projectId: string, id: string, principal: SessionPrincipal): void {
-    const project = this.resources.projectRow(projectId);
-    this.imageRow(projectId, id);
-    this.database.prepare('UPDATE image_assets SET deleted_at=?, updated_at=? WHERE id=?').run(nowIso(), nowIso(), id);
-    this.record(project, principal, 'image-asset.delete', 'image_asset', id, { projectId });
+    this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      this.imageRow(projectId, id);
+      const removed = this.database.prepare(
+        `UPDATE image_assets SET deleted_at=?, updated_at=?
+         WHERE id=? AND project_id=? AND deleted_at IS NULL`,
+      ).run(nowIso(), nowIso(), id, projectId);
+      if (Number(removed.changes) !== 1) throw new NotFoundException('Image asset not found.');
+      this.record(project, principal, 'image-asset.delete', 'image_asset', id, { projectId });
+    });
   }
 
-  listImageAnalyses(projectId: string, assetId: string): Record<string, unknown>[] {
-    this.imageRow(projectId, assetId);
-    return (this.database.prepare(
+  listImageAnalyses(projectId: string, assetId: string, pagination: Pagination): {
+    items: Record<string, unknown>[];
+    total: number;
+    limit: number;
+    offset: number;
+  } {
+    const asset = this.imageRow(projectId, assetId);
+    const total = Number((this.database.prepare(
+      `SELECT COUNT(*) AS value FROM image_analysis_versions
+       WHERE project_id=? AND image_asset_id=? AND deleted_at IS NULL`,
+    ).get(projectId, assetId) as { value: number }).value);
+    const items = (this.database.prepare(
       `SELECT * FROM image_analysis_versions
-       WHERE project_id=? AND image_asset_id=? AND deleted_at IS NULL ORDER BY version DESC`,
-    ).all(projectId, assetId) as unknown as Record<string, unknown>[]).map((row) => this.mapImageAnalysis(row));
+       WHERE project_id=? AND image_asset_id=? AND deleted_at IS NULL
+       ORDER BY version DESC LIMIT ? OFFSET ?`,
+    ).all(projectId, assetId, pagination.limit, pagination.offset) as unknown as Record<string, unknown>[])
+      .map((row) => this.mapImageAnalysisForAsset(asset, row));
+    return { items, total, ...pagination };
   }
 
   approveImageAnalysis(projectId: string, assetId: string, analysisId: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
-    this.imageRow(projectId, assetId);
-    const row = this.row('image_analysis_versions', projectId, analysisId);
-    if (String(row.image_asset_id) !== assetId) throw new BadRequestException('The analysis does not belong to this image asset.');
-    const requested = body.status ?? (body.approved === false ? 'rejected' : 'approved');
-    if (requested === 'approved') {
-      assertResourceMetricsReady('image_analysis_versions', row);
-      this.database.prepare(
-        `UPDATE image_analysis_versions SET status='stale', updated_at=?
-         WHERE image_asset_id=? AND id<>? AND status='approved' AND deleted_at IS NULL`,
-      ).run(nowIso(), assetId, analysisId);
-    }
-    const result = this.approveResource('image_analysis_versions', projectId, analysisId, body, principal, this.mapImageAnalysis.bind(this), 'image-analysis');
-    this.markProjectStale(projectId);
-    return result;
+    return this.database.transaction(() => {
+      this.resources.projectRow(projectId);
+      this.imageRow(projectId, assetId);
+      const row = this.row('image_analysis_versions', projectId, analysisId);
+      if (String(row.image_asset_id) !== assetId) throw new BadRequestException('The analysis does not belong to this image asset.');
+      const requested = body.status ?? (body.approved === false ? 'rejected' : 'approved');
+      if (requested === 'approved') {
+        assertResourceMetricsReady('image_analysis_versions', row);
+        this.database.prepare(
+          `UPDATE image_analysis_versions SET status='stale', updated_at=?
+           WHERE image_asset_id=? AND id<>? AND status='approved' AND deleted_at IS NULL`,
+        ).run(nowIso(), assetId, analysisId);
+      }
+      const result = this.approveResource(
+        'image_analysis_versions', projectId, analysisId, body, principal,
+        this.mapImageAnalysis.bind(this), 'image-analysis',
+      );
+      this.markProjectStale(projectId);
+      return result;
+    });
   }
 
   updateImageAnalysis(projectId: string, assetId: string, analysisId: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
-    const project = this.resources.projectRow(projectId);
-    this.imageRow(projectId, assetId);
-    const row = this.row('image_analysis_versions', projectId, analysisId);
-    if (String(row.image_asset_id) !== assetId) throw new BadRequestException('The analysis does not belong to this image asset.');
-    const current = parseJson<Record<string, unknown>>(row.observation_json, {});
-    const currentQuality = isRecord(current.quality) ? current.quality : {};
-    const incomingQuality = isRecord(body.quality) ? body.quality : {};
-    const nextQuality = {
-      ...currentQuality,
-      ...('clarity' in incomingQuality ? { clarity: optionalRatio(incomingQuality.clarity) } : {}),
-      ...('relevance' in incomingQuality ? { relevance: optionalRatio(incomingQuality.relevance) } : {}),
-      ...('textLegibility' in incomingQuality ? { textLegibility: optionalRatio(incomingQuality.textLegibility) } : {}),
-    };
-    const nextObservation = { ...current, quality: nextQuality };
-    this.database.prepare(
-      `UPDATE image_analysis_versions SET observation_json=?, status='draft',
-       approved_by=NULL, approved_at=NULL, updated_at=? WHERE id=?`,
-    ).run(JSON.stringify(nextObservation), nowIso(), analysisId);
-    this.record(project, principal, 'image-analysis.update', 'image_analysis_version', analysisId, { projectId, assetId });
-    this.markProjectStale(projectId);
-    return this.mapImageAnalysis(this.row('image_analysis_versions', projectId, analysisId));
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      this.imageRow(projectId, assetId);
+      const row = this.row('image_analysis_versions', projectId, analysisId);
+      if (String(row.image_asset_id) !== assetId) throw new BadRequestException('The analysis does not belong to this image asset.');
+      const current = parseJson<Record<string, unknown>>(row.observation_json, {});
+      const currentQuality = isRecord(current.quality) ? current.quality : {};
+      const incomingQuality = isRecord(body.quality) ? body.quality : {};
+      const nextQuality = {
+        ...currentQuality,
+        ...('clarity' in incomingQuality ? { clarity: optionalRatio(incomingQuality.clarity) } : {}),
+        ...('relevance' in incomingQuality ? { relevance: optionalRatio(incomingQuality.relevance) } : {}),
+        ...('textLegibility' in incomingQuality ? { textLegibility: optionalRatio(incomingQuality.textLegibility) } : {}),
+      };
+      const nextObservation = { ...current, quality: nextQuality };
+      const updated = this.database.prepare(
+        `UPDATE image_analysis_versions SET observation_json=?, status='draft',
+         approved_by=NULL, approved_at=NULL, updated_at=?
+         WHERE id=? AND project_id=? AND image_asset_id=? AND deleted_at IS NULL`,
+      ).run(JSON.stringify(nextObservation), nowIso(), analysisId, projectId, assetId);
+      if (Number(updated.changes) !== 1) throw new NotFoundException('Project resource not found.');
+      this.record(project, principal, 'image-analysis.update', 'image_analysis_version', analysisId, { projectId, assetId });
+      this.markProjectStale(projectId);
+      return this.mapImageAnalysis(this.row('image_analysis_versions', projectId, analysisId));
+    });
   }
 
   async analyzeProject(projectId: string, principal: SessionPrincipal, force = false): Promise<Record<string, unknown>> {
@@ -1010,7 +1189,9 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       // 不改变落库与审批。各阶段产物（intelligence / blueprintModules 七键 / gap / strategy / opportunity）
       // 仍以 status='draft' 独立落库，各自经 approve* 独立审批（无隐式级联）；下游依赖的输出 schema 不变；
       // 各阶段的 retryAnalysis 重试与 analyzeProject 级 cachedTask 缓存均保持不变。
-      this.database.transaction(() => {
+      return this.database.transaction(() => {
+        const currentProject = this.resources.projectRow(projectId);
+        this.assertOwnedTask(task.id, projectId, 'project', null);
         const version = this.nextVersion('project_intelligence', projectId);
         this.database.prepare(
           `INSERT INTO project_intelligence
@@ -1041,20 +1222,19 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
         for (const strategy of strategies.slice(0, 100)) this.insertAnalyzedStrategy(projectId, task.id, strategy, principal.userId, now);
         for (const opportunity of opportunities.slice(0, 100)) this.insertAnalyzedOpportunity(projectId, task.id, opportunity, gapIdMap, principal.userId, now);
         this.completeTask(task.id, resultId, now);
+        this.record(currentProject, principal, 'intelligence.analyze', 'analysis_task', task.id, {
+          projectId,
+          cached: false,
+          analysisStages: 3,
+          gapCount: gaps.length,
+          strategyCount: strategies.length,
+          opportunityCount: opportunities.length,
+        });
+        return this.projectAnalysisResult(this.taskRow(task.id), false);
       });
-      this.record(project, principal, 'intelligence.analyze', 'analysis_task', task.id, {
-        projectId,
-        cached: false,
-        analysisStages: 3,
-        gapCount: gaps.length,
-        strategyCount: strategies.length,
-        opportunityCount: opportunities.length,
-      });
-      return this.projectAnalysisResult(this.taskRow(task.id), false);
     } catch (error) {
       // 任务表里记原始技术信息(排查用),抛给用户的是翻译过的、能行动的那句
-      this.failTask(task.id, error);
-      throw analysisFailureException(error);
+      this.throwFailedTask(task.id, error);
     }
   }
 
@@ -1086,7 +1266,9 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       );
       const opportunities = recordArray(opportunityPayload.topicOpportunities);
       const now = nowIso();
-      this.database.transaction(() => {
+      return this.database.transaction(() => {
+        const currentProject = this.resources.projectRow(projectId);
+        this.assertOwnedTask(task.id, projectId, 'project', null);
         this.database.prepare(
           `INSERT INTO opportunity_batches
              (id, project_id, analysis_task_id, trigger, user_guidance, temperature, opportunity_count, created_by, created_at)
@@ -1095,27 +1277,24 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
         for (const opportunity of opportunities.slice(0, 100)) {
           this.insertAnalyzedOpportunity(projectId, task.id, opportunity, gapIdMap, principal.userId, now, batchId);
         }
-        this.database.prepare(
-          `UPDATE analysis_tasks SET status='completed', error=NULL, completed_at=?, updated_at=? WHERE id=?`,
-        ).run(now, now, task.id);
+        this.completeTask(task.id, null, now);
+        this.record(currentProject, principal, 'topic-opportunity.refresh', 'analysis_task', task.id, {
+          projectId,
+          batchId,
+          opportunityCount: opportunities.length,
+          gapCatalogSize: gaps.length,
+          hasUserGuidance: Boolean(userGuidance),
+          existingTitleCount: existingTitles.length,
+        });
+        return {
+          task: this.mapTask(this.taskRow(task.id)),
+          batchId,
+          topicOpportunities: this.listOpportunities(projectId),
+        };
       });
-      this.record(project, principal, 'topic-opportunity.refresh', 'analysis_task', task.id, {
-        projectId,
-        batchId,
-        opportunityCount: opportunities.length,
-        gapCatalogSize: gaps.length,
-        hasUserGuidance: Boolean(userGuidance),
-        existingTitleCount: existingTitles.length,
-      });
-      return {
-        task: this.mapTask(this.taskRow(task.id)),
-        batchId,
-        topicOpportunities: this.listOpportunities(projectId),
-      };
     } catch (error) {
       // 同 analyzeProject:任务表记原始技术信息,抛给用户的是能行动的那句
-      this.failTask(task.id, error);
-      throw analysisFailureException(error);
+      this.throwFailedTask(task.id, error);
     }
   }
 
@@ -1129,7 +1308,11 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     }
     const task = this.createTask(projectId, 'image', assetId, fingerprint, principal);
     try {
-      const buffer = await readFile(this.absoluteStoragePath(asset.storage_path));
+      const buffer = await readStoredFile({
+        dataDir: this.database.options.dataDir,
+        projectDir: join(this.database.imageDir, projectId),
+        storagePath: asset.storage_path,
+      }, MAX_IMAGE_BYTES);
       const payload = await this.analyzeWithCurrentModel(
         project,
         principal,
@@ -1139,7 +1322,10 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       );
       const id = randomUUID();
       const now = nowIso();
-      this.database.transaction(() => {
+      return this.database.transaction(() => {
+        const currentProject = this.resources.projectRow(projectId);
+        this.imageRow(projectId, assetId);
+        this.assertOwnedTask(task.id, projectId, 'image', assetId);
         const versionRow = this.database.prepare(
           'SELECT COALESCE(MAX(version), 0) AS version FROM image_analysis_versions WHERE image_asset_id=?',
         ).get(assetId) as { version: number };
@@ -1150,13 +1336,16 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
            VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?)`,
         ).run(id, assetId, projectId, Number(versionRow.version) + 1, fingerprint, JSON.stringify(payload), principal.userId, now, now);
         this.completeTask(task.id, id, now);
+        this.record(currentProject, principal, 'image-analysis.analyze', 'analysis_task', task.id, { projectId, assetId, cached: false });
+        return {
+          task: this.mapTask(this.taskRow(task.id)),
+          analysis: this.mapImageAnalysis(this.row('image_analysis_versions', projectId, id)),
+          cached: false,
+        };
       });
-      this.record(project, principal, 'image-analysis.analyze', 'analysis_task', task.id, { projectId, assetId, cached: false });
-      return { task: this.mapTask(this.taskRow(task.id)), analysis: this.mapImageAnalysis(this.row('image_analysis_versions', projectId, id)), cached: false };
     } catch (error) {
       // 同 analyzeProject:任务表记原始技术信息,抛给用户的是能行动的那句
-      this.failTask(task.id, error);
-      throw analysisFailureException(error);
+      this.throwFailedTask(task.id, error);
     }
   }
 
@@ -1184,12 +1373,15 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       const payload = await this.analyzeWithCurrentModel(project, principal, prompt, [], task.id);
       // result_id 为 null:补充不产生 project_intelligence 之类的结果行。
       // cachedTask 要求 result_id 非空,所以这些任务天然不会被当成缓存命中。
-      this.completeTask(task.id, null, nowIso());
-      this.record(project, principal, 'knowledge.enrich.model', 'analysis_task', task.id, { projectId, purpose });
-      return payload;
+      return this.database.transaction(() => {
+        const currentProject = this.resources.projectRow(projectId);
+        this.assertOwnedTask(task.id, projectId, 'project', null);
+        this.completeTask(task.id, null, nowIso());
+        this.record(currentProject, principal, 'knowledge.enrich.model', 'analysis_task', task.id, { projectId, purpose });
+        return payload;
+      });
     } catch (error) {
-      this.failTask(task.id, error);
-      throw analysisFailureException(error);
+      this.throwFailedTask(task.id, error);
     }
   }
 
@@ -1515,7 +1707,11 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
         'SELECT * FROM image_assets WHERE id=? AND project_id=?',
       ).get(assetId, projectId) as unknown as ImageRow | undefined;
       if (!asset) throw new BadRequestException(`Image asset ${assetId} is no longer available.`);
-      const buffer = await readFile(this.absoluteStoragePath(asset.storage_path));
+      const buffer = await readStoredFile({
+        dataDir: this.database.options.dataDir,
+        projectDir: join(this.database.imageDir, projectId),
+        storagePath: asset.storage_path,
+      }, MAX_IMAGE_BYTES);
       return {
         ...analysis,
         mimeType: asset.media_type,
@@ -1535,27 +1731,56 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     fallback: Record<string, unknown>;
     createdBy: string;
   }): void {
-    const exists = this.database.prepare(
-      'SELECT 1 FROM coverage_records WHERE generation_job_id=? AND content_package_id=? AND deleted_at IS NULL',
-    ).get(input.jobId, input.packageId);
-    if (exists) return;
-    const now = nowIso();
-    this.database.prepare(
-      `INSERT INTO coverage_records
-       (id, project_id, generation_job_id, content_package_id, opportunity_id, signature_json,
-        created_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      randomUUID(),
-      input.projectId,
-      input.jobId,
-      input.packageId,
-      input.opportunityId ?? null,
-      JSON.stringify(isRecord(input.signature) ? input.signature : { ...input.fallback, candidateIndex: input.candidateIndex }),
-      input.createdBy,
-      now,
-      now,
-    );
+    this.database.transaction(() => {
+      const opportunityId = input.opportunityId ?? null;
+      const eligible = this.database.prepare(
+        `SELECT 1
+           FROM generation_jobs j
+           JOIN content_packages p
+             ON p.id=?
+            AND p.job_id=j.id
+            AND p.project_id=j.project_id
+          WHERE j.id=?
+            AND j.project_id=?
+            AND (? IS NULL OR EXISTS (
+              SELECT 1
+                FROM topic_opportunities o
+               WHERE o.id=?
+                 AND o.project_id=j.project_id
+            ))`,
+      ).get(input.packageId, input.jobId, input.projectId, opportunityId, opportunityId);
+      if (!eligible) {
+        throw new BadRequestException('Generation coverage references must belong to the requested project and job.');
+      }
+
+      const exists = this.database.prepare(
+        `SELECT 1
+           FROM coverage_records
+          WHERE project_id=?
+            AND generation_job_id=?
+            AND content_package_id=?
+            AND deleted_at IS NULL`,
+      ).get(input.projectId, input.jobId, input.packageId);
+      if (exists) return;
+
+      const now = nowIso();
+      this.database.prepare(
+        `INSERT INTO coverage_records
+         (id, project_id, generation_job_id, content_package_id, opportunity_id, signature_json,
+          created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        randomUUID(),
+        input.projectId,
+        input.jobId,
+        input.packageId,
+        opportunityId,
+        JSON.stringify(isRecord(input.signature) ? input.signature : { ...input.fallback, candidateIndex: input.candidateIndex }),
+        input.createdBy,
+        now,
+        now,
+      );
+    });
   }
 
   // Mirrors generation.service.ts knowledgeKind/evidenceStatus so analysis-time
@@ -1591,10 +1816,21 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
        )
        SELECT * FROM ranked WHERE version_rank=1 ORDER BY filename`,
     ).all(project.id as string) as unknown as Record<string, unknown>[];
+    assertKnowledgeRowsBudget('项目分析', knowledgeRows);
     const knowledge: Array<Record<string, unknown>> = [];
+    let actualKnowledgeBytes = 0;
     for (const row of knowledgeRows) {
-      const path = this.absoluteStoragePath(String(row.storage_path));
-      const content = (await readFile(path, 'utf8')).slice(0, 250_000);
+      const content = await readStoredText({
+        dataDir: this.database.options.dataDir,
+        projectDir: join(this.database.knowledgeDir, String(project.id)),
+        storagePath: String(row.storage_path),
+      }, MAX_KNOWLEDGE_BYTES);
+      actualKnowledgeBytes += Buffer.byteLength(content, 'utf8');
+      assertKnowledgeContextBudget({
+        operation: '项目分析',
+        fileCount: knowledgeRows.length,
+        totalBytes: actualKnowledgeBytes,
+      });
       // Section-level evidence handles for the analysis model: the SAME indexing
       // generation.service.ts loadKnowledge uses, so evidenceIds the model cites
       // in gap answers are exactly the references a later generation will accept.
@@ -1636,18 +1872,38 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
         ...(evidenceSections ? { evidenceSections } : {}),
       });
     }
-    const imageRows = this.database.prepare(
-      `SELECT a.*, v.id AS analysis_id, v.version AS analysis_version,
-              v.source_fingerprint AS analysis_fingerprint, v.observation_json
-       FROM image_assets a
+    const imageJoin = `FROM image_assets a
        JOIN image_analysis_versions v ON v.id = (
          SELECT selected.id FROM image_analysis_versions selected
          WHERE selected.image_asset_id=a.id AND selected.status='approved' AND selected.deleted_at IS NULL
          ORDER BY selected.version DESC LIMIT 1
        )
-       WHERE a.project_id=? AND a.deleted_at IS NULL ORDER BY a.created_at`,
+       WHERE a.project_id=? AND a.deleted_at IS NULL`;
+    const imageUsage = this.database.prepare(
+      `SELECT COUNT(*) AS item_count,
+              COALESCE(SUM(LENGTH(CAST(v.observation_json AS BLOB))), 0) AS total_bytes
+       ${imageJoin}`,
+    ).get(project.id as string) as { item_count: number; total_bytes: number };
+    this.assertApprovedImageObservationBudget(
+      Number(imageUsage.item_count),
+      Number(imageUsage.total_bytes),
+    );
+    const imageRows = this.database.prepare(
+      `SELECT a.*, v.id AS analysis_id, v.version AS analysis_version,
+              v.source_fingerprint AS analysis_fingerprint, v.observation_json
+       ${imageJoin} ORDER BY a.created_at`,
     ).all(project.id as string) as unknown as Array<Record<string, unknown>>;
-    const approvedImageObservations = imageRows.map((row) => normalizeImageAnalysis({
+    const approvedImageObservations = imageRows.map((row) => {
+      const observation = parseJson<unknown>(row.observation_json, {});
+      try {
+        assertModelJsonComplexity(observation);
+      } catch {
+        throw new PayloadTooLargeException({
+          message: '项目分析使用的已批准图片观察结构过于复杂，请精简或重新分析图片后重试',
+          code: 'ANALYSIS_IMAGE_CONTEXT_LIMIT',
+        });
+      }
+      return normalizeImageAnalysis({
       id: String(row.id),
       project_id: String(row.project_id),
       filename: String(row.filename),
@@ -1661,12 +1917,13 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       created_at: String(row.created_at),
       updated_at: String(row.updated_at),
       deleted_at: null,
-    }, {
+      }, {
       id: row.analysis_id,
       version: row.analysis_version,
       source_fingerprint: row.analysis_fingerprint,
-      observation_json: row.observation_json,
-    }));
+        observation_json: row.observation_json,
+      });
+    });
     const source = {
       project: {
         id: project.id,
@@ -1678,10 +1935,45 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       knowledge,
       approvedImageObservations,
     };
+    const sourceJson = JSON.stringify(source);
+    // Stage 1 has the largest fixed instruction block. Validate it here so a
+    // prompt-limit failure occurs before an analysis task or quota entry exists.
+    this.assertAnalysisPromptBudget(projectBlueprintAnalysisPrompt(sourceJson), '项目分析');
     return {
       fingerprint: this.fingerprint(source),
-      sourceJson: JSON.stringify(source),
+      sourceJson,
     };
+  }
+
+  private assertApprovedImageObservationBudget(itemCount: number, totalBytes: number): void {
+    const validCount = Number.isSafeInteger(itemCount) && itemCount >= 0
+      ? itemCount
+      : MAX_APPROVED_IMAGE_OBSERVATIONS + 1;
+    const validBytes = Number.isSafeInteger(totalBytes) && totalBytes >= 0
+      ? totalBytes
+      : MAX_APPROVED_IMAGE_OBSERVATION_BYTES + 1;
+    if (validCount <= MAX_APPROVED_IMAGE_OBSERVATIONS
+      && validBytes <= MAX_APPROVED_IMAGE_OBSERVATION_BYTES) return;
+    throw new PayloadTooLargeException({
+      message: '项目分析使用的已批准图片观察超过上下文上限，请减少图片或精简观察后重试',
+      code: 'ANALYSIS_IMAGE_CONTEXT_LIMIT',
+      usage: { itemCount: validCount, totalBytes: validBytes },
+      limits: {
+        maxItems: MAX_APPROVED_IMAGE_OBSERVATIONS,
+        maxBytes: MAX_APPROVED_IMAGE_OBSERVATION_BYTES,
+      },
+    });
+  }
+
+  private assertAnalysisPromptBudget(prompt: string, operation = '分析'): void {
+    const estimatedTokens = estimateTokens(prompt);
+    if (estimatedTokens <= this.options.knowledgeContextTokens) return;
+    throw new PayloadTooLargeException({
+      message: `${operation}提示内容超过模型输入上限，请缩小知识或分析范围后重试`,
+      code: 'ANALYSIS_PROMPT_LIMIT',
+      usage: { estimatedTokens },
+      limits: { maxInputTokens: this.options.knowledgeContextTokens },
+    });
   }
 
   private async analyzeWithCurrentModel(
@@ -1692,14 +1984,42 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     taskId: string,
     temperature = 0.2,
   ): Promise<Record<string, unknown>> {
-    const settings = this.settings.provider(String(project.workspace_id), principal.userId);
-    if (!settings.apiKey) throw new BadRequestException('Configure a model API key before running analysis.');
+    this.assertAnalysisPromptBudget(prompt);
     const workspaceId = String(project.workspace_id);
-    const platform = settings.mode === 'platform';
-    // 先扣后调:必须如此,否则并发能穿透配额。失败再退(见下)。
-    if (platform) this.settings.consumePlatformQuota(workspaceId);
+    const projectId = String(project.id);
+    const prepared = this.database.transaction(() => {
+      const owned = this.database.prepare(
+        `UPDATE analysis_tasks SET updated_at=?
+          WHERE id=? AND project_id=? AND status='running' AND claimed_by=? AND deleted_at IS NULL
+            AND EXISTS (
+              SELECT 1 FROM projects p
+              JOIN workspaces w ON w.id = p.workspace_id
+              WHERE p.id = analysis_tasks.project_id AND p.workspace_id = ?
+                AND p.deleted_at IS NULL AND w.deleted_at IS NULL
+            )`,
+      ).run(nowIso(), taskId, projectId, this.options.instanceId, workspaceId);
+      if (owned.changes !== 1) {
+        this.stopTaskHeartbeat(taskId);
+        throw new AnalysisClaimLostError();
+      }
+
+      const settings = this.settings.provider(workspaceId, principal.userId);
+      if (!settings.apiKey) throw new BadRequestException('Configure a model API key before running analysis.');
+      const platform = settings.mode === 'platform';
+      if (platform) {
+        // The quota increment and task-side balance are one atomic accounting entry.
+        this.settings.consumePlatformQuota(workspaceId);
+        const recorded = this.database.prepare(
+          `UPDATE analysis_tasks
+              SET quota_consumed_count=quota_consumed_count + 1, updated_at=?
+            WHERE id=? AND project_id=? AND status='running' AND claimed_by=? AND deleted_at IS NULL`,
+        ).run(nowIso(), taskId, projectId, this.options.instanceId);
+        if (recorded.changes !== 1) throw new AnalysisClaimLostError();
+      }
+      return { settings, platform };
+    });
     const result = this.analysisTail
-      .then(() => this.retryAnalysis(settings, prompt, imageDataUrls, taskId, temperature))
+      .then(() => this.retryAnalysis(prepared.settings, prompt, imageDataUrls, taskId, temperature))
       .catch((error: unknown) => {
         /*
          * 分析彻底失败要退还额度。
@@ -1709,7 +2029,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
          *
          * 只在这条「确认无产出」的路径上退;成功路径不碰。
          */
-        if (platform) this.settings.refundPlatformQuota(workspaceId);
+        if (prepared.platform) this.refundAnalysisQuota(taskId, workspaceId);
         throw error;
       });
     this.analysisTail = result.then(() => undefined, () => undefined);
@@ -1719,10 +2039,26 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   private async retryAnalysis(settings: ResolvedProviderSettings, prompt: string, images: string[], taskId: string, temperature = 0.2): Promise<Record<string, unknown>> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      this.database.prepare('UPDATE analysis_tasks SET attempt_count=?, updated_at=? WHERE id=?').run(attempt + 1, nowIso(), taskId);
+      const claimed = this.database.prepare(
+        `UPDATE analysis_tasks SET attempt_count=?, updated_at=?
+          WHERE id=? AND status='running' AND claimed_by=? AND deleted_at IS NULL
+            AND EXISTS (
+              SELECT 1 FROM projects p
+              JOIN workspaces w ON w.id = p.workspace_id
+              WHERE p.id = analysis_tasks.project_id
+                AND p.deleted_at IS NULL AND w.deleted_at IS NULL
+            )`,
+      ).run(attempt + 1, nowIso(), taskId, this.options.instanceId);
+      if (claimed.changes !== 1) {
+        this.stopTaskHeartbeat(taskId);
+        throw new AnalysisClaimLostError();
+      }
       try {
-        return await this.callAnalysisModel(settings, prompt, images, temperature);
+        const payload = await this.callAnalysisModel(settings, prompt, images, temperature);
+        this.assertAnalysisTaskLease(taskId);
+        return payload;
       } catch (error) {
+        if (error instanceof AnalysisClaimLostError) throw error;
         lastError = error;
         const status = error instanceof AnalysisGatewayError ? error.status : undefined;
         if (status !== undefined && status !== 429 && status < 500) throw error;
@@ -1730,6 +2066,37 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       }
     }
     throw lastError;
+  }
+
+  private assertAnalysisTaskLease(taskId: string): void {
+    const now = nowIso();
+    const renewed = this.database.prepare(
+      `UPDATE analysis_tasks SET heartbeat_at=?, updated_at=?
+        WHERE id=? AND status='running' AND claimed_by=? AND deleted_at IS NULL
+          AND EXISTS (
+            SELECT 1 FROM projects p
+            JOIN workspaces w ON w.id = p.workspace_id
+            WHERE p.id = analysis_tasks.project_id
+              AND p.deleted_at IS NULL AND w.deleted_at IS NULL
+          )`,
+    ).run(now, now, taskId, this.options.instanceId);
+    if (renewed.changes !== 1) {
+      this.stopTaskHeartbeat(taskId);
+      throw new AnalysisClaimLostError();
+    }
+  }
+
+  /** Refund at most one charged call. Workspace deletion may already have settled it. */
+  private refundAnalysisQuota(taskId: string, workspaceId: string): void {
+    this.database.transaction(() => {
+      const deducted = this.database.prepare(
+        `UPDATE analysis_tasks
+            SET quota_consumed_count=quota_consumed_count - 1, updated_at=?
+          WHERE id=? AND quota_consumed_count > 0
+            AND project_id IN (SELECT id FROM projects WHERE workspace_id=?)`,
+      ).run(nowIso(), taskId, workspaceId);
+      if (deducted.changes === 1) this.settings.refundPlatformQuota(workspaceId);
+    });
   }
 
   private async callAnalysisModel(settings: ResolvedProviderSettings, prompt: string, images: string[], temperature = 0.2): Promise<Record<string, unknown>> {
@@ -1757,7 +2124,13 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
         };
     let response: Response;
     try {
-      response = await fetch(`${baseUrl}${endpoint}`, {
+      const fetchImpl = settings.mode === 'byok'
+        ? createSafeModelFetch({
+            allowHttp: this.options.byokAllowHttp,
+            allowPrivateNetwork: this.options.byokAllowPrivateNetwork,
+          })
+        : globalThis.fetch;
+      response = await fetchImpl(`${baseUrl}${endpoint}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${settings.apiKey}` },
         body: asciiJson(body),
@@ -1768,9 +2141,19 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     } finally {
       clearTimeout(timeout);
     }
-    const text = await response.text();
+    let text: string;
+    try {
+      text = await readBoundedModelResponseText(response);
+    } catch {
+      throw new AnalysisGatewayError('The analysis model response exceeded the safe size limit.', response.status);
+    }
     let payload: unknown;
     try { payload = text ? JSON.parse(text) : {}; } catch { throw new AnalysisGatewayError('The analysis model returned invalid JSON.', response.status); }
+    try {
+      assertModelJsonComplexity(payload);
+    } catch {
+      throw new AnalysisGatewayError('The analysis model response exceeded structural complexity limits.', response.status);
+    }
     if (!response.ok) throw new AnalysisGatewayError(`The analysis model returned HTTP ${response.status}.`, response.status);
     const output = modelText(payload);
     const parsed = parseModelJsonObject(output);
@@ -1904,25 +2287,78 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     this.taskHeartbeats.delete(taskId);
   }
 
+  /** Revalidate the exact task lease inside the final write transaction. */
+  private assertOwnedTask(
+    id: string,
+    projectId: string,
+    kind: 'project' | 'image',
+    targetId: string | null,
+  ): void {
+    const owned = this.database.prepare(
+      `SELECT 1
+         FROM analysis_tasks t
+         JOIN projects p ON p.id=t.project_id
+         JOIN workspaces w ON w.id=p.workspace_id
+        WHERE t.id=? AND t.project_id=? AND t.kind=? AND t.target_id IS ?
+          AND t.status='running' AND t.claimed_by=? AND t.deleted_at IS NULL
+          AND p.deleted_at IS NULL AND w.deleted_at IS NULL`,
+    ).get(id, projectId, kind, targetId, this.options.instanceId);
+    if (!owned) {
+      this.stopTaskHeartbeat(id);
+      throw new AnalysisClaimLostError();
+    }
+  }
+
   // 终态清空归属与心跳:留着会让已完成的分析看起来仍有实例在跑。
   // resultId 允许 null:知识库补充任务没有结果行(见 runEnrichmentModel)。
   private completeTask(id: string, resultId: string | null, now: string): void {
     this.stopTaskHeartbeat(id);
-    this.database.prepare(
+    const completed = this.database.prepare(
       `UPDATE analysis_tasks SET status='completed', result_id=?, error=NULL, completed_at=?, updated_at=?,
-              claimed_by=NULL, heartbeat_at=NULL
-        WHERE id=?`,
-    ).run(resultId, now, now, id);
+              claimed_by=NULL, heartbeat_at=NULL, quota_consumed_count=0
+        WHERE id=? AND status='running' AND claimed_by=? AND deleted_at IS NULL`,
+    ).run(resultId, now, now, id, this.options.instanceId);
+    if (completed.changes !== 1) throw new AnalysisClaimLostError();
   }
 
   private failTask(id: string, error: unknown): void {
     this.stopTaskHeartbeat(id);
-    const message = (error instanceof Error ? error.message : String(error)).slice(0, 1_000);
-    this.database.prepare(
-      `UPDATE analysis_tasks SET status='failed', error=?, completed_at=?, updated_at=?,
-              claimed_by=NULL, heartbeat_at=NULL
-        WHERE id=?`,
-    ).run(message, nowIso(), nowIso(), id);
+    const message = analysisFailureException(error).message.slice(0, 1_000);
+    const now = nowIso();
+    this.database.transaction(() => {
+      const task = this.database.prepare(
+        `SELECT t.quota_consumed_count, p.workspace_id
+           FROM analysis_tasks t
+           JOIN projects p ON p.id=t.project_id
+          WHERE t.id=? AND t.status='running' AND t.claimed_by=? AND t.deleted_at IS NULL`,
+      ).get(id, this.options.instanceId) as { quota_consumed_count: number; workspace_id: string } | undefined;
+      if (!task) throw new AnalysisClaimLostError();
+
+      const quotaBalance = Math.max(0, Math.floor(Number(task.quota_consumed_count)));
+      const failed = this.database.prepare(
+        `UPDATE analysis_tasks SET status='failed', error=?, completed_at=?, updated_at=?,
+                claimed_by=NULL, heartbeat_at=NULL, quota_consumed_count=0
+          WHERE id=? AND status='running' AND claimed_by=? AND deleted_at IS NULL
+            AND quota_consumed_count=?`,
+      ).run(message, now, now, id, this.options.instanceId, task.quota_consumed_count);
+      if (failed.changes !== 1) throw new AnalysisClaimLostError();
+      if (quotaBalance > 0) this.settings.refundPlatformQuota(task.workspace_id, quotaBalance);
+    });
+  }
+
+  /**
+   * Settle an execution error only while this instance still owns the task. If the
+   * task changed owners, the new owner is the sole writer and this process exits
+   * without replacing its state with a stale failure.
+   */
+  private throwFailedTask(id: string, error: unknown): never {
+    if (error instanceof AnalysisClaimLostError) throw analysisFailureException(error);
+    try {
+      this.failTask(id, error);
+    } catch (settleError) {
+      throw analysisFailureException(settleError);
+    }
+    throw analysisFailureException(error);
   }
 
   private cachedTask(projectId: string, kind: 'project' | 'image', targetId: string | null, fingerprint: string): AnalysisTaskRow | undefined {
@@ -1994,22 +2430,27 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     mapper: (row: Record<string, unknown>) => Record<string, unknown>,
     action: string,
   ): Record<string, unknown> {
-    const project = this.resources.projectRow(projectId);
-    this.row(table, projectId, id);
     const requested = body.status ?? (body.approved === false ? 'rejected' : 'approved');
     if (typeof requested !== 'string' || !APPROVAL_STATUSES.has(requested) || requested === 'stale') {
       throw new BadRequestException('status must be draft, approved or rejected.');
     }
-    // 组件 B · M2（需求 2.3）：assertResourceMetricsReady 现为 no-op（度量完备性不再作硬门禁），
-    // 故信息缺口 / 图片观察即使含未知度量也不再因此被阻断审批；未知度量原样持久化。
-    // 保留此调用点以维持结构不变，真正的硬门禁不在此函数内（见 assertResourceMetricsReady 注释）。
-    if (requested === 'approved') assertResourceMetricsReady(table, this.row(table, projectId, id));
-    const now = nowIso();
-    this.database.prepare(
-      `UPDATE ${table} SET status=?, approved_by=?, approved_at=?, updated_at=? WHERE id=? AND project_id=?`,
-    ).run(requested, requested === 'approved' ? principal.userId : null, requested === 'approved' ? now : null, now, id, projectId);
-    this.record(project, principal, `${action}.approve`, table, id, { projectId, status: requested });
-    return mapper(this.row(table, projectId, id));
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      const current = this.row(table, projectId, id);
+      // 组件 B · M2（需求 2.3）：未知度量不再作硬门禁，但仍保留统一校验调用点。
+      if (requested === 'approved') assertResourceMetricsReady(table, current);
+      const now = nowIso();
+      const updated = this.database.prepare(
+        `UPDATE ${table} SET status=?, approved_by=?, approved_at=?, updated_at=?
+         WHERE id=? AND project_id=? AND deleted_at IS NULL`,
+      ).run(
+        requested, requested === 'approved' ? principal.userId : null,
+        requested === 'approved' ? now : null, now, id, projectId,
+      );
+      if (Number(updated.changes) !== 1) throw new NotFoundException('Project resource not found.');
+      this.record(project, principal, `${action}.approve`, table, id, { projectId, status: requested });
+      return mapper(this.row(table, projectId, id));
+    });
   }
 
   private nextVersion(table: string, projectId: string): number {
@@ -2286,7 +2727,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     const asset = this.database.prepare(
       'SELECT * FROM image_assets WHERE id=? AND project_id=?',
     ).get(String(row.image_asset_id), String(row.project_id)) as unknown as ImageRow | undefined;
-    const normalized = normalizeImageAnalysis(asset ?? {
+    const resolvedAsset = asset ?? {
       id: String(row.image_asset_id),
       project_id: String(row.project_id),
       filename: '',
@@ -2300,7 +2741,12 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       created_at: String(row.created_at),
       updated_at: String(row.updated_at),
       deleted_at: null,
-    }, row);
+    };
+    return this.mapImageAnalysisForAsset(resolvedAsset, row);
+  }
+
+  private mapImageAnalysisForAsset(asset: ImageRow, row: Record<string, unknown>): Record<string, unknown> {
+    const normalized = normalizeImageAnalysis(asset, row);
     return {
       ...normalized,
       id: row.id,
@@ -2309,6 +2755,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       version: Number(row.version),
       status: row.status,
       approvalStatus: row.status,
+      observationStatus: row.status === 'approved' ? 'approved' : 'unapproved',
       evidenceStatus: row.status === 'approved' ? 'approved_observation' : 'unapproved_observation',
       sourceFingerprint: row.source_fingerprint,
       observations: parseJson(row.observation_json, {}),
@@ -2360,15 +2807,6 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     if (clean !== normalized || clean.startsWith('.')) throw new BadRequestException('filename cannot contain a path or start with a dot.');
     if (!IMAGE_EXTENSIONS.has(extname(clean).toLowerCase())) throw new BadRequestException('Only .jpg, .jpeg, .png and .webp files are supported.');
     return clean;
-  }
-
-  private absoluteStoragePath(storagePath: string): string {
-    const root = resolve(this.database.options.dataDir);
-    const target = resolve(root, storagePath);
-    if (target !== root && !target.startsWith(`${root}\\`) && !target.startsWith(`${root}/`)) {
-      throw new BadRequestException('Invalid storage path.');
-    }
-    return target;
   }
 
   private record(
@@ -2975,6 +3413,10 @@ export function normalizeGap(row: Record<string, unknown>): Record<string, unkno
     framework: textFrom(data.framework, 4_000) || undefined,
     boundary: textFrom(data.boundary, 4_000) || uniqueStrings(data.boundaries)[0] || undefined,
     evidenceIds: uniqueStrings(data.evidenceIds),
+    // 认不出的取值不透传:下游是联合类型,污染它会让 agent-core 的分支判断失准
+    sourceStatus: typeof data.sourceStatus === 'string' && GAP_SOURCE_STATUSES.has(data.sourceStatus)
+      ? data.sourceStatus
+      : undefined,
     required: data.required === true,
     preferredChannels: contentChannels(data.preferredChannels),
     enabled: data.enabled !== false,
@@ -3276,6 +3718,7 @@ function parseModelJsonObject(raw: string): Record<string, unknown> | undefined 
     for (const variant of [candidate, repairChineseJsonDelimiters(candidate)]) {
       try {
         const parsed = JSON.parse(variant) as unknown;
+        assertModelJsonComplexity(parsed);
         if (isRecord(parsed)) return parsed;
       } catch {
         // Try the next variant / candidate.

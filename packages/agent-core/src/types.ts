@@ -1238,6 +1238,14 @@ export interface InformationGap {
   framework?: string;
   boundary?: string;
   evidenceIds: string[];
+  /**
+   * 答案来源。决定 bindGapEvidence 是否给出人工背书证据。
+   *
+   * - supplied_fact 资料里有出处,分析器基于 evidenceSections 判定
+   * - user_supplied 人工填写并确认过,与资料支撑同等有效
+   * - inference / hypothesis / unknown 仍属待补充
+   */
+  sourceStatus?: "supplied_fact" | "user_supplied" | "inference" | "hypothesis" | "unknown";
   required: boolean;
   preferredChannels?: ContentChannel[];
 }
