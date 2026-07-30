@@ -41,6 +41,16 @@ const EXTENSIONS = new Set(['.md', '.txt']);
 // sections are exactly the per-document canonical splits (never truncated), i.e.
 // the same section identity generation-time evidence binding uses.
 const EVIDENCE_SECTION_TOKEN_BUDGET = 100_000_000;
+/**
+ * 缺口 sourceStatus 的合法取值。
+ *
+ * preflight 直接读 data_json,不经 normalizeGap,所以白名单要在这里再过一遍——
+ * 库里实测有 'unacknowledged' 这种不在联合类型里的历史值。与
+ * intelligence.service.ts 的 GAP_SOURCE_STATUSES 保持一致。
+ */
+const GAP_SOURCE_STATUSES = new Set([
+  'supplied_fact', 'user_supplied', 'inference', 'hypothesis', 'unknown',
+]);
 /** 没有可引用文件时的空选择。不用 selectKnowledgeContext 空跑一次,省一次无意义的分节。 */
 const EMPTY_SELECTION: KnowledgeContextSelection = {
   mode: 'empty',
@@ -478,6 +488,9 @@ export class KnowledgeService {
         category: typeof data.category === 'string' ? data.category : '',
         sectionEvidenceIds,
         availableEvidenceIds,
+        sourceStatus: typeof data.sourceStatus === 'string' && GAP_SOURCE_STATUSES.has(data.sourceStatus)
+          ? data.sourceStatus
+          : undefined,
       });
     });
 
