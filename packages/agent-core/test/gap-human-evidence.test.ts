@@ -85,6 +85,13 @@ describe("人工确认的缺口答案", () => {
     expect(card?.evidenceIds ?? []).not.toContain("evidence_human_approved");
   });
 
+  it("supplied_fact 不算人工背书", async () => {
+    // supplied_fact 只能由分析器写,代表「资料里本来就有」,该由分节证据背书。
+    // 把它也认成人工背书就等于让分析器自己给自己盖章——这条钉住那道边界。
+    const card = await boundGap(gap({ answer: "编号待确认\n证件在门店", sourceStatus: "supplied_fact" }));
+    expect(card?.evidenceIds ?? []).not.toContain("evidence_human_approved");
+  });
+
   it("人工证据与资料分节证据不混同,来源可追溯", async () => {
     const card = await boundGap(gap({ answer: "资料里确认过的一句话", sourceStatus: "user_supplied" }));
     const ids = card?.evidenceIds ?? [];
