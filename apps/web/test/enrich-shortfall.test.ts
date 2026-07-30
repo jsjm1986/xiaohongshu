@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { draftShortfallNote, enrichButtonLabel, enrichSavedHint } from '../src/lib/enrich-types';
+import { draftShortfallNote, enrichButtonLabel, enrichSavedHint, enrichTargetOptions } from '../src/lib/enrich-types';
 
 /*
   入口按钮写的是真实待补总数,而单次起草有上限(后端 MAX_DRAFT_GAPS)。
@@ -87,8 +87,25 @@ test('保存提示指向缺口池的人工确认,不承诺缺口会自动关闭'
   const hint = enrichSavedHint();
   assert.match(hint, /新版本/u);
   assert.match(hint, /缺口/u);
+  // 这条是本任务的实质:必须点明下一步。少了它,旧文案(「缺口要等你补上真实
+  // 资料才会关闭」)也能满足上面三条断言——诚实但仍是死路,测试就成了装饰。
+  assert.match(hint, /我确认过/u);
   // 不能暗示保存本身就关掉了缺口
   assert.doesNotMatch(hint, /已(关闭|解决|完成)/u);
+});
+
+test('可选目标按文件名去重:快捷版传进来的列表含历史版本', () => {
+  // knowledge.list 不按 filename 去重(后端 SQL 每版一行),不去重会出现
+  // 重复选项和重复的 React key。专业版传的是已折叠的列表,两边要给出同一组选项。
+  assert.deepEqual(
+    enrichTargetOptions([{ name: 'A.md' }, { name: 'A.md' }, { name: 'B.md' }]),
+    ['A.md', 'B.md'],
+  );
+  assert.deepEqual(enrichTargetOptions([{ name: 'A.md' }, { name: 'B.md' }]), ['A.md', 'B.md']);
+});
+
+test('空文件名不进选项:选中它会让保存目标变成空串', () => {
+  assert.deepEqual(enrichTargetOptions([{ name: '  ' }, { name: 'A.md' }]), ['A.md']);
 });
 
 test('目标文件在合并前选定,不能只改保存目标', () => {

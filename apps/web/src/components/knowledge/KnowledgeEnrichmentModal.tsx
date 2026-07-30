@@ -3,7 +3,7 @@ import { Info, TriangleAlert } from 'lucide-react';
 import { Button, Field, Modal, useToast } from '../Ui';
 import { api } from '../../lib/api';
 import { canMerge, hasUnsavedEdits, toDraftItems, toMergeItems } from '../../lib/enrich-flow';
-import { draftShortfallNote, enrichSavedHint } from '../../lib/enrich-types';
+import { draftShortfallNote, enrichSavedHint, enrichTargetOptions } from '../../lib/enrich-types';
 import type { DraftItem, ModalStep } from '../../lib/enrich-types';
 import { EnrichmentDraftList } from './EnrichmentDraftList';
 import { OriginalKnowledgePreview } from './OriginalKnowledgePreview';
@@ -163,12 +163,8 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete,
 
   const loading = step === 'drafting' || step === 'merging' || step === 'saving';
 
-  /*
-   * 可选目标按文件名去重。两个入口传进来的列表语义不同:专业版传的是折叠到最新版的
-   * currentFiles,快捷版传的是 knowledge.list 原样返回的行(同名文件每个版本一行)。
-   * 不去重的话快捷版会出现重复选项和重复的 React key。
-   */
-  const fileNames = files ? [...new Set(files.map((file) => file.name))] : null;
+  // 去重规则在 enrichTargetOptions 里,连同两个入口列表语义不同的原因一起说明。
+  const fileNames = files ? enrichTargetOptions(files) : null;
 
   return (
     <Modal
