@@ -80,6 +80,54 @@ export interface KnowledgeEvidenceDocument {
   sections: KnowledgeEvidenceSection[];
 }
 
+/**
+ * 知识库完善度预检的分档。与后端 knowledge-preflight.ts 的 PreflightTier 对齐。
+ *
+ * - `evidence_backed` 答案能在上传资料里找到支撑
+ * - `approved_only` 无资料支撑,依据是人工填写并确认;生成会采用,但它不是资料里的事实
+ * - `will_be_dropped` 无资料支撑且格式破坏了自证,生成会静默丢弃
+ * - `blank` 没有答案
+ */
+export type KnowledgePreflightTier =
+  | 'evidence_backed'
+  | 'approved_only'
+  | 'will_be_dropped'
+  | 'blank';
+
+export interface KnowledgePreflightGap {
+  id: string;
+  label: string;
+  status: string;
+  required: boolean;
+  category: string;
+  tier: KnowledgePreflightTier;
+  sectionEvidenceIds: string[];
+  /** 声明了却已失效的证据引用(资料被改动或删除)。 */
+  staleDeclaredEvidenceIds: string[];
+  reasons: string[];
+}
+
+/**
+ * 项目分析状态。与后端 AnalysisState 对齐。
+ *
+ * 必须和缺口分档分开看:「一条缺口都没有」在数据上和「所有缺口都落实」长得一样
+ * (计数全为 0),但含义相反——前者是还没分析过,那时生成必然被拦。
+ */
+export type KnowledgeAnalysisState = 'missing' | 'draft' | 'approved' | 'stale';
+
+export interface KnowledgePreflight {
+  analysis: KnowledgeAnalysisState;
+  /** 分析已确认,且所有必答缺口都站得住。与生成端 engine.ts:892 同判据。 */
+  canGenerate: boolean;
+  requiredOpen: Array<{ id: string; label: string; tier: KnowledgePreflightTier }>;
+  tiers: Record<KnowledgePreflightTier, number>;
+  byCategory: Array<{ category: string; total: number; settled: number }>;
+  gaps: KnowledgePreflightGap[];
+  warnings: string[];
+  /** 口径说明:预检判的是答案能否被采用,不是内容质量评分,且结论是保守下界。 */
+  note: string;
+}
+
 export interface FormulaVersion {
   id: string;
   projectId: string;
@@ -1889,6 +1937,8 @@ export interface AppSettings {
 export interface ApiList<T> {
   items: T[];
   total: number;
+  limit?: number;
+  offset?: number;
 }
 
 export interface SystemUser {

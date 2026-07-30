@@ -1,0 +1,235 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import {
+  analysisStateFrom,
+  classifyGap,
+  normalizeForSelfProof,
+  selfProofSurvives,
+  summarize,
+  type PreflightGapInput,
+} from '../src/knowledge-preflight.js';
+
+/**
+ * 知识库完善度预检的分档逻辑。
+ *
+ * 这套判据必须和生成端 bindGapEvidence(engine.ts:549)一致:仪表盘说「已确认,可直接
+ * 引用」而生成时把答案丢掉,是这次要根治的偏差。最关键的一档是 will_be_dropped ——
+ * 答案没有资料支撑、且格式破坏了规划上下文自证,当前界面完全看不见它。
+ */
+
+function gap(overrides: Partial<PreflightGapInput> = {}): PreflightGapInput {
+  return {
+    id: 'g1',
+    label: '整装报价包含哪些项',
+    status: 'approved',
+    required: false,
+    answer: '',
+    framework: '',
+    declaredEvidenceIds: [],
+    category: 'decision',
+    sectionEvidenceIds: [],
+    // 默认「项目里没有任何可用证据」,想测引用仍然存在的用例要显式传入。
+    availableEvidenceIds: new Set<string>(),
+    ...overrides,
+  };
+}
+
+test('答案能在上传资料里找到支撑 → evidence_backed', () => {
+  const result = classifyGap(gap({
+    answer: '整装报价包含主材与人工',
+    sectionEvidenceIds: ['evidence_section_abc123'],
+  }));
+  assert.equal(result.tier, 'evidence_backed');
+  assert.deepEqual(result.sectionEvidenceIds, ['evidence_section_abc123']);
+});
+
+test('单行答案无资料支撑 → approved_only(生成会采用,但依据是人工填写)', () => {
+  const result = classifyGap(gap({ answer: '整装报价包含主材与人工' }));
+  assert.equal(result.tier, 'approved_only');
+  // 措辞必须说清依据来自人工确认,不能让用户以为这是资料里的事实
+  assert.match(result.reasons.join(''), /你填写并确认过/u);
+});
+
+test('多行答案无资料支撑 → will_be_dropped,并指出是换行', () => {
+  const result = classifyGap(gap({ answer: '整装报价包含主材\n不含家电' }));
+  assert.equal(result.tier, 'will_be_dropped');
+  assert.match(result.reasons.join(''), /换行/u);
+});
+
+test('含半角双引号无资料支撑 → will_be_dropped,并指出是双引号', () => {
+  const result = classifyGap(gap({ answer: '报价按"套内面积"计算' }));
+  assert.equal(result.tier, 'will_be_dropped');
+  assert.match(result.reasons.join(''), /双引号/u);
+});
+
+test('含制表符或反斜杠无资料支撑 → will_be_dropped', () => {
+  assert.equal(classifyGap(gap({ answer: '主材\t人工' })).tier, 'will_be_dropped');
+  assert.equal(classifyGap(gap({ answer: '见 C:\\报价单' })).tier, 'will_be_dropped');
+});
+
+test('中文引号与中文标点不破坏自证 → approved_only', () => {
+  // JSON 转义只对 " \ 和控制字符插反斜杠,中文标点不受影响。
+  // 这一条守住「不要把所有标点都当成危险字符」——过度告警会让提示失去意义。
+  assert.equal(classifyGap(gap({ answer: '报价按「套内面积」计算' })).tier, 'approved_only');
+  assert.equal(classifyGap(gap({ answer: '含主材、人工；不含家电。' })).tier, 'approved_only');
+});
+
+test('没有答案 → blank', () => {
+  assert.equal(classifyGap(gap()).tier, 'blank');
+  assert.equal(classifyGap(gap({ answer: '   ' })).tier, 'blank');
+});
+
+test('只有 framework 也算提出了答案,与生成端 (answer || framework) 一致', () => {
+  const result = classifyGap(gap({ framework: '按面积段位分档报价' }));
+  assert.equal(result.tier, 'approved_only');
+});
+
+test('引用的证据确实不在项目里 → 报失效', () => {
+  const result = classifyGap(gap({
+    answer: '整装报价包含主材与人工',
+    declaredEvidenceIds: ['evidence_section_gone1', 'evidence_section_gone2'],
+    availableEvidenceIds: new Set(['evidence_section_other']),
+  }));
+  assert.deepEqual(result.staleDeclaredEvidenceIds, ['evidence_section_gone1', 'evidence_section_gone2']);
+  assert.match(result.reasons.join(''), /已失效/u);
+});
+
+test('引用仍然存在、只是没支撑这条答案 → 不得报失效', () => {
+  /*
+   * 这是实际误报的形态。旧实现拿 sectionEvidenceIds(内容支撑这条答案的分节)当
+   * 「存在的分节」,于是任何「引用有效但 conservativeEvidenceSupport 没匹配上答案」
+   * 的缺口都被报成引用失效。线上实测:某项目 69 条引用里只有 1 条真失效,却报了 69 条,
+   * 每条缺口都挂着「资料被改动或删除」的假警报。
+   */
+  const result = classifyGap(gap({
+    answer: '手工填的答案,资料里没有原句',
+    declaredEvidenceIds: ['evidence_section_alive'],
+    sectionEvidenceIds: [],                                  // 没支撑这条答案
+    availableEvidenceIds: new Set(['evidence_section_alive']), // 但它确实还在
+  }));
+  assert.deepEqual(result.staleDeclaredEvidenceIds, [], '引用还在就不能说失效');
+  assert.doesNotMatch(result.reasons.join(''), /失效/u);
+  // 分档仍应如实反映「没有资料支撑」
+  assert.equal(result.tier, 'approved_only');
+});
+
+test('失效提示指向重新分析,不是让用户逐条重选', () => {
+  // 引用批量失效多半是存了新版本导致 evidenceId 全变,重新分析一次全部更新;
+  // 让用户对着几十条引用手工重选是错的指引。
+  const result = classifyGap(gap({
+    answer: '答案',
+    declaredEvidenceIds: ['a', 'b', 'c'],
+    availableEvidenceIds: new Set<string>(),
+  }));
+  assert.match(result.reasons.join(''), /重新分析/u);
+  assert.doesNotMatch(result.reasons.join(''), /重新选择/u);
+});
+
+test('必答缺口站不住 → canGenerate=false 并列出它', () => {
+  const rows = [
+    classifyGap(gap({ id: 'ok', answer: '有支撑', sectionEvidenceIds: ['e1'] })),
+    classifyGap(gap({ id: 'bad', label: '资质编号', required: true, answer: '多行\n答案' })),
+  ];
+  const summary = summarize(rows, 'approved');
+  assert.equal(summary.canGenerate, false);
+  assert.deepEqual(summary.requiredOpen, [{ id: 'bad', label: '资质编号', tier: 'will_be_dropped' }]);
+});
+
+test('必答缺口仅人工批准也算站得住:与生成端一致,不比它更严', () => {
+  // approved_only 在生成端会被采用(经规划上下文自证),预检不能把它判成阻断项,
+  // 否则仪表盘会说不能生成而实际能生成——反向的不一致同样有害。
+  const rows = [classifyGap(gap({ required: true, answer: '单行答案就够' }))];
+  assert.equal(summarize(rows, 'approved').canGenerate, true);
+});
+
+test('空白的必答缺口同样阻断', () => {
+  const rows = [classifyGap(gap({ required: true }))];
+  const summary = summarize(rows, 'approved');
+  assert.equal(summary.canGenerate, false);
+  assert.equal(summary.requiredOpen[0]?.tier, 'blank');
+});
+
+test('分档计数与按分类覆盖', () => {
+  const rows = [
+    classifyGap(gap({ id: '1', category: 'decision', answer: 'a', sectionEvidenceIds: ['e1'] })),
+    classifyGap(gap({ id: '2', category: 'decision', answer: '单行答案' })),
+    classifyGap(gap({ id: '3', category: 'risk', answer: '多行\n答案' })),
+    classifyGap(gap({ id: '4', category: '' })),
+  ];
+  const summary = summarize(rows);
+  assert.deepEqual(summary.tiers, {
+    evidence_backed: 1,
+    approved_only: 1,
+    will_be_dropped: 1,
+    blank: 1,
+  });
+  /*
+   * 按内容断言,不按顺序:跨字符集(中文 vs 拉丁)的 localeCompare 顺序取决于运行时
+   * ICU 数据,拿它做断言会在别的 Node 版本上无故变红。同字符集内的顺序另测。
+   */
+  const byCategory = new Map(summary.byCategory.map((item) => [item.category, item]));
+  assert.equal(summary.byCategory.length, 3);
+  assert.deepEqual(byCategory.get('decision'), { category: 'decision', total: 2, settled: 2 });
+  assert.deepEqual(byCategory.get('risk'), { category: 'risk', total: 1, settled: 0 });
+  // 空分类要归到「未分类」,不能出现空字符串键
+  assert.deepEqual(byCategory.get('未分类'), { category: '未分类', total: 1, settled: 0 });
+});
+
+test('同字符集内按分类名排序', () => {
+  const rows = ['risk', 'decision', 'audience'].map((category, index) =>
+    classifyGap(gap({ id: String(index), category })));
+  assert.deepEqual(
+    summarize(rows).byCategory.map((item) => item.category),
+    ['audience', 'decision', 'risk'],
+  );
+});
+
+test('归一化与生成端 planningEvidenceSupports 逐字一致', () => {
+  // 复刻的是 .normalize("NFKC").replace(/\s+/gu, "")。两边分叉就会让预检结论失真。
+  assert.equal(normalizeForSelfProof(' 全角Ａ  与\t半角A '), '全角A与半角A');
+});
+
+test('自证判定:太短的答案不算', () => {
+  // 生成端要求归一后长度 >= 2
+  assert.equal(selfProofSurvives('a'), false);
+  assert.equal(selfProofSurvives(''), false);
+  assert.equal(selfProofSurvives('ab'), true);
+});
+
+test('空缺口列表在未分析时不能伪报可生成', () => {
+  const summary = summarize([]);
+  assert.equal(summary.analysis, 'missing');
+  assert.equal(summary.canGenerate, false);
+  assert.deepEqual(summary.requiredOpen, []);
+  assert.deepEqual(summary.byCategory, []);
+});
+
+test('空缺口列表只有在分析已确认时才可生成', () => {
+  const summary = summarize([], 'approved');
+  assert.equal(summary.analysis, 'approved');
+  assert.equal(summary.canGenerate, true);
+});
+
+test('分析未就绪 → canGenerate 恒为 false,缺口层面再干净也不行', () => {
+  /*
+   * 实际踩到的缺陷:刚上传完资料、一条缺口都还没有时 requiredOpen 为空,旧实现据此
+   * 判 canGenerate=true,界面显示「可以生成,缺口都已落实」。而那时
+   * prepareGenerationPlan 会抛「An approved project analysis is required」。
+   */
+  const clean = [classifyGap(gap({ required: true, answer: '有支撑', sectionEvidenceIds: ['e1'] }))];
+  for (const state of ['missing', 'draft', 'stale'] as const) {
+    assert.equal(summarize(clean, state).canGenerate, false, `${state}:缺口干净也不该判可生成`);
+  }
+  assert.equal(summarize(clean, 'approved').canGenerate, true, 'approved 且缺口干净才算就绪');
+});
+
+test('analysisStateFrom:认不出的状态一律当没分析', () => {
+  assert.equal(analysisStateFrom('approved'), 'approved');
+  assert.equal(analysisStateFrom('draft'), 'draft');
+  assert.equal(analysisStateFrom('stale'), 'stale');
+  // rejected 是建表允许的取值,但不满足生成条件,归到 missing 让用户重跑
+  assert.equal(analysisStateFrom('rejected'), 'missing');
+  assert.equal(analysisStateFrom(undefined), 'missing');
+  assert.equal(analysisStateFrom(null), 'missing');
+  assert.equal(analysisStateFrom('未来新增的状态'), 'missing');
+});

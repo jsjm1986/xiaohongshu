@@ -14,6 +14,9 @@ import type {
   ImageAsset,
   InformationGap,
   KnowledgeEvidenceDocument,
+  KnowledgePreflight,
+  KnowledgePreflightGap,
+  KnowledgePreflightTier,
   KnowledgeEvidenceSection,
   KnowledgeFile,
   OpportunityBatch,
@@ -188,8 +191,11 @@ const normalizeKnowledge = (raw: JsonRecord): KnowledgeFile => ({
   name: String(raw.name || raw.filename || "未命名文件"),
   size: Number(raw.size ?? raw.bytes ?? 0),
   kind: (() => {
+    // category controls grouping while evidenceStatus controls evidentiary
+    // strength. Prefer the latter: "未分类 + 已知事实" must remain a fact,
+    // not fall through to "用户观点" merely because category is present.
     const value = String(
-      raw.kind || raw.category || raw.evidenceStatus || "",
+      raw.kind || raw.evidenceStatus || raw.category || "",
     ).toLowerCase();
     if (/prohibit|forbidden|禁止/u.test(value)) return "禁止表达";
     if (/case|sample|案例|样本/u.test(value)) return "案例样本";
@@ -224,6 +230,68 @@ const normalizeEvidenceDocument = (raw: JsonRecord): KnowledgeEvidenceDocument =
     ? raw.sections.map((item) => normalizeEvidenceSection(recordValue(item)))
     : [],
 });
+
+const PREFLIGHT_TIERS = ["evidence_backed", "approved_only", "will_be_dropped", "blank"] as const;
+
+const preflightTier = (value: unknown): KnowledgePreflightTier =>
+  PREFLIGHT_TIERS.includes(value as KnowledgePreflightTier)
+    // 认不出来的档一律当「会被丢弃」:预检的价值在于提醒,把未知档显示成安全的
+    // 才是真的危险。后端加了新档而前端没跟上时,宁可多提醒一次。
+    ? (value as KnowledgePreflightTier)
+    : "will_be_dropped";
+
+const normalizePreflightGap = (raw: JsonRecord): KnowledgePreflightGap => ({
+  id: String(raw.id || ""),
+  label: String(raw.label || ""),
+  status: String(raw.status || ""),
+  required: raw.required === true,
+  category: String(raw.category || ""),
+  tier: preflightTier(raw.tier),
+  sectionEvidenceIds: stringList(raw.sectionEvidenceIds),
+  staleDeclaredEvidenceIds: stringList(raw.staleDeclaredEvidenceIds),
+  reasons: stringList(raw.reasons),
+});
+
+const normalizePreflight = (raw: JsonRecord): KnowledgePreflight => {
+  const tiers = recordValue(raw.tiers);
+  const analysis = raw.analysis === "approved" || raw.analysis === "draft" || raw.analysis === "stale"
+    ? raw.analysis
+    : "missing";
+  return {
+    analysis,
+    // canGenerate 缺失时取 false:界面不能因为字段没回来就说「可以生成」。
+    canGenerate: raw.canGenerate === true,
+    requiredOpen: Array.isArray(raw.requiredOpen)
+      ? raw.requiredOpen.map((item) => {
+        const record = recordValue(item);
+        return {
+          id: String(record.id || ""),
+          label: String(record.label || ""),
+          tier: preflightTier(record.tier),
+        };
+      })
+      : [],
+    tiers: {
+      evidence_backed: Number(tiers.evidence_backed ?? 0),
+      approved_only: Number(tiers.approved_only ?? 0),
+      will_be_dropped: Number(tiers.will_be_dropped ?? 0),
+      blank: Number(tiers.blank ?? 0),
+    },
+    byCategory: Array.isArray(raw.byCategory)
+      ? raw.byCategory.map((item) => {
+        const record = recordValue(item);
+        return {
+          category: String(record.category || ""),
+          total: Number(record.total ?? 0),
+          settled: Number(record.settled ?? 0),
+        };
+      })
+      : [],
+    gaps: Array.isArray(raw.gaps) ? raw.gaps.map((item) => normalizePreflightGap(recordValue(item))) : [],
+    warnings: stringList(raw.warnings),
+    note: String(raw.note || ""),
+  };
+};
 
 const normalizePreset = (raw: JsonRecord): ContentPreset => ({
   id: String(raw.id || ""),
@@ -596,7 +664,9 @@ const normalizeImageAnalysis = (raw: JsonRecord): ImageAsset["analysis"] => {
 
 const normalizeImage = (raw: JsonRecord): ImageAsset => {
   const analyses = Array.isArray(raw.analyses) ? raw.analyses.map(recordValue) : [];
-  const latest = analyses[0];
+  const latest = raw.latestAnalysis && typeof raw.latestAnalysis === "object" && !Array.isArray(raw.latestAnalysis)
+    ? recordValue(raw.latestAnalysis)
+    : analyses[0];
   const analysisStatus = String(raw.analysisStatus || latest?.approvalStatus || latest?.status || "not_analyzed");
   const latestApprovalStatus = String(latest?.approvalStatus || latest?.status || analysisStatus);
   return {
@@ -900,6 +970,17 @@ export const api = {
         warnings: stringList(raw.warnings),
       };
     },
+    /**
+     * 完善度预检:每条缺口的答案到生成那一步站不站得住。
+     *
+     * 与生成端同判据,纯服务端计算不调模型。分档含义见 knowledge-preflight.ts:
+     * evidence_backed(有资料支撑)/ approved_only(仅人工确认)/
+     * will_be_dropped(生成会丢弃)/ blank(无答案)。
+     */
+    preflight: async (projectId: string) => {
+      const raw = await request<JsonRecord>(`/api/projects/${encodeURIComponent(projectId)}/knowledge/preflight`);
+      return normalizePreflight(raw);
+    },
   },
   intelligence: {
     get: async (projectId: string) => {
@@ -1060,10 +1141,18 @@ export const api = {
       }),
   },
   imageAssets: {
-    list: async (projectId: string) => {
-      const rows = await request<JsonRecord[]>(`/api/projects/${encodeURIComponent(projectId)}/image-assets`);
-      const detailed = await Promise.all(rows.map((row) => request<JsonRecord>(`/api/projects/${encodeURIComponent(projectId)}/image-assets/${encodeURIComponent(String(row.id || row.assetId || ""))}`).catch(() => row)));
-      return normalizeList(detailed.map(normalizeImage));
+    list: async (projectId: string, options: { limit?: number; offset?: number } = {}) => {
+      const limit = options.limit ?? 50;
+      const offset = options.offset ?? 0;
+      const result = normalizeList(await request<JsonRecord[] | ApiList<JsonRecord>>(
+        `/api/projects/${encodeURIComponent(projectId)}/image-assets?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`,
+      ));
+      return {
+        items: result.items.map(normalizeImage),
+        total: result.total,
+        limit: result.limit ?? limit,
+        offset: result.offset ?? offset,
+      };
     },
     upload: async (projectId: string, file: File) => {
       const body = new FormData();

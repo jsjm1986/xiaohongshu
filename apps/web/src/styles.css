@@ -1564,6 +1564,7 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .asset-card p { min-height: 31px; margin: 0 0 8px; display: -webkit-box; overflow: hidden; color: var(--ink-2); font-size: 9px; line-height: 1.55; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .asset-card > div > div { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
 .asset-card button:not(.asset-card__image) { padding: 4px 7px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); color: var(--brand); font-size: 10px; }
+.asset-library-more { display: flex; justify-content: center; padding: 0 var(--panel-inset) 18px; }
 .intelligence-run { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px var(--panel-inset); border-top: 1px solid var(--line); background: var(--surface-soft); }
 .intelligence-run strong, .intelligence-run p { display: block; margin: 0; }
 .intelligence-run p { color: var(--muted); font-size: 11px; }
@@ -3163,6 +3164,8 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .qc-asset figcaption { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 5px 8px; }
 .qc-asset__status { color: var(--v2-muted); font-size: var(--v2-fs-micro); }
 .qc-asset__action { padding: 2px 7px; border: 1px solid var(--v2-line); border-radius: 6px; background: var(--v2-canvas); color: var(--v2-brand); font-size: var(--v2-fs-micro); cursor: pointer; }
+.qc-picker__more { display: flex; justify-content: center; }
+.qc-picker__more .button { padding: 5px 10px; font-size: var(--v2-fs-sm); }
 
 /* ===== 极简频道 · 按意见修改 ===== */
 .qc-revise { border: 1px solid var(--v2-line); border-radius: var(--v2-radius-sm); padding: 10px 12px; }
@@ -4293,3 +4296,54 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 }
 /* 不确定标记被合并吃掉的提示。用 amber 而非 red:这是「值得重看」而不是「出错了」 */
 .enrich-warning { display: flex; align-items: flex-start; gap: 9px; margin: 0 0 13px; padding: 11px 13px; border-radius: 8px; background: var(--amber-soft); color: var(--amber); font-size: var(--font-sm); line-height: 1.6; }
+.shell-error { display: flex; align-items: center; gap: 12px; margin: 0 0 18px; padding: 12px 14px; border: 1px solid #efb3ab; border-radius: 12px; background: var(--red-soft); color: var(--red); }
+.shell-error > span { display: grid; flex: 1; gap: 2px; }
+.shell-error small { color: inherit; opacity: .78; }
+@media (max-width: 640px) { .shell-error { align-items: flex-start; flex-wrap: wrap; } }
+.inline-load-error { display: flex; align-items: center; gap: 10px; margin: 12px 0; padding: 11px 13px; border: 1px solid #efb3ab; border-radius: 10px; background: var(--red-soft); color: var(--red); }
+.inline-load-error > span { display: grid; flex: 1; gap: 2px; }
+.inline-load-error small { color: inherit; opacity: .8; }
+.empty-state__actions { display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; }
+
+/* 知识库完善建议:预检分档的待处理清单。沿用 .qc-gap 的左边框语义色做法。 */
+.preflight-gap-list { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.preflight-gap {
+  padding: 10px 12px; border-radius: var(--v2-radius-sm);
+  background: var(--v2-canvas); border-left: 3px solid var(--v2-line);
+}
+.preflight-gap--will_be_dropped { border-left-color: var(--v2-error); }
+.preflight-gap--blank { border-left-color: var(--v2-warn); }
+.preflight-gap--approved_only { border-left-color: var(--v2-ai, var(--v2-line)); }
+.preflight-gap--evidence_backed { border-left-color: var(--v2-ok); }
+.preflight-gap__top { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: var(--v2-fs-sm); }
+.preflight-gap__reasons { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 3px; }
+.preflight-gap__reasons li { font-size: var(--v2-fs-micro); color: var(--v2-ink-soft); }
+.preflight-gap__reasons li::before { content: '· '; }
+
+.preflight-coverage { margin-top: 4px; font-size: var(--v2-fs-sm); }
+.preflight-coverage ul { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 10px; }
+.preflight-coverage li {
+  display: flex; gap: 6px; padding: 3px 9px; border-radius: 999px;
+  background: var(--v2-canvas); font-size: var(--v2-fs-micro); color: var(--v2-ink-soft);
+}
+/* 缺得多的那几项要看得见,不能和已齐备的长一样 */
+.preflight-coverage li.is-open { background: var(--v2-warn-soft, var(--v2-canvas)); color: var(--v2-ink); font-weight: 600; }
+
+/* 下一步引导:分析未就绪时最重要的一块,要比普通面板显眼 */
+.next-step-panel { border-left: 3px solid var(--v2-warn); }
+.next-step-panel__body {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; padding: 16px 18px;
+}
+.next-step-panel__body h2 { margin: 0 0 4px; }
+.next-step-panel__body p { margin: 0; color: var(--v2-ink-soft); font-size: var(--v2-fs-sm); }
+
+/* 详情弹窗里的历史版本 */
+.preview-versions { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--v2-line); }
+.preview-versions ul { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.preview-versions button {
+  border: 1px solid var(--v2-line); background: var(--v2-canvas); cursor: pointer;
+  padding: 5px 10px; border-radius: var(--v2-radius-sm);
+  font-size: var(--v2-fs-micro); color: var(--v2-ink-soft); text-align: left; width: 100%;
+}
+.preview-versions button:hover { color: var(--v2-ink); border-color: var(--v2-ink-soft); }

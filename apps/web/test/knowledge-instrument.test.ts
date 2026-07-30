@@ -1,0 +1,257 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import {
+  actionableGaps,
+  categoryCoverage,
+  fileStats,
+  historyVersions,
+  latestFiles,
+  preflightHeadline,
+  TIER_NOTE,
+} from '../src/lib/knowledge-instrument';
+import type { KnowledgeFile, KnowledgePreflight, KnowledgePreflightGap } from '../src/types';
+
+/**
+ * 知识库仪表盘的取数。
+ *
+ * 核心是版本折叠:`/api/knowledge` 返回同名文件的全部版本,页面此前直接按行计数,
+ * 于是一份资料被 AI 补充过一次就显示「文件总数 2 份」、字节数两版相加、
+ * 同一份资料在「已知事实」和「推理与猜想」里各占一个计数。
+ */
+
+function file(overrides: Partial<KnowledgeFile> = {}): KnowledgeFile {
+  return {
+    id: 'f1',
+    projectId: 'p1',
+    name: 'INDEX.md',
+    size: 1000,
+    version: 1,
+    kind: '已知事实',
+    category: '未分类',
+    ...overrides,
+  };
+}
+
+test('同名多版本折叠成一份,取最高版本', () => {
+  const files = [
+    file({ id: 'v1', version: 1, kind: '已知事实', size: 1000 }),
+    file({ id: 'v2', version: 2, kind: '猜想', size: 1100 }),
+  ];
+  const latest = latestFiles(files);
+  assert.equal(latest.length, 1);
+  assert.equal(latest[0]?.id, 'v2', '必须取最高版本,生成端读的就是它');
+});
+
+test('乱序传入也取最高版本', () => {
+  const files = [file({ id: 'v2', version: 2 }), file({ id: 'v1', version: 1 })];
+  assert.equal(latestFiles(files)[0]?.id, 'v2');
+});
+
+test('份数与字节都按生效版本算:这是截图里那组数字的病根', () => {
+  // 线上实测的形态:原文 v1「已知事实」11KB,AI 补充后 v2「猜想」11KB。
+  // 旧算法 → 2 份 / 22KB / 已知事实 1 份 / 推理与猜想 1 份,四个数字全错。
+  const stats = fileStats([
+    file({ id: 'v1', version: 1, kind: '已知事实', size: 11_000 }),
+    file({ id: 'v2', version: 2, kind: '猜想', size: 11_000 }),
+  ]);
+  assert.equal(stats.fileCount, 1, '一份资料');
+  assert.equal(stats.versionCount, 2, '两个版本');
+  assert.equal(stats.totalBytes, 11_000, '不能把两版字节相加');
+  assert.equal(stats.fact, 0, '生效版本是猜想,不该再算作可直接引用的已知事实');
+  assert.equal(stats.reasoning, 1);
+});
+
+test('多个不同文件各计一份', () => {
+  const stats = fileStats([
+    file({ id: 'a', name: 'a.md', kind: '已知事实', size: 100 }),
+    file({ id: 'b', name: 'b.md', kind: '禁止表达', size: 200 }),
+    file({ id: 'b2', name: 'b.md', version: 2, kind: '禁止表达', size: 250 }),
+  ]);
+  assert.equal(stats.fileCount, 2);
+  assert.equal(stats.totalBytes, 350, '100 + 250,不含 b 的 v1');
+  assert.equal(stats.banned, 1);
+});
+
+test('version 缺省当 1,不因载荷异常崩掉', () => {
+  const stats = fileStats([file({ id: 'x', version: undefined }), file({ id: 'y', version: 2 })]);
+  assert.equal(stats.fileCount, 1);
+  assert.equal(latestFiles([file({ id: 'x', version: undefined }), file({ id: 'y', version: 2 })])[0]?.id, 'y');
+});
+
+test('空列表不产生 NaN', () => {
+  const stats = fileStats([]);
+  assert.equal(stats.fileCount, 0);
+  assert.equal(stats.totalBytes, 0);
+});
+
+test('历史版本按版本号倒序,不含最新版', () => {
+  const files = [
+    file({ id: 'v1', version: 1 }),
+    file({ id: 'v3', version: 3 }),
+    file({ id: 'v2', version: 2 }),
+    file({ id: 'other', name: 'other.md', version: 1 }),
+  ];
+  assert.deepEqual(historyVersions(files, 'INDEX.md').map((item) => item.id), ['v2', 'v1']);
+  assert.deepEqual(historyVersions(files, 'other.md'), []);
+});
+
+function gap(overrides: Partial<KnowledgePreflightGap> = {}): KnowledgePreflightGap {
+  return {
+    id: 'g1',
+    label: '缺口',
+    status: 'approved',
+    required: false,
+    category: 'decision',
+    tier: 'evidence_backed',
+    sectionEvidenceIds: [],
+    staleDeclaredEvidenceIds: [],
+    reasons: [],
+    ...overrides,
+  };
+}
+
+function preflight(overrides: Partial<KnowledgePreflight> = {}): KnowledgePreflight {
+  return {
+    analysis: 'approved',
+    canGenerate: true,
+    requiredOpen: [],
+    tiers: { evidence_backed: 0, approved_only: 0, will_be_dropped: 0, blank: 0 },
+    byCategory: [],
+    gaps: [],
+    warnings: [],
+    note: '说明',
+    ...overrides,
+  };
+}
+
+test('刚传完资料还没分析 → 说下一步是做分析,不能说「可以生成」', () => {
+  /*
+   * 这是实际踩到的缺陷:用户上传知识库后页面显示「可以生成,缺口都已落实」。
+   * 那时缺口数为 0、tiers 全 0、requiredOpen 为空,和「全部落实」在数据上一样,
+   * 但生成会被 prepareGenerationPlan 拦掉。
+   */
+  const view = preflightHeadline(preflight({ analysis: 'missing', canGenerate: false }));
+  assert.equal(view?.needsAnalysis, true);
+  assert.match(view!.text, /做项目分析/u);
+  assert.doesNotMatch(view!.text, /可以生成/u);
+  assert.ok(view!.nextStep.length > 0, '必须给出下一步说明');
+});
+
+test('指路指向科研版的「内容生成」,不指快捷版', () => {
+  /*
+   * 这个页面属于科研版。第一版把「去分析」跳到了 /quick/:id/knowledge(基础版工作台),
+   * 是串了产品线——科研版的分析 UI 在 /generate(GeneratorPage 默认 simple 模式渲染
+   * IntelligentSimpleFlow,项目分析、蓝图确认、缺口池都在那里)。
+   */
+  for (const analysis of ['missing', 'stale', 'draft'] as const) {
+    const view = preflightHeadline(preflight({ analysis, canGenerate: false }));
+    assert.match(view!.nextStep, /内容生成/u, `${analysis} 应指向「内容生成」`);
+    assert.doesNotMatch(view!.nextStep, /快捷|工作台/u, `${analysis} 不该把用户送去快捷版`);
+  }
+});
+
+test('分析失效 → 说要重新分析', () => {
+  const view = preflightHeadline(preflight({ analysis: 'stale', canGenerate: false }));
+  assert.equal(view?.needsAnalysis, true);
+  assert.match(view!.text, /重新分析/u);
+});
+
+test('分析完成但未确认 → 说要确认', () => {
+  const view = preflightHeadline(preflight({ analysis: 'draft', canGenerate: false }));
+  assert.equal(view?.needsAnalysis, true);
+  assert.match(view!.text, /确认/u);
+});
+
+test('分析未就绪时,即便缺口层面没问题也不说可以生成', () => {
+  // 顺序要紧:分析状态必须先判,否则 tiers 全 0 会走到「缺口都已落实」那一支。
+  for (const analysis of ['missing', 'stale', 'draft'] as const) {
+    const view = preflightHeadline(preflight({ analysis, canGenerate: false }));
+    assert.doesNotMatch(view!.text, /可以生成/u, `analysis=${analysis} 不该说可以生成`);
+  }
+});
+
+test('分析已确认且缺口都落实 → 才说可以生成,且不再提示去分析', () => {
+  const view = preflightHeadline(preflight({
+    analysis: 'approved',
+    tiers: { evidence_backed: 8, approved_only: 9, will_be_dropped: 0, blank: 0 },
+  }));
+  assert.equal(view?.tone, 'ok');
+  assert.equal(view?.needsAnalysis, false);
+  assert.match(view!.text, /可以生成/u);
+});
+
+test('必答缺口没落实 → 主结论说还不能生成', () => {
+  const view = preflightHeadline(preflight({
+    canGenerate: false,
+    requiredOpen: [{ id: 'g1', label: '资质编号', tier: 'will_be_dropped' }],
+    tiers: { evidence_backed: 3, approved_only: 0, will_be_dropped: 1, blank: 0 },
+  }));
+  assert.equal(view?.tone, 'error');
+  assert.match(view!.text, /还不能生成/u);
+});
+
+test('能生成但有答案会被丢弃 → 仍要告警,不能只说可以生成', () => {
+  const view = preflightHeadline(preflight({
+    tiers: { evidence_backed: 5, approved_only: 2, will_be_dropped: 2, blank: 0 },
+  }));
+  assert.equal(view?.tone, 'warn');
+  assert.match(view!.text, /2 条答案会被丢弃/u);
+  assert.equal(view?.actionable, 2);
+});
+
+test('全部落实 → ok', () => {
+  const view = preflightHeadline(preflight({
+    tiers: { evidence_backed: 8, approved_only: 9, will_be_dropped: 0, blank: 0 },
+  }));
+  assert.equal(view?.tone, 'ok');
+  assert.equal(view?.actionable, 0);
+});
+
+test('主结论不使用「N/M」比率:分母是模型每轮随机给的,跨轮不可比', () => {
+  const view = preflightHeadline(preflight({
+    tiers: { evidence_backed: 16, approved_only: 0, will_be_dropped: 0, blank: 1 },
+  }));
+  assert.doesNotMatch(view!.text, /\d+\s*\/\s*\d+/u, '不得出现 16/17 这类比率');
+});
+
+test('没有预检结果时返回 null,不编造结论', () => {
+  assert.equal(preflightHeadline(null), null);
+  assert.deepEqual(categoryCoverage(null), []);
+  assert.deepEqual(actionableGaps(null), []);
+});
+
+test('分类覆盖:缺得多的排前面', () => {
+  const rows = categoryCoverage(preflight({
+    byCategory: [
+      { category: 'decision', total: 5, settled: 5 },
+      { category: 'trust', total: 6, settled: 0 },
+      { category: 'price', total: 2, settled: 1 },
+    ],
+  }));
+  assert.deepEqual(rows.map((row) => row.category), ['trust', 'price', 'decision']);
+});
+
+test('待处理缺口:必答优先,会丢弃排在无答案之前', () => {
+  const rows = actionableGaps(preflight({
+    gaps: [
+      gap({ id: 'blank', tier: 'blank' }),
+      gap({ id: 'dropped', tier: 'will_be_dropped' }),
+      gap({ id: 'ok', tier: 'evidence_backed' }),
+      gap({ id: 'requiredBlank', tier: 'blank', required: true }),
+    ],
+  }));
+  assert.deepEqual(rows.map((row) => row.id), ['requiredBlank', 'dropped', 'blank']);
+});
+
+test('引用失效的缺口也算待处理,即使答案本身有资料支撑', () => {
+  const rows = actionableGaps(preflight({
+    gaps: [gap({ id: 'stale', tier: 'evidence_backed', staleDeclaredEvidenceIds: ['e-gone'] })],
+  }));
+  assert.deepEqual(rows.map((row) => row.id), ['stale']);
+});
+
+test('仅人工确认这一档的说明必须点明它不是资料里的事实', () => {
+  // 这是整个功能的要点:此前界面把它和「已知事实」一起显示成「可直接引用」。
+  assert.match(TIER_NOTE.approved_only, /不是资料里的事实/u);
+  assert.match(TIER_NOTE.will_be_dropped, /丢掉/u);
+});

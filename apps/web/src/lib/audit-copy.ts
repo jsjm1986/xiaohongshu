@@ -56,6 +56,8 @@ export const AUDIT_ACTION_COPY: Record<string, AuditCopy> = {
   'formula.create': { label: '新建公式版本' },
   'formula.activate': { label: '启用公式版本' },
   'formula.auto-upgrade': { label: '公式变更后自动失效相关发布', automatic: true },
+  // 项目首次需要公式时由系统建 v1,不是用户点出来的,所以是 automatic。
+  'formula.bootstrap': { label: '自动创建初始公式版本', automatic: true },
   'generation.create': { label: '发起生成' },
   'generation.revise': { label: '提交修改要求' },
   'intelligence.analyze': { label: '分析项目情报' },
