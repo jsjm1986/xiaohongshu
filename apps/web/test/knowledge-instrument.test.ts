@@ -156,6 +156,28 @@ test('分析失效 → 说要重新分析', () => {
   assert.match(view!.text, /重新分析/u);
 });
 
+test('资料变动后的待办条要说明缺口和证据都会被更新', () => {
+  /*
+   * 用户实际卡住的地方:补充保存后以为完事了,结果缺口还在、证据全失效。
+   * 待办条要把「重新分析会一并更新缺口与证据引用」说出来,否则用户会去
+   * 逐条手工重选证据——那是错的动作,evidenceId 含 documentId,
+   * 一次保存会让该文件所有引用同时失效。
+   */
+  const view = preflightHeadline(preflight({ analysis: 'stale', canGenerate: false }));
+  assert.equal(view?.needsAnalysis, true);
+  assert.match(view!.nextStep, /缺口/u);
+  assert.match(view!.nextStep, /证据|引用/u);
+  /*
+   * 禁的是「指示用户去逐条重选」,不是「逐条」这三个字。
+   * 计划原本写的是 doesNotMatch(/逐条|重新选择/),但它自己给的文案是
+   * 「不需要你逐条重选」——明确否定该动作,恰是想要的语义,却被字面断言判红。
+   * 所以提到逐条/重选时必须带否定词,否则就是在指示用户白做工。
+   */
+  const mentionsReselect = /逐条|重新选择|重选/u.test(view!.nextStep);
+  const negated = /(不需要|无需|不用)[^。]{0,8}(逐条|重新选择|重选)/u.test(view!.nextStep);
+  assert.equal(mentionsReselect && !negated, false, `不该指示用户逐条重选:${view!.nextStep}`);
+});
+
 test('分析完成但未确认 → 说要确认', () => {
   const view = preflightHeadline(preflight({ analysis: 'draft', canGenerate: false }));
   assert.equal(view?.needsAnalysis, true);

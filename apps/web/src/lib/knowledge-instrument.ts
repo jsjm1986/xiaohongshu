@@ -136,7 +136,10 @@ export function preflightHeadline(preflight: KnowledgePreflight | null): Preflig
       ...base,
       text: '下一步:重新分析',
       tone: 'warn',
-      nextStep: '资料改动过,之前的分析已失效。到「内容生成」重新分析并确认后才能生成。',
+      // 必须点明「一并更新」:用户看到满屏「引用已失效」的第一反应是去逐条重选证据,
+      // 而 evidenceId 含 documentId,一次保存就让该文件所有引用同时失效——手工重选
+      // 是白做工,重新分析才是一次解决的路径。
+      nextStep: '资料改动过,之前的分析已失效。到「内容生成」重新分析——缺口和证据引用会一并更新,不需要你逐条重选。',
       needsAnalysis: true,
     };
   }
