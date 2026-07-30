@@ -71,12 +71,14 @@ export const TIER_LABEL: Record<KnowledgePreflightTier, string> = {
  * 每一档的说明。措辞是这个功能的全部价值所在,不能含糊:
  * `approved_only` 必须让用户看出「它不是来自你上传的资料」,
  * `will_be_dropped` 必须让用户知道这条会被静默丢掉,
- * `evidence_stale` 不能沿用「你填写并确认过」——那批答案是分析器给的,用户没填过。
+ * `evidence_stale` 不能沿用「你填写并确认过」——那批答案是分析器给的,用户没填过;
+ * 也不能说「重新分析会重建」——资料被整份删掉时重建不出来,这一格空间小,
+ * 只说「会更新」,把「可能要重新上传」留给主结论和口径说明去讲。
  */
 export const TIER_NOTE: Record<KnowledgePreflightTier, string> = {
   evidence_backed: '答案能在你上传的资料里找到出处',
   approved_only: '你填写并确认过,生成会用;但它不是资料里的事实',
-  evidence_stale: '出处随资料新版本失效,重新分析会重建',
+  evidence_stale: '出处已失效,重新分析会更新引用',
   will_be_dropped: '生成时会被丢掉,需要改格式或补资料',
   blank: '需要你补充真实资料',
 };
@@ -182,7 +184,8 @@ export function preflightHeadline(preflight: KnowledgePreflight | null): Preflig
         ...base,
         text: `还不能生成:${requiredOpen.length} 条必答缺口的引用已失效`,
         tone: 'error',
-        nextStep: '这些答案的资料出处已随新版本失效。到「内容生成」重新分析,引用会一并重建。',
+        // 不承诺「重建」:原资料被删掉时重建不出来,那批用户真正要做的是重新上传。
+        nextStep: '这些答案的资料出处已失效(资料存过新版本或被删除)。到「内容生成」重新分析,引用会一并更新;原资料已删除的,要重新上传才能再有出处。',
         needsAnalysis: true,
       };
     }
@@ -191,7 +194,7 @@ export function preflightHeadline(preflight: KnowledgePreflight | null): Preflig
       text: `还不能生成:${requiredOpen.length} 条必答缺口没落实`,
       tone: 'error',
       nextStep: staleOpen > 0
-        ? `补上缺资料的那几条,或改掉会被丢弃的答案格式;其中 ${staleOpen} 条是引用失效,重新分析会一并重建。`
+        ? `补上缺资料的那几条,或改掉会被丢弃的答案格式;其中 ${staleOpen} 条是引用失效,重新分析会一并更新引用,原资料已删除的要重新上传。`
         : '补上这几条的真实资料,或改掉会被丢弃的答案格式。',
       // needsAnalysis 是必填 boolean,不能条件展开。混合情形也给 true:
       // 重新分析是其中一部分缺口的唯一出路,不给跳转等于藏起出路。
