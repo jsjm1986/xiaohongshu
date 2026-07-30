@@ -473,10 +473,12 @@ export function KnowledgePage() {
           <header className="panel__header">
             <div>
               <h2><V2SecLabel>LIB · 完善建议</V2SecLabel>还要补什么</h2>
-              <p>{preflight.note}</p>
+              {/* 口径说明比别处的副标题长得多(三句:判据/不是质量分/保守下界),
+                  满宽一行读起来吃力,限宽换行。内容一句都不能省——见 PREFLIGHT_NOTE 注释。 */}
+              <p className="preflight-note">{preflight.note}</p>
             </div>
           </header>
-          <div className="panel__body">
+          <div className="preflight-body">
             {openGaps.length > 0 && (
               <ul className="preflight-gap-list">
                 {openGaps.slice(0, 12).map((gap) => (
@@ -484,9 +486,7 @@ export function KnowledgePage() {
                     <div className="preflight-gap__top">
                       <strong>{gap.label}</strong>
                       {gap.required && <Badge tone="warning">必答</Badge>}
-                      <Badge tone={gap.tier === 'will_be_dropped' ? 'danger' : 'neutral'}>
-                        {TIER_LABEL[gap.tier]}
-                      </Badge>
+                      <span className="preflight-gap__tier">{TIER_LABEL[gap.tier]}</span>
                     </div>
                     {/* 原因是用户能动手的唯一线索,必须逐条列出,不能只给一个档位标签 */}
                     <ul className="preflight-gap__reasons">
@@ -497,11 +497,11 @@ export function KnowledgePage() {
               </ul>
             )}
             {openGaps.length > 12 && (
-              <p className="upload-note">另有 {openGaps.length - 12} 条待处理,补完上面几条后会重新统计。</p>
+              <p className="upload-note">另有 {openGaps.length - 12} 条待处理，补完上面几条后会重新统计。</p>
             )}
             {coverage.some((row) => row.settled < row.total) && (
               <div className="preflight-coverage">
-                <strong>按分类看覆盖</strong>
+                <span className="preflight-coverage__label">按分类看覆盖</span>
                 <ul>
                   {coverage.map((row) => (
                     <li key={row.category} className={row.settled < row.total ? 'is-open' : ''}>
