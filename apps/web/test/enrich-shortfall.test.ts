@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { draftShortfallNote, enrichButtonLabel } from '../src/lib/enrich-types';
+import { draftShortfallNote, enrichButtonLabel, enrichSavedHint } from '../src/lib/enrich-types';
 
 /*
   入口按钮写的是真实待补总数,而单次起草有上限(后端 MAX_DRAFT_GAPS)。
@@ -75,4 +75,29 @@ test('弹窗把落差和读不出的文件都显示出来', () => {
   assert.match(modal, /unreadableFiles/, '没有读取 unreadableFiles');
   // 读不出资料会让推断质量下降,得用告警级别而不是普通提示
   assert.match(modal, /unreadable\.length > 0[\s\S]{0,200}enrich-warning/, '读不出的文件应当以告警显示');
+});
+
+/**
+ * 保存后的提示要指向下一步。
+ *
+ * 旧文案只说「缺口要等你补上真实资料才会关闭」——诚实但是死路:用户不知道
+ * 认可的草稿内容该往哪去。现在缺口编辑器能设「我确认过」,那才是关闭缺口的路径。
+ */
+test('保存提示指向缺口池的人工确认,不承诺缺口会自动关闭', () => {
+  const hint = enrichSavedHint();
+  assert.match(hint, /新版本/u);
+  assert.match(hint, /缺口/u);
+  // 不能暗示保存本身就关掉了缺口
+  assert.doesNotMatch(hint, /已(关闭|解决|完成)/u);
+});
+
+test('目标文件在合并前选定,不能只改保存目标', () => {
+  /*
+   * 目标文件必须参与 merge。merge 会读目标文件的原文并把补充融进去
+   * (intelligence-enrich.service.ts:202-217),预览就是那份融合结果。
+   * 如果只把选择结果用在 save 上,融进 A 原文的文档会存成 B 的新版本——
+   * B 的最新版里 B 自己的内容凭空消失,正是后端在 :212 处防的那种覆盖。
+   */
+  const modal = read('../src/components/knowledge/KnowledgeEnrichmentModal.tsx');
+  assert.match(modal, /enrich\.merge\(projectId, \{[^}]*targetFile/, 'merge 没有带上目标文件');
 });

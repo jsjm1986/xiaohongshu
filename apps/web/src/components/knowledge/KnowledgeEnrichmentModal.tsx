@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Info, TriangleAlert } from 'lucide-react';
-import { Button, Modal, useToast } from '../Ui';
+import { Button, Field, Modal, useToast } from '../Ui';
 import { api } from '../../lib/api';
 import { canMerge, hasUnsavedEdits, toDraftItems, toMergeItems } from '../../lib/enrich-flow';
-import { draftShortfallNote } from '../../lib/enrich-types';
+import { draftShortfallNote, enrichSavedHint } from '../../lib/enrich-types';
 import type { DraftItem, ModalStep } from '../../lib/enrich-types';
 import { EnrichmentDraftList } from './EnrichmentDraftList';
 import { OriginalKnowledgePreview } from './OriginalKnowledgePreview';
@@ -19,6 +19,13 @@ interface Props {
    * 缺口池里单条精补时传一个 id;标题也会跟着变,免得用户以为在跑全量。
    */
   gapIds?: readonly string[];
+  /**
+   * 可选:已有的知识文件,用来选「保存到哪一份」。
+   *
+   * 缺口池入口没有文件列表(该页不拉 knowledge.list),那里不显示选择器,
+   * 沿用后端算出的默认目标——不为了 UI 一致去加一条网络往返。
+   */
+  files?: ReadonlyArray<{ name: string }>;
 }
 
 const TITLES: Record<ModalStep, string> = {
@@ -35,7 +42,7 @@ const LOADING_TEXT: Record<'drafting' | 'merging' | 'saving', string> = {
   saving: '正在保存新版本',
 };
 
-export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete, gapIds }: Props) {
+export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete, gapIds, files }: Props) {
   const [step, setStep] = useState<ModalStep>('drafting');
   const [items, setItems] = useState<DraftItem[]>([]);
   const [preview, setPreview] = useState('');
@@ -56,6 +63,8 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete,
     setStep('drafting');
     setItems([]);
     setPreview('');
+    // 目标文件也要归零:上次选的是「并入 A」,这次重开还留着就会悄悄写到 A 上。
+    setTargetFile('');
     setError(null);
     setShortfall(null);
     setUnreadable([]);
@@ -82,7 +91,16 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete,
     setStep('merging');
     setError(null);
     try {
-      const result = await api.intelligence.enrich.merge(projectId, { items: toMergeItems(items) });
+      /*
+       * 目标文件要在这一步就定下来。merge 会读目标文件的原文、把补充融进去,预览就是
+       * 那份融合结果;只在 save 时改目标,等于把融了 A 原文的文档存成 B 的新版本,
+       * B 自己的内容就在最新版里消失了(后端 :212 防的正是这种覆盖)。
+       * 空串 = 用户没选,沿用后端的默认目标(知识地图)。
+       */
+      const result = await api.intelligence.enrich.merge(projectId, {
+        items: toMergeItems(items),
+        targetFile: targetFile || undefined,
+      });
       setPreview(result.preview);
       setTargetFile(result.targetFile);
       setIsNewFile(result.isNewFile);
@@ -103,9 +121,10 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete,
        * 不说「生效」。冒烟实测:补充保存后重新分析,原先空白的缺口仍是 unknown——
        * 这是对的,草稿如实写的是「此项资料缺失」,分析器据此标 factEligible=false。
        * 但「生效」会让用户以为重新分析后缺口就消失,发现还在就以为功能坏了。
-       * 如实说清它做到了什么(整理出该问什么)、没做到什么(填不上真事实)。
+       * 文案统一在 enrichSavedHint():既不承诺缺口关闭,也要指出关闭的路径
+       * (填进缺口答案并选「我确认过」),否则用户只知道走不通、不知道该往哪走。
        */
-      toast.push('已保存为新版本。补充内容整理了「还缺什么」,缺口要等你补上真实资料才会关闭');
+      toast.push(enrichSavedHint());
       onComplete();
       onClose();
     } catch (e: unknown) {
@@ -143,6 +162,13 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete,
   };
 
   const loading = step === 'drafting' || step === 'merging' || step === 'saving';
+
+  /*
+   * 可选目标按文件名去重。两个入口传进来的列表语义不同:专业版传的是折叠到最新版的
+   * currentFiles,快捷版传的是 knowledge.list 原样返回的行(同名文件每个版本一行)。
+   * 不去重的话快捷版会出现重复选项和重复的 React key。
+   */
+  const fileNames = files ? [...new Set(files.map((file) => file.name))] : null;
 
   return (
     <Modal
@@ -196,6 +222,22 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete,
                   请确认文件是否还在,必要时重新上传后再起草。
                 </span>
               </p>
+            )}
+            {/*
+              目标文件必须可选。API 一直支持 targetFile,前端只回显不给选,结果是
+              33.6 KB 原始资料没被触碰,补充内容独立成 2.9 KB 的 INDEX.md(证据类型
+              「猜想」)——用户的资料和 AI 的补充各自躺着,没有合流。
+              放在合并之前:合并要读目标文件的原文,选完再合并才对得上。
+              没有文件列表时(缺口池入口)不渲染,沿用后端算出的默认目标。
+            */}
+            {fileNames && (
+              <Field label="保存到" hint="默认合并进知识地图；也可以并入你已有的某份资料">
+                <select value={targetFile} onChange={(event) => setTargetFile(event.target.value)}>
+                  {/* 缺省项:让后端去算默认目标,前端不重复那套判断 */}
+                  <option value="">知识地图（默认，没有就新建）</option>
+                  {fileNames.map((name) => <option key={name} value={name}>{name}</option>)}
+                </select>
+              </Field>
             )}
             <EnrichmentDraftList items={items} onChange={setItems} />
           </div>

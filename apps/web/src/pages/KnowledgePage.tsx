@@ -571,6 +571,9 @@ export function KnowledgePage() {
         <KnowledgeEnrichmentModal
           open={enrichOpen}
           projectId={projectId}
+          /* 让用户选补充并入哪一份资料。传已折叠到最新版的 currentFiles,不传原始 files:
+             历史版本不是可选的保存目标,弹窗里也只按文件名选。 */
+          files={currentFiles}
           onClose={() => setEnrichOpen(false)}
           onComplete={load}
         />
