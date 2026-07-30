@@ -4318,15 +4318,16 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .preflight-gap-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .preflight-gap {
   padding: 10px 12px; border-radius: var(--v2-radius-sm);
-  background: var(--v2-canvas); border-left: 3px solid var(--v2-line);
+  background: var(--v2-canvas);
 }
-.preflight-gap--will_be_dropped { border-left-color: var(--v2-error); }
-.preflight-gap--blank { border-left-color: var(--v2-warn); }
-.preflight-gap--approved_only { border-left-color: var(--v2-ai, var(--v2-line)); }
-.preflight-gap--evidence_backed { border-left-color: var(--v2-ok); }
 .preflight-gap__top { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; font-size: var(--v2-fs-sm); }
-/* 档位不用 Badge:左边框已经在表达同一件事,再加个色块就是两层装饰说一句话 */
+/*
+ * 档位只用右侧这行文字表达,不再加左边竖条。
+ * 去掉竖条后它成了唯一的档位线索,所以「会被丢弃」这一档要能看出来——
+ * 只给它上色,其余两档保持弱化,不让每张卡都花。
+ */
 .preflight-gap__tier { margin-left: auto; font-size: var(--v2-fs-micro); color: var(--v2-muted); }
+.preflight-gap--will_be_dropped .preflight-gap__tier { color: var(--v2-error); }
 .preflight-gap__reasons { list-style: none; margin: 5px 0 0; padding: 0; display: grid; gap: 3px; }
 .preflight-gap__reasons li { font-size: var(--v2-fs-micro); color: var(--v2-ink-soft); line-height: 1.65; }
 
