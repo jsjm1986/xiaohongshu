@@ -253,6 +253,12 @@ test('分析器给过出处、引用已失效 → 独立成 evidence_stale,不�
   assert.ok(result.reasons.some((reason) => /引用/u.test(reason)), result.reasons.join('|'));
   // 关键:不能再声称是用户填的
   assert.ok(!result.reasons.some((reason) => /你填写并确认过/u.test(reason)), result.reasons.join('|'));
+  /*
+   * 只说一遍。新档的首句已经交代了引用失效,末尾那段通用失效提示必须让开——
+   * 同一件事播报两遍会让用户以为是两个独立问题。上面的 /引用/ 断言兜不住这点:
+   * 它对「说一遍」和「说两遍」都成立,所以这里按条数断言。
+   */
+  assert.equal(result.reasons.filter((reason) => /失效/u.test(reason)).length, 1, result.reasons.join('|'));
 });
 
 test('没有失效引用作证时不进新档:supplied_fact 是上一轮的判定,不能凭它作保', () => {
