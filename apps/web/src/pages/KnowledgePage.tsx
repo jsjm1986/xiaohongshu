@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   FileText,
   Filter,
+  Link2Off,
   MoreHorizontal,
   PenLine,
   Plus,
@@ -396,6 +397,21 @@ export function KnowledgePage() {
             value={preflight.tiers.approved_only}
             unit="条"
             note={TIER_NOTE.approved_only}
+          />
+        )}
+        {/*
+          档位卡是一段段手写 JSX 而非遍历 TIER_*,所以新增档位必须在这里补一格。
+          不补,evidence_stale 的缺口会从仪表盘彻底消失(某真实项目 18 条里有 15 条属于该档),
+          计数就又开始骗人了。
+        */}
+        {preflight && preflight.tiers.evidence_stale > 0 && (
+          <V2InstrumentCell
+            tone={TIER_TONE.evidence_stale}
+            icon={<Link2Off size={15} />}
+            label={TIER_LABEL.evidence_stale}
+            value={preflight.tiers.evidence_stale}
+            unit="条"
+            note={TIER_NOTE.evidence_stale}
           />
         )}
         {preflight && preflight.tiers.will_be_dropped > 0 && (

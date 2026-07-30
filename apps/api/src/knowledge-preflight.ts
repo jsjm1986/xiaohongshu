@@ -5,7 +5,7 @@
  * 真正的硬门在 engine.ts:892——`required && !((answer || framework) && evidenceIds.length)`。
  * 两边不是同一个标准,于是仪表盘显示「已确认,可直接引用」的缺口,生成时可能被丢掉。
  *
- * 这里复刻生成端 `bindGapEvidence` 的判定,把缺口分成四档,其中 `will_be_dropped`
+ * 这里复刻生成端 `bindGapEvidence` 的判定,把缺口分成五档,其中 `will_be_dropped`
  * 是当前界面完全看不见的一档。
  *
  * 能复刻到什么程度:`bindGapEvidence` 走三条证据路径——
@@ -14,8 +14,10 @@
  *   3. planningEvidenceSupports(已批准的规划上下文)
  * 路径 2、3 依赖生成时才存在的 ResolvedGenerationConfig 与 planningContext,知识库
  * 层面拿不到,所以本模块只精确复刻路径 1,对路径 3 做保守复刻(只判断「格式会不会
- * 破坏自证」)。结论因此是**保守下界**:预检说站得住的一定站得住,预检说会被丢的,
- * 在极少数情况下可能被路径 2 救回。
+ * 破坏自证」)。
+ * 结论是**保守下界**:预检说有资料支撑的一定有;说会被丢的,极少数情况下可能被
+ * 路径 2 救回。另有一档 `evidence_stale` 是「生成时会被采用,但没有当前资料为它
+ * 作证」——站得住不等于可复核,这一档说的是后者。
  */
 
 /** 缺口答案的证据强度分档。 */
@@ -24,6 +26,13 @@ export type PreflightTier =
   | 'evidence_backed'
   /** 无资料支撑,但答案能经已批准的规划上下文自证。生成会采用,依据是「有人填了并批准」。 */
   | 'approved_only'
+  /**
+   * 分析器判定资料里有出处,但那些引用已经失效(资料存过新版本或被删除)。
+   *
+   * 生成时答案仍会被采用(靠规划上下文自证),但**没有任何当前资料为它作证**——
+   * 结论不可复核。所以它既不是 evidence_backed,也不该谎报成「你填写并确认过」。
+   */
+  | 'evidence_stale'
   /** 无资料支撑,且格式破坏了自证。生成会静默丢弃这条答案。 */
   | 'will_be_dropped'
   /** 没有答案。 */
@@ -66,6 +75,14 @@ export interface PreflightGapInput {
   /** 缺口自己声明的证据 id。仅用于回显差异,不参与分档——生成端也不信任它,会重算。 */
   declaredEvidenceIds: readonly string[];
   category: string;
+  /**
+   * 缺口答案的来源标记,由分析器或缺口编辑器写。
+   *
+   * 只用来区分「分析器说有出处」与「用户自己填的」:前者引用失效时要说实话
+   * (evidence_stale),后者本来就是人工确认,不该改口。调用方须先过白名单——
+   * 库里实测有 'unacknowledged' 这种不在联合类型里的值。
+   */
+  sourceStatus?: string;
   /** 由调用方跑 findSupportingSectionEvidenceIds 得出的、内容支撑这条答案的证据 id。 */
   sectionEvidenceIds: readonly string[];
   /**
@@ -112,6 +129,26 @@ export function classifyGap(input: PreflightGapInput): PreflightGapResult {
   } else if (sectionEvidenceIds.length) {
     tier = 'evidence_backed';
     reasons.push(`答案能在已上传资料里找到支撑(${sectionEvidenceIds.length} 处分节)。`);
+  } else if (
+    /*
+     * 三个条件都必需:
+     * - supplied_fact:分析器当初给过出处。
+     * - 有失效引用:那个出处**确实断了**的实证。只看 sourceStatus 会替一个可能已
+     *   过时的判定作保——资料被整份删掉时,说「重新分析会重建引用」是空头承诺。
+     * - selfProofSurvives:格式坏的答案是真会被丢弃,得留给 will_be_dropped 去说
+     *   清是哪个字符;重新分析修不了换行。
+     */
+    input.sourceStatus === 'supplied_fact'
+    && staleDeclaredEvidenceIds.length > 0
+    && selfProofSurvives(proposed)
+  ) {
+    tier = 'evidence_stale';
+    /*
+     * 不承诺「会重建引用」。资料被整份删掉时重建不出来——实测项目「眼袋王」活的知识
+     * 文件为 0、47 条缺口落在本档,重新分析没有任何资料可引。措辞与 :174 那条通用提示
+     * 取同一口径:把「存过新版本」和「被删除」两种可能都说出来,只承诺「一并更新」。
+     */
+    reasons.push('原本有资料出处,但引用已失效(资料存过新版本或被删除)。重新分析会一并更新;资料已删除的,要重新上传才能再有出处。');
   } else if (selfProofSurvives(proposed)) {
     tier = 'approved_only';
     reasons.push('答案没有对应的上传资料,依据是你填写并确认过。生成会采用,但它不是来自资料的事实。');
@@ -129,7 +166,8 @@ export function classifyGap(input: PreflightGapInput): PreflightGapResult {
     if (proposed.includes('\\')) reasons.push('答案里有反斜杠 \\ ——去掉它,或把这段内容作为资料上传。');
   }
 
-  if (staleDeclaredEvidenceIds.length) {
+  // 新档的首句已经说了引用失效,再追加一条就是同一件事说两遍。
+  if (staleDeclaredEvidenceIds.length && tier !== 'evidence_stale') {
     /*
      * 不说「需要重新选择」。
      *
@@ -177,7 +215,13 @@ export interface PreflightSummary {
   analysis: AnalysisState;
   /** 所有必答缺口都站得住。与 engine.ts:892 同判据。分析未就绪时恒为 false。 */
   canGenerate: boolean;
-  /** 站不住的必答缺口。生成时正文会出现「关于X我还没问明白」。 */
+  /**
+   * 站不住的必答缺口,**只含 status='approved' 的行**(见 blocksGeneration)。
+   *
+   * `blank` / `will_be_dropped` 会让生成时正文出现「关于X我还没问明白」;
+   * `evidence_stale` 不会(答案仍被采用),但它的结论无法用当前资料复核,
+   * 同样不该就这么生成。
+   */
   requiredOpen: Array<{ id: string; label: string; tier: PreflightTier }>;
   tiers: Record<PreflightTier, number>;
   /** 按缺口分类看覆盖:总数答得多但全挤在一个维度,和均匀覆盖不是一回事。 */
@@ -187,6 +231,22 @@ export interface PreflightSummary {
 /** 一条缺口是否算「站得住」:生成端会保留它的答案。 */
 function settled(tier: PreflightTier): boolean {
   return tier === 'evidence_backed' || tier === 'approved_only';
+}
+
+/**
+ * 这一行会不会真的进生成。
+ *
+ * 预检取数不过滤 status(stale 的缺口恰恰最该提醒用户),但生成端只消费
+ * status='approved' 的行(intelligence.service.approvedRows)。所以「挣住生成」
+ * 只能由 approved 行决定,否则会造出一个用户消不掉的错误结论:
+ * insertAnalyzedGap 只插入、从不清理被取代的旧行,一条 status='stale' 的必答缺口
+ * 会永远显示「还不能生成」,而重新分析也清不掉它。
+ *
+ * 注意:分档计数与 byCategory 仍统计全部行——用户要看见知识库全貌,
+ * 被裁掉的只有 requiredOpen 这个硬门。
+ */
+function blocksGeneration(row: PreflightGapResult): boolean {
+  return row.status === 'approved' && row.required && !settled(row.tier);
 }
 
 /**
@@ -209,13 +269,14 @@ export function summarize(
   const tiers: Record<PreflightTier, number> = {
     evidence_backed: 0,
     approved_only: 0,
+    evidence_stale: 0,
     will_be_dropped: 0,
     blank: 0,
   };
   for (const row of rows) tiers[row.tier] += 1;
 
   const requiredOpen = rows
-    .filter((row) => row.required && !settled(row.tier))
+    .filter(blocksGeneration)
     .map((row) => ({ id: row.id, label: row.label, tier: row.tier }));
 
   const byCategoryMap = new Map<string, { total: number; settled: number }>();
@@ -250,4 +311,8 @@ export function summarize(
  */
 export const PREFLIGHT_NOTE = '本预检与生成端同一判据(证据是否支撑答案),纯本地计算,不调用模型。'
   + '它判断的是答案能否被生成采用,不是内容质量评分。'
-  + '因为部分证据路径依赖生成时的上下文,结论是保守下界:显示站得住的一定站得住。';
+  + '因为部分证据路径依赖生成时的上下文,结论是保守下界:显示有资料支撑的一定有。'
+  // 不写「重新分析重建引用」:资料被整份删掉时重建不出来(实测有活的知识文件为 0
+  // 而大批缺口落在本档的项目)。只承诺「一并更新」,并点出删除后要重新上传。
+  + '标为「引用已失效」的仍会被生成采用,但没有当前资料为它作证:重新分析会一并更新引用,'
+  + '若原资料已删除,要重新上传才能再有出处。';

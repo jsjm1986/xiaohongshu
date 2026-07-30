@@ -160,6 +160,7 @@ test('分档计数与按分类覆盖', () => {
   assert.deepEqual(summary.tiers, {
     evidence_backed: 1,
     approved_only: 1,
+    evidence_stale: 0,
     will_be_dropped: 1,
     blank: 1,
   });
@@ -232,4 +233,132 @@ test('analysisStateFrom:认不出的状态一律当没分析', () => {
   assert.equal(analysisStateFrom(undefined), 'missing');
   assert.equal(analysisStateFrom(null), 'missing');
   assert.equal(analysisStateFrom('未来新增的状态'), 'missing');
+});
+
+/**
+ * 引用失效不能说成「你填写并确认过」。
+ *
+ * 分析器判定 supplied_fact 的缺口,一旦资料存了新版本,evidenceId 全变,
+ * 分节匹配就不中。旧逻辑于是落 approved_only 并声称「依据是你填写并确认过」——
+ * 而用户从没填过这条。实测 18 条缺口 15 条被这么谎报。
+ */
+test('分析器给过出处、引用已失效 → 独立成 evidence_stale,不谎报成人工确认', () => {
+  const result = classifyGap(gap({
+    label: '易用性',
+    answer: '不需要额外培训,前台四个核心价值即可上手',
+    declaredEvidenceIds: ['evidence_section_deadbeef'],
+    sourceStatus: 'supplied_fact',
+  }));
+  assert.equal(result.tier, 'evidence_stale');
+  assert.ok(result.reasons.some((reason) => /引用/u.test(reason)), result.reasons.join('|'));
+  // 关键:不能再声称是用户填的
+  assert.ok(!result.reasons.some((reason) => /你填写并确认过/u.test(reason)), result.reasons.join('|'));
+  /*
+   * 只说一遍。新档的首句已经交代了引用失效,末尾那段通用失效提示必须让开——
+   * 同一件事播报两遍会让用户以为是两个独立问题。上面的 /引用/ 断言兜不住这点:
+   * 它对「说一遍」和「说两遍」都成立,所以这里按条数断言。
+   */
+  assert.equal(result.reasons.filter((reason) => /失效/u.test(reason)).length, 1, result.reasons.join('|'));
+});
+
+test('没有失效引用作证时不进新档:supplied_fact 是上一轮的判定,不能凭它作保', () => {
+  // 声明的引用都还在可用集合里 → 出处没断 → 落不进新档
+  const result = classifyGap(gap({
+    answer: '一句能自证的单行答案',
+    declaredEvidenceIds: ['evidence_section_alive'],
+    availableEvidenceIds: new Set(['evidence_section_alive']),
+    sourceStatus: 'supplied_fact',
+  }));
+  assert.equal(result.tier, 'approved_only');
+});
+
+test('只认 supplied_fact:user_supplied 本来就是人工确认,不该改口', () => {
+  const result = classifyGap(gap({
+    answer: '我到院面诊后才确定',
+    declaredEvidenceIds: ['evidence_section_deadbeef'],
+    sourceStatus: 'user_supplied',
+  }));
+  assert.equal(result.tier, 'approved_only');
+});
+
+test('内容仍能匹配上就仍算有资料支撑:引用失效不改变这个事实', () => {
+  const result = classifyGap(gap({
+    answer: '能匹配到分节的答案',
+    declaredEvidenceIds: ['evidence_section_deadbeef'],
+    sectionEvidenceIds: ['evidence_section_hit'],
+    availableEvidenceIds: new Set(['evidence_section_hit']),
+    sourceStatus: 'supplied_fact',
+  }));
+  assert.equal(result.tier, 'evidence_backed');
+});
+
+test('格式坏的仍归会被丢弃:重新分析修不了换行,逐字符提示不能丢', () => {
+  const result = classifyGap(gap({
+    answer: '第一行\n第二行',
+    declaredEvidenceIds: ['evidence_section_deadbeef'],
+    sourceStatus: 'supplied_fact',
+  }));
+  assert.equal(result.tier, 'will_be_dropped');
+  assert.ok(result.reasons.some((reason) => /换行/u.test(reason)), result.reasons.join('|'));
+});
+
+test('认不出的 sourceStatus 不进新档:库里真有 unacknowledged 这种值', () => {
+  const result = classifyGap(gap({
+    answer: '一句能自证的单行答案',
+    declaredEvidenceIds: ['evidence_section_deadbeef'],
+    sourceStatus: 'unacknowledged',
+  }));
+  assert.equal(result.tier, 'approved_only');
+});
+
+test('必答缺口落在 evidence_stale → 不算已落实,挣住生成', () => {
+  const stale = classifyGap(gap({
+    required: true,
+    answer: '一句能自证的单行答案',
+    declaredEvidenceIds: ['evidence_section_deadbeef'],
+    sourceStatus: 'supplied_fact',
+  }));
+  const summary = summarize([stale], 'approved');
+  assert.equal(stale.tier, 'evidence_stale');
+  assert.equal(summary.canGenerate, false);
+  assert.equal(summary.requiredOpen.length, 1);
+  assert.equal(summary.tiers.evidence_stale, 1);
+});
+
+/**
+ * 非 approved 的必答缺口不该挣住生成。
+ *
+ * preflight() 读任何 status 的缺口行,而生成端只消费 status='approved' 的行
+ * (intelligence.service.approvedRows)。一条 status='stale' 的必答缺口落进
+ * evidence_stale 后会翻掉 canGenerate,面板说「还不能生成」并让用户去重新分析——
+ * 但 insertAnalyzedGap 只插入、从不清理被取代的旧行,这条提示永远消不掉。
+ * 实测项目「眼袋王」61 条 stale 缺口里正有 1 条必答。
+ *
+ * 分档展示仍要包含所有行(用户要看见全貌),但挣住生成只能由生成端真会消费的行决定。
+ */
+test('非 approved 的必答缺口不挣住生成:生成端根本不消费它', () => {
+  const staleRow = classifyGap(gap({
+    id: 'ghost',
+    status: 'stale',
+    required: true,
+    answer: '一句能自证的单行答案',
+    declaredEvidenceIds: ['evidence_section_deadbeef'],
+    sourceStatus: 'supplied_fact',
+  }));
+  const summary = summarize([staleRow], 'approved');
+  assert.equal(staleRow.tier, 'evidence_stale', '分档本身不变');
+  assert.equal(summary.tiers.evidence_stale, 1, '仍要计入分档展示:用户要看见全貌');
+  assert.equal(summary.requiredOpen.length, 0, '不该进 requiredOpen');
+  assert.equal(summary.canGenerate, true, '生成端不消费这行,不能因它说不能生成');
+});
+
+test('非 approved 的行仍计入 byCategory,展示口径不缩水', () => {
+  const rows = [
+    classifyGap(gap({ id: 'a', status: 'draft', category: 'risk', answer: '多行\n答案' })),
+    classifyGap(gap({ id: 'b', status: 'approved', category: 'risk', answer: 'x', sectionEvidenceIds: ['e1'] })),
+  ];
+  const summary = summarize(rows, 'approved');
+  const risk = summary.byCategory.find((item) => item.category === 'risk');
+  assert.equal(risk?.total, 2, '两行都要出现在覆盖统计里');
+  assert.equal(risk?.settled, 1);
 });

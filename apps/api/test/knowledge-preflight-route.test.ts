@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { createApplication } from '../src/app.js';
+import { DatabaseService } from '../src/database.service.js';
 
 /**
  * 完善度预检的 HTTP 端到端:分档逻辑的单测在 knowledge-preflight.test.ts,这里验证
@@ -50,6 +51,26 @@ async function createGap(project: string, input: Record<string, unknown>) {
   });
   assert.equal(created.response.status, 201, JSON.stringify(created.body));
   return created.body;
+}
+
+/**
+ * 落一个只有分析器才能写的 sourceStatus。
+ *
+ * 人工路径(POST/PATCH)有 assertNoAnalyzerOnlySource 守卫,supplied_fact 会被拦成 400
+ * ——人填的答案不该声称资料里有出处。这里直接改库模拟分析器落库,而不是放宽那道门禁。
+ * 'unacknowledged' 这类库里的历史脏值也只能这么造。
+ */
+async function createGapWithSourceStatus(
+  project: string,
+  input: Record<string, unknown>,
+  sourceStatus: string,
+) {
+  const created = await createGap(project, input);
+  const id = String(created.id);
+  app.get(DatabaseService).prepare(
+    "UPDATE information_gaps SET data_json = json_set(data_json, '$.sourceStatus', ?) WHERE id = ?",
+  ).run(sourceStatus, id);
+  return id;
 }
 
 before(async () => {
@@ -191,6 +212,40 @@ test('引用真实存在的证据 → 不报失效(误报回归守卫)', async (
   const row = result.body.gaps.find((gap: any) => gap.label === '引用有效但答案无支撑');
   assert.deepEqual(row.staleDeclaredEvidenceIds, [], '引用还在就不能报失效');
   assert.doesNotMatch(row.reasons.join(''), /失效/u);
+});
+
+test('引用失效的 supplied_fact 缺口,接口返回 evidence_stale', async () => {
+  /*
+   * sourceStatus 必须真的到达分档。
+   *
+   * preflight() 直接读 data_json 而不经 normalizeGap,漏传这个字段的话 evidence_stale
+   * 永远不触发,Task 1 的判据从接口上看不出效果——分档函数的单测抓不到这种断链。
+   */
+  await createGapWithSourceStatus(
+    projectId,
+    // 答案单行(能自证),引用一个不存在的证据 id(失效实证),内容与已上传资料无关
+    { label: '门店地址', answer: '门店在城南老街的临街铺面', evidenceIds: ['evidence_section_已删除的资料_1'] },
+    'supplied_fact',
+  );
+
+  const result = await request(`/api/projects/${projectId}/knowledge/preflight`);
+  assert.equal(result.response.status, 200, JSON.stringify(result.body));
+  const row = result.body.gaps.find((gap: any) => gap.label === '门店地址');
+  assert.equal(row.tier, 'evidence_stale', JSON.stringify(row));
+  assert.ok(result.body.tiers.evidence_stale >= 1, JSON.stringify(result.body.tiers));
+});
+
+test('认不出的 sourceStatus 不会污染分档', async () => {
+  // 库里实测存在的历史脏值,不在 GAP_SOURCE_STATUSES 之内:不能被当成 supplied_fact。
+  await createGapWithSourceStatus(
+    projectId,
+    { label: '停车方式', answer: '门口可以临时停车', evidenceIds: ['evidence_section_已删除的资料_2'] },
+    'unacknowledged',
+  );
+
+  const result = await request(`/api/projects/${projectId}/knowledge/preflight`);
+  const row = result.body.gaps.find((gap: any) => gap.label === '停车方式');
+  assert.equal(row.tier, 'approved_only', JSON.stringify(row));
 });
 
 test('未登录取不到预检', async () => {

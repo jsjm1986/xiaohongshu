@@ -41,6 +41,16 @@ const EXTENSIONS = new Set(['.md', '.txt']);
 // sections are exactly the per-document canonical splits (never truncated), i.e.
 // the same section identity generation-time evidence binding uses.
 const EVIDENCE_SECTION_TOKEN_BUDGET = 100_000_000;
+/**
+ * 缺口 sourceStatus 的合法取值。
+ *
+ * preflight 直接读 data_json,不经 normalizeGap,所以白名单要在这里再过一遍——
+ * 库里实测有 'unacknowledged' 这种不在联合类型里的历史值。与
+ * intelligence.service.ts 的 GAP_SOURCE_STATUSES 保持一致。
+ */
+const GAP_SOURCE_STATUSES = new Set([
+  'supplied_fact', 'user_supplied', 'inference', 'hypothesis', 'unknown',
+]);
 /** 没有可引用文件时的空选择。不用 selectKnowledgeContext 空跑一次,省一次无意义的分节。 */
 const EMPTY_SELECTION: KnowledgeContextSelection = {
   mode: 'empty',
@@ -430,8 +440,10 @@ export class KnowledgeService {
    * 与生成端 engine.ts:892 同判据(答案必须有证据支撑),纯本地计算不调模型。
    * 分档逻辑在 knowledge-preflight.ts,这里只负责取数据、跑证据匹配。
    *
-   * 不过滤 status:补充判据一向不看 status(见 intelligence-enrich.service.pendingGaps),
+   * 取数不过滤 status:补充判据一向不看 status(见 intelligence-enrich.service.pendingGaps),
    * 而且 stale 的缺口恰恰是最需要提醒用户的。status 原样回给前端自行区分。
+   * 但「挣住生成」只由 approved 行决定 —— 见 summarize 的 blocksGeneration,
+   * 生成端只消费 approved 行,拿别的行去翻 canGenerate 会造出消不掉的错误结论。
    */
   async preflight(projectId: string): Promise<Record<string, unknown>> {
     const { selection, warnings } = await this.evidenceDocumentSelection(projectId, '完善度预检');
@@ -478,6 +490,9 @@ export class KnowledgeService {
         category: typeof data.category === 'string' ? data.category : '',
         sectionEvidenceIds,
         availableEvidenceIds,
+        sourceStatus: typeof data.sourceStatus === 'string' && GAP_SOURCE_STATUSES.has(data.sourceStatus)
+          ? data.sourceStatus
+          : undefined,
       });
     });
 

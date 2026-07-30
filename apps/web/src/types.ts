@@ -85,12 +85,14 @@ export interface KnowledgeEvidenceDocument {
  *
  * - `evidence_backed` 答案能在上传资料里找到支撑
  * - `approved_only` 无资料支撑,依据是人工填写并确认;生成会采用,但它不是资料里的事实
+ * - `evidence_stale` 分析器给过出处但引用已失效,生成仍会采用、结论无法复核
  * - `will_be_dropped` 无资料支撑且格式破坏了自证,生成会静默丢弃
  * - `blank` 没有答案
  */
 export type KnowledgePreflightTier =
   | 'evidence_backed'
   | 'approved_only'
+  | 'evidence_stale'
   | 'will_be_dropped'
   | 'blank';
 

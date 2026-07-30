@@ -231,7 +231,7 @@ const normalizeEvidenceDocument = (raw: JsonRecord): KnowledgeEvidenceDocument =
     : [],
 });
 
-const PREFLIGHT_TIERS = ["evidence_backed", "approved_only", "will_be_dropped", "blank"] as const;
+const PREFLIGHT_TIERS = ["evidence_backed", "approved_only", "evidence_stale", "will_be_dropped", "blank"] as const;
 
 const preflightTier = (value: unknown): KnowledgePreflightTier =>
   PREFLIGHT_TIERS.includes(value as KnowledgePreflightTier)
@@ -274,6 +274,7 @@ const normalizePreflight = (raw: JsonRecord): KnowledgePreflight => {
     tiers: {
       evidence_backed: Number(tiers.evidence_backed ?? 0),
       approved_only: Number(tiers.approved_only ?? 0),
+      evidence_stale: Number(tiers.evidence_stale ?? 0),
       will_be_dropped: Number(tiers.will_be_dropped ?? 0),
       blank: Number(tiers.blank ?? 0),
     },
@@ -975,6 +976,7 @@ export const api = {
      *
      * 与生成端同判据,纯服务端计算不调模型。分档含义见 knowledge-preflight.ts:
      * evidence_backed(有资料支撑)/ approved_only(仅人工确认)/
+     * evidence_stale(分析器给过出处但引用已失效)/
      * will_be_dropped(生成会丢弃)/ blank(无答案)。
      */
     preflight: async (projectId: string) => {
