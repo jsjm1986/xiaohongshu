@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import {
   actionableGaps,
@@ -276,4 +277,17 @@ test('仅人工确认这一档的说明必须点明它不是资料里的事实',
   // 这是整个功能的要点:此前界面把它和「已知事实」一起显示成「可直接引用」。
   assert.match(TIER_NOTE.approved_only, /不是资料里的事实/u);
   assert.match(TIER_NOTE.will_be_dropped, /丢掉/u);
+});
+
+/**
+ * api.ts 的 PREFLIGHT_TIERS 是硬编码的第二份档位清单,而且是运行时数组、
+ * 不触发 typecheck。漏掉新档时 preflightTier() 会把它静默改判成
+ * will_be_dropped——新档一条都到不了界面,而 tiers.will_be_dropped 被虚增。
+ * 唯一能兜住它的就是这条源码断言。
+ */
+test('api.ts 的运行时档位白名单认得 evidence_stale', () => {
+  const source = readFileSync(new URL('../src/lib/api.ts', import.meta.url), 'utf8');
+  const match = /const PREFLIGHT_TIERS = \[([^\]]+)\]/u.exec(source);
+  assert.ok(match, 'api.ts 里找不到 PREFLIGHT_TIERS');
+  assert.match(match[1], /evidence_stale/u);
 });
