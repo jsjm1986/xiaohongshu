@@ -498,13 +498,22 @@ export function SettingsPage() {
                 </div>
                 {["系统管理员", "Owner", "Admin"].includes(user?.role || "") && (
                   <div className="quota-admin">
-                    <Field label="平台测试额度">
-                      <input type="number" min={0} value={settings.monthlyQuota} onChange={(event) => setSettings({ ...settings, monthlyQuota: Math.max(0, Number(event.target.value)) })} />
-                    </Field>
-                    <Field label="默认温度" hint="0–2，控制生成发散度。留空用平台默认。">
-                      <input type="number" min={0} max={2} step={0.1} value={settings.defaultTemperature ?? ""} onChange={(event) => setSettings({ ...settings, defaultTemperature: event.target.value === "" ? undefined : Math.max(0, Math.min(2, Number(event.target.value))) })} />
-                    </Field>
-                    <Button loading={saving} onClick={saveSettings}>更新额度</Button>
+                    <div className="quota-admin__heading">
+                      <div>
+                        <strong>额度参数</strong>
+                        <span>修改后立即应用于当前工作区。</span>
+                      </div>
+                      <Badge tone="neutral">仅管理员可编辑</Badge>
+                    </div>
+                    <div className="quota-admin__controls">
+                      <Field label="平台测试额度" hint="设置当前周期可创建的生成任务总数。">
+                        <input type="number" min={0} value={settings.monthlyQuota} onChange={(event) => setSettings({ ...settings, monthlyQuota: Math.max(0, Number(event.target.value)) })} />
+                      </Field>
+                      <Field label="默认温度" hint="范围 0–2；留空时使用模型平台默认值。">
+                        <input type="number" min={0} max={2} step={0.1} value={settings.defaultTemperature ?? ""} onChange={(event) => setSettings({ ...settings, defaultTemperature: event.target.value === "" ? undefined : Math.max(0, Math.min(2, Number(event.target.value))) })} />
+                      </Field>
+                      <Button className="quota-admin__submit" loading={saving} onClick={saveSettings}>更新额度</Button>
+                    </div>
                   </div>
                 )}
               </section>
