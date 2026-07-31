@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { useProjects } from '../components/ProjectContext';
 import { Badge, Button, Field, Modal, Skeleton, useToast } from '../components/Ui';
 import { V2Hero } from '../components/V2';
+import { errorMessage } from '../lib/errors';
 import { formatDate } from '../lib/utils';
 
 export function ProjectsPage() {
@@ -25,6 +26,8 @@ export function ProjectsPage() {
       setModalOpen(false);
       setForm({ name: '', domain: '', description: '' });
       toast.push('项目已创建');
+    } catch (error) {
+      toast.push(errorMessage(error, '项目创建失败'), 'error');
     } finally {
       setSaving(false);
     }
@@ -38,6 +41,8 @@ export function ProjectsPage() {
       await updateProject(editing.id, { name: editing.name, domain: editing.domain, description: editing.description });
       setEditing(null);
       toast.push('项目已更新');
+    } catch (error) {
+      toast.push(errorMessage(error, '项目更新失败'), 'error');
     } finally {
       setSaving(false);
     }
@@ -50,6 +55,8 @@ export function ProjectsPage() {
       await removeProject(deleting.id);
       setDeleting(null);
       toast.push('项目已删除');
+    } catch (error) {
+      toast.push(errorMessage(error, '项目删除失败'), 'error');
     } finally {
       setSaving(false);
     }

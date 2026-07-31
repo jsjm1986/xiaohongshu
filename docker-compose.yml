@@ -5,6 +5,10 @@ services:
       - "8780:8780"
     env_file:
       - .env
+    environment:
+      # Direct development binds loopback; a container must accept traffic from
+      # its bridge interface for the published port to work.
+      HOST: 0.0.0.0
     volumes:
       - ./data:/data
     restart: unless-stopped

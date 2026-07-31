@@ -6,6 +6,7 @@ import {
   ForbiddenException,
   Get,
   Inject,
+  NotFoundException,
   Param,
   Patch,
   Post,
@@ -26,9 +27,15 @@ import {
   RequirePermission,
   SessionAuthGuard,
 } from './guards.js';
-import { parseStringArray, type AuthenticatedRequest, type SessionPrincipal } from './models.js';
+import {
+  parseStringArray,
+  type AuthenticatedRequest,
+  type Permission,
+  type SessionPrincipal,
+} from './models.js';
 import { ResourceService } from './resource.service.js';
 import { ResearchService } from './research.service.js';
+import { SettingsService } from './settings.service.js';
 import { nowIso, optionalString, requireObject, requireString } from './utils.js';
 
 @Controller('api/projects')
@@ -42,6 +49,7 @@ export class ProjectController {
     @Inject(IntelligenceService) private readonly intelligence: IntelligenceService,
     @Inject(FormulaService) private readonly formulas: FormulaService,
     @Inject(ResearchService) private readonly research: ResearchService,
+    @Inject(SettingsService) private readonly settings: SettingsService,
   ) {}
 
   @Get()
@@ -54,25 +62,16 @@ export class ProjectController {
     const principal = this.principal(rawRequest);
     const body = requireObject(rawBody);
     const workspaceId = this.resources.inferWorkspace(principal, body.workspaceId);
-    this.resources.workspaceRow(workspaceId);
-    if (
-      principal.systemRole !== 'admin' &&
-      !this.permissions.hasPermission(principal.userId, workspaceId, 'project.write')
-    ) {
-      throw new ForbiddenException('缺少权限：project.write');
-    }
-
     const name = requireString(body.name, 'name', { max: 120 });
-    const slug = this.resources.uniqueSlug(
-      'projects',
-      typeof body.slug === 'string' ? body.slug : name,
-      workspaceId,
-    );
+    const requestedSlug = typeof body.slug === 'string' ? body.slug : name;
     const description = optionalString(body.description, 'description', 2_000) ?? '';
     const profile = this.profileFromBody(body);
     const id = randomUUID();
     const now = nowIso();
-    this.database.transaction(() => {
+    return this.database.transaction(() => {
+      this.resources.workspaceRow(workspaceId);
+      this.assertCurrentPermission(principal, workspaceId, 'project.write');
+      const slug = this.resources.uniqueSlug('projects', requestedSlug, workspaceId);
       this.database
         .prepare(
           `INSERT INTO projects
@@ -83,8 +82,8 @@ export class ProjectController {
       this.formulas.ensureDefault(id, principal);
       this.research.bootstrapProject(id, principal.userId);
       this.audit.record({ workspaceId, userId: principal.userId, action: 'project.create', entityType: 'project', entityId: id });
+      return this.resources.mapProject(this.resources.projectRow(id));
     });
-    return this.resources.mapProject(this.resources.projectRow(id));
   }
 
   @Get(':projectId')
@@ -100,37 +99,113 @@ export class ProjectController {
     @Param('projectId') projectId: string,
     @Body() rawBody: unknown,
   ) {
-    const row = this.resources.projectRow(projectId);
     const body = requireObject(rawBody);
-    const name = optionalString(body.name, 'name', 120) ?? String(row.name);
-    const description = optionalString(body.description, 'description', 2_000) ?? String(row.description);
-    const storedProfile = JSON.parse(String(row.profile_json)) as Record<string, unknown>;
-    const profile = body.profile !== undefined
-      ? this.profileFromBody(body)
-      : this.hasProfileFields(body)
-        ? { ...storedProfile, ...this.profileFromBody(body) }
-        : storedProfile;
-    const now = nowIso();
-    this.database
-      .prepare('UPDATE projects SET name = ?, description = ?, profile_json = ?, updated_at = ? WHERE id = ?')
-      .run(name, description, JSON.stringify(profile), now, projectId);
-    this.audit.record({ workspaceId: String(row.workspace_id), userId: this.principal(rawRequest).userId, action: 'project.update', entityType: 'project', entityId: projectId });
-    this.intelligence.markProjectStale(projectId);
-    return this.resources.mapProject(this.resources.projectRow(projectId));
+    const principal = this.principal(rawRequest);
+    return this.database.transaction(() => {
+      const row = this.resources.projectRow(projectId);
+      this.assertCurrentPermission(
+        principal,
+        String(row.workspace_id),
+        'project.write',
+        projectId,
+      );
+      const name = optionalString(body.name, 'name', 120) ?? String(row.name);
+      const description = optionalString(body.description, 'description', 2_000) ?? String(row.description);
+      const storedProfile = JSON.parse(String(row.profile_json)) as Record<string, unknown>;
+      const profile = body.profile !== undefined
+        ? this.profileFromBody(body)
+        : this.hasProfileFields(body)
+          ? { ...storedProfile, ...this.profileFromBody(body) }
+          : storedProfile;
+      const updated = this.database
+        .prepare(
+          `UPDATE projects SET name = ?, description = ?, profile_json = ?, updated_at = ?
+           WHERE id = ? AND deleted_at IS NULL`,
+        )
+        .run(name, description, JSON.stringify(profile), nowIso(), projectId);
+      if (Number(updated.changes) !== 1) throw new NotFoundException('项目不存在');
+      this.intelligence.markProjectStale(projectId);
+      this.audit.record({
+        workspaceId: String(row.workspace_id),
+        userId: principal.userId,
+        action: 'project.update',
+        entityType: 'project',
+        entityId: projectId,
+      });
+      return this.resources.mapProject(this.resources.projectRow(projectId));
+    });
   }
 
   @Delete(':projectId')
   @RequirePermission({ permission: 'project.delete', projectParam: 'projectId' })
   remove(@Req() rawRequest: Request, @Param('projectId') projectId: string) {
-    const row = this.resources.projectRow(projectId);
     const now = nowIso();
-    this.database.prepare('UPDATE projects SET deleted_at = ?, updated_at = ? WHERE id = ?').run(now, now, projectId);
-    this.audit.record({ workspaceId: String(row.workspace_id), userId: this.principal(rawRequest).userId, action: 'project.delete', entityType: 'project', entityId: projectId });
+    const principal = this.principal(rawRequest);
+    this.database.transaction(() => {
+      const row = this.resources.projectRow(projectId);
+      const workspaceId = String(row.workspace_id);
+      this.assertCurrentPermission(principal, workspaceId, 'project.delete', projectId);
+      const activeRevisionQuota = this.database
+        .prepare(
+          `SELECT COALESCE(SUM(r.quota_consumed_count), 0) AS value
+             FROM revision_tasks r
+             JOIN generation_jobs j ON j.id = r.job_id
+            WHERE j.project_id = ? AND r.status IN ('queued', 'running')`,
+        )
+        .get(projectId) as { value: number };
+      const activeAnalysisQuota = this.database
+        .prepare(
+          `SELECT COALESCE(SUM(quota_consumed_count), 0) AS value
+             FROM analysis_tasks
+            WHERE project_id = ? AND status IN ('queued', 'running')`,
+        )
+        .get(projectId) as { value: number };
+      const quotaRefund = Number(activeRevisionQuota.value) + Number(activeAnalysisQuota.value);
+      if (quotaRefund > 0) this.settings.refundPlatformQuota(workspaceId, quotaRefund);
+
+      const stoppedMessage = '项目已删除，任务已停止';
+      this.database
+        .prepare(
+          `UPDATE revision_tasks
+              SET status='failed', progress=100, error=?, completed_at=?, updated_at=?,
+                  claimed_by=NULL, heartbeat_at=NULL, quota_consumed_count=0
+            WHERE status IN ('queued', 'running')
+              AND job_id IN (SELECT id FROM generation_jobs WHERE project_id = ?)`,
+        )
+        .run(stoppedMessage, now, now, projectId);
+      this.database
+        .prepare(
+          `UPDATE generation_jobs
+              SET status='failed', progress=100, error=?, completed_at=?, updated_at=?,
+                  claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL
+            WHERE status IN ('queued', 'running') AND project_id = ?`,
+        )
+        .run(stoppedMessage, now, now, projectId);
+      this.database
+        .prepare(
+          `UPDATE analysis_tasks
+              SET status='failed', error=?, completed_at=?, updated_at=?,
+                  claimed_by=NULL, heartbeat_at=NULL, quota_consumed_count=0
+            WHERE status IN ('queued', 'running') AND project_id = ?`,
+        )
+        .run(stoppedMessage, now, now, projectId);
+      const removed = this.database
+        .prepare('UPDATE projects SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL')
+        .run(now, now, projectId);
+      if (Number(removed.changes) !== 1) throw new NotFoundException('项目不存在');
+      this.audit.record({
+        workspaceId,
+        userId: principal.userId,
+        action: 'project.delete',
+        entityType: 'project',
+        entityId: projectId,
+      });
+    });
     return { ok: true };
   }
 
   @Get(':projectId/acl')
-  @RequirePermission({ permission: 'project.write', projectParam: 'projectId' })
+  @RequirePermission({ permission: 'member.manage', projectParam: 'projectId' })
   listAcl(@Param('projectId') projectId: string) {
     this.resources.projectRow(projectId);
     return this.database
@@ -154,49 +229,91 @@ export class ProjectController {
   }
 
   @Put(':projectId/acl/:userId')
-  @RequirePermission({ permission: 'project.write', projectParam: 'projectId' })
+  @RequirePermission({ permission: 'member.manage', projectParam: 'projectId' })
   setAcl(
     @Req() rawRequest: Request,
     @Param('projectId') projectId: string,
     @Param('userId') userId: string,
     @Body() rawBody: unknown,
   ) {
-    const project = this.resources.projectRow(projectId);
     const body = requireObject(rawBody);
     const grants = parseStringArray(body.grants);
     const denies = parseStringArray(body.denies);
-    if (
-      !this.database
-        .prepare('SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
-        .get(project.workspace_id as string, userId)
-    ) {
-      throw new ConflictException('用户不是该工作区成员');
-    }
-    this.database
-      .prepare(
-        `INSERT INTO project_acl (project_id, user_id, grants_json, denies_json, updated_at)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(project_id, user_id) DO UPDATE SET
-           grants_json = excluded.grants_json,
-           denies_json = excluded.denies_json,
-           updated_at = excluded.updated_at`,
-      )
-      .run(projectId, userId, JSON.stringify(grants), JSON.stringify(denies), nowIso());
-    this.audit.record({ workspaceId: String(project.workspace_id), userId: this.principal(rawRequest).userId, action: 'project-acl.upsert', entityType: 'user', entityId: userId, details: { projectId, grants, denies } });
-    return { projectId, userId, grants, denies };
+    const principal = this.principal(rawRequest);
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      const workspaceId = String(project.workspace_id);
+      this.assertCurrentPermission(principal, workspaceId, 'member.manage', projectId);
+      if (
+        this.database
+          .prepare('SELECT 1 FROM workspaces WHERE id = ? AND owner_id = ? AND deleted_at IS NULL')
+          .get(workspaceId, userId)
+      ) {
+        throw new ConflictException('工作区所有者不能设置项目权限覆盖');
+      }
+      if (
+        !this.database
+          .prepare(
+            `SELECT 1 FROM workspace_members wm
+             JOIN users u ON u.id = wm.user_id
+             WHERE wm.workspace_id = ? AND wm.user_id = ? AND u.disabled_at IS NULL`,
+          )
+          .get(workspaceId, userId)
+      ) {
+        throw new ConflictException('用户不是该工作区的有效成员');
+      }
+      this.database
+        .prepare(
+          `INSERT INTO project_acl (project_id, user_id, grants_json, denies_json, updated_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(project_id, user_id) DO UPDATE SET
+             grants_json = excluded.grants_json,
+             denies_json = excluded.denies_json,
+             updated_at = excluded.updated_at`,
+        )
+        .run(projectId, userId, JSON.stringify(grants), JSON.stringify(denies), nowIso());
+      this.audit.record({
+        workspaceId,
+        userId: principal.userId,
+        action: 'project-acl.upsert',
+        entityType: 'user',
+        entityId: userId,
+        details: { projectId, grants, denies },
+      });
+      return { projectId, userId, grants, denies };
+    });
   }
 
   @Delete(':projectId/acl/:userId')
-  @RequirePermission({ permission: 'project.write', projectParam: 'projectId' })
+  @RequirePermission({ permission: 'member.manage', projectParam: 'projectId' })
   deleteAcl(
     @Req() rawRequest: Request,
     @Param('projectId') projectId: string,
     @Param('userId') userId: string,
   ) {
-    const project = this.resources.projectRow(projectId);
-    this.database.prepare('DELETE FROM project_acl WHERE project_id = ? AND user_id = ?').run(projectId, userId);
-    this.audit.record({ workspaceId: String(project.workspace_id), userId: this.principal(rawRequest).userId, action: 'project-acl.delete', entityType: 'user', entityId: userId, details: { projectId } });
-    return { ok: true };
+    const principal = this.principal(rawRequest);
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      this.assertCurrentPermission(
+        principal,
+        String(project.workspace_id),
+        'member.manage',
+        projectId,
+      );
+      const removed = this.database
+        .prepare('DELETE FROM project_acl WHERE project_id = ? AND user_id = ?')
+        .run(projectId, userId);
+      if (Number(removed.changes) !== 1) throw new NotFoundException('项目权限覆盖不存在');
+      this.audit.record({
+        workspaceId: String(project.workspace_id),
+        userId: principal.userId,
+        action: 'project-acl.delete',
+        entityType: 'user',
+        entityId: userId,
+        details: { projectId },
+      });
+      return { ok: true };
+    });
   }
 
   private profileFromBody(body: Record<string, unknown>): Record<string, unknown> {
@@ -217,6 +334,18 @@ export class ProjectController {
     return ['domain', 'productPoints', 'organizationPoints', 'cities', 'doctors'].some(
       (key) => body[key] !== undefined,
     );
+  }
+
+  private assertCurrentPermission(
+    principal: SessionPrincipal,
+    workspaceId: string,
+    permission: Permission,
+    projectId?: string,
+  ): void {
+    if (principal.systemRole === 'admin') return;
+    if (!this.permissions.hasPermission(principal.userId, workspaceId, permission, projectId)) {
+      throw new ForbiddenException(`缺少权限：${permission}`);
+    }
   }
 
   private principal(rawRequest: Request): SessionPrincipal {

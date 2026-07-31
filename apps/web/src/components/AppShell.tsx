@@ -1,4 +1,4 @@
-import { Bell, ChevronDown, Gauge, LogOut, Menu, Settings, Sparkles, X } from "lucide-react";
+import { Bell, ChevronDown, CircleAlert, Gauge, LogOut, Menu, RefreshCcw, Settings, Sparkles, X } from "lucide-react";
 import { useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "./AuthContext";
@@ -6,6 +6,7 @@ import { EditionSwitch } from "./EditionSwitch";
 import { CHANNELS, SETTINGS_CHANNEL } from "../lib/channels";
 import { groupNavItems, navItemForPath, visibleNavItems } from "../lib/nav-groups";
 import { ProjectProvider, useProjects } from "./ProjectContext";
+import { Button } from "./Ui";
 
 /*
   频道表下沉到 lib/channels.ts:页面 hero 也要按当前路径取「图标 + 频道名」,
@@ -17,7 +18,7 @@ function ShellContent() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const { user, logout } = useAuth();
-  const { projects, projectId, setProjectId, loading } = useProjects();
+  const { projects, projectId, setProjectId, loading, error, refresh } = useProjects();
   const location = useLocation();
   const navigate = useNavigate();
   const visibleNavigation = visibleNavItems(navigation, user?.role);
@@ -178,7 +179,19 @@ function ShellContent() {
         </header>
 
         <main className="content">
-          <Outlet />
+          {error && (
+            <div className="shell-error" role="alert">
+              <CircleAlert size={18} />
+              <span><strong>项目数据加载失败</strong><small>{error}</small></span>
+              <Button variant="ghost" icon={<RefreshCcw size={15} />} loading={loading} onClick={() => void refresh()}>重试</Button>
+            </div>
+          )}
+          {/*
+            专家页的本地状态都以当前项目为作用域。项目切换时重挂页面，既清理
+            表单/弹窗，也让旧项目尚未结束的 Promise 只能更新已卸载的实例，不能
+            在返回较晚时覆盖新项目页面。
+          */}
+          {(!error || projects.length > 0) && <Outlet key={projectId || "no-project"} />}
         </main>
       </div>
     </div>

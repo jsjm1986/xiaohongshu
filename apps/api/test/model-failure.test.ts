@@ -132,5 +132,6 @@ test('文案带上动作名,并在退额度时明说', () => {
   // other 不退,文案里不能出现「已退还」——那会是假承诺。
   const other = modelFailureMessage('other', '修改', '候选未通过事实校验');
   assert.ok(!other.includes('已退还'), `other 文案不该承诺退额度：${other}`);
-  assert.match(other, /候选未通过事实校验/u, 'other 要透出原文,至少给一点线索');
+  assert.match(other, /修改失败|重试/u);
+  assert.doesNotMatch(other, /候选未通过事实校验/u, 'other 也不能把内部校验或供应商原文暴露给用户');
 });

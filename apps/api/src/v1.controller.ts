@@ -64,7 +64,8 @@ export class V1Controller {
       .prepare(
         `SELECT k.*, p.workspace_id FROM knowledge_files k
          JOIN projects p ON p.id = k.project_id
-         WHERE k.deleted_at IS NULL AND p.deleted_at IS NULL
+         JOIN workspaces w ON w.id = p.workspace_id
+         WHERE k.deleted_at IS NULL AND p.deleted_at IS NULL AND w.deleted_at IS NULL
            AND (? IS NULL OR p.workspace_id = ?)
            AND (? IS NULL OR k.project_id = ?)
          ORDER BY k.created_at DESC`,
@@ -105,7 +106,8 @@ export class V1Controller {
       .prepare(
         `SELECT j.*, p.workspace_id FROM generation_jobs j
          JOIN projects p ON p.id = j.project_id
-         WHERE p.deleted_at IS NULL
+         JOIN workspaces w ON w.id = p.workspace_id
+         WHERE j.deleted_at IS NULL AND p.deleted_at IS NULL AND w.deleted_at IS NULL
            AND (? IS NULL OR p.workspace_id = ?)
            AND (? IS NULL OR j.project_id = ?)
          ORDER BY j.created_at DESC`,
@@ -141,7 +143,8 @@ export class V1Controller {
       .prepare(
         `SELECT c.*, p.workspace_id FROM content_packages c
          JOIN projects p ON p.id = c.project_id
-         WHERE c.id = ? AND p.deleted_at IS NULL`,
+         JOIN workspaces w ON w.id = p.workspace_id
+         WHERE c.id = ? AND p.deleted_at IS NULL AND w.deleted_at IS NULL`,
       )
       .get(id) as Record<string, unknown> | undefined;
     if (!row) throw new NotFoundException('内容包不存在');

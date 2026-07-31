@@ -1,10 +1,17 @@
 import assert from 'node:assert/strict';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createInterface, type Interface } from 'node:readline';
+import { setTimeout as delay } from 'node:timers/promises';
 import { after, before, beforeEach, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { createFormulaVersion, DEFAULT_FORMULA_VERSION } from '@content-agent/agent-core';
 import { DatabaseService } from '../src/database.service.js';
 import { claimNextJob, heartbeatJob, reclaimStaleJobs } from '../src/job-claim.js';
+import { KnowledgeService } from '../src/knowledge.service.js';
 
 /**
  * 两个实例共用同一个 SQLite 文件。
@@ -61,6 +68,39 @@ function seedParents(): void {
     .run(now, now);
 }
 
+function seedProject(id: string): void {
+  const now = new Date().toISOString();
+  instanceA.prepare(
+    `INSERT OR IGNORE INTO projects (id, workspace_id, slug, name, created_by, created_at, updated_at)
+     VALUES (?, 'w1', ?, ?, 'u1', ?, ?)`,
+  ).run(id, id, id, now, now);
+}
+
+function seedFormula(projectId: string, id: string, versionNumber: number, status: 'active' | 'draft'): void {
+  const createdAt = new Date().toISOString();
+  const version = createFormulaVersion({
+    id,
+    projectId,
+    version: `${versionNumber}.0.0${status === 'draft' ? '-draft' : ''}`,
+    status,
+    createdAt,
+    formulas: DEFAULT_FORMULA_VERSION.formulas,
+  });
+  instanceA.prepare(
+    `INSERT INTO formula_versions
+       (id, project_id, version, status, definition_json, created_by, created_at, activated_at)
+     VALUES (?, ?, ?, ?, ?, 'u1', ?, ?)`,
+  ).run(
+    id,
+    projectId,
+    versionNumber,
+    status,
+    JSON.stringify({ name: '并发测试公式', description: '并发测试', version, config: {} }),
+    createdAt,
+    status === 'active' ? createdAt : null,
+  );
+}
+
 function seedQueued(id: string, createdAt: string): void {
   const now = new Date().toISOString();
   instanceA
@@ -84,6 +124,83 @@ function rowOf(id: string) {
 
 function interruptionsOf(id: string): number {
   return Number((JSON.parse(rowOf(id).resolution_snapshot_json) as { restartInterruptions?: number }).restartInterruptions ?? 0);
+}
+
+interface VersionWorker {
+  child: ChildProcessWithoutNullStreams;
+  lines: AsyncIterator<string>;
+  stderr: () => string;
+}
+
+interface WorkerResult {
+  id: string;
+  ok: boolean;
+  version?: number;
+  claimedId?: string;
+  error?: string;
+}
+
+async function startVersionWorker(): Promise<VersionWorker> {
+  const child = spawn(
+    process.execPath,
+    ['--import', 'tsx', fileURLToPath(new URL('./fixtures/version-allocation-worker.ts', import.meta.url))],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        CONTENT_AGENT_DATA_DIR: dataDir,
+        CONTENT_AGENT_DB_PATH: databasePath,
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    },
+  );
+  let errorOutput = '';
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk: string) => { errorOutput += chunk; });
+  const output: Interface = createInterface({ input: child.stdout, crlfDelay: Infinity });
+  const lines = output[Symbol.asyncIterator]();
+  const ready = await lines.next();
+  assert.equal(ready.value, 'READY', errorOutput);
+  return { child, lines, stderr: () => errorOutput };
+}
+
+async function stopVersionWorker(worker: VersionWorker): Promise<void> {
+  worker.child.stdin.end();
+  const [code] = await once(worker.child, 'exit') as [number | null];
+  assert.equal(code, 0, worker.stderr());
+}
+
+async function readWorkerResult(
+  worker: VersionWorker,
+): Promise<WorkerResult> {
+  const line = await worker.lines.next();
+  assert.match(line.value ?? '', /^RESULT /u, worker.stderr());
+  return JSON.parse(String(line.value).slice('RESULT '.length)) as WorkerResult;
+}
+
+async function commandWhileWriteLocked(
+  worker: VersionWorker,
+  id: string,
+  operation: string,
+  projectId: string,
+  insertUncommittedVersion: () => void,
+): Promise<WorkerResult> {
+  instanceA.db.exec('BEGIN IMMEDIATE');
+  let committed = false;
+  try {
+    insertUncommittedVersion();
+    worker.child.stdin.write(`${JSON.stringify({ id, operation, projectId })}\n`);
+    const started = await worker.lines.next();
+    assert.equal(started.value, `START ${id}`, worker.stderr());
+    // The worker is now blocked on BEGIN IMMEDIATE. The old implementation read
+    // MAX(version) before this point and later collided with this pending row.
+    await delay(50);
+    instanceA.db.exec('COMMIT');
+    committed = true;
+  } finally {
+    if (!committed) instanceA.db.exec('ROLLBACK');
+  }
+  return readWorkerResult(worker);
 }
 
 beforeEach(() => {
@@ -116,6 +233,46 @@ test('24 篇任务被两个实例分完:每篇恰好领一次,没有一篇漏掉
     .prepare("SELECT COUNT(*) AS value FROM generation_jobs WHERE status='queued'")
     .get() as { value: number };
   assert.equal(Number(stillQueued.value), 0);
+});
+
+test('跨进程领取等待写锁后基于最新队列继续取下一条', async () => {
+  seedQueued('claim-first', '2026-07-26T00:00:01.000Z');
+  seedQueued('claim-second', '2026-07-26T00:00:02.000Z');
+  const worker = await startVersionWorker();
+  const claimedAt = new Date().toISOString();
+  let committed = false;
+  instanceA.db.exec('BEGIN IMMEDIATE');
+  try {
+    const claimed = instanceA.prepare(
+      `UPDATE generation_jobs
+          SET status='running', claimed_by=?, claimed_at=?, heartbeat_at=?, updated_at=?
+        WHERE id='claim-first' AND status='queued'`,
+    ).run(ID_A, claimedAt, claimedAt, claimedAt);
+    assert.equal(claimed.changes, 1);
+
+    worker.child.stdin.write(`${JSON.stringify({ id: 'claim-race', operation: 'claim-job' })}\n`);
+    const started = await worker.lines.next();
+    assert.equal(started.value, 'START claim-race', worker.stderr());
+    // 子进程此时阻塞在原子 UPDATE 的 SQLite 写锁上。提交后它必须重新读取最新
+    // 快照并选择第二条,不能拿着锁前的候选覆盖第一条,也不能误报队列为空。
+    await delay(50);
+    instanceA.db.exec('COMMIT');
+    committed = true;
+
+    const result = await readWorkerResult(worker);
+    assert.deepEqual(result, { id: 'claim-race', ok: true, claimedId: 'claim-second' });
+    const owners = (instanceA.prepare(
+      'SELECT id, status, claimed_by FROM generation_jobs ORDER BY created_at, id',
+    ).all() as Array<{ id: string; status: string; claimed_by: string | null }>)
+      .map((row) => ({ ...row }));
+    assert.deepEqual(owners, [
+      { id: 'claim-first', status: 'running', claimed_by: ID_A },
+      { id: 'claim-second', status: 'running', claimed_by: 'worker:claim-job' },
+    ]);
+  } finally {
+    if (!committed) instanceA.db.exec('ROLLBACK');
+    await stopVersionWorker(worker);
+  }
 });
 
 test('B 实例启动不会抢走 A 正在跑的任务:实测被判 failed 的那条路径', () => {
@@ -208,4 +365,180 @@ test('配额扣减在两个连接间不超发:上限就是上限', () => {
   assert.equal(granted, 5, '只应放行到上限');
   const row = instanceA.prepare("SELECT quota_used FROM workspace_settings WHERE workspace_id='w1'").get() as { quota_used: number };
   assert.equal(Number(row.quota_used), 5, 'quota_used 不得越过 monthly_quota');
+});
+
+test('两个连接导入同名知识文件时分配不同版本', async () => {
+  const resources = { projectRow: () => ({ workspace_id: 'w1' }) } as never;
+  const audit = { record: () => undefined } as never;
+  const intelligence = { markProjectStale: () => undefined } as never;
+  const serviceA = new KnowledgeService(instanceA, resources, audit, intelligence);
+  const serviceB = new KnowledgeService(instanceB, resources, audit, intelligence);
+  const principal = { userId: 'u1' } as never;
+
+  const [first, second] = await Promise.all([
+    serviceA.import({ projectId: 'p1', filename: 'parallel.md', content: '版本 A', principal }),
+    serviceB.import({ projectId: 'p1', filename: 'parallel.md', content: '版本 B', principal }),
+  ]);
+
+  assert.deepEqual(
+    [Number(first.version), Number(second.version)].sort((a, b) => a - b),
+    [1, 2],
+  );
+  const rows = instanceA.prepare(
+    "SELECT version FROM knowledge_files WHERE project_id='p1' AND filename='parallel.md' ORDER BY version",
+  ).all() as Array<{ version: number }>;
+  assert.deepEqual(rows.map((row) => Number(row.version)), [1, 2]);
+});
+
+test('版本取号在跨进程写锁后执行:公式、研究资源与项目智能都连续且不冲突', async () => {
+  const worker = await startVersionWorker();
+  const now = new Date().toISOString();
+  try {
+    const formulaProject = 'p-version-formula';
+    seedProject(formulaProject);
+    seedFormula(formulaProject, `${formulaProject}-v1`, 1, 'active');
+    const formula = await commandWhileWriteLocked(
+      worker,
+      'formula',
+      'formula',
+      formulaProject,
+      () => seedFormula(formulaProject, `${formulaProject}-v2`, 2, 'draft'),
+    );
+    assert.deepEqual(formula, { id: 'formula', ok: true, version: 3 });
+
+    const defaultProject = 'p-version-default';
+    seedProject(defaultProject);
+    const defaultFormula = await commandWhileWriteLocked(
+      worker,
+      'ensure-default',
+      'ensure-default',
+      defaultProject,
+      () => seedFormula(defaultProject, `${defaultProject}-v1`, 1, 'active'),
+    );
+    assert.deepEqual(defaultFormula, { id: 'ensure-default', ok: true, version: 1 });
+    assert.equal(
+      Number((instanceA.prepare('SELECT COUNT(*) AS value FROM formula_versions WHERE project_id=?').get(defaultProject) as { value: number }).value),
+      1,
+    );
+
+    const claimProject = 'p-version-claim';
+    seedProject(claimProject);
+    const claim = await commandWhileWriteLocked(worker, 'claim', 'claim', claimProject, () => {
+      instanceA.prepare(
+        `INSERT INTO research_claims
+           (id,project_id,logical_key,version,parent_id,title,statement,claim_type,status,scope_json,metadata_json,created_by,created_at)
+         VALUES (?,?, 'parallel-claim',1,NULL,'并发主张 1','内容 1','hypothesis','draft','[]','{}','u1',?)`,
+      ).run(`${claimProject}-v1`, claimProject, now);
+    });
+    assert.deepEqual(claim, { id: 'claim', ok: true, version: 2 });
+
+    const sourceProject = 'p-version-source';
+    seedProject(sourceProject);
+    const source = await commandWhileWriteLocked(worker, 'source', 'source', sourceProject, () => {
+      instanceA.prepare(
+        `INSERT INTO evidence_sources
+           (id,project_id,source_key,version,parent_id,kind,citation,url,supports_text,limitations_text,status,metadata_json,created_by,created_at)
+         VALUES (?,?, 'parallel-source',1,NULL,'test','并发来源 1',NULL,'','','draft','{}','u1',?)`,
+      ).run(`${sourceProject}-v1`, sourceProject, now);
+    });
+    assert.deepEqual(source, { id: 'source', ok: true, version: 2 });
+
+    const datasetProject = 'p-version-dataset';
+    seedProject(datasetProject);
+    const dataset = await commandWhileWriteLocked(worker, 'dataset', 'dataset', datasetProject, () => {
+      instanceA.prepare(
+        `INSERT INTO dataset_snapshots
+           (id,project_id,dataset_key,version,label,kind,sha256,row_count,storage_ref,provenance,limitations,schema_json,status,created_by,created_at)
+         VALUES (?,?, 'parallel-dataset',1,'并发数据集 1','internal_sample',?,NULL,'','','','{}','draft','u1',?)`,
+      ).run(`${datasetProject}-v1`, datasetProject, 'b'.repeat(64), now);
+    });
+    assert.deepEqual(dataset, { id: 'dataset', ok: true, version: 2 });
+
+    const experimentProject = 'p-version-experiment';
+    seedProject(experimentProject);
+    const experiment = await commandWhileWriteLocked(worker, 'experiment', 'experiment', experimentProject, () => {
+      instanceA.prepare(
+        `INSERT INTO experiment_versions
+           (id,project_id,experiment_key,version,parent_id,title,hypothesis,design_json,metrics_json,analysis_plan_json,status,created_by,created_at)
+         VALUES (?,?, 'parallel-experiment',1,NULL,'并发实验 1','假设 1','{}','[]','{}','draft','u1',?)`,
+      ).run(`${experimentProject}-v1`, experimentProject, now);
+    });
+    assert.deepEqual(experiment, { id: 'experiment', ok: true, version: 2 });
+
+    const resultProject = 'p-version-result';
+    seedProject(resultProject);
+    instanceA.prepare(
+      `INSERT INTO experiment_versions
+         (id,project_id,experiment_key,version,parent_id,title,hypothesis,design_json,metrics_json,analysis_plan_json,status,created_by,created_at)
+       VALUES (?,?,'result-parent',1,NULL,'结果父实验','假设','{}','[]','{}','running','u1',?)`,
+    ).run(`${resultProject}-experiment-parent`, resultProject, now);
+    const result = await commandWhileWriteLocked(worker, 'experiment-result', 'experiment-result', resultProject, () => {
+      instanceA.prepare(
+        `INSERT INTO experiment_results
+           (id,experiment_version_id,version,dataset_snapshot_id,result_json,conclusion,status,created_by,created_at)
+         VALUES (?, ?,1,NULL,'{}','inconclusive','draft','u1',?)`,
+      ).run(`${resultProject}-result-v1`, `${resultProject}-experiment-parent`, now);
+    });
+    assert.deepEqual(result, { id: 'experiment-result', ok: true, version: 2 });
+
+    const intelligenceProject = 'p-version-intelligence';
+    seedProject(intelligenceProject);
+    const intelligence = await commandWhileWriteLocked(worker, 'intelligence', 'intelligence', intelligenceProject, () => {
+      instanceA.prepare(
+        `INSERT INTO project_intelligence
+           (id,project_id,version,status,source_fingerprint,map_json,created_by,created_at,updated_at)
+         VALUES (?,?,1,'draft','fixture','{}','u1',?,?)`,
+      ).run(`${intelligenceProject}-v1`, intelligenceProject, now, now);
+    });
+    assert.deepEqual(intelligence, { id: 'intelligence', ok: true, version: 2 });
+  } finally {
+    await stopVersionWorker(worker);
+  }
+});
+
+test('两个进程首次初始化研究目录与基线发布时只写入一份', async () => {
+  const projectId = 'p-parallel-bootstrap';
+  seedProject(projectId);
+  seedFormula(projectId, `${projectId}-formula`, 1, 'active');
+  const workerA = await startVersionWorker();
+  const workerB = await startVersionWorker();
+  let committed = false;
+  instanceA.db.exec('BEGIN IMMEDIATE');
+  try {
+    workerA.child.stdin.write(`${JSON.stringify({ id: 'bootstrap-a', operation: 'bootstrap', projectId })}\n`);
+    workerB.child.stdin.write(`${JSON.stringify({ id: 'bootstrap-b', operation: 'bootstrap', projectId })}\n`);
+    const [startedA, startedB] = await Promise.all([workerA.lines.next(), workerB.lines.next()]);
+    assert.equal(startedA.value, 'START bootstrap-a', workerA.stderr());
+    assert.equal(startedB.value, 'START bootstrap-b', workerB.stderr());
+    await delay(50);
+    instanceA.db.exec('COMMIT');
+    committed = true;
+    const [resultA, resultB] = await Promise.all([readWorkerResult(workerA), readWorkerResult(workerB)]);
+    assert.deepEqual(resultA, { id: 'bootstrap-a', ok: true });
+    assert.deepEqual(resultB, { id: 'bootstrap-b', ok: true });
+  } finally {
+    if (!committed) instanceA.db.exec('ROLLBACK');
+    await Promise.all([stopVersionWorker(workerA), stopVersionWorker(workerB)]);
+  }
+
+  const claimGroups = instanceA.prepare(
+    `SELECT logical_key, COUNT(*) AS count, MAX(version) AS max_version
+       FROM research_claims WHERE project_id=? AND logical_key LIKE 'formula:%' GROUP BY logical_key`,
+  ).all(projectId) as Array<{ logical_key: string; count: number; max_version: number }>;
+  assert.ok(claimGroups.length > 0);
+  assert.ok(claimGroups.every((row) => Number(row.count) === 1 && Number(row.max_version) === 1));
+
+  const sourceGroups = instanceA.prepare(
+    `SELECT source_key, COUNT(*) AS count, MAX(version) AS max_version
+       FROM evidence_sources WHERE project_id=? GROUP BY source_key`,
+  ).all(projectId) as Array<{ source_key: string; count: number; max_version: number }>;
+  assert.ok(sourceGroups.length > 0);
+  assert.ok(sourceGroups.every((row) => Number(row.count) === 1 && Number(row.max_version) === 1));
+
+  const releases = instanceA.prepare(
+    'SELECT status, COUNT(*) AS count FROM release_manifests WHERE project_id=? GROUP BY status',
+  ).all(projectId) as Array<{ status: string; count: number }>;
+  assert.equal(releases.length, 1);
+  assert.equal(releases[0]?.status, 'active');
+  assert.equal(Number(releases[0]?.count), 1);
 });

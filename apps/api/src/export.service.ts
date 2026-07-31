@@ -2,14 +2,7 @@ import { existsSync } from 'node:fs';
 import { platform } from 'node:os';
 import { resolve } from 'node:path';
 import { BadRequestException, Injectable } from '@nestjs/common';
-import {
-  Document,
-  HeadingLevel,
-  Packer,
-  Paragraph,
-  TextRun,
-  type ISectionOptions,
-} from 'docx';
+import type { ISectionOptions } from 'docx';
 import PDFDocument from 'pdfkit';
 import {
   normalizeContentPackageForApi,
@@ -25,6 +18,27 @@ export interface ExportOptions {
 }
 
 type JsonObject = Record<string, unknown>;
+type DocxModule = typeof import('docx');
+
+let docxModulePromise: Promise<DocxModule> | undefined;
+
+function loadDocxModule(): Promise<DocxModule> {
+  if (!docxModulePromise) docxModulePromise = importDocxModule();
+  return docxModulePromise;
+}
+
+async function importDocxModule(): Promise<DocxModule> {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const hideNodeExperimentalGetter = Boolean(descriptor?.configurable && typeof descriptor.get === 'function');
+  if (hideNodeExperimentalGetter) Reflect.deleteProperty(globalThis, 'localStorage');
+  try {
+    return await import('docx');
+  } finally {
+    if (hideNodeExperimentalGetter && descriptor) {
+      Object.defineProperty(globalThis, 'localStorage', descriptor);
+    }
+  }
+}
 
 const WINDOWS_FONT_CANDIDATES = [
   'C:/Windows/Fonts/msyh.ttc',
@@ -158,9 +172,11 @@ export class ExportService {
   }
 
   private async toDocx(pkg: JsonObject, options: ExportOptions): Promise<Buffer> {
+    const docx = await loadDocxModule();
+    const { Document, Packer } = docx;
     const markdown = this.toMarkdown(pkg);
     const font = options.docxFontName ?? process.env.CONTENT_AGENT_DOCX_FONT_NAME ?? 'Microsoft YaHei';
-    const children = markdown.split('\n').map((line) => markdownLineToParagraph(line, font));
+    const children = markdown.split('\n').map((line) => markdownLineToParagraph(line, font, docx));
     const section: ISectionOptions = { properties: {}, children };
     const document = new Document({
       styles: {
@@ -516,7 +532,8 @@ function appendAuditTrail(lines: string[], pkg: JsonObject): void {
   );
 }
 
-function markdownLineToParagraph(line: string, font: string): Paragraph {
+function markdownLineToParagraph(line: string, font: string, docx: DocxModule) {
+  const { HeadingLevel, Paragraph, TextRun } = docx;
   if (line.startsWith('# ')) {
     return new Paragraph({
       heading: HeadingLevel.TITLE,

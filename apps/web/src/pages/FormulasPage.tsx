@@ -12,6 +12,7 @@ import {
   Info,
   LockKeyhole,
   Plus,
+  RefreshCcw,
   RotateCcw,
   Variable,
 } from "lucide-react";
@@ -20,6 +21,7 @@ import { useProjects } from "../components/ProjectContext";
 import {
   Badge,
   Button,
+  EmptyState,
   Field,
   Modal,
   Skeleton,
@@ -40,7 +42,7 @@ import {
   isCalculationBoundToFormulaVersion,
   type FormulaCalculatorRawInputs,
 } from "../lib/formula-calculator";
-import { demoFormulas } from "../lib/fixtures";
+import { errorMessage } from "../lib/errors";
 import {
   parseReviewedDefaultsSyncResult,
   requestConfirmedFormulaActivation,
@@ -81,6 +83,8 @@ export function FormulasPage() {
   const [versions, setVersions] = useState<FormulaVersion[]>([]);
   const [schema, setSchema] = useState<GenerationParameterSchema>(defaultParameterSchema);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [schemaWarning, setSchemaWarning] = useState<string | null>(null);
   const [selected, setSelected] = useState<FormulaVersion | null>(null);
   const [newOpen, setNewOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -91,30 +95,37 @@ export function FormulasPage() {
   const [syncingDefaults, setSyncingDefaults] = useState(false);
   const toast = useToast();
 
-  useEffect(() => {
+  const load = () => {
     if (!projectId) {
+      setVersions([]);
+      setSelected(null);
+      setLoadError(null);
+      setSchemaWarning(null);
       setLoading(false);
       return;
     }
     setLoading(true);
+    setLoadError(null);
+    setSchemaWarning(null);
     Promise.all([
       api.formulas.list(projectId),
-      api.parameters.schema(projectId).catch(() => null),
+      api.parameters.schema(projectId)
+        .then((value) => ({ value, error: null as string | null }))
+        .catch((error) => ({ value: null, error: errorMessage(error, "参数 Schema 加载失败") })),
     ])
-      .then(([result, rawSchema]) => {
+      .then(([result, schemaResult]) => {
         const active = result.items.find((item) => item.status === "active") || result.items[0];
         setVersions(result.items);
         setSelected(active || null);
-        setSchema(normalizeParameterSchema(rawSchema, active));
+        setSchema(normalizeParameterSchema(schemaResult.value, active));
+        setSchemaWarning(schemaResult.error);
       })
-      .catch(() => {
-        const fixtures = demoFormulas.filter((item) => item.projectId === projectId);
-        const active = fixtures.find((item) => item.status === "active") || fixtures[0];
-        setVersions(fixtures);
-        setSelected(active || null);
-        setSchema(normalizeParameterSchema(null, active));
-      })
+      .catch((error) => setLoadError(errorMessage(error, "公式版本加载失败")))
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    load();
   }, [projectId]);
 
   useEffect(() => {
@@ -150,24 +161,26 @@ export function FormulasPage() {
   };
 
   const createVersion = async () => {
-    if (!projectId) return;
-    const next: FormulaVersion = {
-      id: `local-${Date.now()}`,
-      projectId,
-      version: `v${versions.length + 1}.0-draft`,
-      name: selected?.name || "完整文案公式",
-      description: "从当前版本复制",
-      status: "draft",
-      formulaCount: selected?.formulas?.length ?? selected?.formulaCount ?? 0,
-      formulas: selected?.formulas,
-      config: selected?.config,
-      createdAt: new Date().toISOString(),
-    };
-    const result = await api.formulas.create({ ...next, parentId: selected?.id }).catch(() => next);
-    setVersions((current) => [result, ...current]);
-    setSelected(result);
-    setNewOpen(false);
-    toast.push("草稿版本已创建");
+    if (!projectId || !selected) return;
+    setSaving(true);
+    try {
+      const result = await api.formulas.create({
+        projectId,
+        parentId: selected.id,
+        name: selected.name || "完整文案公式",
+        description: "从当前版本复制",
+        formulas: selected.formulas,
+        config: selected.config,
+      });
+      setVersions((current) => [result, ...current]);
+      setSelected(result);
+      setNewOpen(false);
+      toast.push("草稿版本已创建");
+    } catch (error) {
+      toast.push(errorMessage(error, "公式草稿创建失败"), "error");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const syncReviewedDefaults = async () => {
@@ -239,7 +252,9 @@ export function FormulasPage() {
         description={`「${currentProject?.name || "当前项目"}」的生产定义、规范边界、待验证推理与行为参数映射。`}
         actions={<><Button variant="secondary" icon={<GitBranch size={17} />} onClick={() => setSyncOpen(true)} disabled={!projectId}>同步已复核默认公式</Button><Button icon={<Plus size={17} />} onClick={() => setNewOpen(true)} disabled={!selected}>创建新版本</Button></>}
       />
-      {loading ? <Skeleton lines={8} /> : (
+      {loading ? <Skeleton lines={8} /> : loadError ? (
+        <section className="panel"><EmptyState icon={<AlertTriangle size={24} />} title="公式版本加载失败" description={loadError} action={<Button variant="secondary" icon={<RefreshCcw size={16} />} onClick={load}>重试</Button>} /></section>
+      ) : (
         <div className="formula-layout">
           <aside className="version-list">
             <header><h2>版本记录</h2><Badge>{versions.length} 个版本</Badge></header>
@@ -247,6 +262,7 @@ export function FormulasPage() {
           </aside>
 
           {selected ? <main className="formula-detail">
+            {schemaWarning && <section className="formula-behavior-note"><AlertTriangle size={18} /><div><strong>参数映射暂未从服务端加载</strong><p>{schemaWarning}。当前参数映射只用于保持页面结构，不代表服务端已确认配置；请重试加载后再据此调整生成参数。</p></div><Button variant="ghost" icon={<RefreshCcw size={15} />} onClick={load}>重试</Button></section>}
             <header className="formula-detail__header"><div className="formula-detail__mark"><FlaskConical size={24} /></div><div><span>版本 {selected.version}</span><h2>{selected.name}</h2><p>{selected.description}</p></div><div className="formula-detail__actions">{selected.status === "active" ? <Badge tone="positive"><CheckCircle2 size={13} />当前启用</Badge> : <Button variant="secondary" loading={activatingId === selected.id} disabled={Boolean(activatingId)} onClick={() => activate(selected)}>启用此版本</Button>}</div></header>
             <div className="formula-meta"><span><GitBranch size={16} /><small>版本状态</small><strong>{selected.status === "active" ? "不可变已锁定" : selected.status === "archived" ? "已归档未启用" : "未启用草稿"}</strong></span><span><FlaskConical size={16} /><small>真实公式单元</small><strong>{selected.formulas?.length ?? selected.formulaCount ?? 0} 个</strong></span><span><LockKeyhole size={16} /><small>未知值策略</small><strong>保持 unknown</strong></span></div>
 
@@ -262,7 +278,7 @@ export function FormulasPage() {
         </div>
       )}
 
-      <Modal open={newOpen} onClose={() => setNewOpen(false)} title="创建公式草稿" description="已启用版本不会被修改，系统将创建一份独立副本。" footer={<><Button variant="ghost" onClick={() => setNewOpen(false)}>取消</Button><Button onClick={createVersion} icon={<Copy size={16} />}>复制为草稿</Button></>}>
+      <Modal open={newOpen} onClose={() => { if (!saving) setNewOpen(false); }} title="创建公式草稿" description="已启用版本不会被修改，系统将创建一份独立副本。" footer={<><Button variant="ghost" disabled={saving} onClick={() => setNewOpen(false)}>取消</Button><Button loading={saving} onClick={createVersion} icon={<Copy size={16} />}>复制为草稿</Button></>}>
         <div className="version-copy-preview"><span><FlaskConical size={20} /></span><div><strong>{selected?.version || "当前公式"} → 新草稿</strong><p>真实公式定义、变量、表达式与项目配置将一并复制。</p></div></div>
       </Modal>
 

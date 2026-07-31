@@ -82,11 +82,11 @@ export class KnowledgeController {
   recategorize(
     @Req() rawRequest: Request,
     @Param('fileId') fileId: string,
-    @Body() body: { category?: string; evidenceStatus?: string },
+    @Body() rawBody: unknown,
   ) {
     const row = this.knowledge.row(fileId);
     this.assert(rawRequest, String(row.project_id), 'knowledge.import');
-    return this.knowledge.recategorize(fileId, body ?? {}, this.principal(rawRequest));
+    return this.knowledge.recategorize(fileId, requireObject(rawBody), this.principal(rawRequest));
   }
 
   @Delete(':fileId')
@@ -222,12 +222,12 @@ export class ProjectKnowledgeController {
     @Req() rawRequest: Request,
     @Param('projectId') projectId: string,
     @Param('fileId') fileId: string,
-    @Body() body: { category?: string; evidenceStatus?: string },
+    @Body() rawBody: unknown,
   ) {
     const row = this.knowledge.row(fileId);
     if (row.project_id !== projectId) throw new BadRequestException('文件不属于该项目');
     this.assert(rawRequest, projectId, 'knowledge.import');
-    return this.knowledge.recategorize(fileId, body ?? {}, this.principal(rawRequest));
+    return this.knowledge.recategorize(fileId, requireObject(rawBody), this.principal(rawRequest));
   }
 
   @Delete(':fileId')

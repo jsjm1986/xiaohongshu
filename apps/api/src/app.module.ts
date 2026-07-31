@@ -5,7 +5,7 @@ import { AuditService } from './audit.service.js';
 import { AuditController } from './audit.controller.js';
 import { AuthController } from './auth.controller.js';
 import { AuthService } from './auth.service.js';
-import { APP_OPTIONS, type ApiOptionsInput, resolveOptions } from './config.js';
+import { APP_OPTIONS, type ApiOptions } from './config.js';
 import { DatabaseService } from './database.service.js';
 import {
   CsrfGuard,
@@ -30,6 +30,7 @@ import { ProjectController } from './project.controller.js';
 import { PresetController } from './preset.controller.js';
 import { RegistrationController } from './registration.controller.js';
 import { RegistrationService } from './registration.service.js';
+import { RateLimitService } from './rate-limit.service.js';
 import { PresetService } from './preset.service.js';
 import { ResourceService } from './resource.service.js';
 import { RevisionService } from './revision.service.js';
@@ -42,7 +43,7 @@ import { WorkspaceController } from './workspace.controller.js';
 
 @Module({})
 export class AppModule {
-  static register(options: ApiOptionsInput = {}): DynamicModule {
+  static register(options: ApiOptions): DynamicModule {
     return {
       module: AppModule,
       controllers: [
@@ -67,7 +68,7 @@ export class AppModule {
         V1Controller,
       ],
       providers: [
-        { provide: APP_OPTIONS, useValue: resolveOptions(options) },
+        { provide: APP_OPTIONS, useValue: options },
         DatabaseService,
         AuthService,
         AuditService,
@@ -83,6 +84,7 @@ export class AppModule {
         PresetService,
         ExportService,
         RegistrationService,
+        RateLimitService,
         SessionAuthGuard,
         CsrfGuard,
         ReadOnlyAuthGuard,

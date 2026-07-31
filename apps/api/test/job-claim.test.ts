@@ -60,9 +60,18 @@ function seedParents(): void {
     .prepare('INSERT OR IGNORE INTO workspaces (id, slug, name, owner_id, created_at, updated_at) VALUES (?,?,?,?,?,?)')
     .run('w1', 'ws', 'ws', 'u1', now, now);
   database
+    .prepare('INSERT OR IGNORE INTO workspaces (id, slug, name, owner_id, created_at, updated_at) VALUES (?,?,?,?,?,?)')
+    .run('w2', 'ws-valid', 'ws-valid', 'u1', now, now);
+  database
     .prepare(
       `INSERT OR IGNORE INTO projects (id, workspace_id, slug, name, created_by, created_at, updated_at)
        VALUES ('p1','w1','proj','项目','u1',?,?)`,
+    )
+    .run(now, now);
+  database
+    .prepare(
+      `INSERT OR IGNORE INTO projects (id, workspace_id, slug, name, created_by, created_at, updated_at)
+       VALUES ('p2','w2','proj-valid','有效项目','u1',?,?)`,
     )
     .run(now, now);
 }
@@ -74,6 +83,7 @@ function seedJob(id: string, input: {
   claimedBy?: string | null;
   heartbeatAt?: string | null;
   interruptions?: number;
+  projectId?: string;
 } ): void {
   const now = new Date().toISOString();
   const snapshot = input.interruptions === undefined
@@ -87,11 +97,11 @@ function seedJob(id: string, input: {
           resolution_snapshot_json, config_impact_json, opportunity_snapshot_json,
           planning_context_json, image_context_json, research_snapshot_json, quality_status,
           claimed_by, claimed_at, heartbeat_at)
-       VALUES (?, 'p1', ?, '{}', 's', 'u1', ?, ?, ?, 'g', 'simple', 0, '{}', 1,
+       VALUES (?, ?, ?, '{}', 's', 'u1', ?, ?, ?, 'g', 'simple', 0, '{}', 1,
           ?, '{}', '{}', '{}', '[]', '{}', 'unknown', ?, ?, ?)`,
     )
     .run(
-      id, input.status, input.createdAt ?? now, now, `选题-${id}`, snapshot,
+      id, input.projectId ?? 'p1', input.status, input.createdAt ?? now, now, `选题-${id}`, snapshot,
       input.claimedBy ?? null, input.claimedBy ? now : null, input.heartbeatAt ?? null,
     );
 }
@@ -139,10 +149,13 @@ const revisionFailMessage = (attempts: number) =>
 
 function rowOf(id: string) {
   return database
-    .prepare('SELECT status, progress, claimed_by, heartbeat_at, error, resolution_snapshot_json FROM generation_jobs WHERE id=?')
+    .prepare(
+      'SELECT status, progress, claimed_by, claimed_at, heartbeat_at, error, resolution_snapshot_json FROM generation_jobs WHERE id=?',
+    )
     .get(id) as {
       status: string; progress: number; claimed_by: string | null;
-      heartbeat_at: string | null; error: string | null; resolution_snapshot_json: string;
+      claimed_at: string | null; heartbeat_at: string | null; error: string | null;
+      resolution_snapshot_json: string;
     };
 }
 
@@ -154,6 +167,8 @@ beforeEach(() => {
   // revision_tasks 先删:它有 job_id 外键,虽然是 CASCADE,显式顺序更不容易误解。
   database.prepare('DELETE FROM revision_tasks').run();
   database.prepare('DELETE FROM generation_jobs').run();
+  database.prepare('UPDATE projects SET deleted_at=NULL').run();
+  database.prepare('UPDATE workspaces SET deleted_at=NULL').run();
 });
 
 test('同一个排队任务只会被一个实例领到:第二个实例拿不到它', () => {
@@ -227,6 +242,7 @@ test('心跳超时的任务被归还队列并累加打断计数:持有它的实�
   const row = rowOf('orphan');
   assert.equal(row.status, 'queued');
   assert.equal(row.claimed_by, null, '归还时要清空归属,否则谁都领不走');
+  assert.equal(row.claimed_at, null, '归还时也要清空旧领取时间');
   assert.equal(row.heartbeat_at, null);
   assert.equal(Number(row.progress), 0, '重跑要从头开始');
   assert.equal(interruptionsOf('orphan'), 2);
@@ -285,6 +301,7 @@ test('超过打断上限的任务判 failed,不再无限重跑烧模型调用', 
   assert.equal(row.status, 'failed');
   assert.match(String(row.error), /反复打断/u);
   assert.equal(row.claimed_by, null, '判死也要清归属,避免残留误导');
+  assert.equal(row.claimed_at, null, '失败终态不能残留旧领取时间');
 });
 
 test('心跳续约成功;丢失所有权时返回 false,让调用方中止写入', () => {
@@ -297,6 +314,81 @@ test('心跳续约成功;丢失所有权时返回 false,让调用方中止写入
   // 被回收后归属清空,原持有者也续不上。
   database.prepare("UPDATE generation_jobs SET claimed_by=NULL WHERE id='mine'").run();
   assert.equal(heartbeatJob(database, 'mine', INSTANCE_A, new Date().toISOString()), false);
+});
+
+test('generation_jobs:终态与软删任务拒绝迟到心跳且不改原时间', () => {
+  const heartbeatAt = '2026-07-26T11:59:00.000Z';
+  const attemptedAt = '2026-07-26T12:00:00.000Z';
+  seedJob('completed-heartbeat', { status: 'completed', claimedBy: INSTANCE_A, heartbeatAt });
+  seedJob('failed-heartbeat', { status: 'failed', claimedBy: INSTANCE_A, heartbeatAt });
+  seedJob('deleted-heartbeat', { status: 'running', claimedBy: INSTANCE_A, heartbeatAt });
+  database.prepare("UPDATE generation_jobs SET deleted_at=? WHERE id='deleted-heartbeat'").run(attemptedAt);
+
+  assert.equal(heartbeatJob(database, 'completed-heartbeat', INSTANCE_A, attemptedAt), false);
+  assert.equal(heartbeatJob(database, 'failed-heartbeat', INSTANCE_A, attemptedAt), false);
+  assert.equal(heartbeatJob(database, 'deleted-heartbeat', INSTANCE_A, attemptedAt), false);
+  assert.equal(rowOf('completed-heartbeat').heartbeat_at, heartbeatAt);
+  assert.equal(rowOf('failed-heartbeat').heartbeat_at, heartbeatAt);
+  assert.equal(rowOf('deleted-heartbeat').heartbeat_at, heartbeatAt);
+});
+
+test('generation_jobs:回收使用旧快照时不覆盖新心跳或新领取者', () => {
+  const now = new Date('2026-07-26T12:00:00.000Z');
+  const staleHeartbeat = new Date(now.getTime() - 600_000).toISOString();
+  const refreshedHeartbeat = new Date(now.getTime() - 1_000).toISOString();
+  seedJob('freshened-during-reclaim', {
+    status: 'running', claimedBy: INSTANCE_A, heartbeatAt: staleHeartbeat, interruptions: 1,
+  });
+  seedJob('reclaimed-during-reclaim', {
+    status: 'running', claimedBy: INSTANCE_A, heartbeatAt: staleHeartbeat, interruptions: 1,
+  });
+
+  const originalPrepare = database.prepare.bind(database);
+  let raceInjected = false;
+  (database as unknown as { prepare: typeof originalPrepare }).prepare = (sql: string) => {
+    const statement = originalPrepare(sql);
+    if (!sql.includes('SELECT id, claimed_by, heartbeat_at') || !sql.includes('FROM generation_jobs')) {
+      return statement;
+    }
+    return {
+      all: (...args: unknown[]) => {
+        const rows = statement.all(...args);
+        if (!raceInjected) {
+          raceInjected = true;
+          originalPrepare(
+            "UPDATE generation_jobs SET heartbeat_at=?, updated_at=? WHERE id='freshened-during-reclaim'",
+          ).run(refreshedHeartbeat, refreshedHeartbeat);
+          originalPrepare(
+            `UPDATE generation_jobs
+                SET status='queued', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, updated_at=?
+              WHERE id='reclaimed-during-reclaim'`,
+          ).run(refreshedHeartbeat);
+          assert.equal(claimNextJob(database, INSTANCE_B, refreshedHeartbeat), 'reclaimed-during-reclaim');
+        }
+        return rows;
+      },
+    } as unknown as ReturnType<typeof originalPrepare>;
+  };
+
+  let result;
+  try {
+    result = reclaimStaleJobs(database, now.toISOString(), CLAIM_TIMEOUT_MS);
+  } finally {
+    (database as unknown as { prepare: typeof originalPrepare }).prepare = originalPrepare;
+  }
+
+  assert.equal(raceInjected, true, '前提:旧快照读出后确实注入了状态变化');
+  assert.deepEqual(result, { requeued: [], failed: [] }, 'CAS 失败的行不能被误报为已回收');
+  const freshened = rowOf('freshened-during-reclaim');
+  assert.equal(freshened.status, 'running');
+  assert.equal(freshened.claimed_by, INSTANCE_A);
+  assert.equal(freshened.heartbeat_at, refreshedHeartbeat, '新心跳不能被旧快照覆盖');
+  assert.equal(interruptionsOf('freshened-during-reclaim'), 1);
+  const reclaimed = rowOf('reclaimed-during-reclaim');
+  assert.equal(reclaimed.status, 'running');
+  assert.equal(reclaimed.claimed_by, INSTANCE_B, '新领取者不能被迟到的回收覆盖');
+  assert.equal(reclaimed.heartbeat_at, refreshedHeartbeat);
+  assert.equal(interruptionsOf('reclaimed-during-reclaim'), 1, 'CAS 失败不能错误累加打断次数');
 });
 
 test('队列位次与总数从 DB 算,是跨实例的全局真值', () => {
@@ -331,6 +423,59 @@ test('软删的任务不参与领取与位次:产出区删掉的不该再跑', (
   assert.equal(claimNextJob(database, INSTANCE_A, new Date().toISOString()), 'kept');
 });
 
+test('已删除项目下的生成任务不参与领取、心跳、回收、总数与位次', () => {
+  const now = new Date('2026-07-27T12:00:00.000Z');
+  seedJob('deleted-project-queued', {
+    status: 'queued', createdAt: '2026-07-27T00:00:01.000Z', projectId: 'p1',
+  });
+  seedJob('deleted-project-running', {
+    status: 'running', projectId: 'p1', claimedBy: INSTANCE_A,
+    heartbeatAt: new Date(now.getTime() - 600_000).toISOString(),
+  });
+  seedJob('valid-project-queued', {
+    status: 'queued', createdAt: '2026-07-27T00:00:02.000Z', projectId: 'p2',
+  });
+  database.prepare("UPDATE projects SET deleted_at=? WHERE id='p1'").run(now.toISOString());
+
+  assert.equal(queuedJobCount(database), 1);
+  assert.equal(queuedJobPosition(database, 'deleted-project-queued'), undefined);
+  assert.equal(queuedJobPosition(database, 'valid-project-queued'), 1);
+  assert.equal(heartbeatJob(database, 'deleted-project-running', INSTANCE_A, now.toISOString()), false);
+  assert.deepEqual(
+    reclaimStaleJobs(database, now.toISOString(), CLAIM_TIMEOUT_MS),
+    { requeued: [], failed: [] },
+  );
+  assert.equal(rowOf('deleted-project-running').status, 'running', '失效父级不能被回收回队列');
+  assert.equal(claimNextJob(database, INSTANCE_B, now.toISOString()), 'valid-project-queued');
+  assert.equal(rowOf('deleted-project-queued').status, 'queued');
+});
+
+test('已删除工作区下的生成任务不参与领取、心跳、回收、总数与位次', () => {
+  const now = new Date('2026-07-27T12:00:00.000Z');
+  seedJob('deleted-workspace-queued', {
+    status: 'queued', createdAt: '2026-07-27T00:00:01.000Z', projectId: 'p1',
+  });
+  seedJob('deleted-workspace-running', {
+    status: 'running', projectId: 'p1', claimedBy: INSTANCE_A,
+    heartbeatAt: new Date(now.getTime() - 600_000).toISOString(),
+  });
+  seedJob('valid-workspace-queued', {
+    status: 'queued', createdAt: '2026-07-27T00:00:02.000Z', projectId: 'p2',
+  });
+  database.prepare("UPDATE workspaces SET deleted_at=? WHERE id='w1'").run(now.toISOString());
+
+  assert.equal(queuedJobCount(database), 1);
+  assert.equal(queuedJobPosition(database, 'deleted-workspace-queued'), undefined);
+  assert.equal(queuedJobPosition(database, 'valid-workspace-queued'), 1);
+  assert.equal(heartbeatJob(database, 'deleted-workspace-running', INSTANCE_A, now.toISOString()), false);
+  assert.deepEqual(
+    reclaimStaleJobs(database, now.toISOString(), CLAIM_TIMEOUT_MS),
+    { requeued: [], failed: [] },
+  );
+  assert.equal(claimNextJob(database, INSTANCE_B, now.toISOString()), 'valid-workspace-queued');
+  assert.equal(rowOf('deleted-workspace-queued').status, 'queued');
+});
+
 /**
  * 泛化后的认领实现要同时服务两张表。这里锁三件事:
  *  1. revision_tasks 的领取同样原子(两次领取不会拿到同一条)
@@ -350,6 +495,55 @@ test('revision_tasks:领取是原子的,同一条不会被领两次', () => {
   const row = revisionRowOf('rev-1');
   assert.equal(row.status, 'running');
   assert.equal(row.claimed_by, INSTANCE_A);
+});
+
+test('revision_tasks:已删除父任务下的任务拒绝领取、心跳与回收', () => {
+  const now = new Date('2026-07-27T12:00:00.000Z');
+  seedJob('deleted-parent-queued', { status: 'completed', projectId: 'p1' });
+  seedJob('deleted-parent-running', { status: 'completed', projectId: 'p1' });
+  seedJob('valid-parent', { status: 'completed', projectId: 'p2' });
+  seedRevisionTask('rev-deleted-parent-queued', 'deleted-parent-queued');
+  seedRevisionTask('rev-deleted-parent-running', 'deleted-parent-running', {
+    status: 'running', claimedBy: INSTANCE_A,
+    heartbeatAt: new Date(now.getTime() - 600_000).toISOString(),
+  });
+  seedRevisionTask('rev-valid-parent', 'valid-parent');
+  database.prepare(
+    "UPDATE generation_jobs SET deleted_at=? WHERE id IN ('deleted-parent-queued','deleted-parent-running')",
+  ).run(now.toISOString());
+
+  assert.equal(
+    heartbeatTask(database, REVISION_TASKS_SPEC, 'rev-deleted-parent-running', INSTANCE_A, now.toISOString()),
+    false,
+  );
+  assert.deepEqual(
+    reclaimStale(database, REVISION_TASKS_SPEC, now.toISOString(), CLAIM_TIMEOUT_MS, revisionFailMessage),
+    { requeued: [], failed: [] },
+  );
+  assert.equal(
+    claimNext(database, REVISION_TASKS_SPEC, INSTANCE_B, now.toISOString()),
+    'rev-valid-parent',
+  );
+  assert.equal(revisionRowOf('rev-deleted-parent-queued').status, 'queued');
+  assert.equal(revisionRowOf('rev-deleted-parent-running').status, 'running');
+});
+
+test('revision_tasks:已删除项目或工作区下的任务均拒绝领取', () => {
+  const now = new Date().toISOString();
+  seedJob('project-parent', { status: 'completed', projectId: 'p1' });
+  seedJob('valid-parent', { status: 'completed', projectId: 'p2' });
+  seedRevisionTask('rev-deleted-project', 'project-parent');
+  seedRevisionTask('rev-valid-project', 'valid-parent');
+  database.prepare("UPDATE projects SET deleted_at=? WHERE id='p1'").run(now);
+  assert.equal(claimNext(database, REVISION_TASKS_SPEC, INSTANCE_A, now), 'rev-valid-project');
+  assert.equal(revisionRowOf('rev-deleted-project').status, 'queued');
+
+  database.prepare("UPDATE projects SET deleted_at=NULL WHERE id='p1'").run();
+  database.prepare("UPDATE workspaces SET deleted_at=? WHERE id='w1'").run(now);
+  seedJob('valid-parent-2', { status: 'completed', projectId: 'p2' });
+  seedRevisionTask('rev-valid-workspace', 'valid-parent-2');
+  assert.equal(claimNext(database, REVISION_TASKS_SPEC, INSTANCE_B, now), 'rev-valid-workspace');
+  assert.equal(revisionRowOf('rev-deleted-project').status, 'queued');
 });
 
 test('revision_tasks:心跳新鲜的不回收,心跳超时的才回收', () => {
@@ -414,4 +608,94 @@ test('心跳:不持有的实例续约失败', () => {
     heartbeatTask(database, REVISION_TASKS_SPEC, 'rev-1', INSTANCE_B, now), false,
     '不持有的实例续约必须返回 false,调用方据此中止写入',
   );
+});
+
+test('revision_tasks:终态任务拒绝迟到心跳且不改原时间', () => {
+  const heartbeatAt = '2026-07-27T11:59:00.000Z';
+  const attemptedAt = '2026-07-27T12:00:00.000Z';
+  seedJob('job-completed-heartbeat', { status: 'completed' });
+  seedJob('job-failed-heartbeat', { status: 'completed' });
+  seedRevisionTask('rev-completed-heartbeat', 'job-completed-heartbeat', {
+    status: 'completed', claimedBy: INSTANCE_A, heartbeatAt,
+  });
+  seedRevisionTask('rev-failed-heartbeat', 'job-failed-heartbeat', {
+    status: 'failed', claimedBy: INSTANCE_A, heartbeatAt,
+  });
+
+  assert.equal(
+    heartbeatTask(database, REVISION_TASKS_SPEC, 'rev-completed-heartbeat', INSTANCE_A, attemptedAt),
+    false,
+  );
+  assert.equal(
+    heartbeatTask(database, REVISION_TASKS_SPEC, 'rev-failed-heartbeat', INSTANCE_A, attemptedAt),
+    false,
+  );
+  assert.equal(revisionRowOf('rev-completed-heartbeat').heartbeat_at, heartbeatAt);
+  assert.equal(revisionRowOf('rev-failed-heartbeat').heartbeat_at, heartbeatAt);
+});
+
+test('revision_tasks:回收使用旧快照时不覆盖新心跳或新领取者', () => {
+  const now = new Date('2026-07-27T12:00:00.000Z');
+  const staleHeartbeat = new Date(now.getTime() - 600_000).toISOString();
+  const refreshedHeartbeat = new Date(now.getTime() - 1_000).toISOString();
+  seedJob('job-rev-freshened', { status: 'completed' });
+  seedJob('job-rev-reclaimed', { status: 'completed' });
+  seedRevisionTask('rev-freshened-during-reclaim', 'job-rev-freshened', {
+    status: 'running', claimedBy: INSTANCE_A, heartbeatAt: staleHeartbeat, attempts: 1,
+  });
+  seedRevisionTask('rev-reclaimed-during-reclaim', 'job-rev-reclaimed', {
+    status: 'running', claimedBy: INSTANCE_A, heartbeatAt: staleHeartbeat, attempts: 1,
+  });
+
+  const originalPrepare = database.prepare.bind(database);
+  let raceInjected = false;
+  (database as unknown as { prepare: typeof originalPrepare }).prepare = (sql: string) => {
+    const statement = originalPrepare(sql);
+    if (!sql.includes('SELECT id, claimed_by, heartbeat_at') || !sql.includes('FROM revision_tasks')) {
+      return statement;
+    }
+    return {
+      all: (...args: unknown[]) => {
+        const rows = statement.all(...args);
+        if (!raceInjected) {
+          raceInjected = true;
+          originalPrepare(
+            "UPDATE revision_tasks SET heartbeat_at=?, updated_at=? WHERE id='rev-freshened-during-reclaim'",
+          ).run(refreshedHeartbeat, refreshedHeartbeat);
+          originalPrepare(
+            `UPDATE revision_tasks
+                SET status='queued', claimed_by=NULL, heartbeat_at=NULL, updated_at=?
+              WHERE id='rev-reclaimed-during-reclaim'`,
+          ).run(refreshedHeartbeat);
+          assert.equal(
+            claimNext(database, REVISION_TASKS_SPEC, INSTANCE_B, refreshedHeartbeat),
+            'rev-reclaimed-during-reclaim',
+          );
+        }
+        return rows;
+      },
+    } as unknown as ReturnType<typeof originalPrepare>;
+  };
+
+  let result;
+  try {
+    result = reclaimStale(
+      database, REVISION_TASKS_SPEC, now.toISOString(), CLAIM_TIMEOUT_MS, revisionFailMessage,
+    );
+  } finally {
+    (database as unknown as { prepare: typeof originalPrepare }).prepare = originalPrepare;
+  }
+
+  assert.equal(raceInjected, true);
+  assert.deepEqual(result, { requeued: [], failed: [] });
+  const freshened = revisionRowOf('rev-freshened-during-reclaim');
+  assert.equal(freshened.status, 'running');
+  assert.equal(freshened.claimed_by, INSTANCE_A);
+  assert.equal(freshened.heartbeat_at, refreshedHeartbeat);
+  assert.equal(freshened.attempt_count, 1);
+  const reclaimed = revisionRowOf('rev-reclaimed-during-reclaim');
+  assert.equal(reclaimed.status, 'running');
+  assert.equal(reclaimed.claimed_by, INSTANCE_B);
+  assert.equal(reclaimed.heartbeat_at, refreshedHeartbeat);
+  assert.equal(reclaimed.attempt_count, 1, 'CAS 失败不能错误累加 attempt_count');
 });

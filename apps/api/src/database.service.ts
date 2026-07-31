@@ -13,7 +13,7 @@ export type SqlValue = string | number | bigint | Uint8Array | null;
  * 无关的测试变红——那不是回归信号,是维护噪声。测试断言这个常量,真正想验的
  * 「迁移到最新且表结构对得上」不变。
  */
-export const SCHEMA_VERSION = 15;
+export const SCHEMA_VERSION = 19;
 
 @Injectable()
 export class DatabaseService implements OnModuleDestroy {
@@ -35,7 +35,10 @@ export class DatabaseService implements OnModuleDestroy {
 
     this.db = new DatabaseSync(options.databasePath);
     this.db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
-    this.migrate();
+    // The migration version read and every subsequent DDL statement must share
+    // one write lock. Per-version locks allow two starting processes to read the
+    // same stale user_version and then execute the same CREATE/ALTER twice.
+    this.transaction(() => this.migrate());
   }
 
   prepare(sql: string): StatementSync {
@@ -932,6 +935,245 @@ export class DatabaseService implements OnModuleDestroy {
       this.db.exec('PRAGMA user_version = 15');
     });
     if (version < 15) version = 15;
+
+    if (version < 16) this.transaction(() => {
+      /*
+       * Knowledge versions used to be allocated with MAX(version)+1 outside the
+       * INSERT transaction and had no unique constraint. Repair any duplicate
+       * legacy rows before adding the database-level last line of defence.
+       */
+      const tableExists = (name: string): boolean => Boolean(
+        this.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name),
+      );
+      const hasKnowledgeFiles = tableExists('knowledge_files');
+      const hasWorkspaceMembership = tableExists('workspaces') && tableExists('workspace_members');
+
+      // Some historical migration fixtures contain only the tables relevant to
+      // their target version. A real v15 database has these v1 tables, but v16
+      // should still upgrade those deliberately partial snapshots.
+      if (hasKnowledgeFiles) {
+        const duplicateGroups = this.prepare(
+          `SELECT project_id, filename
+             FROM knowledge_files
+            GROUP BY project_id, filename
+           HAVING COUNT(*) > COUNT(DISTINCT version)`,
+        ).all() as Array<{ project_id: string; filename: string }>;
+        const rowsForFile = this.prepare(
+          `SELECT id, version FROM knowledge_files
+            WHERE project_id = ? AND filename = ?
+            ORDER BY version, created_at, id`,
+        );
+        const updateVersion = this.prepare('UPDATE knowledge_files SET version = ? WHERE id = ?');
+        for (const group of duplicateGroups) {
+          const rows = rowsForFile.all(group.project_id, group.filename) as Array<{ id: string; version: number }>;
+          const used = new Set<number>();
+          let next = rows.reduce((maximum, row) => Math.max(maximum, Number(row.version)), 0);
+          for (const row of rows) {
+            const current = Number(row.version);
+            if (!used.has(current)) {
+              used.add(current);
+              continue;
+            }
+            do next += 1; while (used.has(next));
+            updateVersion.run(next, row.id);
+            used.add(next);
+          }
+        }
+        this.db.exec(`
+          CREATE UNIQUE INDEX knowledge_files_version_idx
+            ON knowledge_files(project_id, filename, version);
+        `);
+      }
+
+      /*
+       * v15 and earlier allowed member upsert to create several Owners or
+       * downgrade the canonical owner. Restore owner_id as the authority, then
+       * enforce the invariant for all future writes, not only this controller.
+       */
+      if (hasWorkspaceMembership) this.db.exec(`
+        INSERT INTO workspace_members
+          (workspace_id, user_id, role, grants_json, denies_json, created_at, updated_at)
+        SELECT id, owner_id, 'Owner', '[]', '[]', created_at, updated_at
+          FROM workspaces
+         WHERE NOT EXISTS (
+           SELECT 1 FROM workspace_members
+            WHERE workspace_id = workspaces.id AND user_id = workspaces.owner_id
+         );
+
+        UPDATE workspace_members
+           SET role = 'Admin'
+         WHERE role = 'Owner'
+           AND user_id <> (SELECT owner_id FROM workspaces WHERE id = workspace_id);
+        UPDATE workspace_members
+           SET role = 'Owner', grants_json = '[]', denies_json = '[]'
+         WHERE user_id = (SELECT owner_id FROM workspaces WHERE id = workspace_id);
+
+        CREATE UNIQUE INDEX workspace_members_single_owner_idx
+          ON workspace_members(workspace_id) WHERE role = 'Owner';
+
+        CREATE TRIGGER workspace_member_owner_insert_guard
+        BEFORE INSERT ON workspace_members
+        WHEN (NEW.role = 'Owner' AND NEW.user_id <> (SELECT owner_id FROM workspaces WHERE id = NEW.workspace_id))
+          OR (NEW.role <> 'Owner' AND NEW.user_id = (SELECT owner_id FROM workspaces WHERE id = NEW.workspace_id))
+        BEGIN
+          SELECT RAISE(ABORT, 'workspace owner role mismatch');
+        END;
+
+        CREATE TRIGGER workspace_member_owner_update_guard
+        BEFORE UPDATE OF workspace_id, user_id, role ON workspace_members
+        WHEN (NEW.role = 'Owner' AND NEW.user_id <> (SELECT owner_id FROM workspaces WHERE id = NEW.workspace_id))
+          OR (NEW.role <> 'Owner' AND NEW.user_id = (SELECT owner_id FROM workspaces WHERE id = NEW.workspace_id))
+        BEGIN
+          SELECT RAISE(ABORT, 'workspace owner role mismatch');
+        END;
+
+        CREATE TRIGGER workspace_member_owner_delete_guard
+        BEFORE DELETE ON workspace_members
+        WHEN OLD.user_id = (SELECT owner_id FROM workspaces WHERE id = OLD.workspace_id)
+        BEGIN
+          SELECT RAISE(ABORT, 'workspace owner membership cannot be deleted');
+        END;
+
+        CREATE TRIGGER workspace_owner_update_guard
+        BEFORE UPDATE OF owner_id ON workspaces
+        WHEN NEW.owner_id <> OLD.owner_id
+        BEGIN
+          SELECT RAISE(ABORT, 'workspace ownership requires an explicit transfer transaction');
+        END;
+      `);
+      this.db.exec('PRAGMA user_version = 16');
+    });
+    if (version < 16) version = 16;
+
+    if (version < 17) this.transaction(() => {
+      const tableExists = (name: string): boolean => Boolean(
+        this.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name),
+      );
+      const hasWorkspaceMembership = tableExists('workspaces') && tableExists('workspace_members');
+      const hasProjectAcl = hasWorkspaceMembership && tableExists('projects') && tableExists('project_acl');
+
+      /*
+       * owner_id is the sole ownership authority. v16 repaired Owner roles but
+       * still allowed grants/denies and project ACL rows to override the
+       * canonical owner's permissions. Clean those legacy rows, then enforce
+       * the complete invariant for controller-independent writes.
+       */
+      if (hasWorkspaceMembership) {
+        this.db.exec(`
+          UPDATE workspace_members
+             SET role = 'Owner', grants_json = '[]', denies_json = '[]'
+           WHERE user_id = (SELECT owner_id FROM workspaces WHERE id = workspace_id);
+
+          DROP TRIGGER IF EXISTS workspace_member_owner_insert_guard;
+          DROP TRIGGER IF EXISTS workspace_member_owner_update_guard;
+
+          CREATE TRIGGER workspace_member_owner_insert_guard
+          BEFORE INSERT ON workspace_members
+          WHEN (NEW.role = 'Owner' AND NEW.user_id <> (SELECT owner_id FROM workspaces WHERE id = NEW.workspace_id))
+            OR (NEW.role <> 'Owner' AND NEW.user_id = (SELECT owner_id FROM workspaces WHERE id = NEW.workspace_id))
+            OR (NEW.user_id = (SELECT owner_id FROM workspaces WHERE id = NEW.workspace_id)
+                AND (NEW.grants_json <> '[]' OR NEW.denies_json <> '[]'))
+          BEGIN
+            SELECT RAISE(ABORT, 'workspace owner role or permission override mismatch');
+          END;
+
+          CREATE TRIGGER workspace_member_owner_update_guard
+          BEFORE UPDATE OF workspace_id, user_id, role, grants_json, denies_json ON workspace_members
+          WHEN (NEW.role = 'Owner' AND NEW.user_id <> (SELECT owner_id FROM workspaces WHERE id = NEW.workspace_id))
+            OR (NEW.role <> 'Owner' AND NEW.user_id = (SELECT owner_id FROM workspaces WHERE id = NEW.workspace_id))
+            OR (NEW.user_id = (SELECT owner_id FROM workspaces WHERE id = NEW.workspace_id)
+                AND (NEW.grants_json <> '[]' OR NEW.denies_json <> '[]'))
+          BEGIN
+            SELECT RAISE(ABORT, 'workspace owner role or permission override mismatch');
+          END;
+        `);
+      }
+
+      if (hasProjectAcl) {
+        this.db.exec(`
+          DELETE FROM project_acl
+           WHERE EXISTS (
+             SELECT 1
+               FROM projects p
+               JOIN workspaces w ON w.id = p.workspace_id
+              WHERE p.id = project_acl.project_id AND w.owner_id = project_acl.user_id
+           );
+
+          CREATE TRIGGER IF NOT EXISTS project_acl_owner_insert_guard
+          BEFORE INSERT ON project_acl
+          WHEN EXISTS (
+            SELECT 1
+              FROM projects p
+              JOIN workspaces w ON w.id = p.workspace_id
+             WHERE p.id = NEW.project_id AND w.owner_id = NEW.user_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'workspace owner project ACL is not allowed');
+          END;
+
+          CREATE TRIGGER IF NOT EXISTS project_acl_owner_update_guard
+          BEFORE UPDATE OF project_id, user_id, grants_json, denies_json ON project_acl
+          WHEN EXISTS (
+            SELECT 1
+              FROM projects p
+              JOIN workspaces w ON w.id = p.workspace_id
+             WHERE p.id = NEW.project_id AND w.owner_id = NEW.user_id
+          )
+          BEGIN
+            SELECT RAISE(ABORT, 'workspace owner project ACL is not allowed');
+          END;
+        `);
+      }
+
+      this.db.exec('PRAGMA user_version = 17');
+    });
+    if (version < 17) version = 17;
+
+    if (version < 18) this.transaction(() => {
+      const hasAnalysisTasks = Boolean(
+        this.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='analysis_tasks'").get(),
+      );
+      /*
+       * Persist the number of platform calls charged to an inline analysis task
+       * but not yet settled. A process can die, lose its lease, or have its
+       * workspace deleted while the provider request is in flight; without this
+       * balance the recovery side cannot distinguish a real charge from a call
+       * that never started.
+       *
+       * Some migration tests intentionally use partial historical snapshots. A
+       * real v17 database has analysis_tasks, but skipping the ALTER when that
+       * table is absent keeps those fixtures upgradeable.
+       */
+      if (hasAnalysisTasks) {
+        const hasQuotaBalance = Boolean(
+          this.prepare("SELECT 1 FROM pragma_table_info('analysis_tasks') WHERE name='quota_consumed_count'").get(),
+        );
+        if (!hasQuotaBalance) {
+          this.db.exec(
+            'ALTER TABLE analysis_tasks ADD COLUMN quota_consumed_count INTEGER NOT NULL DEFAULT 0',
+          );
+        }
+      }
+      this.db.exec('PRAGMA user_version = 18');
+    });
+    if (version < 18) version = 18;
+
+    if (version < 19) this.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+          scope TEXT NOT NULL,
+          key_hash TEXT NOT NULL,
+          attempt_count INTEGER NOT NULL CHECK(attempt_count >= 0),
+          reset_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(scope, key_hash)
+        );
+        CREATE INDEX IF NOT EXISTS rate_limit_buckets_reset_idx
+          ON rate_limit_buckets(reset_at);
+        PRAGMA user_version = 19;
+      `);
+    });
+    if (version < 19) version = 19;
   }
 
   onModuleDestroy(): void {

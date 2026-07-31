@@ -52,7 +52,7 @@ export function classifyModelFailure(error: unknown): ModelFailureKind {
   if (status === undefined || status === 429 || status >= 500) return 'unavailable';
   if (status === 401 || status === 403) return 'credentials';
   // 模型返回了但内容不合契约:采样波动,重试一次多半能好
-  if (/omitted required|invalid JSON|empty planning resources|not a JSON object|non-JSON response|did not contain output text/i.test(message)) {
+  if (/omitted required|invalid JSON|empty planning resources|not a JSON object|non-JSON response|did not contain output text|size limit|structural complexity|nesting-depth/i.test(message)) {
     return 'incomplete';
   }
   return 'other';
@@ -72,7 +72,7 @@ export function shouldRefundQuota(kind: ModelFailureKind): boolean {
  * 用户可见文案。action 是动作名(「分析」/「修改」),让同一份文案服务两个调用方。
  * 退额度的分类必须把这件事说出来,否则用户以为白花了一次。
  */
-export function modelFailureMessage(kind: ModelFailureKind, action: string, raw: string): string {
+export function modelFailureMessage(kind: ModelFailureKind, action: string, _raw: string): string {
   switch (kind) {
     case 'unavailable':
       return `模型服务暂时不可用，${action}没有完成。已退还本次额度，请稍后重试；若持续失败请联系客服。`;
@@ -81,6 +81,6 @@ export function modelFailureMessage(kind: ModelFailureKind, action: string, raw:
     case 'incomplete':
       return `模型这次返回的结果不完整，${action}没有完成。已退还本次额度，直接重试一次通常就好了。`;
     default:
-      return `${action}失败：${raw}`;
+      return `${action}失败，未完成本次操作。请重试；若持续失败请联系客服。`;
   }
 }

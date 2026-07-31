@@ -46,7 +46,7 @@ export class ResourceService {
       .prepare(
         `SELECT p.*, w.name AS workspace_name,
                 (SELECT COUNT(*) FROM knowledge_files k WHERE k.project_id = p.id AND k.deleted_at IS NULL) AS knowledge_count,
-                (SELECT COUNT(*) FROM generation_jobs g WHERE g.project_id = p.id) AS generation_count,
+                (SELECT COUNT(*) FROM generation_jobs g WHERE g.project_id = p.id AND g.deleted_at IS NULL) AS generation_count,
                 (SELECT version FROM formula_versions f WHERE f.project_id = p.id AND f.status = 'active' ORDER BY version DESC LIMIT 1) AS active_formula_version
          FROM projects p
          JOIN workspaces w ON w.id = p.workspace_id
@@ -69,7 +69,9 @@ export class ResourceService {
   }
 
   inferWorkspace(principal: SessionPrincipal, requested: unknown): string {
-    if (typeof requested === 'string' && requested) return requested;
+    if (typeof requested === 'string' && requested) {
+      return String(this.workspaceRow(requested).id);
+    }
     const workspaces = this.workspacesFor(principal);
     if (workspaces.length !== 1) throw new ConflictException('请明确指定 workspaceId');
     return String(workspaces[0]?.id);
@@ -77,7 +79,11 @@ export class ResourceService {
 
   projectRow(projectId: string): Record<string, unknown> {
     const row = this.database
-      .prepare('SELECT * FROM projects WHERE id = ? AND deleted_at IS NULL')
+      .prepare(
+        `SELECT p.* FROM projects p
+         JOIN workspaces w ON w.id = p.workspace_id
+         WHERE p.id = ? AND p.deleted_at IS NULL AND w.deleted_at IS NULL`,
+      )
       .get(projectId) as Record<string, unknown> | undefined;
     if (!row) throw new NotFoundException('项目不存在');
     return row;

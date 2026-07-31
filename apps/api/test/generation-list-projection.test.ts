@@ -104,10 +104,10 @@ after(async () => {
 test('列表返回消费方需要的全部字段', async () => {
   const { response, body } = await request(`/api/generations?projectId=${projectId}`);
   assert.equal(response.status, 200, JSON.stringify(body).slice(0,400));
-  assert.ok(Array.isArray(body));
-  assert.ok(body.length > 0, '前置:应有一个任务');
+  assert.ok(Array.isArray(body.items));
+  assert.ok(body.items.length > 0, '前置:应有一个任务');
   for (const field of REQUIRED_LIST_FIELDS) {
-    assert.ok(field in body[0], `列表缺少字段 ${field}`);
+    assert.ok(field in body.items[0], `列表缺少字段 ${field}`);
   }
 });
 
@@ -115,7 +115,7 @@ test('列表返回消费方需要的全部字段', async () => {
 // 否则前端 `job.error && ...` 之类的判断会把空串当成有错误。
 test('可选字段要么不存在,要么是有意义的值,不出现 null/空串', async () => {
   const { body } = await request(`/api/generations?projectId=${projectId}`);
-  const job = body[0];
+  const job = body.items[0];
   for (const field of OPTIONAL_LIST_FIELDS) {
     if (!(field in job)) continue;
     assert.notEqual(job[field], null, `${field} 不应为 null`);
@@ -125,17 +125,17 @@ test('可选字段要么不存在,要么是有意义的值,不出现 null/空串
 
 test('列表不含重字段:planningContext / configImpact 等一律不出现', async () => {
   const { body } = await request(`/api/generations?projectId=${projectId}`);
-  assert.ok(body.length > 0, '前置:应有一个任务');
+  assert.ok(body.items.length > 0, '前置:应有一个任务');
   for (const field of FORBIDDEN_LIST_FIELDS) {
-    assert.equal(field in body[0], false, `列表不应包含重字段 ${field}`);
+    assert.equal(field in body.items[0], false, `列表不应包含重字段 ${field}`);
   }
 });
 
 test('单个任务的列表投影体积远小于详情', async () => {
   const { body: list } = await request(`/api/generations?projectId=${projectId}`);
-  assert.ok(list.length > 0, '前置:应有一个任务');
-  const listSize = JSON.stringify(list[0]).length;
-  const { body: detail } = await request(`/api/generations/${list[0].id}`);
+  assert.ok(list.items.length > 0, '前置:应有一个任务');
+  const listSize = JSON.stringify(list.items[0]).length;
+  const { body: detail } = await request(`/api/generations/${list.items[0].id}`);
   const detailSize = JSON.stringify(detail).length;
   // 实测详情单条 366KB;投影应在 2KB 量级。给一个宽松但有意义的上限。
   assert.ok(listSize < 4000, `列表单条 ${listSize} 字节,应小于 4000`);
@@ -146,7 +146,7 @@ test('单个任务的列表投影体积远小于详情', async () => {
 // (extractRecipe)要读 resolvedConfig.task,所以保留瘦身版:只有 task 一个键。
 test('resolvedConfig 只保留 task,不带整份配置', async () => {
   const { body } = await request(`/api/generations?projectId=${projectId}`);
-  const rc = body[0].resolvedConfig;
+  const rc = body.items[0].resolvedConfig;
   assert.ok(rc, 'resolvedConfig 应存在(配方回填需要)');
   assert.deepEqual(Object.keys(rc), ['task']);
 });
@@ -157,18 +157,18 @@ test('opportunitySnapshot 只保留 id 兜底键', async () => {
   const { body } = await request(`/api/generations?projectId=${projectId}`);
   // 值为 undefined 的键在 JSON 里会消失,所以断言的是「不含 id/opportunityId
   // 之外的任何键」,而不是这两个键一定存在。
-  const keys = Object.keys(body[0].opportunitySnapshot ?? {});
+  const keys = Object.keys(body.items[0].opportunitySnapshot ?? {});
   const extra = keys.filter((k) => k !== 'id' && k !== 'opportunityId');
   assert.deepEqual(extra, [], `快照不应含其他字段,实际多出 ${extra.join(',')}`);
   // 有 id 的任务必须把它带出来(兜底路径不能断)
-  const withSnapshot = body.find((j: any) => j.opportunitySnapshot?.id);
+  const withSnapshot = body.items.find((j: any) => j.opportunitySnapshot?.id);
   if (withSnapshot) assert.equal(typeof withSnapshot.opportunitySnapshot.id, 'string');
 });
 
 test('详情接口不受影响:仍然给全字段与候选', async () => {
   const { body: list } = await request(`/api/generations?projectId=${projectId}`);
-  assert.ok(list.length > 0, '前置:应有一个任务');
-  const { response, body } = await request(`/api/generations/${list[0].id}`);
+  assert.ok(list.items.length > 0, '前置:应有一个任务');
+  const { response, body } = await request(`/api/generations/${list.items[0].id}`);
   assert.equal(response.status, 200);
   // 瘦身只针对列表,详情该有的重字段必须还在
   for (const field of ['planningContext', 'resolvedConfig', 'parameterImpactReport']) {

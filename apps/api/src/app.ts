@@ -7,11 +7,12 @@ import { json, urlencoded, type NextFunction, type Request, type Response } from
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module.js';
-import type { ApiOptionsInput } from './config.js';
+import { resolveOptions, type ApiOptionsInput } from './config.js';
 
 export async function createApplication(options: ApiOptionsInput = {}): Promise<NestExpressApplication> {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule.register(options), {
-    logger: options.logger === false ? false : ['error', 'warn', 'log'],
+  const resolvedOptions = resolveOptions(options);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule.register(resolvedOptions), {
+    logger: resolvedOptions.logger ? ['error', 'warn', 'log'] : false,
     bodyParser: false,
   });
   app.use(json({ limit: '3mb' }));
@@ -27,7 +28,7 @@ export async function createApplication(options: ApiOptionsInput = {}): Promise<
       'Content-Security-Policy',
       "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
     );
-    if (process.env.NODE_ENV === 'production') {
+    if (resolvedOptions.production) {
       response.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     }
     next();

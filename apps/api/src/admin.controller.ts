@@ -50,14 +50,21 @@ export class AdminController {
   async createUser(@Req() request: Request, @Body() rawBody: unknown) {
     this.requireSystemAdmin(request);
     const body = requireObject(rawBody);
+    const principal = (request as unknown as AuthenticatedRequest).principal as SessionPrincipal;
     const result = await this.auth.createUser({
       username: body.username,
       password: body.password,
       systemRole: body.systemRole,
       userKind: body.userKind,
+    }, (created) => {
+      this.audit.record({
+        userId: principal.userId,
+        action: 'user.create',
+        entityType: 'user',
+        entityId: String(created.id),
+        details: { username: created.username, systemRole: created.systemRole },
+      });
     });
-    const principal = (request as unknown as AuthenticatedRequest).principal as SessionPrincipal;
-    this.audit.record({ userId: principal.userId, action: 'user.create', entityType: 'user', entityId: String(result.id), details: { username: result.username, systemRole: result.systemRole } });
     return result;
   }
 

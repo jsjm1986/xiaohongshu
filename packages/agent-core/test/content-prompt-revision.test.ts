@@ -58,6 +58,12 @@ describe("structured output parsing and validation", () => {
     expect(draft.content.Cref.threads).toHaveLength(1);
   });
 
+  it("rejects excessively nested model JSON before draft normalization", () => {
+    let deep: Record<string, unknown> = { leaf: true };
+    for (let index = 0; index < 34; index += 1) deep = { nested: deep };
+    expect(() => parseGenerationDraft(JSON.stringify(deep))).toThrow(/complexity|nesting-depth/u);
+  });
+
   it("keeps missing compatible-provider ledgers explicitly unknown instead of inventing facts", () => {
     const value = validDraftJson();
     delete (value as any).evidenceIds;

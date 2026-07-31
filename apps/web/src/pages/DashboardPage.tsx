@@ -6,6 +6,7 @@ import {
   Clock3,
   FileClock,
   FlaskConical,
+  RefreshCcw,
   Sparkles,
   TrendingUp,
   TriangleAlert,
@@ -15,13 +16,14 @@ import { Link, useNavigate } from "react-router-dom";
 import {
   Badge,
   Button,
+  EmptyState,
   PageHeader,
   Skeleton,
 } from "../components/Ui";
 import { V2Hero, V2Instrument, V2InstrumentCell } from "../components/V2";
 import { useProjects } from "../components/ProjectContext";
 import { api } from "../lib/api";
-import { demoGenerations, demoKnowledge } from "../lib/fixtures";
+import { errorMessage } from "../lib/errors";
 import { formatDate } from "../lib/utils";
 import type { GenerationJob, KnowledgeFile } from "../types";
 
@@ -30,35 +32,33 @@ export function DashboardPage() {
   const [history, setHistory] = useState<GenerationJob[]>([]);
   const [knowledge, setKnowledge] = useState<KnowledgeFile[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const navigate = useNavigate();
 
-  useEffect(() => {
+  const load = () => {
     if (!projectId) {
       setHistory([]);
       setKnowledge([]);
+      setLoadError(null);
       setLoading(false);
       return;
     }
     setLoading(true);
+    setLoadError(null);
     Promise.all([
-      api.generations
-        .list(projectId)
-        .then((data) => data.items)
-        .catch(() =>
-          demoGenerations.filter((item) => item.projectId === projectId),
-        ),
-      api.knowledge
-        .list(projectId)
-        .then((data) => data.items)
-        .catch(() =>
-          demoKnowledge.filter((item) => item.projectId === projectId),
-        ),
+      api.generations.list(projectId).then((data) => data.items),
+      api.knowledge.list(projectId).then((data) => data.items),
     ])
       .then(([generationItems, knowledgeItems]) => {
         setHistory(generationItems);
         setKnowledge(knowledgeItems);
       })
+      .catch((error) => setLoadError(errorMessage(error, '项目概览加载失败')))
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    load();
   }, [projectId]);
 
   const completed = history.filter((item) => item.status === "completed");
@@ -86,6 +86,20 @@ export function DashboardPage() {
         />
         <section className="panel">
           <EmptyProject onCreate={() => navigate("/projects")} />
+        </section>
+      </div>
+    );
+
+  if (!loading && loadError)
+    return (
+      <div className="page dashboard-page">
+        <V2Hero
+          status={<>{currentProject?.name || "当前项目"} · 数据不可用</>}
+          title="项目概览暂时无法加载"
+          description="系统不会用演示数据替代真实项目记录。"
+        />
+        <section className="panel">
+          <EmptyState icon={<TriangleAlert size={24} />} title="项目数据加载失败" description={loadError} action={<Button variant="secondary" icon={<RefreshCcw size={16} />} onClick={load}>重试</Button>} />
         </section>
       </div>
     );

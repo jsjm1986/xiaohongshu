@@ -46,27 +46,37 @@ export function QuickReaderPage() {
   const [activeIndex, setActiveIndex] = useState(0);
   /** 「看详情」滚到工作区校验全文 */
   const workbenchRef = useRef<HTMLDivElement | null>(null);
+  const loadSequence = useRef(0);
 
   const fail = (e: unknown, fallback: string) =>
     toast.push(e instanceof Error ? e.message : fallback, 'error');
 
   const load = useCallback(async () => {
     if (!jobId) return;
+    const sequence = ++loadSequence.current;
     setLoading(true);
     setLoadError(null);
     try {
       const fresh = await api.generations.reader(jobId);
-      setJob(fresh);
+      if (sequence === loadSequence.current) setJob(fresh);
     } catch (e) {
       // 直接打开一个不存在/无权限的 id 是正常路径(收藏了旧链接),给页面级
       // 说明而不是一个空白页加一条 toast。
-      setLoadError(e instanceof Error ? e.message : '读取失败');
+      if (sequence === loadSequence.current) {
+        setLoadError(e instanceof Error ? e.message : '读取失败');
+      }
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current) setLoading(false);
     }
   }, [jobId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    setJob(null);
+    setProject(null);
+    setSiblings([]);
+    void load();
+    return () => { loadSequence.current += 1; };
+  }, [load]);
 
   // 换一篇要回到第一个候选:上一篇选了第 3 版,下一篇可能只有 1 版,
   // 沿用旧下标会让 NoteCard 与工作区读到不同候选(Math.min 各自兜底)。

@@ -7,6 +7,7 @@ import { ProjectProvider } from '../ProjectContext';
 import { api } from '../../lib/api';
 import { quotaCell, type QuotaSnapshot } from '../../lib/quota-view';
 import { isSaasUser, SAAS_ACCOUNT_PATH } from '../../lib/saas-access';
+import { useToast } from '../Ui';
 
 /**
  * 极简创作 · 独立产品壳:无专家侧边栏,顶栏 + 居中内容区。
@@ -17,6 +18,7 @@ function QuickShellContent() {
   const [profileOpen, setProfileOpen] = useState(false);
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const toast = useToast();
   const [quota, setQuota] = useState<QuotaSnapshot | null>(null);
 
   /**
@@ -44,8 +46,12 @@ function QuickShellContent() {
   }, []);
 
   const handleLogout = async () => {
-    await logout();
-    navigate('/login');
+    try {
+      await logout();
+      navigate('/login');
+    } catch (error) {
+      toast.push(error instanceof Error ? error.message : '退出登录失败', 'error');
+    }
   };
 
   const cell = quotaCell(quota);

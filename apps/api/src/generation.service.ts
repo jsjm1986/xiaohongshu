@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { join } from 'node:path';
 import {
   ContentGenerationAgent,
   GENERATION_PARAMETER_REGISTRY,
@@ -19,7 +18,7 @@ import {
   type ResolvedGenerationConfig,
 } from '@content-agent/agent-core';
 import {
-  BadRequestException, Inject, Injectable, NotFoundException,
+  BadRequestException, HttpException, Inject, Injectable, NotFoundException,
   type OnModuleDestroy, type OnModuleInit,
 } from '@nestjs/common';
 import { AuditService } from './audit.service.js';
@@ -44,16 +43,24 @@ import {
   reclaimStaleJobs,
   REVISION_TASKS_SPEC,
 } from './job-claim.js';
-import { classifyModelFailure, modelFailureMessage, shouldRefundQuota } from './model-failure.js';
+import { classifyModelFailure, modelFailureMessage } from './model-failure.js';
 import { detectProviderOutage } from './provider-outage.js';
 import { IntelligenceService } from './intelligence.service.js';
+import {
+  assertKnowledgeContextBudget,
+  assertKnowledgeRowsBudget,
+} from './knowledge-budget.js';
 import type { SessionPrincipal } from './models.js';
 import { PresetService } from './preset.service.js';
 import { ResourceService } from './resource.service.js';
 import { ResearchService } from './research.service.js';
 import { RevisionService } from './revision.service.js';
+import { createSafeModelFetch } from './safe-model-fetch.js';
 import { SettingsService } from './settings.service.js';
+import { readStoredText } from './storage-file.js';
 import { nowIso, parseJson } from './utils.js';
+
+const MAX_KNOWLEDGE_BYTES = 2 * 1024 * 1024;
 
 interface JobRow {
   id: string;
@@ -105,6 +112,43 @@ interface ModelProviderRetryOptions {
   sleep?: (delayMs: number) => Promise<void>;
 }
 
+/** 任务已被回收、接管或删除；旧执行者必须丢弃本轮结果。 */
+class ClaimLostError extends Error {
+  constructor(readonly taskKind: 'generation' | 'revision') {
+    super(`${taskKind} task claim lost`);
+    this.name = 'ClaimLostError';
+  }
+}
+
+function publicHttpExceptionMessage(error: HttpException): string {
+  const response = error.getResponse();
+  if (typeof response === 'string') return response.slice(0, 1_000);
+  if (response && typeof response === 'object') {
+    const value = (response as { message?: unknown }).message;
+    if (typeof value === 'string') return value.slice(0, 1_000);
+    if (Array.isArray(value)) {
+      const joined = value.filter((item): item is string => typeof item === 'string').join('；');
+      if (joined) return joined.slice(0, 1_000);
+    }
+  }
+  return error.message.slice(0, 1_000);
+}
+
+/** Initial generation is charged when accepted, so failure text must not promise a refund. */
+function generationFailureMessage(error: unknown): string {
+  if (error instanceof HttpException) return publicHttpExceptionMessage(error);
+  switch (classifyModelFailure(error)) {
+    case 'unavailable':
+      return '模型服务暂时不可用，内容生成没有完成。请稍后重试；若持续失败请联系客服。';
+    case 'credentials':
+      return '模型服务凭据异常，内容生成没有完成。请检查模型设置或联系客服处理。';
+    case 'incomplete':
+      return '模型这次返回的结果不完整，内容生成没有完成。请重试；若持续失败请联系客服。';
+    default:
+      return '内容生成失败，未完成本次操作。请重试；若持续失败请联系客服。';
+  }
+}
+
 export function retryModelProvider(
   provider: ModelProvider,
   options: ModelProviderRetryOptions = {},
@@ -133,8 +177,12 @@ export function retryModelProvider(
           // 可选诊断:确认重试是否真的发生、每次 status 是什么。定位台账 100% 失败
           // 时靠它拿到了"两个候选把 4 次尝试全部耗尽"这一关键证据。
           if (process.env.CONTENT_AGENT_DEBUG_RETRY) {
-            const detail = error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160);
-            console.error(`[retry] purpose=${String(request.metadata?.purpose)} attempt=${attempt + 1}/${maxAttempts} status=${status} ${detail}`);
+            const purpose = typeof request.metadata?.purpose === 'string'
+              ? request.metadata.purpose.replace(/[^0-9A-Za-z_.:-]/gu, '_').slice(0, 80)
+              : 'unknown';
+            // Provider messages can contain response bodies, endpoints or
+            // tenant data. Diagnostics retain only bounded non-secret fields.
+            console.error(`[retry] purpose=${purpose} attempt=${attempt + 1}/${maxAttempts} status=${status ?? 'network'}`);
           }
           if (status !== undefined && status !== 429 && status < 500) throw error;
           if (attempt < maxAttempts - 1) await sleep(baseDelayMs * 2 ** attempt);
@@ -308,37 +356,29 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     this.drainQueue();
 
     // 修改任务走同一份认领/回收实现,但队列名额独立(见 maxConcurrentRevisions)。
+    const refundedByRevision = new Map<string, number>();
     const revisionResult = reclaimStale(
       this.database, REVISION_TASKS_SPEC, nowIso(), this.options.jobClaimTimeoutMs,
       (attempts) => `修改被反复打断（${attempts} 次），已停止自动重跑，请重新提交修改要求`,
+      (id) => {
+        const workspaceId = this.requiredWorkspaceIdForRevision(id);
+        const refunded = this.settleRevisionQuota(id, workspaceId, 0);
+        refundedByRevision.set(id, refunded);
+        if (refunded) {
+          this.database
+            .prepare('UPDATE revision_tasks SET error = error || ?, updated_at=? WHERE id=?')
+            .run(`；已退还本次修改消耗的额度（${refunded} 次）。`, nowIso(), id);
+        }
+      },
     );
     for (const id of revisionResult.requeued) {
       const task = this.revisions.row(id);
       if (task) this.event(task.job_id, 'revision_requeued', { revisionId: id, reason: 'claim_timeout' });
     }
-    /*
-     * 回收判死这一侧必须退额度,而且要按扣款次数退。
-     *
-     * 扣额度在每次 processRevision 调模型之前发生,重试靠这里重新入队,所以 `kill -9`
-     * 或心跳失速三轮会扣三次,最后触顶判 failed——用户零产出、被扣三次。原实现的这个
-     * 分支只写了一个事件,一次都不退,与规格「只在确认无产出时退」正面冲突。
-     *
-     * keep=0:触顶判死意味着一次产出都没交付(内容包只在成功收尾的单事务里写入),所以
-     * 扣过几次就退几次。这不是 other 类——other 说的是「模型跑完了、结果不合格」,而这里
-     * 模型的每一次调用都被打断在半途。
-     */
     for (const id of revisionResult.failed) {
       const task = this.revisions.row(id);
       if (!task) continue;
-      const workspaceId = this.workspaceIdForJob(task.job_id);
-      const refunded = workspaceId ? this.settleRevisionQuota(id, workspaceId, 0) : 0;
-      // 真退了才说退了。退还次数是运行时才知道的(BYOK 模式一次都没扣),所以这句话
-      // 由这里补,而不是写进 reclaimStale 的固定文案里——那样会变成一句假承诺。
-      if (refunded) {
-        this.database
-          .prepare('UPDATE revision_tasks SET error = error || ?, updated_at=? WHERE id=?')
-          .run(`已退还本次修改消耗的额度（${refunded} 次）。`, nowIso(), id);
-      }
+      const refunded = refundedByRevision.get(id) ?? 0;
       this.event(task.job_id, 'revision_failed', {
         revisionId: id, message: '修改被反复打断，已停止自动重跑', refundedQuota: refunded,
       });
@@ -347,7 +387,9 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
   }
 
   create(raw: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
-    const id = this.insertJob(raw, principal, null);
+    // 扣额度、任务、queued 事件和审计必须同生共死。批量入口已有外层事务；
+    // 单篇也显式包裹，避免插入失败或进程在两条语句间退出后留下“扣费但无任务”。
+    const id = this.database.transaction(() => this.insertJob(raw, principal, null));
     this.enqueue(id);
     return this.get(id);
   }
@@ -404,6 +446,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     }
     const config = resolution.resolvedConfig;
     this.assertLatestSelectedKnowledge(projectId, config.knowledge.selectedFileIds);
+    this.assertGenerationKnowledgeBudget(projectId, config.knowledge, '内容生成');
     const provider = this.settings.provider(workspaceId, principal.userId);
     if (provider.mode === 'platform' && provider.apiKey) this.settings.consumePlatformQuota(workspaceId);
 
@@ -549,20 +592,68 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
    * 软删一条产出。返回撤销所需的信息。
    *
    * 不物理删:内容包、生成事件、批次都靠 job_id 外键挂着,物理删会连带清掉审计
-   * 痕迹;而且付费产品里「删错了」必须有退路。已扣的额度不退——记录还在才解释得清账。
+   * 痕迹;而且付费产品里「删错了」必须有退路。生成本身已扣的额度不退——记录还在
+   * 才解释得清账;但尚未交付结果的改稿必须结清余额,否则删除会让任务失去父级、余额
+   * 永久挂账。
    */
   softDelete(jobId: string): Record<string, unknown> {
     const row = this.jobRow(jobId);
     if (row.deleted_at) return { id: row.id, topic: row.topic, alreadyDeleted: true };
-    // 队列在 DB 里,而领取与位次查询都带 deleted_at IS NULL,所以软删本身就让它
-    // 不再被 drainQueue 捞起来跑——不需要额外摘队列。这比原来只摘本实例内存队列
-    // 更可靠:多实例下别的实例照样不会捞它。
-    const wasQueued = row.status === 'queued';
-    // 独立语句而不是扩展 updateJob:后者一次性重写 status/progress/error 等七个字段,
-    // 让它顺带管软删会把"删除"和"改状态"这两件事纠缠在一起。
     const now = nowIso();
-    this.database.prepare('UPDATE generation_jobs SET deleted_at=?, updated_at=? WHERE id=?').run(now, now, jobId);
-    this.event(jobId, 'deleted', { removedFromQueue: wasQueued });
+    const stoppedRevisionIds: string[] = [];
+    const deleted = this.database.transaction(() => {
+      const current = this.database
+        .prepare('SELECT status, deleted_at FROM generation_jobs WHERE id=?')
+        .get(jobId) as { status: JobRow['status']; deleted_at: string | null } | undefined;
+      if (!current) throw new NotFoundException('生成任务不存在');
+      if (current.deleted_at) return false;
+
+      const workspaceId = String(this.resources.projectRow(row.project_id).workspace_id);
+      const activeRevisionQuota = this.database
+        .prepare(
+          `SELECT COALESCE(SUM(quota_consumed_count), 0) AS value
+             FROM revision_tasks
+            WHERE job_id=? AND status IN ('queued', 'running')`,
+        )
+        .get(jobId) as { value: number };
+      const revisionRefund = Number(activeRevisionQuota.value);
+      if (revisionRefund > 0) this.settings.refundPlatformQuota(workspaceId, revisionRefund);
+
+      const stoppedMessage = '生成任务已删除，任务已停止';
+      const revisions = this.database
+        .prepare(
+          `UPDATE revision_tasks
+              SET status='failed', progress=100, error=?, completed_at=?, updated_at=?,
+                  claimed_by=NULL, heartbeat_at=NULL, quota_consumed_count=0
+            WHERE job_id=? AND status IN ('queued', 'running')
+            RETURNING id`,
+        )
+        .all(stoppedMessage, now, now, jobId) as unknown as Array<{ id: string }>;
+      stoppedRevisionIds.push(...revisions.map((item) => item.id));
+      this.database
+        .prepare(
+          `UPDATE generation_jobs
+              SET deleted_at=?, updated_at=?,
+                  status=CASE WHEN status IN ('queued', 'running') THEN 'failed' ELSE status END,
+                  progress=CASE WHEN status IN ('queued', 'running') THEN 100 ELSE progress END,
+                  error=CASE WHEN status IN ('queued', 'running') THEN ? ELSE error END,
+                  completed_at=CASE WHEN status IN ('queued', 'running') THEN ? ELSE completed_at END,
+                  claimed_by=CASE WHEN status IN ('queued', 'running') THEN NULL ELSE claimed_by END,
+                  claimed_at=CASE WHEN status IN ('queued', 'running') THEN NULL ELSE claimed_at END,
+                  heartbeat_at=CASE WHEN status IN ('queued', 'running') THEN NULL ELSE heartbeat_at END
+            WHERE id=? AND deleted_at IS NULL`,
+        )
+        .run(now, now, stoppedMessage, now, jobId);
+      this.event(jobId, 'deleted', {
+        removedFromQueue: current.status === 'queued',
+        stoppedRevisions: stoppedRevisionIds.length,
+        refundedRevisionQuota: revisionRefund,
+      });
+      return true;
+    });
+    if (!deleted) return { id: row.id, topic: row.topic, alreadyDeleted: true };
+    this.stopHeartbeat(jobId);
+    for (const revisionId of stoppedRevisionIds) this.stopRevisionHeartbeat(revisionId);
     return { id: row.id, topic: row.topic, alreadyDeleted: false };
   }
 
@@ -573,9 +664,8 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     /*
      * 只清 deleted_at,不重新入队。
      *
-     * 被删的任务如果当时还在排队,软删已经把它摘出内存队列了;撤销时重新入队看似
-     * 对称,实则危险——用户删掉一个排队任务往往正是为了让它别跑(省额度、改主意)。
-     * 恢复出来的记录停在 queued 状态,由「按同款重试」显式重发,而不是悄悄开跑。
+     * 删除时 queued/running 已明确结为 failed,所以清掉 deleted_at 只恢复可见性。
+     * 用户要再次执行必须走「按同款重试」显式新建任务,不会悄悄开跑旧记录。
      */
     this.database.prepare('UPDATE generation_jobs SET deleted_at=NULL, updated_at=? WHERE id=?').run(nowIso(), jobId);
     this.event(jobId, 'restored', {});
@@ -763,15 +853,22 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     // 直接按项目 + status 清库,覆盖所有实例上的排队任务。原来只遍历本实例内存
     // 队列,多实例下别的实例上同项目的任务不会被清——而这个函数存在的全部意义
     // 就是避免每篇再花 16 分钟撞同一面墙。
-    const cleared = this.database
-      .prepare("SELECT id FROM generation_jobs WHERE project_id=? AND status='queued' AND deleted_at IS NULL")
-      .all(projectId) as unknown as Array<{ id: string }>;
-    if (!cleared.length) return 0;
-    for (const row of cleared) {
-      this.updateJob(row.id, { status: 'failed', error: reason, progress: 100, completedAt: nowIso() });
-      this.event(row.id, 'failed', { message: reason, providerOutage: true });
-    }
-    return cleared.length;
+    return this.database.transaction(() => {
+      const now = nowIso();
+      const cleared = this.database
+        .prepare(
+          `UPDATE generation_jobs
+              SET status='failed', error=?, progress=100, completed_at=?, updated_at=?,
+                  claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL
+            WHERE project_id=? AND status='queued' AND deleted_at IS NULL
+            RETURNING id`,
+        )
+        .all(reason, now, now, projectId) as unknown as Array<{ id: string }>;
+      for (const row of cleared) {
+        this.event(row.id, 'failed', { message: reason, providerOutage: true });
+      }
+      return cleared.length;
+    });
   }
 
   private drainQueue(): void {
@@ -836,22 +933,21 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * 这个 job 所属的 workspace。
-   *
-   * 不走 jobRow/projectRow:它们带 deleted_at IS NULL 过滤并在查不到时抛异常,而退额度
-   * 的场合恰恰包含「项目已被软删」——欠用户的那几次额度不该因为项目被删就不退了。
+   * 修改任务所属的 workspace。这里故意不筛软删除:项目即使刚被软删,历史扣款仍要退。
+   * 查不到说明任务链已经被级联删除或数据损坏,必须抛错让外层事务整体回滚。
    */
-  private workspaceIdForJob(jobId: string): string | undefined {
-    try {
-      const row = this.database
-        .prepare(`SELECT p.workspace_id AS workspace_id
-                    FROM generation_jobs j JOIN projects p ON p.id = j.project_id
-                   WHERE j.id = ?`)
-        .get(jobId) as { workspace_id: string } | undefined;
-      return row ? String(row.workspace_id) : undefined;
-    } catch {
-      return undefined;
-    }
+  private requiredWorkspaceIdForRevision(revisionId: string): string {
+    const row = this.database
+      .prepare(
+        `SELECT p.workspace_id AS workspace_id
+           FROM revision_tasks r
+           JOIN generation_jobs j ON j.id = r.job_id
+           JOIN projects p ON p.id = j.project_id
+          WHERE r.id = ?`,
+      )
+      .get(revisionId) as { workspace_id: string } | undefined;
+    if (!row) throw new Error('修改任务所属工作区不存在');
+    return String(row.workspace_id);
   }
 
   /**
@@ -864,56 +960,35 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
    * 判据是「交付了几次产出」,不是「执行了几次」:被打断的那些执行按定义什么都没交付,
    * 所以成功收尾也要把之前打断掉的那几次退回去,只留成功这一次。
    *
-   * 读-改-写放在一个事务里,并用 `WHERE quota_consumed_count = ?` 卡住原值:两个实例
-   * 同时结清同一条任务时只有一个的 UPDATE 会命中,另一个退 0 次。这是「扣与退次数配平」
-   * 在多实例下成立的依据。
+   * 本方法不自行开事务,调用方必须把它放在任务终态事务里。任务余额与 workspace
+   * 额度要么同时更新、要么同时回滚,不能出现任务账归零但用户额度没退的状态。
    */
   private settleRevisionQuota(revisionId: string, workspaceId: string, keep: 0 | 1): number {
-    if (!workspaceId) return 0;
-    let refunds = 0;
-    try {
-      refunds = this.database.transaction(() => {
-        const row = this.database
-          .prepare('SELECT quota_consumed_count FROM revision_tasks WHERE id=?')
-          .get(revisionId) as { quota_consumed_count: number } | undefined;
-        const consumed = Number(row?.quota_consumed_count ?? 0);
-        const refund = Math.max(0, consumed - keep);
-        if (!refund) return 0;
-        const result = this.database
-          .prepare('UPDATE revision_tasks SET quota_consumed_count=? WHERE id=? AND quota_consumed_count=?')
-          .run(consumed - refund, revisionId, consumed);
-        return result.changes ? refund : 0;
-      });
-    } catch {
-      // 关停竞态或瞬时锁冲突。宁可不退也不能在账目上退两次:计数没减就等于没退,
-      // 下一次结清(回收判死那一侧)还会看到它。
-      return 0;
-    }
-    for (let i = 0; i < refunds; i += 1) this.settings.refundPlatformQuota(workspaceId);
-    return refunds;
+    const row = this.database
+      .prepare('SELECT quota_consumed_count FROM revision_tasks WHERE id=?')
+      .get(revisionId) as { quota_consumed_count: number } | undefined;
+    if (!row) throw new Error('修改任务不存在，无法结清额度');
+    const consumed = Number(row.quota_consumed_count);
+    const refund = Math.max(0, consumed - keep);
+    if (!refund) return 0;
+    const result = this.database
+      .prepare('UPDATE revision_tasks SET quota_consumed_count=? WHERE id=? AND quota_consumed_count=?')
+      .run(consumed - refund, revisionId, consumed);
+    if (result.changes !== 1) throw new Error('修改任务额度余额发生并发变化');
+    this.settings.refundPlatformQuota(workspaceId, refund);
+    return refund;
   }
 
-  /** 本实例是否仍持有这个修改任务。收尾写库前必查:心跳断过就可能已被接管。 */
-  private stillOwnsRevision(revisionId: string): boolean {
-    if (this.stopped) return false;
-    try {
-      const row = this.database.prepare('SELECT claimed_by FROM revision_tasks WHERE id=?').get(revisionId) as
-        { claimed_by: string | null } | undefined;
-      return row?.claimed_by === this.options.instanceId;
-    } catch {
-      // 关停竞态:连接已关闭。当作不再持有,放弃写入。
-      return false;
-    }
-  }
-
-  /** 推进进度。已不持有则静默放弃,不覆盖接管者的进度。 */
+  /** 推进改稿进度。CAS 未命中说明归属已易主,旧执行者必须立即停手。 */
   private revisionProgress(revisionId: string, value: number): void {
-    if (!this.stillOwnsRevision(revisionId)) return;
-    try {
-      this.database
-        .prepare('UPDATE revision_tasks SET progress=?, updated_at=? WHERE id=?')
-        .run(value, nowIso(), revisionId);
-    } catch { /* 关停竞态:任务留在 running,由回收接管 */ }
+    if (this.stopped) throw new ClaimLostError('revision');
+    const result = this.database
+      .prepare(
+        `UPDATE revision_tasks SET progress=?, updated_at=?
+          WHERE id=? AND status='running' AND claimed_by=?`,
+      )
+      .run(value, nowIso(), revisionId, this.options.instanceId);
+    if (result.changes !== 1) throw new ClaimLostError('revision');
   }
 
   /**
@@ -934,51 +1009,37 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     this.heartbeats.delete(jobId);
   }
 
-  /**
-   * 推进进度。关停途中静默跳过:进度只是 UI 反馈,而 process 的 await 之间可能
-   * 跨过 app.close(),这时写库会撞上已关闭的连接。
-   */
-  private progress(jobId: string, value: number, knowledgeContext?: unknown): void {
-    if (this.stopped) return;
-    try {
-      this.updateJob(jobId, knowledgeContext === undefined
-        ? { progress: value }
-        : { progress: value, knowledgeContext });
-    } catch { /* 关停竞态:任务留在 running,由回收接管 */ }
-  }
-
-  /**
-   * 本实例是否仍应该写这个任务的结果。收尾写库前确认一次。
-   *
-   * 两种情况要停手:(a) 已关停——连接可能已经关闭,继续写会撞上「database is not
-   * open」并冒成 unhandledRejection;任务留在 running,心跳停更后由下一个实例回收。
-   * (b) 归属已易主——任务被回收并被别的实例接管重跑,再写就会与接管者互相覆盖,
-   * 同一个 job 出现两套 content_packages。
-   */
-  private stillOwns(jobId: string): boolean {
-    if (this.stopped) return false;
-    try {
-      const row = this.database
-        .prepare('SELECT claimed_by FROM generation_jobs WHERE id=?')
-        .get(jobId) as { claimed_by: string | null } | undefined;
-      return row?.claimed_by === this.options.instanceId;
-    } catch {
-      // 关停竞态:连接已关闭。当作不再持有,放弃写入。
-      return false;
-    }
+  /** 推进生成进度。条件与心跳一致,不能用无归属守卫的更新。 */
+  private progress(jobId: string, value: number): void {
+    if (this.stopped) throw new ClaimLostError('generation');
+    const result = this.database
+      .prepare(
+        `UPDATE generation_jobs SET progress=?, updated_at=?
+          WHERE id=? AND status='running' AND claimed_by=? AND deleted_at IS NULL`,
+      )
+      .run(value, nowIso(), jobId, this.options.instanceId);
+    if (result.changes !== 1) throw new ClaimLostError('generation');
   }
 
   private async process(jobId: string): Promise<void> {
     const job = this.jobRow(jobId);
-    // status 已由 claimNextJob 原子置为 running,这里只推进进度。
-    this.updateJob(jobId, { progress: 12, error: null });
-    this.startHeartbeat(jobId);
-    this.event(jobId, 'running', {});
-    // process 的每个 await 之间都可能跨过 app.close()。收尾写入靠 stillOwns 挡,
-    // 中途的进度更新靠 progress() 挡,失败路径也检查 stillOwns。
-
     try {
+      // 领取已把 status 原子置为 running。启动进度与事件也必须同生共死，并再次
+      // 校验归属：领取后到 setImmediate 执行前，任务可能已经被回收或软删。
+      this.database.transaction(() => {
+        const started = this.database
+          .prepare(
+            `UPDATE generation_jobs SET progress=12, error=NULL, updated_at=?
+              WHERE id=? AND status='running' AND claimed_by=? AND deleted_at IS NULL`,
+          )
+          .run(nowIso(), jobId, this.options.instanceId);
+        if (started.changes !== 1) throw new ClaimLostError('generation');
+        this.event(jobId, 'running', {});
+      });
+      this.startHeartbeat(jobId);
+
       const config = parseJson<ResolvedGenerationConfig>(job.config_json, {} as ResolvedGenerationConfig);
+      this.normalizeStoredKnowledgeConfig(config);
       const storedResolution = parseJson<Record<string, unknown>>(job.resolution_snapshot_json, {});
       const parameterSelection = isRecord(storedResolution.parameterSelection)
         ? storedResolution.parameterSelection as GenerationParameterSelection
@@ -989,7 +1050,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       const project = this.resources.projectRow(job.project_id);
       const providerSettings = this.settings.provider(String(project.workspace_id), job.created_by);
       this.progress(jobId, 28);
-      const knowledge = await this.loadKnowledge(job.project_id);
+      const knowledge = await this.loadKnowledge(job.project_id, config.knowledge, '内容生成');
       this.progress(jobId, 44);
       const planningContext = await this.intelligence.hydratePlanningContext(job.project_id, storedPlanningContext);
       const agent = new ContentGenerationAgent({ modelProvider: this.modelProvider(providerSettings) });
@@ -1016,14 +1077,20 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       const impactReport = result.impactReport ?? storedImpact;
       const validCandidateCount = result.packages.filter((content) => content.validation.valid).length;
       const qualityStatus = deriveQualityStatus(result.packages);
-      // 收尾前确认所有权:若本实例的心跳曾经断掉、任务已被别的实例接管并重跑,
-      // 这里再写产出就会与接管者互相覆盖(同一 job 出现两套 content_packages)。
-      // 放弃写入而不是抛错:接管者会完整跑完,用户拿到的仍是一份正常产出。
-      if (!this.stillOwns(jobId)) {
-        this.event(jobId, 'claim_lost', { message: '任务已被其他实例接管，本次结果丢弃' });
-        return;
-      }
-      this.progress(jobId, 88, result.knowledgeContext);
+      const mergedResolution = result.resolutionSnapshot
+        ? { ...storedResolution, ...result.resolutionSnapshot }
+        : storedResolution;
+      const mergedImpact = result.impactReport
+        ? {
+            ...(storedImpact ?? {}),
+            ...result.impactReport,
+            compatibilityTraces: isRecord(storedImpact) ? storedImpact.compatibilityTraces : undefined,
+          }
+        : storedImpact ?? {};
+
+      // 88% 只表示模型阶段结束。知识上下文不能在这里提前持久化：若最终 CAS
+      // 失败，它必须和内容包、coverage、快照一起完整回滚。
+      this.progress(jobId, 88);
       this.database.transaction(() => {
         for (const content of result.packages) {
           if (resolutionSnapshot && !content.resolutionSnapshot) content.resolutionSnapshot = resolutionSnapshot;
@@ -1054,59 +1121,73 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
             createdBy: job.created_by,
           });
         }
-        if (Object.keys(realizedOpportunitySnapshot).length) {
-          this.database.prepare(
-            'UPDATE generation_jobs SET opportunity_snapshot_json=?, updated_at=? WHERE id=?',
-          ).run(JSON.stringify(realizedOpportunitySnapshot), nowIso(), jobId);
-        }
-        if (result.resolutionSnapshot || result.impactReport) {
-          const mergedResolution = result.resolutionSnapshot
-            ? { ...storedResolution, ...result.resolutionSnapshot }
-            : storedResolution;
-          const mergedImpact = result.impactReport
-            ? {
-                ...(storedImpact ?? {}),
-                ...result.impactReport,
-                compatibilityTraces: isRecord(storedImpact) ? storedImpact.compatibilityTraces : undefined,
-              }
-            : storedImpact ?? {};
-          this.database
-            .prepare(
-              `UPDATE generation_jobs SET resolution_snapshot_json=?, config_impact_json=?, updated_at=?
-               WHERE id=?`,
-            )
-            .run(
-              JSON.stringify(mergedResolution),
-              JSON.stringify(mergedImpact),
-              nowIso(),
-              jobId,
-            );
-        }
-        this.updateJob(jobId, { status: 'completed', qualityStatus, progress: 100, completedAt: result.completedAt });
-      });
-      this.event(jobId, 'completed', {
-        candidateCount: result.packages.length,
-        validCandidateCount,
-        qualityStatus,
-        knowledgeMode: result.knowledgeContext.mode,
-        selectedDocuments: result.knowledgeContext.selectedDocumentIds,
+
+        // 终态 CAS 放在所有产物写入之后。若归属已易主，抛错会回滚本事务内
+        // 的全部内容包、coverage 和快照，旧执行者不留下任何痕迹。
+        const completed = this.database
+          .prepare(
+            `UPDATE generation_jobs
+                SET status='completed', quality_status=?, progress=100, error=NULL, completed_at=?,
+                    knowledge_context_json=?, opportunity_snapshot_json=?, resolution_snapshot_json=?,
+                    config_impact_json=?, updated_at=?, claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL
+              WHERE id=? AND status='running' AND claimed_by=? AND deleted_at IS NULL`,
+          )
+          .run(
+            qualityStatus,
+            result.completedAt,
+            JSON.stringify(result.knowledgeContext),
+            JSON.stringify(realizedOpportunitySnapshot),
+            JSON.stringify(mergedResolution),
+            JSON.stringify(mergedImpact),
+            nowIso(),
+            jobId,
+            this.options.instanceId,
+          );
+        if (completed.changes !== 1) throw new ClaimLostError('generation');
+        this.event(jobId, 'completed', {
+          candidateCount: result.packages.length,
+          validCandidateCount,
+          qualityStatus,
+          knowledgeMode: result.knowledgeContext.mode,
+          selectedDocuments: result.knowledgeContext.selectedDocumentIds,
+        });
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message.slice(0, 1_000) : String(error).slice(0, 1_000);
-      // 已被接管的任务不写失败态:接管者可能正跑得好好的,把它标 failed 是覆盖
-      // 别人的正确结果。本次失败只记事件,不改状态。
-      if (this.stillOwns(jobId)) {
-        this.updateJob(jobId, { status: 'failed', error: message, progress: 100, completedAt: nowIso() });
+      // 易主、软删与关停都不是本轮执行的失败。接管者拥有唯一写权，旧实例必须
+      // 完全静默：不改状态、不记事件、不退款，也不触发供应商熔断。
+      if (error instanceof ClaimLostError) return;
+      const raw = error instanceof Error ? error.message.slice(0, 1_000) : String(error).slice(0, 1_000);
+      // Outage detection still uses the private provider detail, but neither
+      // task state nor events persist that response body.
+      const outage = detectProviderOutage(raw);
+      const message = outage?.reason ?? generationFailureMessage(error);
+      try {
+        this.database.transaction(() => {
+          const now = nowIso();
+          const failed = this.database
+            .prepare(
+              `UPDATE generation_jobs
+                  SET status='failed', progress=100, error=?, completed_at=?, updated_at=?,
+                      claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL
+                WHERE id=? AND status='running' AND claimed_by=? AND deleted_at IS NULL`,
+            )
+            .run(message, now, now, jobId, this.options.instanceId);
+          if (failed.changes !== 1) throw new ClaimLostError('generation');
+          this.event(jobId, 'failed', { message });
+        });
+      } catch (settleError) {
+        if (settleError instanceof ClaimLostError) return;
+        // 失败态或事件无法原子提交时保留 running，让心跳停止后的孤儿回收重试；
+        // 此时不能清理队列，否则会在根因尚未落账时扩大副作用。
+        throw settleError;
       }
-      this.event(jobId, 'failed', { message });
       // 供应商级故障(余额不足/无可用账号/凭据冷却):后面排队的注定同样失败,
       // 立刻判掉而不是每篇再花 16 分钟撞一次同一面墙。单篇级错误不触发。
-      const outage = detectProviderOutage(message);
       if (outage) {
         const cleared = this.failQueuedForOutage(job.project_id, outage.reason);
-        if (cleared > 0) {
-          this.event(jobId, 'provider_outage', { kind: outage.kind, clearedQueuedJobs: cleared });
-        }
+        // Record every task that actually observed the provider outage. This
+        // retains diagnosis and call-count evidence without storing raw bodies.
+        this.event(jobId, 'provider_outage', { kind: outage.kind, clearedQueuedJobs: cleared });
       }
     }
   }
@@ -1124,13 +1205,24 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
   private async processRevision(revisionId: string): Promise<void> {
     const task = this.revisions.row(revisionId);
     if (!task) return;
-    this.startRevisionHeartbeat(revisionId);
-    this.event(task.job_id, 'revision_running', { revisionId });
-
-    // workspaceId 在 try 内才拿得到,但 catch 里要用它结额度账。先置空:取到之前就
-    // 失败时 catch 里会回查一次(见 workspaceIdForJob),因为那时余额可能是上一轮欠的。
     let workspaceId = '';
+    // 只描述当前进程是否真正完成过本轮平台扣款事务。历史中断遗留的余额由
+    // quota_consumed_count 记录，不能把它误当成本轮扣款。
+    let chargedThisAttempt = false;
+    let modelInvoked = false;
     try {
+      this.database.transaction(() => {
+        const started = this.database
+          .prepare(
+            `UPDATE revision_tasks SET progress=5, error=NULL, updated_at=?
+              WHERE id=? AND status='running' AND claimed_by=?`,
+          )
+          .run(nowIso(), revisionId, this.options.instanceId);
+        if (started.changes !== 1) throw new ClaimLostError('revision');
+        this.event(task.job_id, 'revision_running', { revisionId });
+      });
+      this.startRevisionHeartbeat(revisionId);
+
       // jobRow / projectRow 也在 try 内:项目或任务被软删时它们抛 NotFoundException,
       // 放在 try 外会被 drainRevisions 的 .catch(() => undefined) 吞掉,任务就停在
       // running——没有 failed、没有事件,还占着那条部分唯一索引的名额,只能等回收
@@ -1147,23 +1239,36 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       if (!current) throw new Error('候选内容无法解析');
 
       const formula = this.formulas.get(job.formula_version_id).version;
+      const config = parseJson<ResolvedGenerationConfig>(job.config_json, {} as ResolvedGenerationConfig);
+      this.normalizeStoredKnowledgeConfig(config);
       const providerSettings = this.settings.provider(workspaceId, task.created_by);
+      // Knowledge is validated and loaded before platform quota is charged. A
+      // context-size or storage failure therefore cannot consume a paid call.
+      const knowledge = await this.loadKnowledge(job.project_id, config.knowledge, '内容修改');
       /*
        * 扣额度的时机与原同步实现一致(调用模型前),但每次扣都记账。
        *
        * 记账是必需的:重试靠孤儿回收重新入队,所以一条任务可能被执行 N 次、扣 N 次,
        * 最终由 reclaimStale 判 failed。那一侧要退,就必须知道退几次——退 1 次会少退,
        * 固定退 3 次会在只扣过 1 次时白送。quota_consumed_count 就是「已扣未退」余额。
-       */
+      */
       if (providerSettings.mode === 'platform' && providerSettings.apiKey) {
-        this.settings.consumePlatformQuota(workspaceId);
-        this.database
-          .prepare('UPDATE revision_tasks SET quota_consumed_count = quota_consumed_count + 1 WHERE id=?')
-          .run(revisionId);
+        this.database.transaction(() => {
+          this.settings.consumePlatformQuota(workspaceId);
+          const recorded = this.database
+            .prepare(
+              `UPDATE revision_tasks
+                  SET quota_consumed_count=quota_consumed_count + 1, updated_at=?
+                WHERE id=? AND status='running' AND claimed_by=?`,
+            )
+            .run(nowIso(), revisionId, this.options.instanceId);
+          if (recorded.changes !== 1) throw new ClaimLostError('revision');
+        });
+        // 只在扣款和任务账都提交之后置位。事务抛错时额度自增会一并回滚。
+        chargedThisAttempt = true;
       }
 
       this.revisionProgress(revisionId, 25);
-      const knowledge = await this.loadKnowledge(job.project_id);
       const jobResolution = parseJson<Record<string, unknown>>(job.resolution_snapshot_json, {});
       const parameterSelection = isRecord(jobResolution.parameterSelection)
         ? jobResolution.parameterSelection as GenerationParameterSelection
@@ -1179,7 +1284,14 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       const hydrated = await this.intelligence.hydratePlanningContext(job.project_id, revisionPlanningContext);
 
       this.revisionProgress(revisionId, 40);
-      const agent = new ContentGenerationAgent({ modelProvider: this.modelProvider(providerSettings) });
+      const provider = this.modelProvider(providerSettings);
+      const trackedProvider: ModelProvider | undefined = provider ? {
+        generate: (request) => {
+          modelInvoked = true;
+          return provider.generate(request);
+        },
+      } : undefined;
+      const agent = new ContentGenerationAgent({ modelProvider: trackedProvider });
       const result = await agent.revise({
         package: current,
         instruction: task.instruction,
@@ -1204,88 +1316,92 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
         if (!revised[field] && previous[field]) revised[field] = previous[field];
       }
 
-      // 收尾前确认所有权:心跳断过、任务已被接管并重跑时,再写就会两边互相覆盖。
-      //
-      // 这里不结额度账:本次结果作废,但接管者会重跑并再扣一次,由它那一侧的终态
-      // 结清统一处理(quota_consumed_count 是整条任务的累计值,不是单次执行的)。
-      if (!this.stillOwnsRevision(revisionId)) {
-        this.event(task.job_id, 'revision_claim_lost', { revisionId, message: '任务已被其他实例接管，本次结果丢弃' });
-        return;
-      }
       const now = nowIso();
       this.database.transaction(() => {
         this.database
           .prepare('UPDATE content_packages SET id=?, content_json=?, updated_at=? WHERE id=?')
           .run(result.package.id, JSON.stringify(result.package), now, packageRow.id);
-        this.database
+        // 平台模式本轮确实扣过一次时保留这一次；BYOK 或本轮没扣款时一笔不留，
+        // 顺便退清历史中断遗留的余额。
+        const refundedOnSuccess = this.settleRevisionQuota(
+          revisionId,
+          workspaceId,
+          chargedThisAttempt ? 1 : 0,
+        );
+        const completed = this.database
           .prepare(
             `UPDATE revision_tasks
                 SET status='completed', progress=100, error=NULL, rerun_channels_json=?,
-                    result_package_id=?, completed_at=?, updated_at=?
-              WHERE id=?`,
+                    result_package_id=?, completed_at=?, updated_at=?,
+                    claimed_by=NULL, heartbeat_at=NULL
+              WHERE id=? AND status='running' AND claimed_by=?`,
           )
-          .run(JSON.stringify(result.dependency.rerunChannels), result.package.id, now, now, revisionId);
-      });
-      /*
-       * 交付了一次产出,所以留一次扣款、把之前被打断的那几次退回去。
-       *
-       * 被打断的执行按定义什么都没交付(内容包在最后一步单事务写入),用户不该为它们
-       * 付费。成功路径也要结账,否则「被打断两次、第三次成功」的用户会为一次产出付
-       * 三次钱。
-       */
-      const refundedOnSuccess = this.settleRevisionQuota(revisionId, workspaceId, 1);
-      if (refundedOnSuccess) {
-        this.event(task.job_id, 'revision_quota_refunded', {
-          revisionId, refunded: refundedOnSuccess, reason: 'interrupted_attempts',
+          .run(
+            JSON.stringify(result.dependency.rerunChannels),
+            result.package.id,
+            now,
+            now,
+            revisionId,
+            this.options.instanceId,
+          );
+        if (completed.changes !== 1) throw new ClaimLostError('revision');
+        if (refundedOnSuccess) {
+          this.event(task.job_id, 'revision_quota_refunded', {
+            revisionId, refunded: refundedOnSuccess, reason: 'interrupted_attempts',
+          });
+        }
+        this.event(task.job_id, 'revised', {
+          revisionId,
+          candidateId: task.candidate_id,
+          rerunChannels: result.dependency.rerunChannels,
+          approvedSourceImageAnalysisCount: hydrated?.imageAnalyses?.length ?? 0,
         });
-      }
-      this.event(task.job_id, 'revised', {
-        revisionId,
-        candidateId: task.candidate_id,
-        rerunChannels: result.dependency.rerunChannels,
-        approvedSourceImageAnalysisCount: hydrated?.imageAnalyses?.length ?? 0,
-      });
-      this.audit.record({
-        workspaceId, userId: task.created_by, action: 'generation.revise',
-        entityType: 'content_package', entityId: result.package.id,
-        details: { jobId: task.job_id, candidateId: task.candidate_id, rerunChannels: result.dependency.rerunChannels },
+        this.audit.record({
+          workspaceId, userId: task.created_by, action: 'generation.revise',
+          entityType: 'content_package', entityId: result.package.id,
+          details: {
+            jobId: task.job_id,
+            candidateId: task.candidate_id,
+            rerunChannels: result.dependency.rerunChannels,
+          },
+        });
       });
     } catch (error) {
+      if (error instanceof ClaimLostError) return;
       const kind = classifyModelFailure(error);
       const raw = error instanceof Error ? error.message.slice(0, 1_000) : String(error).slice(0, 1_000);
-      /*
-       * 只在「确认无产出」时退额度(shouldRefundQuota:other 类不退)。校验不通过一类
-       * 消耗了真实算力并产出了可判定结果,退它等于白送一次。
-       *
-       * 与分析路径的分歧,已由人类裁定并有意保留:intelligence.service 的
-       * analyzeWithCurrentModel 对**任何**错误都退额度。那是既有的历史行为,改它会让
-       * 现有用户的额度账目发生变化,所以只有 revise 这条新路径用新真源。两处不一致是
-       * 明知的、不是遗漏。
-       */
-      /*
-       * 退几次:按 quota_consumed_count(已扣未退余额)退,不是固定退 1。这条任务可能
-       * 已经被打断重跑过几轮、每轮扣一次,而那些轮次一次产出都没交付。
-       *
-       * other 类保留一次扣款(keep=1):它消耗了真实算力并产出了可判定结果。但只保留
-       * **这一次**——之前被打断的那几轮仍然是零产出,照退。
-       *
-       * 无条件结清,不看本次执行是否扣成:失败发生在扣款之前时余额若非 0,那是上一轮
-       * 欠着的,同样该退。workspaceId 在扣款之前失败时
-       * 是空串,回查一次;余额为 0 时 settle 什么都不做,所以这条路径依然「一分不扣」。
-       */
-      const settleWorkspaceId = workspaceId || this.workspaceIdForJob(task.job_id) || '';
-      this.settleRevisionQuota(revisionId, settleWorkspaceId, shouldRefundQuota(kind) ? 0 : 1);
-      if (!this.stillOwnsRevision(revisionId)) return;
-      const now = nowIso();
-      this.database
-        .prepare("UPDATE revision_tasks SET status='failed', progress=100, error=?, completed_at=?, updated_at=? WHERE id=?")
-        .run(modelFailureMessage(kind, '修改', raw), now, now, revisionId);
-      this.event(task.job_id, 'revision_failed', { revisionId, message: raw });
+      const message = !modelInvoked && error instanceof HttpException
+        ? publicHttpExceptionMessage(error)
+        : modelFailureMessage(kind, '修改', raw);
+      this.database.transaction(() => {
+        const settleWorkspaceId = workspaceId || this.requiredWorkspaceIdForRevision(revisionId);
+        // other 只有在本轮确实发生了平台模型调用时才保留一次扣款；其余情况零
+        // 产出，退清本轮及历史中断余额。
+        const keep = kind === 'other' && chargedThisAttempt ? 1 : 0;
+        const refunded = this.settleRevisionQuota(revisionId, settleWorkspaceId, keep);
+        const now = nowIso();
+        const failed = this.database
+          .prepare(
+            `UPDATE revision_tasks
+                SET status='failed', progress=100, error=?, completed_at=?, updated_at=?,
+                    claimed_by=NULL, heartbeat_at=NULL
+              WHERE id=? AND status='running' AND claimed_by=?`,
+          )
+          .run(
+            message,
+            now,
+            now,
+            revisionId,
+            this.options.instanceId,
+          );
+        if (failed.changes !== 1) throw new ClaimLostError('revision');
+        this.event(task.job_id, 'revision_failed', { revisionId, message, refundedQuota: refunded });
+      });
     }
   }
 
-  private async loadKnowledge(projectId: string): Promise<KnowledgeDocument[]> {
-    const rows = this.database
+  private latestKnowledgeRows(projectId: string): Record<string, unknown>[] {
+    return this.database
       .prepare(
         `WITH ranked AS (
            SELECT *, ROW_NUMBER() OVER (
@@ -1298,10 +1414,62 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
          SELECT * FROM ranked WHERE version_rank=1 ORDER BY filename`,
       )
       .all(projectId) as unknown as Record<string, unknown>[];
-    return Promise.all(rows.map(async (row) => {
-      const content = await readFile(resolve(this.database.options.dataDir, String(row.storage_path)), 'utf8');
+  }
+
+  private selectedKnowledgeRows(
+    projectId: string,
+    config?: ResolvedGenerationConfig['knowledge'],
+  ): Record<string, unknown>[] {
+    const excluded = new Set(Array.isArray(config?.excludedFileIds) ? config.excludedFileIds : []);
+    const selected = new Set(Array.isArray(config?.selectedFileIds) ? config.selectedFileIds : []);
+    return this.latestKnowledgeRows(projectId).filter((row) => {
+      const id = String(row.id);
+      if (excluded.has(id)) return false;
+      // Style corpora are analysis/calibration material and never writer context.
+      if (String(row.category) === 'reference-corpus') return false;
+      return selected.size === 0 || selected.has(id);
+    });
+  }
+
+  private normalizeStoredKnowledgeConfig(config: ResolvedGenerationConfig): void {
+    if (!isRecord(config.knowledge)) throw new Error('生成任务知识配置无效');
+    config.knowledge.selectedFileIds = Array.isArray(config.knowledge.selectedFileIds)
+      ? config.knowledge.selectedFileIds.filter((id): id is string => typeof id === 'string')
+      : [];
+    config.knowledge.excludedFileIds = Array.isArray(config.knowledge.excludedFileIds)
+      ? config.knowledge.excludedFileIds.filter((id): id is string => typeof id === 'string')
+      : [];
+  }
+
+  private assertGenerationKnowledgeBudget(
+    projectId: string,
+    config: ResolvedGenerationConfig['knowledge'],
+    operation: string,
+  ): void {
+    assertKnowledgeRowsBudget(operation, this.selectedKnowledgeRows(projectId, config));
+  }
+
+  private async loadKnowledge(
+    projectId: string,
+    config?: ResolvedGenerationConfig['knowledge'],
+    operation = '知识加载',
+  ): Promise<KnowledgeDocument[]> {
+    const rows = this.selectedKnowledgeRows(projectId, config);
+    assertKnowledgeRowsBudget(operation, rows);
+    const documents: KnowledgeDocument[] = [];
+    let totalBytes = 0;
+    for (const row of rows) {
+      const content = await readStoredText({
+        dataDir: this.database.options.dataDir,
+        projectDir: join(this.database.knowledgeDir, projectId),
+        storagePath: String(row.storage_path),
+      }, MAX_KNOWLEDGE_BYTES);
+      totalBytes += Buffer.byteLength(content, 'utf8');
+      // Database byte metadata is only a preflight hint. Recheck actual bytes
+      // while reading so stale or tampered rows cannot bypass the shared cap.
+      assertKnowledgeContextBudget({ operation, fileCount: rows.length, totalBytes });
       const metadata = parseJson<Record<string, unknown>>(String(row.metadata_json), {});
-      return indexKnowledgeSource({
+      documents.push(indexKnowledgeSource({
         id: String(row.id),
         projectId,
         path: String(row.filename),
@@ -1319,8 +1487,9 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
           ].filter((value, index, all) => all.indexOf(value) === index),
           caveats: Array.isArray(metadata.caveats) ? metadata.caveats.map(String) : [],
         },
-      });
-    }));
+      }));
+    }
+    return documents;
   }
 
   private assertLatestSelectedKnowledge(projectId: string, selectedFileIds: readonly string[]): void {
@@ -1372,12 +1541,21 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       // 仅 platform 模式直连官方 OpenAI，才支持 json_schema。
       structuredOutput: settings.mode === 'byok' || settings.provider.toLowerCase().includes('compatible') ? 'json_object' : 'json_schema',
       includeTemperature: true,
+      fetch: settings.mode === 'byok'
+        ? createSafeModelFetch({
+            allowHttp: this.options.byokAllowHttp,
+            allowPrivateNetwork: this.options.byokAllowPrivateNetwork,
+          })
+        : undefined,
       timeoutMs: Number.isFinite(this.options.modelRequestTimeoutMs)
         ? Math.max(10_000, Math.min(300_000, this.options.modelRequestTimeoutMs))
         : 90_000,
     });
     return limitModelProvider(
-      retryModelProvider(client, { maxAttempts: this.options.modelRetryAttempts }),
+      retryModelProvider(client, {
+        maxAttempts: this.options.modelRetryAttempts,
+        baseDelayMs: this.options.modelRetryBaseDelayMs,
+      }),
       this.options.modelMaxConcurrentRequests,
     );
   }
@@ -1572,22 +1750,6 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
 
   private packageRows(jobId: string): PackageRow[] {
     return this.database.prepare('SELECT * FROM content_packages WHERE job_id = ? ORDER BY candidate_index').all(jobId) as unknown as PackageRow[];
-  }
-
-  private updateJob(jobId: string, input: { status?: string; qualityStatus?: JobRow['quality_status']; progress?: number; error?: string | null; completedAt?: string; knowledgeContext?: unknown }): void {
-    const row = this.jobRow(jobId);
-    const status = input.status ?? row.status;
-    // 终态清空归属与心跳:留着会让已完成的任务看起来仍被某个实例持有,回收扫描
-    // 也得多筛一层。清掉之后「claimed_by 非空」就精确等于「有实例正在跑」。
-    const terminal = status === 'completed' || status === 'failed';
-    this.database
-      .prepare(
-        `UPDATE generation_jobs
-            SET status=?, quality_status=?, progress=?, error=?, completed_at=?, knowledge_context_json=?, updated_at=?
-                ${terminal ? ', claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL' : ''}
-          WHERE id=?`,
-      )
-      .run(status, input.qualityStatus ?? row.quality_status, input.progress ?? row.progress, input.error === undefined ? row.error : input.error, input.completedAt ?? row.completed_at, input.knowledgeContext === undefined ? row.knowledge_context_json : JSON.stringify(input.knowledgeContext), nowIso(), jobId);
   }
 
   private event(jobId: string, event: string, details: Record<string, unknown>): void {

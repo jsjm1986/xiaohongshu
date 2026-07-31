@@ -13,11 +13,12 @@ import {
   ShieldCheck,
   SlidersHorizontal,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useProjects } from "../components/ProjectContext";
-import { Badge, Button, Field, Modal, PageHeader, Skeleton, useToast } from "../components/Ui";
+import { Badge, Button, EmptyState, Field, Modal, PageHeader, Skeleton, useToast } from "../components/Ui";
 import { V2Hero } from "../components/V2";
 import { api, ApiError } from "../lib/api";
+import { errorMessage } from "../lib/errors";
 import { defaultParameterSchema, normalizeParameterSchema } from "../lib/parameter-schema";
 import {
   experimentTransitions,
@@ -77,32 +78,71 @@ export function ResearchPage() {
   const [schema, setSchema] = useState<GenerationParameterSchema>(defaultParameterSchema);
   const [tab, setTab] = useState<Tab>("overview");
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [schemaWarning, setSchemaWarning] = useState("");
   const [busy, setBusy] = useState("");
   const [query, setQuery] = useState("");
   const [createKind, setCreateKind] = useState<CreateKind | null>(null);
   const [resultExperiment, setResultExperiment] = useState<ResearchExperiment | null>(null);
   const [form, setForm] = useState<Record<string, string>>({});
   const [releaseBindings, setReleaseBindings] = useState({ datasets: [] as string[], results: [] as string[], calibrations: [] as string[] });
+  const activeProjectId = useRef(projectId);
+  const loadSeq = useRef(0);
+  activeProjectId.current = projectId;
   const toast = useToast();
 
-  const load = async (quiet = false) => {
-    if (!projectId) return;
-    if (!quiet) setLoading(true);
-    try {
-      const [research, rawSchema] = await Promise.all([
-        api.research.overview(projectId),
-        api.parameters.schema(projectId).catch(() => null),
-      ]);
-      setOverview(research);
-      setSchema(normalizeParameterSchema(rawSchema));
-    } catch (error) {
-      toast.push(error instanceof Error ? error.message : "研究资料加载失败", "error");
-    } finally {
+  const load = async (quiet = false, requestedProjectId = projectId) => {
+    if (!requestedProjectId) {
+      setOverview(null);
+      setLoadError("");
+      setSchemaWarning("");
       setLoading(false);
+      return;
+    }
+    const seq = ++loadSeq.current;
+    if (!quiet) setLoading(true);
+    setLoadError("");
+    try {
+      const [researchResult, schemaResult] = await Promise.allSettled([
+        api.research.overview(requestedProjectId),
+        api.parameters.schema(requestedProjectId),
+      ]);
+      if (activeProjectId.current !== requestedProjectId || seq !== loadSeq.current) return;
+      if (researchResult.status === "fulfilled") {
+        setOverview(researchResult.value);
+      } else {
+        setOverview(null);
+        setLoadError(errorMessage(researchResult.reason, "研究资料加载失败"));
+      }
+      if (schemaResult.status === "fulfilled") {
+        setSchema(normalizeParameterSchema(schemaResult.value));
+        setSchemaWarning("");
+      } else {
+        setSchema(defaultParameterSchema);
+        setSchemaWarning(errorMessage(schemaResult.reason, "生成参数定义加载失败"));
+      }
+    } finally {
+      if (activeProjectId.current === requestedProjectId && seq === loadSeq.current) setLoading(false);
     }
   };
 
-  useEffect(() => { void load(); }, [projectId]);
+  useEffect(() => {
+    loadSeq.current += 1;
+    setOverview(null);
+    setSchema(defaultParameterSchema);
+    setLoadError("");
+    setSchemaWarning("");
+    setLoading(Boolean(projectId));
+    setBusy("");
+    setQuery("");
+    setTab("overview");
+    setCreateKind(null);
+    setResultExperiment(null);
+    setForm({});
+    setReleaseBindings({ datasets: [], results: [], calibrations: [] });
+    void load(false, projectId);
+    return () => { loadSeq.current += 1; };
+  }, [projectId]);
 
   const openCreate = (kind: CreateKind, experiment?: ResearchExperiment) => {
     setCreateKind(kind);
@@ -118,55 +158,63 @@ export function ResearchPage() {
 
   const act = async (key: string, action: () => Promise<unknown>, success: string) => {
     if (!projectId || busy) return;
+    const requestedProjectId = projectId;
     setBusy(key);
     try {
       await action();
-      await load(true);
+      if (activeProjectId.current !== requestedProjectId) return;
+      await load(true, requestedProjectId);
+      if (activeProjectId.current !== requestedProjectId) return;
       toast.push(success);
     } catch (error) {
-      const message = error instanceof ApiError ? error.message : error instanceof Error ? error.message : "操作失败";
-      toast.push(message, "error");
+      if (activeProjectId.current === requestedProjectId) {
+        const message = error instanceof ApiError ? error.message : errorMessage(error, "操作失败");
+        toast.push(message, "error");
+      }
     } finally {
-      setBusy("");
+      if (activeProjectId.current === requestedProjectId) setBusy("");
     }
   };
 
   const submitCreate = async () => {
     if (!projectId || !createKind) return;
+    const requestedProjectId = projectId;
+    const requestedProjectDomain = currentProject?.domain || "project";
     setBusy(`create:${createKind}`);
     try {
       if (createKind === "claims") {
-        const claim = await api.research.createClaim(projectId, {
+        const claim = await api.research.createClaim(requestedProjectId, {
           logicalKey: form.logicalKey || undefined,
           title: form.title,
           statement: form.statement,
           claimType: form.claimType,
-          scope: [currentProject?.domain || "project"],
+          scope: [requestedProjectDomain],
         });
-        if (form.evidenceSourceId) await api.research.linkEvidence(projectId, claim.id, {
+        if (form.evidenceSourceId) await api.research.linkEvidence(requestedProjectId, claim.id, {
           evidenceSourceId: form.evidenceSourceId, relation: "context", strength: "unrated",
           note: "新建时关联；需人工复核来源支持范围与主张是否一致。",
         });
       } else if (createKind === "sources") {
-        await api.research.createSource(projectId, {
+        await api.research.createSource(requestedProjectId, {
           sourceKey: form.sourceKey || undefined, kind: form.kind, citation: form.citation,
           url: form.url || undefined, supports: form.supports, limitations: form.limitations,
         });
       } else if (createKind === "datasets") {
-        await api.research.createDataset(projectId, {
+        await api.research.createDataset(requestedProjectId, {
           datasetKey: form.datasetKey || undefined, kind: form.kind, label: form.label,
           sha256: form.sha256.trim().toLowerCase(), rowCount: form.rowCount ? Number(form.rowCount) : undefined,
           storageRef: form.storageRef, provenance: form.provenance, limitations: form.limitations, schema: {},
         });
       } else if (createKind === "experiments") {
-        await api.research.createExperiment(projectId, {
+        await api.research.createExperiment(requestedProjectId, {
           experimentKey: form.experimentKey || undefined, title: form.title, hypothesis: form.hypothesis,
           design: parseJsonField(form.design, "实验设计"), metrics: parseJsonField(form.metrics, "指标"),
           analysisPlan: parseJsonField(form.analysisPlan, "分析计划"),
         });
       } else if (createKind === "calibrations") {
+        if (schemaWarning) throw new Error("生成参数定义尚未从服务端加载，不能创建校准提案");
         const parameter = schema.parameters.find((item) => item.id === form.targetKey);
-        await api.research.createCalibration(projectId, {
+        await api.research.createCalibration(requestedProjectId, {
           targetType: "parameter", targetKey: form.targetKey,
           current: { value: parseParameterValue(form.current, parameter?.control) },
           proposed: { value: parseParameterValue(form.proposed, parameter?.control) },
@@ -174,7 +222,7 @@ export function ResearchPage() {
           impact: parseJsonField(form.impact, "影响说明"),
         });
       } else if (createKind === "releases") {
-        await api.research.createRelease(projectId, {
+        await api.research.createRelease(requestedProjectId, {
           version: form.version, buildId: form.buildId, notes: form.notes,
           bindings: {
             datasetSnapshotIds: releaseBindings.datasets,
@@ -183,18 +231,22 @@ export function ResearchPage() {
           },
         });
       } else if (createKind === "result" && resultExperiment) {
-        await api.research.createExperimentResult(projectId, resultExperiment.id, {
+        await api.research.createExperimentResult(requestedProjectId, resultExperiment.id, {
           result: parseJsonField(form.result, "实验结果"), conclusion: form.conclusion,
           datasetSnapshotId: form.datasetSnapshotId || undefined,
         });
       }
+      if (activeProjectId.current !== requestedProjectId) return;
       closeCreate();
-      await load(true);
+      await load(true, requestedProjectId);
+      if (activeProjectId.current !== requestedProjectId) return;
       toast.push("已保存为可审计记录；尚未批准的内容不会影响运行时");
     } catch (error) {
-      toast.push(error instanceof Error ? error.message : "创建失败", "error");
+      if (activeProjectId.current === requestedProjectId) {
+        toast.push(errorMessage(error, "创建失败"), "error");
+      }
     } finally {
-      setBusy("");
+      if (activeProjectId.current === requestedProjectId) setBusy("");
     }
   };
 
@@ -212,6 +264,10 @@ export function ResearchPage() {
   }, [overview, query]);
 
   if (loading) return <div className="page research-page"><PageHeader title="研究与证据" description="正在装载版本化研究记录" /><Skeleton lines={8} /></div>;
+  if (loadError || !overview) return <div className="page research-page">
+    <PageHeader title="研究与证据" description="版本化研究记录与生成运行时保持隔离" />
+    <section className="panel"><EmptyState icon={<CircleAlert size={24} />} title="研究资料加载失败" description={loadError || "服务端没有返回研究总览。"} action={<Button variant="secondary" icon={<RefreshCw size={16} />} onClick={() => void load(false, projectId)}>重试</Button>} /></section>
+  </div>;
 
   return <div className="page research-page">
     <V2Hero
@@ -220,7 +276,7 @@ export function ResearchPage() {
       description={`管理 ${currentProject?.name || "当前项目"} 的理论、论文、实践数据、实验、校准和发布基线。`}
       actions={<>
         <Button variant="secondary" icon={<RefreshCw size={16} />} onClick={() => void load()} loading={loading}>刷新</Button>
-        {tab !== "overview" && <Button icon={<Plus size={16} />} onClick={() => openCreate(tab)}>新建{tabs.find((item) => item.id === tab)?.label}</Button>}
+        {tab !== "overview" && <Button icon={<Plus size={16} />} disabled={tab === "calibrations" && Boolean(schemaWarning)} title={tab === "calibrations" && schemaWarning ? "先重新加载服务端参数定义" : undefined} onClick={() => openCreate(tab)}>新建{tabs.find((item) => item.id === tab)?.label}</Button>}
       </>}
     />
 
@@ -229,6 +285,8 @@ export function ResearchPage() {
       <div><strong>研究记录与生成运行时默认隔离</strong><p>论文、猜想和实验结果不会自动写入提示词；参数校准必须“批准 → 绑定发布清单 → 激活”才生效。单次生成的人工设置仍优先。</p></div>
       <Badge tone="positive">边界已启用</Badge>
     </section>
+
+    {schemaWarning && <div className="inline-load-error" role="alert"><CircleAlert size={17} /><span><strong>生成参数定义暂不可用</strong><small>{schemaWarning}。现有研究记录仍可查看，但页面只显示界面默认参数，不能据此新建校准提案。</small></span><Button variant="ghost" onClick={() => void load(false, projectId)}>重试</Button></div>}
 
     <nav className="research-tabs" aria-label="研究资料分类">
       {tabs.map(({ id, label, icon: Icon, count }) => <button type="button" key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}>

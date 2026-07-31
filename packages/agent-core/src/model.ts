@@ -41,6 +41,7 @@ export interface OpenAICompatibleClientOptions {
   includeSeed?: boolean;
   includeTemperature?: boolean;
   chatMaxTokensField?: "max_tokens" | "max_completion_tokens";
+  maxResponseBytes?: number;
   fetch?: typeof globalThis.fetch;
 }
 
@@ -76,6 +77,78 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function numeric(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+export const DEFAULT_MAX_MODEL_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MAX_MODEL_JSON_DEPTH = 32;
+const MAX_MODEL_JSON_NODES = 20_000;
+const MAX_MODEL_JSON_ARRAY_ITEMS = 5_000;
+const MAX_MODEL_JSON_OBJECT_KEYS = 2_000;
+
+/** Bound untrusted provider JSON before downstream parsers walk or clone it. */
+export function assertModelJsonComplexity(value: unknown): void {
+  const stack: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
+  const seen = new WeakSet<object>();
+  let nodes = 0;
+  while (stack.length) {
+    const current = stack.pop()!;
+    nodes += 1;
+    if (nodes > MAX_MODEL_JSON_NODES) throw new Error("Model JSON exceeded the structural complexity limit.");
+    if (!current.value || typeof current.value !== "object") continue;
+    if (seen.has(current.value)) throw new Error("Model JSON contained a circular reference.");
+    seen.add(current.value);
+
+    if (Array.isArray(current.value)) {
+      if (current.value.length > MAX_MODEL_JSON_ARRAY_ITEMS) throw new Error("Model JSON array exceeded the item limit.");
+      if (current.value.length && current.depth >= MAX_MODEL_JSON_DEPTH) throw new Error("Model JSON exceeded the nesting-depth limit.");
+      for (const item of current.value) stack.push({ value: item, depth: current.depth + 1 });
+      continue;
+    }
+
+    const entries = Object.entries(current.value as Record<string, unknown>);
+    if (entries.length > MAX_MODEL_JSON_OBJECT_KEYS) throw new Error("Model JSON object exceeded the key limit.");
+    if (entries.length && current.depth >= MAX_MODEL_JSON_DEPTH) throw new Error("Model JSON exceeded the nesting-depth limit.");
+    for (const [key, item] of entries) {
+      if (key === "__proto__") throw new Error("Model JSON contained an unsafe key.");
+      stack.push({ value: item, depth: current.depth + 1 });
+    }
+  }
+}
+
+/** Read response bytes incrementally so platform-mode responses cannot grow without bound. */
+export async function readBoundedModelResponseText(
+  response: Response,
+  maxBytes = DEFAULT_MAX_MODEL_RESPONSE_BYTES,
+): Promise<string> {
+  const limit = Number.isFinite(maxBytes) && maxBytes >= 0
+    ? Math.floor(maxBytes)
+    : DEFAULT_MAX_MODEL_RESPONSE_BYTES;
+  const declared = response.headers.get("content-length");
+  if (declared && /^\d+$/u.test(declared) && BigInt(declared) > BigInt(limit)) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error("Model response exceeded the size limit.");
+  }
+  if (!response.body) return "";
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let received = 0;
+  let output = "";
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      received += chunk.value.byteLength;
+      if (received > limit) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error("Model response exceeded the size limit.");
+      }
+      output += decoder.decode(chunk.value, { stream: true });
+    }
+    return output + decoder.decode();
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 /**
@@ -152,6 +225,7 @@ export class OpenAICompatibleClient implements ModelProvider {
   private readonly transport: OpenAITransport;
   private readonly structuredOutput: StructuredOutputMode;
   private readonly timeoutMs: number;
+  private readonly maxResponseBytes: number;
 
   constructor(private readonly options: OpenAICompatibleClientOptions) {
     if (!options.apiKey.trim()) throw new Error("An API key is required for OpenAICompatibleClient.");
@@ -161,6 +235,7 @@ export class OpenAICompatibleClient implements ModelProvider {
     this.transport = options.transport ?? "responses";
     this.structuredOutput = options.structuredOutput ?? "json_schema";
     this.timeoutMs = options.timeoutMs ?? 60_000;
+    this.maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_MODEL_RESPONSE_BYTES;
   }
 
   async generate(request: ModelGenerationRequest): Promise<ModelGenerationResponse> {
@@ -187,22 +262,33 @@ export class OpenAICompatibleClient implements ModelProvider {
           signal: controller.signal,
         });
       } catch (error) {
+        clearTimeout(timeout);
         const message = error instanceof Error && error.name === "AbortError"
           ? `Model request timed out after ${this.timeoutMs} ms.`
           : `Model request failed: ${error instanceof Error ? error.message : String(error)}`;
         throw new ModelProviderError(message);
-      } finally {
-        clearTimeout(timeout);
       }
 
       const requestId = response.headers.get("x-request-id") ?? undefined;
-      const rawText = await response.text();
+      let rawText: string;
+      try {
+        rawText = await readBoundedModelResponseText(response, this.maxResponseBytes);
+      } catch {
+        throw new ModelProviderError("Model response exceeded the configured size limit or could not be read.", response.status, requestId);
+      } finally {
+        clearTimeout(timeout);
+      }
       let payload: unknown;
       try {
         payload = rawText ? JSON.parse(rawText) : {};
       } catch {
         if (!response.ok) throw new ModelProviderError(`Model returned HTTP ${response.status} with a non-JSON body.`, response.status, requestId);
         throw new ModelProviderError("Model returned a non-JSON response.", response.status, requestId);
+      }
+      try {
+        assertModelJsonComplexity(payload);
+      } catch {
+        throw new ModelProviderError("Model response JSON exceeded structural complexity limits.", response.status, requestId);
       }
       if (!response.ok) {
         const providerMessage = isRecord(payload) && isRecord(payload.error) && typeof payload.error.message === "string"

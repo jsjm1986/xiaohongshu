@@ -547,46 +547,6 @@ test('两个实例共用同一个库文件:同一条修改任务只被领一次'
       .map((row) => `${row.id}=${row.claimed_by}`);
     assert.deepEqual(owners, [`rev-1=${ID_A}`, `rev-2=${ID_B}`], '两条任务各归一个实例,没有一条被领两次');
 
-    /*
-     * 竞态窗口:两个实例都已经通过「挑最早排队的一条」的子查询,然后才各自 UPDATE。
-     *
-     * 顺序调用复现不了它——A 的 UPDATE 先落库,B 的子查询就已经看不到那一行了。这里
-     * 把 B 的选取结果冻结在 A 动手之前:先让 B 选,再让 A 完整领走,最后让 B 拿着
-     * 过期的候选去 UPDATE。外层 UPDATE 的 `AND status='queued'` 是唯一挡住它的东西;
-     * 去掉那个守卫,B 会把 A 正在跑的任务改成自己的,同一条修改被两个实例并发执行。
-     */
-    seedTask('rev-race', 'j-rev-race', 'pkg-race');
-    // 钩住 B 的选取语句:它返回候选之后、B 自己 UPDATE 之前,让 A 完整领走这一条。
-    // 这样跑的是真正的 claimNext,而不是在用例里重抄一遍它的 SQL——重抄的话
-    // 生产代码怎么改这条用例都是绿的。
-    const originalPrepare = instanceB.prepare.bind(instanceB);
-    let raceInjected = false;
-    (instanceB as unknown as { prepare: typeof originalPrepare }).prepare = (sql: string) => {
-      const statement = originalPrepare(sql);
-      if (!sql.includes("status='queued'") || !sql.includes('SELECT id')) return statement;
-      return {
-        ...statement,
-        get: (...args: never[]) => {
-          const row = (statement.get as (...a: never[]) => unknown)(...args);
-          if (!raceInjected) {
-            raceInjected = true;
-            claimNext(instanceA, REVISION_TASKS_SPEC, ID_A, new Date().toISOString());
-          }
-          return row;
-        },
-      } as unknown as ReturnType<typeof originalPrepare>;
-    };
-    let racedClaim: string | undefined;
-    try {
-      racedClaim = claimNext(instanceB, REVISION_TASKS_SPEC, ID_B, new Date().toISOString());
-    } finally {
-      (instanceB as unknown as { prepare: typeof originalPrepare }).prepare = originalPrepare;
-    }
-    assert.ok(raceInjected, '前提:竞态确实注入了');
-    assert.equal(racedClaim, undefined, 'A 已经在这一瞬间领走了,B 必须认领失败而不是也返回 id');
-    const owner = instanceA.prepare('SELECT claimed_by FROM revision_tasks WHERE id=?').get('rev-race') as
-      { claimed_by: string };
-    assert.equal(owner.claimed_by, ID_A, '归属不能被迟到的那次领取覆盖');
   } finally {
     instanceA.onModuleDestroy?.();
     instanceB.onModuleDestroy?.();

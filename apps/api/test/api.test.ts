@@ -140,7 +140,20 @@ test('repeated failed logins are rate limited', async () => {
   assert.equal(blocked.response.status, 429);
 });
 
+test('oversized login passwords are rejected before password verification', async () => {
+  const result = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username: 'admin', password: 'x'.repeat(257) }),
+  });
+  assert.equal(result.response.status, 401);
+  assert.equal(result.body.message, '用户名或密码错误');
+});
+
 test('CSRF and first-login password change are enforced', async () => {
+  const readBeforeChange = await call('/api/projects', { cookie: adminCookie });
+  assert.equal(readBeforeChange.response.status, 403);
+  assert.equal(readBeforeChange.body.code, 'PASSWORD_CHANGE_REQUIRED');
+
   const withoutCsrf = await call('/api/projects', {
     method: 'POST',
     cookie: adminCookie,
@@ -263,6 +276,29 @@ test('viewer can read but cannot write projects', async () => {
   });
   assert.equal(membership.response.status, 200);
 
+  const ownerDb = app.get(DatabaseService);
+  const owner = ownerDb.prepare('SELECT owner_id FROM workspaces WHERE id = ?')
+    .get(workspaceId) as { owner_id: string };
+  const downgradeOwner = await call(`/api/workspaces/${workspaceId}/members/${owner.owner_id}`, {
+    method: 'PUT',
+    cookie: adminCookie,
+    csrf: adminCsrf,
+    body: JSON.stringify({ role: 'Viewer' }),
+  });
+  assert.equal(downgradeOwner.response.status, 409, '不能借成员更新降级 owner_id 指向的所有者');
+  const createSecondOwner = await call(`/api/workspaces/${workspaceId}/members/${user.body.id}`, {
+    method: 'PUT',
+    cookie: adminCookie,
+    csrf: adminCsrf,
+    body: JSON.stringify({ role: 'Owner' }),
+  });
+  assert.equal(createSecondOwner.response.status, 409, '不能借角色更新隐式转移所有权');
+  const roles = ownerDb.prepare(
+    'SELECT user_id, role FROM workspace_members WHERE workspace_id = ? ORDER BY user_id',
+  ).all(workspaceId) as Array<{ user_id: string; role: string }>;
+  assert.equal(roles.find((row) => row.user_id === owner.owner_id)?.role, 'Owner');
+  assert.equal(roles.find((row) => row.user_id === user.body.id)?.role, 'Viewer');
+
   const viewer = await login('viewer', 'Viewer-bootstrap-123!');
   const changed = await call('/api/auth/change-password', {
     method: 'POST',
@@ -286,6 +322,31 @@ test('viewer can read but cannot write projects', async () => {
     body: JSON.stringify({ workspaceId, name: '无权限项目' }),
   });
   assert.equal(create.response.status, 403);
+
+  // project.write 不等于成员管理。否则一个只被授予项目编辑权的人可以改自己的
+  // project ACL，再给自己追加 project.delete / generation.export 等任意权限。
+  const grantProjectWrite = await call(`/api/projects/${projectId}/acl/${user.body.id}`, {
+    method: 'PUT',
+    cookie: adminCookie,
+    csrf: adminCsrf,
+    body: JSON.stringify({ grants: ['project.write'], denies: [] }),
+  });
+  assert.equal(grantProjectWrite.response.status, 200);
+  const escalateAcl = await call(`/api/projects/${projectId}/acl/${user.body.id}`, {
+    method: 'PUT',
+    cookie: viewer.cookie,
+    csrf: viewer.csrf,
+    body: JSON.stringify({ grants: ['project.write', 'project.delete'], denies: [] }),
+  });
+  assert.equal(escalateAcl.response.status, 403);
+  const storedAcl = app.get(DatabaseService).prepare(
+    'SELECT grants_json FROM project_acl WHERE project_id=? AND user_id=?',
+  ).get(projectId, user.body.id) as { grants_json: string };
+  assert.deepEqual(JSON.parse(storedAcl.grants_json), ['project.write']);
+  const clearProjectWrite = await call(`/api/projects/${projectId}/acl/${user.body.id}`, {
+    method: 'DELETE', cookie: adminCookie, csrf: adminCsrf,
+  });
+  assert.equal(clearProjectWrite.response.status, 200);
 
   const legacyProject = await call('/api/projects', {
     method: 'POST',
@@ -431,6 +492,133 @@ test('viewer can read but cannot write projects', async () => {
     csrf: adminCsrf,
   });
   assert.equal(deletedLegacyProject.response.status, 200);
+});
+
+test('workspace Admin cannot override the canonical Owner permissions', async () => {
+  const ownerCreated = await call('/api/admin/users', {
+    method: 'POST',
+    cookie: adminCookie,
+    csrf: adminCsrf,
+    body: JSON.stringify({ username: 'security-owner', password: 'Owner-bootstrap-123!' }),
+  });
+  assert.equal(ownerCreated.response.status, 201);
+  const attackerCreated = await call('/api/admin/users', {
+    method: 'POST',
+    cookie: adminCookie,
+    csrf: adminCsrf,
+    body: JSON.stringify({ username: 'security-admin', password: 'Attacker-bootstrap-123!' }),
+  });
+  assert.equal(attackerCreated.response.status, 201);
+
+  const workspaceCreated = await call('/api/workspaces', {
+    method: 'POST',
+    cookie: adminCookie,
+    csrf: adminCsrf,
+    body: JSON.stringify({ name: 'Owner 权限边界', ownerUserId: ownerCreated.body.id }),
+  });
+  assert.equal(workspaceCreated.response.status, 201, JSON.stringify(workspaceCreated.body));
+  const securityWorkspaceId = String(workspaceCreated.body.id);
+  const attackerMembership = await call(
+    '/api/workspaces/' + securityWorkspaceId + '/members/' + attackerCreated.body.id,
+    {
+      method: 'PUT',
+      cookie: adminCookie,
+      csrf: adminCsrf,
+      body: JSON.stringify({ role: 'Admin' }),
+    },
+  );
+  assert.equal(attackerMembership.response.status, 200);
+
+  const owner = await login('security-owner', 'Owner-bootstrap-123!');
+  const ownerPasswordChanged = await call('/api/auth/change-password', {
+    method: 'POST',
+    cookie: owner.cookie,
+    csrf: owner.csrf,
+    body: JSON.stringify({
+      currentPassword: 'Owner-bootstrap-123!',
+      newPassword: 'Owner-updated-456!',
+    }),
+  });
+  assert.equal(ownerPasswordChanged.response.status, 201);
+  const attacker = await login('security-admin', 'Attacker-bootstrap-123!');
+  const attackerPasswordChanged = await call('/api/auth/change-password', {
+    method: 'POST',
+    cookie: attacker.cookie,
+    csrf: attacker.csrf,
+    body: JSON.stringify({
+      currentPassword: 'Attacker-bootstrap-123!',
+      newPassword: 'Attacker-updated-456!',
+    }),
+  });
+  assert.equal(attackerPasswordChanged.response.status, 201);
+
+  const projectCreated = await call('/api/projects', {
+    method: 'POST',
+    cookie: owner.cookie,
+    csrf: owner.csrf,
+    body: JSON.stringify({ workspaceId: securityWorkspaceId, name: 'Owner 管理权限回归' }),
+  });
+  assert.equal(projectCreated.response.status, 201, JSON.stringify(projectCreated.body));
+  const securityProjectId = String(projectCreated.body.id);
+
+  const workspaceOverride = await call(
+    '/api/workspaces/' + securityWorkspaceId + '/members/' + ownerCreated.body.id,
+    {
+      method: 'PUT',
+      cookie: attacker.cookie,
+      csrf: attacker.csrf,
+      body: JSON.stringify({ role: 'Owner', grants: [], denies: ['workspace.manage'] }),
+    },
+  );
+  assert.equal(workspaceOverride.response.status, 409, JSON.stringify(workspaceOverride.body));
+  const projectOverride = await call(
+    '/api/projects/' + securityProjectId + '/acl/' + ownerCreated.body.id,
+    {
+      method: 'PUT',
+      cookie: attacker.cookie,
+      csrf: attacker.csrf,
+      body: JSON.stringify({ grants: [], denies: ['project.write'] }),
+    },
+  );
+  assert.equal(projectOverride.response.status, 409, JSON.stringify(projectOverride.body));
+
+  const database = app.get(DatabaseService);
+  const storedOwner = database.prepare(
+    'SELECT role, grants_json, denies_json FROM workspace_members WHERE workspace_id=? AND user_id=?',
+  ).get(securityWorkspaceId, ownerCreated.body.id) as {
+    role: string;
+    grants_json: string;
+    denies_json: string;
+  };
+  assert.deepEqual({ ...storedOwner }, { role: 'Owner', grants_json: '[]', denies_json: '[]' });
+  const ownerAclCount = database.prepare(
+    'SELECT COUNT(*) AS value FROM project_acl WHERE project_id=? AND user_id=?',
+  ).get(securityProjectId, ownerCreated.body.id) as { value: number };
+  assert.equal(Number(ownerAclCount.value), 0);
+
+  const ownerWorkspaceUpdate = await call('/api/workspaces/' + securityWorkspaceId, {
+    method: 'PATCH',
+    cookie: owner.cookie,
+    csrf: owner.csrf,
+    body: JSON.stringify({ name: 'Owner 权限仍然有效' }),
+  });
+  assert.equal(ownerWorkspaceUpdate.response.status, 200, JSON.stringify(ownerWorkspaceUpdate.body));
+  const ownerProjectUpdate = await call('/api/projects/' + securityProjectId, {
+    method: 'PATCH',
+    cookie: owner.cookie,
+    csrf: owner.csrf,
+    body: JSON.stringify({ description: 'Owner 未被权限覆盖锁死' }),
+  });
+  assert.equal(ownerProjectUpdate.response.status, 200, JSON.stringify(ownerProjectUpdate.body));
+
+  const projectDeleted = await call('/api/projects/' + securityProjectId, {
+    method: 'DELETE', cookie: owner.cookie, csrf: owner.csrf,
+  });
+  assert.equal(projectDeleted.response.status, 200);
+  const workspaceDeleted = await call('/api/workspaces/' + securityWorkspaceId, {
+    method: 'DELETE', cookie: owner.cookie, csrf: owner.csrf,
+  });
+  assert.equal(workspaceDeleted.response.status, 200);
 });
 
 test('read-only API keys are workspace-scoped', async () => {

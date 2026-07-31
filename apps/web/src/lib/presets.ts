@@ -127,7 +127,7 @@ export interface PresetApplication {
   entryPoint?: string;
 }
 
-/** Normalize both API-native and old browser-local presets without carrying state from another card. */
+/** Normalize API-native and legacy preset shapes without carrying state from another card. */
 export function preparePresetApplication(preset: ContentPreset): PresetApplication {
   const values = preset.values || {};
   const directValues = isRecord(values.parameters) ? values.parameters : values;
@@ -187,17 +187,4 @@ export function mergePresetShelf(projectPresets: ContentPreset[]): ContentPreset
     ...item,
     isDefault: item.id === defaultId,
   }));
-}
-
-const key = (projectId: string) => `content-agent-presets:${projectId}`;
-
-export function readLocalPresets(projectId: string): ContentPreset[] {
-  try {
-    const value = JSON.parse(localStorage.getItem(key(projectId)) || '[]');
-    return Array.isArray(value) ? value : [];
-  } catch { return []; }
-}
-
-export function writeLocalPresets(projectId: string, presets: ContentPreset[]) {
-  localStorage.setItem(key(projectId), JSON.stringify(presets));
 }

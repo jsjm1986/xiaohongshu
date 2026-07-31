@@ -49,7 +49,7 @@ import {
 } from "../components/Ui";
 import { V2Hero } from "../components/V2";
 import { api, ApiError } from "../lib/api";
-import { demoGenerations } from "../lib/fixtures";
+import { errorMessage } from "../lib/errors";
 import {
   CANONICAL_DIAGNOSTIC_FINGERPRINTS,
   hasCanonicalDiagnosticContract,
@@ -65,15 +65,12 @@ import {
 import {
   mergePresetShelf,
   preparePresetApplication,
-  readLocalPresets,
-  writeLocalPresets,
 } from "../lib/presets";
 import { f30ParameterLinkWarning, TREND_FIT_SETTINGS_BOUNDARY_COPY } from "../lib/trend-fit";
 import type {
   AdvancedGenerationConfig,
   ConfigConflict,
   ContentPreset,
-  FormulaVersion,
   GenerateInput,
   GenerationParameterDefinition,
   GenerationParameterSchema,
@@ -144,8 +141,11 @@ export function GeneratorPage() {
   const [advancedView, setAdvancedView] = useState<"goal" | "formula">("goal");
   const [schema, setSchema] = useState<GenerationParameterSchema>(defaultParameterSchema);
   const [schemaLoading, setSchemaLoading] = useState(false);
+  const [schemaWarning, setSchemaWarning] = useState<string | null>(null);
   const [projectPresets, setProjectPresets] = useState<ContentPreset[]>([]);
   const [presetLoading, setPresetLoading] = useState(false);
+  const [presetError, setPresetError] = useState<string | null>(null);
+  const [resourceReload, setResourceReload] = useState(0);
   const [selectedPresetId, setSelectedPresetId] = useState("");
   const [savePresetOpen, setSavePresetOpen] = useState(false);
   const [presetDraft, setPresetDraft] = useState({ name: "", description: "" });
@@ -154,6 +154,7 @@ export function GeneratorPage() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [preview, setPreview] = useState<ResolvedConfigPreview | null>(null);
   const [previewInput, setPreviewInput] = useState<GenerateInput | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const navigate = useNavigate();
   const toast = useToast();
@@ -163,31 +164,46 @@ export function GeneratorPage() {
   useEffect(() => {
     if (!projectId) {
       setSchema(defaultParameterSchema);
+      setSchemaWarning(null);
       setProjectPresets([]);
+      setPresetError(null);
+      setSchemaLoading(false);
+      setPresetLoading(false);
       return;
     }
     let alive = true;
     setSchemaLoading(true);
     setPresetLoading(true);
+    setSchemaWarning(null);
+    setPresetError(null);
     Promise.all([
-      api.parameters.schema(projectId).catch(() => null),
-      api.formulas.list(projectId).catch(() => ({ items: [] as FormulaVersion[], total: 0 })),
+      api.parameters.schema(projectId),
+      api.formulas.list(projectId),
     ])
       .then(([rawSchema, formulaResult]) => {
         if (!alive) return;
         const active = formulaResult.items.find((item) => item.status === "active") || formulaResult.items[0];
         setSchema(normalizeParameterSchema(rawSchema, active));
       })
+      .catch((error) => {
+        if (!alive) return;
+        setSchema(defaultParameterSchema);
+        setSchemaWarning(errorMessage(error, "生成参数 Schema 加载失败"));
+      })
       .finally(() => alive && setSchemaLoading(false));
     api.presets
       .list(projectId)
       .then((result) => alive && setProjectPresets(result.items))
-      .catch(() => alive && setProjectPresets(readLocalPresets(projectId)))
+      .catch((error) => {
+        if (!alive) return;
+        setProjectPresets([]);
+        setPresetError(errorMessage(error, "项目预设加载失败"));
+      })
       .finally(() => alive && setPresetLoading(false));
     return () => {
       alive = false;
     };
-  }, [projectId]);
+  }, [projectId, resourceReload]);
 
   const selectedPreset = presets.find((item) => item.id === selectedPresetId);
   const effectiveBodyLength = Number(parameterOverrides.body_max_chars ?? advanced.bodyLength);
@@ -311,11 +327,6 @@ export function GeneratorPage() {
 
   const presetValues = (): ContentPreset["values"] => parameterValues();
 
-  const persistLocalPresets = (next: ContentPreset[]) => {
-    setProjectPresets(next);
-    if (projectId) writeLocalPresets(projectId, next.filter((item) => item.source === "project"));
-  };
-
   const savePreset = async () => {
     if (!projectId || !presetDraft.name.trim()) return;
     setSavingPreset(true);
@@ -325,34 +336,17 @@ export function GeneratorPage() {
       values: presetValues(),
       isDefault: false,
     };
-    let savedLocally = false;
-    let saveFailed = false;
     try {
       const created = await api.presets.create(projectId, input);
       setProjectPresets((current) => [...current, created]);
       setSelectedPresetId(created.id);
-    } catch (error) {
-      if (error instanceof ApiError && error.status !== 404 && error.status < 500) {
-        saveFailed = true;
-        toast.push(error.message || "预设参数未通过服务端校验", "error");
-        return;
-      }
-      const created: ContentPreset = {
-        id: `local-${Date.now()}`,
-        projectId,
-        source: "project",
-        ...input,
-        createdAt: new Date().toISOString(),
-      };
-      persistLocalPresets([...projectPresets.filter((item) => item.source === "project"), created]);
-      setSelectedPresetId(created.id);
-      savedLocally = true;
-    } finally {
-      setSavingPreset(false);
       setSavePresetOpen(false);
       setPresetDraft({ name: "", description: "" });
-      if (!saveFailed && savedLocally) toast.push("服务器不可用，预设仅保存在这台浏览器", "info");
-      else if (!saveFailed) toast.push("当前参数已保存为项目预设");
+      toast.push("当前参数已保存为项目预设");
+    } catch (error) {
+      toast.push(errorMessage(error, "预设保存失败"), "error");
+    } finally {
+      setSavingPreset(false);
     }
   };
 
@@ -361,55 +355,24 @@ export function GeneratorPage() {
     const input = window.prompt("复制预设的名称", `${preset.name} · 副本`);
     if (input === null) return;
     const copyName = input.trim() || `${preset.name} · 副本`;
-    let copied: ContentPreset;
     try {
-      copied = await api.presets.copy(projectId, preset.id, { name: copyName });
-    } catch (copyError) {
-      if (copyError instanceof ApiError && copyError.status !== 404 && copyError.status < 500) {
-        toast.push(copyError.message || "没有复制预设的权限", "error");
-        return;
-      }
-      try {
-        copied = await api.presets.create(projectId, {
-          name: copyName,
-          description: preset.description,
-          values: preset.values,
-          isDefault: false,
-        });
-      } catch (createError) {
-        if (createError instanceof ApiError && createError.status !== 404 && createError.status < 500) {
-          toast.push(createError.message || "预设复制失败", "error");
-          return;
-        }
-        copied = {
-          ...preset,
-          id: `local-${Date.now()}`,
-          projectId,
-          name: copyName,
-          source: "project",
-          isDefault: false,
-        };
-        persistLocalPresets([...projectPresets.filter((item) => item.source === "project"), copied]);
-      }
+      const copied = await api.presets.copy(projectId, preset.id, { name: copyName });
+      setProjectPresets((current) => [...current, copied]);
+      toast.push("已复制为项目预设");
+    } catch (error) {
+      toast.push(errorMessage(error, "预设复制失败"), "error");
     }
-    if (!projectPresets.some((item) => item.id === copied.id)) setProjectPresets((current) => [...current, copied]);
-    toast.push(copied.id.startsWith("local-") ? "服务器不可用，副本仅保存在这台浏览器" : "已复制为项目预设", copied.id.startsWith("local-") ? "info" : "success");
   };
 
   const setDefaultPreset = async (preset: ContentPreset) => {
     if (!projectId) return;
     try {
       await api.presets.setDefault(projectId, preset.id);
+      setProjectPresets((current) => current.map((item) => ({ ...item, isDefault: item.id === preset.id })));
+      toast.push(`「${preset.name}」已设为项目默认`);
     } catch (error) {
-      if (error instanceof ApiError && error.status !== 404 && error.status < 500) {
-        toast.push(error.message || "无法设置默认预设", "error");
-        return;
-      }
-      toast.push("服务器不可用，默认状态仅保存在这台浏览器", "info");
+      toast.push(errorMessage(error, "无法设置默认预设"), "error");
     }
-    const next = projectPresets.map((item) => ({ ...item, isDefault: item.id === preset.id }));
-    persistLocalPresets(next);
-    toast.push(`「${preset.name}」已设为项目默认`);
   };
 
   const updatePreset = async (preset: ContentPreset) => {
@@ -421,13 +384,7 @@ export function GeneratorPage() {
       setProjectPresets((current) => current.map((item) => item.id === preset.id ? updated : item));
       toast.push(`「${preset.name}」已更新为当前参数`);
     } catch (error) {
-      if (error instanceof ApiError && error.status !== 404 && error.status < 500) {
-        toast.push(error.message || "预设更新未通过校验", "error");
-        return;
-      }
-      const next = projectPresets.map((item) => item.id === preset.id ? { ...item, values: presetValues(), updatedAt: new Date().toISOString() } : item);
-      persistLocalPresets(next);
-      toast.push("服务器不可用，仅更新了浏览器本地预设", "info");
+      toast.push(errorMessage(error, "预设更新失败"), "error");
     }
   };
 
@@ -435,17 +392,12 @@ export function GeneratorPage() {
     if (!projectId || preset.source !== "project") return;
     try {
       await api.presets.remove(projectId, preset.id);
+      setProjectPresets((current) => current.filter((item) => item.id !== preset.id));
+      if (selectedPresetId === preset.id) setSelectedPresetId("");
+      toast.push("项目预设已删除");
     } catch (error) {
-      if (error instanceof ApiError && error.status !== 404 && error.status < 500) {
-        toast.push(error.message || "无法删除预设", "error");
-        return;
-      }
-      toast.push("服务器不可用，只删除了这台浏览器的副本", "info");
+      toast.push(errorMessage(error, "无法删除预设"), "error");
     }
-    const next = projectPresets.filter((item) => item.id !== preset.id);
-    persistLocalPresets(next);
-    if (selectedPresetId === preset.id) setSelectedPresetId("");
-    toast.push("项目预设已删除");
   };
 
   const parseOverrides = (): Record<string, unknown> | null => {
@@ -470,11 +422,7 @@ export function GeneratorPage() {
       projectId,
       mode,
       ...form,
-      presetId:
-        selectedPresetId &&
-        !selectedPresetId.startsWith("local-")
-          ? selectedPresetId
-          : undefined,
+      presetId: selectedPresetId || undefined,
       config: mode === "advanced" ? advanced : undefined,
       overrides: {
         ...rawOverrides,
@@ -494,51 +442,34 @@ export function GeneratorPage() {
     setPreviewOpen(true);
     setPreviewLoading(true);
     setPreviewInput(input);
+    setPreview(null);
+    setPreviewError(null);
     const local = localPreview(input, advanced, schema, currentProject?.knowledgeCount);
     try {
       const resolved = await api.config.resolve(projectId, input);
       setPreview(normalizePreview(resolved, local));
-    } catch {
-      setPreview(local);
+    } catch (error) {
+      setPreviewError(errorMessage(error, "服务端配置解析失败"));
     } finally {
       setPreviewLoading(false);
     }
   };
 
   const runGeneration = async () => {
-    if (!previewInput) return;
+    if (!previewInput || !preview || previewError) return;
     setSubmitting(true);
     try {
       const job = await api.generations.create(previewInput);
       toast.push("生成任务已创建");
       navigate(`/generations/${job.id}`);
     } catch (error) {
-      const demoSession = sessionStorage.getItem("content-agent-demo-session") === "1";
-      if (demoSession) {
-        sessionStorage.setItem(
-          "content-agent-demo-generation",
-          JSON.stringify({
-            ...demoGenerations[0],
-            topic: previewInput.topic || form.topic,
-            goal: previewInput.goal || form.goal,
-            mode,
-            presetId: selectedPresetId || undefined,
-            resolvedConfig: preview?.resolvedConfig,
-            configPreview: preview,
-            impactReport: preview?.impacts,
-          }),
-        );
-        toast.push("演示会话：已使用本地示例生成 3 个候选", "info");
-        navigate("/generations/g-demo");
-      } else {
-        const message = error instanceof ApiError
-          ? error.message
-          : error instanceof Error ? error.message : "生成任务创建失败";
-        const releaseGuidance = /发布清单|ACTIVE_RELEASE|release/i.test(message)
-          ? "。请到「研究与证据 → 发布版本」新建一个发布清单，批准并激活到生成运行时后重试"
-          : "";
-        toast.push(`生成失败：${message}${releaseGuidance}`, "error");
-      }
+      const message = error instanceof ApiError
+        ? error.message
+        : errorMessage(error, "生成任务创建失败");
+      const releaseGuidance = /发布清单|ACTIVE_RELEASE|release/i.test(message)
+        ? "。请到「研究与证据 → 发布版本」新建一个发布清单，批准并激活到生成运行时后重试"
+        : "";
+      toast.push(`生成失败：${message}${releaseGuidance}`, "error");
     } finally {
       setSubmitting(false);
     }
@@ -577,6 +508,7 @@ export function GeneratorPage() {
         presets={presets}
         selectedId={selectedPresetId}
         loading={presetLoading}
+        error={presetError}
         compact={mode === "simple"}
         onApply={applyPreset}
         onCopy={copyPreset}
@@ -584,14 +516,17 @@ export function GeneratorPage() {
         onDefault={setDefaultPreset}
         onDelete={removePreset}
         onSave={() => setSavePresetOpen(true)}
+        onRetry={() => setResourceReload((value) => value + 1)}
       />
+
+      {schemaWarning && <div className="inline-load-error" role="alert"><AlertTriangle size={17} /><span><strong>生成参数暂未从服务端加载</strong><small>{schemaWarning}。当前只显示界面默认值，配置预览仍须由服务端确认。</small></span><Button variant="ghost" onClick={() => setResourceReload((value) => value + 1)}>重试</Button></div>}
 
       {mode === "simple" ? (
         <IntelligentSimpleFlow
           projects={projects}
           projectId={projectId}
           submitting={submitting || previewLoading}
-          selectedPresetId={selectedPresetId && !selectedPresetId.startsWith("local-") ? selectedPresetId : undefined}
+          selectedPresetId={selectedPresetId || undefined}
           selectedPreset={selectedPreset || presets.find((preset) => preset.isDefault)}
           onProject={setProjectId}
           onPreview={(input) => void prepareInputPreview(input)}
@@ -657,10 +592,10 @@ export function GeneratorPage() {
 
       <Modal
         open={savePresetOpen}
-        onClose={() => setSavePresetOpen(false)}
+        onClose={() => { if (!savingPreset) setSavePresetOpen(false); }}
         title="保存为项目预设"
         description="预设会保存当前可视化参数和任务倾向，不会保存本次主题、地点或关键对象。"
-        footer={<><Button variant="ghost" onClick={() => setSavePresetOpen(false)}>取消</Button><Button loading={savingPreset} disabled={!presetDraft.name.trim()} onClick={savePreset} icon={<BookmarkPlus size={16} />}>保存预设</Button></>}
+        footer={<><Button variant="ghost" disabled={savingPreset} onClick={() => setSavePresetOpen(false)}>取消</Button><Button loading={savingPreset} disabled={!presetDraft.name.trim()} onClick={savePreset} icon={<BookmarkPlus size={16} />}>保存预设</Button></>}
       >
         <div className="form-stack">
           <Field label="预设名称" required><input value={presetDraft.name} onChange={(event) => setPresetDraft({ ...presetDraft, name: event.target.value })} placeholder="例如：高证据审慎比较" /></Field>
@@ -672,6 +607,7 @@ export function GeneratorPage() {
       <ConfigPreviewModal
         open={previewOpen}
         loading={previewLoading}
+        error={previewError}
         preview={preview}
         input={previewInput}
         presetName={selectedPreset?.name}
@@ -681,15 +617,17 @@ export function GeneratorPage() {
         submitting={submitting}
         onClose={() => !submitting && setPreviewOpen(false)}
         onConfirm={runGeneration}
+        onRetry={() => { if (previewInput) void prepareInputPreview(previewInput); }}
       />
     </div>
   );
 }
 
-function PresetShelf({ presets, selectedId, loading, compact, onApply, onCopy, onUpdate, onDefault, onDelete, onSave }: {
+function PresetShelf({ presets, selectedId, loading, error, compact, onApply, onCopy, onUpdate, onDefault, onDelete, onSave, onRetry }: {
   presets: ContentPreset[];
   selectedId: string;
   loading: boolean;
+  error: string | null;
   compact: boolean;
   onApply: (preset: ContentPreset) => void;
   onCopy: (preset: ContentPreset) => void;
@@ -697,9 +635,11 @@ function PresetShelf({ presets, selectedId, loading, compact, onApply, onCopy, o
   onDefault: (preset: ContentPreset) => void;
   onDelete: (preset: ContentPreset) => void;
   onSave: () => void;
+  onRetry: () => void;
 }) {
   return <section className={`preset-shelf ${compact ? "preset-shelf--compact" : ""}`}>
     <header><div><span>{compact ? "一键开始" : "生成预设"}</span><h2>{compact ? "先选一个最接近的写作任务" : "复用一整组经过说明的参数"}</h2><p>{compact ? "预设会自动填写读者阶段、入口和隐藏变量，你仍可逐步检查。" : "内置预设可复制，项目预设可设为默认或删除。"}</p></div><Button variant="ghost" icon={<BookmarkPlus size={15} />} onClick={onSave}>保存当前</Button></header>
+    {error && <div className="inline-load-error" role="alert"><AlertTriangle size={17} /><span><strong>项目预设加载失败</strong><small>{error}。当前只显示内置界面模板，项目预设和默认状态可能不完整。</small></span><Button variant="ghost" onClick={onRetry}>重试</Button></div>}
     {loading ? <Skeleton lines={2} /> : <div className="preset-row">
       {presets.map((preset) => <article key={preset.id} className={`preset-card ${selectedId === preset.id ? "selected" : ""}`}>
         <button className="preset-card__apply" type="button" onClick={() => onApply(preset)}>
@@ -827,9 +767,10 @@ function ParameterInput({ parameter, value, onChange }: { parameter: GenerationP
 
 const looksLikeUuid = (value: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.trim());
 
-function ConfigPreviewModal({ open, loading, preview, input, presetName, projectName, formulaLabel, schema, submitting, onClose, onConfirm }: {
+function ConfigPreviewModal({ open, loading, error, preview, input, presetName, projectName, formulaLabel, schema, submitting, onClose, onConfirm, onRetry }: {
   open: boolean;
   loading: boolean;
+  error: string | null;
   preview: ResolvedConfigPreview | null;
   input: GenerateInput | null;
   presetName?: string;
@@ -839,6 +780,7 @@ function ConfigPreviewModal({ open, loading, preview, input, presetName, project
   submitting: boolean;
   onClose: () => void;
   onConfirm: () => void;
+  onRetry: () => void;
 }) {
   const severityRank: Record<string, number> = { error: 0, warning: 1, info: 2 };
   const conflicts = [...(preview?.conflicts || []), ...(preview?.warnings || [])]
@@ -855,8 +797,8 @@ function ConfigPreviewModal({ open, loading, preview, input, presetName, project
     .filter((group) => group.items.length > 0);
   const ungroupedImpacts = (preview?.impacts || []).filter((impact) => !schema.parameters.some((parameter) => parameter.id === impact.parameterId));
   const formulaVersionLabel = preview?.formulaVersion && !looksLikeUuid(preview.formulaVersion) ? preview.formulaVersion : formulaLabel;
-  return <Modal open={open} onClose={onClose} title="生成前配置预览" description="确认本次参数如何继承、是否冲突，以及它们会影响哪些内容环节。" size="wide" footer={<><Button variant="ghost" onClick={onClose}>返回修改</Button><Button disabled={loading || hasErrors || !input} loading={submitting} icon={<Sparkles size={16} />} onClick={onConfirm}>确认并生成 3 个候选</Button></>}>
-    {loading ? <div className="preview-loading"><span className="spinner" /><strong>正在解析配置继承与冲突…</strong><p>系统 → 工作区 → 项目 → 预设 → 本次覆盖</p></div> : preview && input ? <div className="config-preview">
+  return <Modal open={open} onClose={onClose} title="生成前配置预览" description="确认本次参数如何继承、是否冲突，以及它们会影响哪些内容环节。" size="wide" footer={<><Button variant="ghost" onClick={onClose}>返回修改</Button><Button disabled={loading || Boolean(error) || hasErrors || !input || !preview} loading={submitting} icon={<Sparkles size={16} />} onClick={onConfirm}>确认并生成 3 个候选</Button></>}>
+    {loading ? <div className="preview-loading"><span className="spinner" /><strong>正在解析配置继承与冲突…</strong><p>系统 → 工作区 → 项目 → 预设 → 本次覆盖</p></div> : error ? <div className="preview-loading" role="alert"><AlertTriangle size={22} /><strong>配置解析失败</strong><p>{error}。未取得服务端解析结果前不能创建生成任务。</p><Button variant="secondary" onClick={onRetry}>重试解析</Button></div> : preview && input ? <div className="config-preview">
       <section className="preview-inheritance"><span>系统默认</span><i>→</i><span>工作区</span><i>→</i><span>项目</span><i>→</i>{presetName && <><span className="active">{presetName}</span><i>→</i></>}<span className="active">本次任务</span></section>
       <section className="preview-facts"><div><small>项目</small><strong>{projectName || input.projectId}</strong></div><div><small>读者 / 入口</small><strong>{stageLabel(input.audienceStage)} · {entryLabel(input.entryPoint)}</strong></div><div><small>公式版本</small><strong>{formulaVersionLabel}</strong></div><div><small>知识注入</small><strong>{preview.knowledgeMode || "优先全量"}{preview.knowledgeFiles !== undefined ? ` · ${preview.knowledgeFiles} 份` : ""}</strong></div></section>
       {conflicts.length ? <section className="preview-conflicts"><h3>冲突与提示 <Badge tone={hasErrors ? "danger" : "warning"}>{conflicts.length} 项</Badge></h3>{visibleConflicts.map(conflictRow)}{infoConflicts.length > 0 && <details className="preview-info-toggle"><summary>还有 {infoConflicts.length} 条配置提示 <ChevronDown size={13} /></summary>{infoConflicts.map(conflictRow)}</details>}</section> : <div className="preview-clear"><CheckCircle2 size={16} /><span><strong>没有发现阻断生成的配置冲突</strong><small>未知信息仍会在结果中保留，不会自动当作事实。</small></span></div>}

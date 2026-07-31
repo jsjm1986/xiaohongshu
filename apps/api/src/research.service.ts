@@ -14,14 +14,16 @@ import {
   PROMPT_CONTRACT_DIGEST,
   PROMPT_CONTRACT_VERSION,
 } from '@content-agent/agent-core';
-import { BadRequestException, Inject, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException, OnModuleInit, PayloadTooLargeException } from '@nestjs/common';
 import { AuditService } from './audit.service.js';
 import { DatabaseService } from './database.service.js';
 import { normalizeParameterValues } from './generation-parameters.js';
 import type { SessionPrincipal } from './models.js';
-import { nowIso, optionalString, parseJson, requireString, slugify } from './utils.js';
+import { assertJsonComplexity, nowIso, optionalString, parseJson, requireString, slugify } from './utils.js';
 
 type JsonObject = Record<string, unknown>;
+const MAX_RESEARCH_JSON_BYTES = 256 * 1024;
+const MAX_RELEASE_BINDINGS_PER_TYPE = 100;
 
 interface CatalogSource {
   id: string;
@@ -69,7 +71,11 @@ export class ResearchService implements OnModuleInit {
   ) {}
 
   onModuleInit(): void {
-    const projects = this.database.prepare('SELECT id, created_by FROM projects WHERE deleted_at IS NULL').all() as Array<{ id: string; created_by: string }>;
+    const projects = this.database.prepare(
+      `SELECT p.id, p.created_by FROM projects p
+       JOIN workspaces w ON w.id = p.workspace_id
+       WHERE p.deleted_at IS NULL AND w.deleted_at IS NULL`,
+    ).all() as Array<{ id: string; created_by: string }>;
     for (const project of projects) this.bootstrapProject(project.id, project.created_by);
   }
 
@@ -127,33 +133,47 @@ export class ResearchService implements OnModuleInit {
   }
 
   createClaim(projectId: string, input: JsonObject, principal: SessionPrincipal): JsonObject {
-    const parent = typeof input.parentId === 'string' ? this.claimRow(projectId, input.parentId) : undefined;
-    const logicalKey = parent ? String(parent.logical_key) : requireString(input.logicalKey ?? slugify(String(input.title ?? '')), 'logicalKey', { max: 120 });
-    const version = this.nextVersion('research_claims', 'logical_key', projectId, logicalKey);
+    const parentId = input.parentId === undefined
+      ? undefined
+      : requireString(input.parentId, 'parentId', { max: 200 });
+    const requestedLogicalKey = parentId
+      ? undefined
+      : requireString(input.logicalKey ?? slugify(String(input.title ?? '')), 'logicalKey', { max: 120 });
     const id = randomUUID();
     const now = nowIso();
     const claimType = enumValue(input.claimType, ['definition', 'external_research', 'internal_observation', 'inference', 'hypothesis', 'unknown'], 'claimType');
-    this.database.prepare(
-      `INSERT INTO research_claims
-       (id,project_id,logical_key,version,parent_id,title,statement,claim_type,status,scope_json,metadata_json,created_by,created_at)
-       VALUES (?,?,?,?,?,?,?,?, 'draft',?,?,?,?)`,
-    ).run(
-      id, projectId, logicalKey, version, parent ? String(parent.id) : null,
-      requireString(input.title, 'title', { max: 240 }),
-      requireString(input.statement, 'statement', { max: 12_000 }),
-      claimType, json(input.scope, []), json(input.metadata, {}), principal.userId, now,
-    );
-    this.record(projectId, principal.userId, 'research.claim.create', 'research_claim', id, { logicalKey, version });
+    const title = requireString(input.title, 'title', { max: 240 });
+    const statement = requireString(input.statement, 'statement', { max: 12_000 });
+    const scope = jsonArray(input.scope, 'scope');
+    const metadata = jsonObject(input.metadata, 'metadata');
+    this.database.transaction(() => {
+      const parent = parentId ? this.claimRow(projectId, parentId) : undefined;
+      const logicalKey = parent ? String(parent.logical_key) : requestedLogicalKey!;
+      const allocated = this.nextVersion('research_claims', 'logical_key', projectId, logicalKey);
+      this.database.prepare(
+        `INSERT INTO research_claims
+         (id,project_id,logical_key,version,parent_id,title,statement,claim_type,status,scope_json,metadata_json,created_by,created_at)
+         VALUES (?,?,?,?,?,?,?,?, 'draft',?,?,?,?)`,
+      ).run(
+        id, projectId, logicalKey, allocated, parent ? String(parent.id) : null,
+        title, statement, claimType, scope, metadata, principal.userId, now,
+      );
+      this.record(projectId, principal.userId, 'research.claim.create', 'research_claim', id, { logicalKey, version: allocated });
+      return allocated;
+    });
     return this.claim(this.claimRow(projectId, id));
   }
 
   reviewClaim(projectId: string, id: string, input: JsonObject, principal: SessionPrincipal): JsonObject {
-    this.claimRow(projectId, id);
     const status = enumValue(input.status, ['under_review', 'approved', 'deprecated', 'rejected'], 'status');
-    this.database.prepare('UPDATE research_claims SET status=?, reviewed_by=?, reviewed_at=? WHERE id=? AND project_id=?')
-      .run(status, principal.userId, nowIso(), id, projectId);
-    this.record(projectId, principal.userId, 'research.claim.review', 'research_claim', id, { status });
-    return this.claim(this.claimRow(projectId, id));
+    return this.database.transaction(() => {
+      this.claimRow(projectId, id);
+      const updated = this.database.prepare('UPDATE research_claims SET status=?, reviewed_by=?, reviewed_at=? WHERE id=? AND project_id=?')
+        .run(status, principal.userId, nowIso(), id, projectId);
+      if (Number(updated.changes) !== 1) throw new NotFoundException('理论主张不存在');
+      this.record(projectId, principal.userId, 'research.claim.review', 'research_claim', id, { status });
+      return this.claim(this.claimRow(projectId, id));
+    });
   }
 
   listSources(projectId: string): JsonObject[] {
@@ -165,48 +185,65 @@ export class ResearchService implements OnModuleInit {
   }
 
   createSource(projectId: string, input: JsonObject, principal: SessionPrincipal): JsonObject {
-    const parent = typeof input.parentId === 'string' ? this.sourceRow(projectId, input.parentId) : undefined;
-    const sourceKey = parent ? String(parent.source_key) : requireString(input.sourceKey ?? slugify(String(input.citation ?? '')), 'sourceKey', { max: 160 });
-    const version = this.nextVersion('evidence_sources', 'source_key', projectId, sourceKey);
+    const parentId = input.parentId === undefined
+      ? undefined
+      : requireString(input.parentId, 'parentId', { max: 200 });
+    const requestedSourceKey = parentId
+      ? undefined
+      : requireString(input.sourceKey ?? slugify(String(input.citation ?? '')), 'sourceKey', { max: 160 });
     const id = randomUUID();
-    this.database.prepare(
-      `INSERT INTO evidence_sources
-       (id,project_id,source_key,version,parent_id,kind,citation,url,supports_text,limitations_text,status,metadata_json,created_by,created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?, 'draft',?,?,?)`,
-    ).run(
-      id, projectId, sourceKey, version, parent ? String(parent.id) : null,
-      requireString(input.kind, 'kind', { max: 120 }),
-      requireString(input.citation, 'citation', { max: 2_000 }),
-      optionalString(input.url, 'url', 2_000) ?? null,
-      optionalString(input.supports, 'supports', 12_000) ?? '',
-      optionalString(input.limitations, 'limitations', 12_000) ?? '',
-      json(input.metadata, {}), principal.userId, nowIso(),
-    );
-    this.record(projectId, principal.userId, 'research.source.create', 'evidence_source', id, { sourceKey, version });
+    const kind = requireString(input.kind, 'kind', { max: 120 });
+    const citation = requireString(input.citation, 'citation', { max: 2_000 });
+    const url = optionalString(input.url, 'url', 2_000) ?? null;
+    const supports = optionalString(input.supports, 'supports', 12_000) ?? '';
+    const limitations = optionalString(input.limitations, 'limitations', 12_000) ?? '';
+    const metadata = jsonObject(input.metadata, 'metadata');
+    const createdAt = nowIso();
+    this.database.transaction(() => {
+      const parent = parentId ? this.sourceRow(projectId, parentId) : undefined;
+      const sourceKey = parent ? String(parent.source_key) : requestedSourceKey!;
+      const allocated = this.nextVersion('evidence_sources', 'source_key', projectId, sourceKey);
+      this.database.prepare(
+        `INSERT INTO evidence_sources
+         (id,project_id,source_key,version,parent_id,kind,citation,url,supports_text,limitations_text,status,metadata_json,created_by,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?, 'draft',?,?,?)`,
+      ).run(
+        id, projectId, sourceKey, allocated, parent ? String(parent.id) : null,
+        kind, citation, url, supports, limitations, metadata, principal.userId, createdAt,
+      );
+      this.record(projectId, principal.userId, 'research.source.create', 'evidence_source', id, { sourceKey, version: allocated });
+      return allocated;
+    });
     return this.source(this.sourceRow(projectId, id));
   }
 
   reviewSource(projectId: string, id: string, input: JsonObject, principal: SessionPrincipal): JsonObject {
-    this.sourceRow(projectId, id);
     const status = enumValue(input.status, ['under_review', 'approved', 'deprecated', 'rejected'], 'status');
-    this.database.prepare('UPDATE evidence_sources SET status=?, reviewed_by=?, reviewed_at=? WHERE id=? AND project_id=?')
-      .run(status, principal.userId, nowIso(), id, projectId);
-    this.record(projectId, principal.userId, 'research.source.review', 'evidence_source', id, { status });
-    return this.source(this.sourceRow(projectId, id));
+    return this.database.transaction(() => {
+      this.sourceRow(projectId, id);
+      const updated = this.database.prepare('UPDATE evidence_sources SET status=?, reviewed_by=?, reviewed_at=? WHERE id=? AND project_id=?')
+        .run(status, principal.userId, nowIso(), id, projectId);
+      if (Number(updated.changes) !== 1) throw new NotFoundException('证据来源不存在');
+      this.record(projectId, principal.userId, 'research.source.review', 'evidence_source', id, { status });
+      return this.source(this.sourceRow(projectId, id));
+    });
   }
 
   linkEvidence(projectId: string, claimId: string, input: JsonObject, principal: SessionPrincipal): JsonObject {
-    this.claimRow(projectId, claimId);
-    const sourceId = requireString(input.evidenceSourceId, 'evidenceSourceId');
-    this.sourceRow(projectId, sourceId);
+    const sourceId = requireString(input.evidenceSourceId, 'evidenceSourceId', { max: 200 });
     const relation = enumValue(input.relation, ['supports', 'contradicts', 'limits', 'context'], 'relation');
     const strength = enumValue(input.strength ?? 'unrated', ['unrated', 'weak', 'moderate', 'strong'], 'strength');
-    this.database.prepare(
-      `INSERT OR REPLACE INTO claim_evidence_links
-       (claim_id,evidence_source_id,relation,strength,note,created_by,created_at) VALUES (?,?,?,?,?,?,?)`,
-    ).run(claimId, sourceId, relation, strength, optionalString(input.note, 'note', 4_000) ?? '', principal.userId, nowIso());
-    this.record(projectId, principal.userId, 'research.claim.link-evidence', 'research_claim', claimId, { sourceId, relation, strength });
-    return { claimId, evidenceSourceId: sourceId, relation, strength, note: optionalString(input.note, 'note', 4_000) ?? '' };
+    const note = optionalString(input.note, 'note', 4_000) ?? '';
+    this.database.transaction(() => {
+      this.claimRow(projectId, claimId);
+      this.sourceRow(projectId, sourceId);
+      this.database.prepare(
+        `INSERT OR REPLACE INTO claim_evidence_links
+         (claim_id,evidence_source_id,relation,strength,note,created_by,created_at) VALUES (?,?,?,?,?,?,?)`,
+      ).run(claimId, sourceId, relation, strength, note, principal.userId, nowIso());
+      this.record(projectId, principal.userId, 'research.claim.link-evidence', 'research_claim', claimId, { sourceId, relation, strength });
+    });
+    return { claimId, evidenceSourceId: sourceId, relation, strength, note };
   }
 
   listDatasets(projectId: string): JsonObject[] {
@@ -215,33 +252,42 @@ export class ResearchService implements OnModuleInit {
 
   createDataset(projectId: string, input: JsonObject, principal: SessionPrincipal): JsonObject {
     const key = requireString(input.datasetKey ?? slugify(String(input.label ?? '')), 'datasetKey', { max: 160 });
-    const version = this.nextVersion('dataset_snapshots', 'dataset_key', projectId, key);
     const id = randomUUID();
     const checksum = requireString(input.sha256, 'sha256', { min: 64, max: 64, pattern: /^[a-f0-9]{64}$/u });
     const rowCount = input.rowCount === undefined || input.rowCount === null ? null : integer(input.rowCount, 'rowCount', 0);
-    this.database.prepare(
-      `INSERT INTO dataset_snapshots
-       (id,project_id,dataset_key,version,label,kind,sha256,row_count,storage_ref,provenance,limitations,schema_json,status,created_by,created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'draft',?,?)`,
-    ).run(
-      id, projectId, key, version, requireString(input.label, 'label', { max: 240 }),
-      enumValue(input.kind, ['internal_sample', 'experiment', 'live_observation', 'external'], 'kind'),
-      checksum, rowCount, optionalString(input.storageRef, 'storageRef', 2_000) ?? '',
-      optionalString(input.provenance, 'provenance', 12_000) ?? '',
-      optionalString(input.limitations, 'limitations', 12_000) ?? '',
-      json(input.schema, {}), principal.userId, nowIso(),
-    );
-    this.record(projectId, principal.userId, 'research.dataset.create', 'dataset_snapshot', id, { key, version, checksum });
+    const label = requireString(input.label, 'label', { max: 240 });
+    const kind = enumValue(input.kind, ['internal_sample', 'experiment', 'live_observation', 'external'], 'kind');
+    const storageRef = optionalString(input.storageRef, 'storageRef', 2_000) ?? '';
+    const provenance = optionalString(input.provenance, 'provenance', 12_000) ?? '';
+    const limitations = optionalString(input.limitations, 'limitations', 12_000) ?? '';
+    const schema = jsonObject(input.schema, 'schema');
+    const createdAt = nowIso();
+    this.database.transaction(() => {
+      const allocated = this.nextVersion('dataset_snapshots', 'dataset_key', projectId, key);
+      this.database.prepare(
+        `INSERT INTO dataset_snapshots
+         (id,project_id,dataset_key,version,label,kind,sha256,row_count,storage_ref,provenance,limitations,schema_json,status,created_by,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'draft',?,?)`,
+      ).run(
+        id, projectId, key, allocated, label, kind, checksum, rowCount, storageRef,
+        provenance, limitations, schema, principal.userId, createdAt,
+      );
+      this.record(projectId, principal.userId, 'research.dataset.create', 'dataset_snapshot', id, { key, version: allocated, checksum });
+      return allocated;
+    });
     return this.dataset(this.datasetRow(projectId, id));
   }
 
   reviewDataset(projectId: string, id: string, input: JsonObject, principal: SessionPrincipal): JsonObject {
-    this.datasetRow(projectId, id);
     const status = enumValue(input.status, ['under_review', 'approved', 'deprecated', 'rejected'], 'status');
-    this.database.prepare('UPDATE dataset_snapshots SET status=?, approved_by=?, approved_at=? WHERE id=? AND project_id=?')
-      .run(status, principal.userId, nowIso(), id, projectId);
-    this.record(projectId, principal.userId, 'research.dataset.review', 'dataset_snapshot', id, { status });
-    return this.dataset(this.datasetRow(projectId, id));
+    return this.database.transaction(() => {
+      this.datasetRow(projectId, id);
+      const updated = this.database.prepare('UPDATE dataset_snapshots SET status=?, approved_by=?, approved_at=? WHERE id=? AND project_id=?')
+        .run(status, principal.userId, nowIso(), id, projectId);
+      if (Number(updated.changes) !== 1) throw new NotFoundException('数据快照不存在');
+      this.record(projectId, principal.userId, 'research.dataset.review', 'dataset_snapshot', id, { status });
+      return this.dataset(this.datasetRow(projectId, id));
+    });
   }
 
   listExperiments(projectId: string): JsonObject[] {
@@ -253,26 +299,38 @@ export class ResearchService implements OnModuleInit {
   }
 
   createExperiment(projectId: string, input: JsonObject, principal: SessionPrincipal): JsonObject {
-    const parent = typeof input.parentId === 'string' ? this.experimentRow(projectId, input.parentId) : undefined;
-    const key = parent ? String(parent.experiment_key) : requireString(input.experimentKey ?? slugify(String(input.title ?? '')), 'experimentKey', { max: 160 });
-    const version = this.nextVersion('experiment_versions', 'experiment_key', projectId, key);
+    const parentId = input.parentId === undefined
+      ? undefined
+      : requireString(input.parentId, 'parentId', { max: 200 });
+    const requestedKey = parentId
+      ? undefined
+      : requireString(input.experimentKey ?? slugify(String(input.title ?? '')), 'experimentKey', { max: 160 });
     const id = randomUUID();
-    this.database.prepare(
-      `INSERT INTO experiment_versions
-       (id,project_id,experiment_key,version,parent_id,title,hypothesis,design_json,metrics_json,analysis_plan_json,status,created_by,created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?, 'draft',?,?)`,
-    ).run(
-      id, projectId, key, version, parent ? String(parent.id) : null,
-      requireString(input.title, 'title', { max: 240 }),
-      requireString(input.hypothesis, 'hypothesis', { max: 12_000 }),
-      json(input.design, {}), json(input.metrics, []), json(input.analysisPlan, {}), principal.userId, nowIso(),
-    );
-    this.record(projectId, principal.userId, 'research.experiment.create', 'experiment_version', id, { key, version });
+    const title = requireString(input.title, 'title', { max: 240 });
+    const hypothesis = requireString(input.hypothesis, 'hypothesis', { max: 12_000 });
+    const design = jsonObject(input.design, 'design');
+    const metrics = jsonArray(input.metrics, 'metrics');
+    const analysisPlan = jsonObject(input.analysisPlan, 'analysisPlan');
+    const createdAt = nowIso();
+    this.database.transaction(() => {
+      const parent = parentId ? this.experimentRow(projectId, parentId) : undefined;
+      const key = parent ? String(parent.experiment_key) : requestedKey!;
+      const allocated = this.nextVersion('experiment_versions', 'experiment_key', projectId, key);
+      this.database.prepare(
+        `INSERT INTO experiment_versions
+         (id,project_id,experiment_key,version,parent_id,title,hypothesis,design_json,metrics_json,analysis_plan_json,status,created_by,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?, 'draft',?,?)`,
+      ).run(
+        id, projectId, key, allocated, parent ? String(parent.id) : null, title, hypothesis,
+        design, metrics, analysisPlan, principal.userId, createdAt,
+      );
+      this.record(projectId, principal.userId, 'research.experiment.create', 'experiment_version', id, { key, version: allocated });
+      return allocated;
+    });
     return this.experiment(this.experimentRow(projectId, id));
   }
 
   transitionExperiment(projectId: string, id: string, input: JsonObject, principal: SessionPrincipal): JsonObject {
-    const row = this.experimentRow(projectId, id);
     const status = enumValue(input.status, ['preregistered', 'running', 'completed', 'replicated', 'rejected', 'archived'], 'status');
     const allowed: Record<string, string[]> = {
       draft: ['preregistered', 'rejected', 'archived'],
@@ -283,48 +341,73 @@ export class ResearchService implements OnModuleInit {
       rejected: ['archived'],
       archived: [],
     };
-    if (!allowed[String(row.status)]?.includes(status)) throw new BadRequestException(`实验状态不能从 ${String(row.status)} 变为 ${status}`);
     const now = nowIso();
-    this.database.prepare(
-      `UPDATE experiment_versions SET status=?, approved_by=COALESCE(approved_by,?),
-       approved_at=CASE WHEN ?='preregistered' THEN ? ELSE approved_at END,
-       started_at=CASE WHEN ?='running' THEN ? ELSE started_at END,
-       completed_at=CASE WHEN ? IN ('completed','replicated') THEN ? ELSE completed_at END
-       WHERE id=? AND project_id=?`,
-    ).run(status, principal.userId, status, now, status, now, status, now, id, projectId);
-    this.record(projectId, principal.userId, 'research.experiment.transition', 'experiment_version', id, { from: row.status, status });
-    return this.experiment(this.experimentRow(projectId, id));
+    return this.database.transaction(() => {
+      const row = this.experimentRow(projectId, id);
+      const previousStatus = String(row.status);
+      if (!allowed[previousStatus]?.includes(status)) {
+        throw new BadRequestException(`实验状态不能从 ${previousStatus} 变为 ${status}`);
+      }
+      const updated = this.database.prepare(
+        `UPDATE experiment_versions SET status=?, approved_by=COALESCE(approved_by,?),
+         approved_at=CASE WHEN ?='preregistered' THEN ? ELSE approved_at END,
+         started_at=CASE WHEN ?='running' THEN ? ELSE started_at END,
+         completed_at=CASE WHEN ? IN ('completed','replicated') THEN ? ELSE completed_at END
+         WHERE id=? AND project_id=? AND status=?`,
+      ).run(status, principal.userId, status, now, status, now, status, now, id, projectId, previousStatus);
+      if (Number(updated.changes) !== 1) throw new BadRequestException('实验状态已变化，请刷新后重试');
+      this.record(projectId, principal.userId, 'research.experiment.transition', 'experiment_version', id, { from: row.status, status });
+      return this.experiment(this.experimentRow(projectId, id));
+    });
   }
 
   createExperimentResult(projectId: string, experimentId: string, input: JsonObject, principal: SessionPrincipal): JsonObject {
-    const experiment = this.experimentRow(projectId, experimentId);
-    if (!['running', 'completed', 'replicated'].includes(String(experiment.status))) {
-      throw new BadRequestException('实验只有开始运行后才能登记结果');
-    }
-    const datasetId = typeof input.datasetSnapshotId === 'string' ? input.datasetSnapshotId : null;
-    if (datasetId) this.datasetRow(projectId, datasetId);
-    const version = Number((this.database.prepare('SELECT COALESCE(MAX(version),0)+1 AS value FROM experiment_results WHERE experiment_version_id=?').get(experimentId) as { value: number }).value);
+    const datasetId = input.datasetSnapshotId === undefined || input.datasetSnapshotId === null
+      ? null
+      : requireString(input.datasetSnapshotId, 'datasetSnapshotId', { max: 200 });
     const id = randomUUID();
-    this.database.prepare(
-      `INSERT INTO experiment_results
-       (id,experiment_version_id,version,dataset_snapshot_id,result_json,conclusion,status,created_by,created_at)
-       VALUES (?,?,?,?,?,?, 'draft',?,?)`,
-    ).run(
-      id, experimentId, version, datasetId, json(input.result, {}),
-      enumValue(input.conclusion ?? 'inconclusive', ['supports', 'contradicts', 'inconclusive', 'not_analyzed'], 'conclusion'),
-      principal.userId, nowIso(),
-    );
-    this.record(projectId, principal.userId, 'research.experiment-result.create', 'experiment_result', id, { experimentId, version, datasetId });
+    const result = jsonObject(input.result, 'result');
+    const conclusion = enumValue(input.conclusion ?? 'inconclusive', ['supports', 'contradicts', 'inconclusive', 'not_analyzed'], 'conclusion');
+    const createdAt = nowIso();
+    this.database.transaction(() => {
+      const experiment = this.experimentRow(projectId, experimentId);
+      if (!['running', 'completed', 'replicated'].includes(String(experiment.status))) {
+        throw new BadRequestException('实验只有开始运行后才能登记结果');
+      }
+      if (datasetId) this.datasetRow(projectId, datasetId);
+      const allocated = Number((this.database.prepare(
+        'SELECT COALESCE(MAX(version),0)+1 AS value FROM experiment_results WHERE experiment_version_id=?',
+      ).get(experimentId) as { value: number }).value);
+      this.database.prepare(
+        `INSERT INTO experiment_results
+         (id,experiment_version_id,version,dataset_snapshot_id,result_json,conclusion,status,created_by,created_at)
+         VALUES (?,?,?,?,?,?, 'draft',?,?)`,
+      ).run(id, experimentId, allocated, datasetId, result, conclusion, principal.userId, createdAt);
+      this.record(projectId, principal.userId, 'research.experiment-result.create', 'experiment_result', id, { experimentId, version: allocated, datasetId });
+      return allocated;
+    });
     return this.result(this.resultRow(projectId, id));
   }
 
   reviewExperimentResult(projectId: string, id: string, input: JsonObject, principal: SessionPrincipal): JsonObject {
-    this.resultRow(projectId, id);
     const status = enumValue(input.status, ['under_review', 'approved', 'rejected'], 'status');
-    this.database.prepare('UPDATE experiment_results SET status=?, reviewed_by=?, reviewed_at=? WHERE id=?')
-      .run(status, principal.userId, nowIso(), id);
-    this.record(projectId, principal.userId, 'research.experiment-result.review', 'experiment_result', id, { status });
-    return this.result(this.resultRow(projectId, id));
+    return this.database.transaction(() => {
+      this.resultRow(projectId, id);
+      const updated = this.database.prepare(
+        `UPDATE experiment_results
+            SET status=?, reviewed_by=?, reviewed_at=?
+          WHERE id=?
+            AND EXISTS (
+              SELECT 1
+                FROM experiment_versions e
+               WHERE e.id=experiment_results.experiment_version_id
+                 AND e.project_id=?
+            )`,
+      ).run(status, principal.userId, nowIso(), id, projectId);
+      if (Number(updated.changes) !== 1) throw new NotFoundException('实验结果不存在');
+      this.record(projectId, principal.userId, 'research.experiment-result.review', 'experiment_result', id, { status });
+      return this.result(this.resultRow(projectId, id));
+    });
   }
 
   listCalibrations(projectId: string): JsonObject[] {
@@ -338,27 +421,43 @@ export class ResearchService implements OnModuleInit {
       throw new BadRequestException('targetKey 不是已注册的生成参数');
     }
     const id = randomUUID();
-    this.database.prepare(
-      `INSERT INTO calibration_proposals
-       (id,project_id,target_type,target_key,current_json,proposed_json,rationale,evidence_json,impact_json,status,created_by,created_at)
-       VALUES (?,?,?,?,?,?,?,?,?, 'draft',?,?)`,
-    ).run(
-      id, projectId, targetType, targetKey, json(input.current, {}), json(input.proposed, {}),
-      requireString(input.rationale, 'rationale', { max: 12_000 }), json(input.evidence, {}), json(input.impact, {}),
-      principal.userId, nowIso(),
-    );
-    this.record(projectId, principal.userId, 'research.calibration.create', 'calibration_proposal', id, { targetType, targetKey });
-    return this.calibration(this.calibrationRow(projectId, id));
+    const current = jsonObject(input.current, 'current');
+    const proposed = jsonObject(input.proposed, 'proposed');
+    const rationale = requireString(input.rationale, 'rationale', { max: 12_000 });
+    const evidence = jsonObject(input.evidence, 'evidence');
+    const impact = jsonObject(input.impact, 'impact');
+    const createdAt = nowIso();
+    return this.database.transaction(() => {
+      this.database.prepare(
+        `INSERT INTO calibration_proposals
+         (id,project_id,target_type,target_key,current_json,proposed_json,rationale,evidence_json,impact_json,status,created_by,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?, 'draft',?,?)`,
+      ).run(
+        id, projectId, targetType, targetKey, current, proposed, rationale, evidence, impact,
+        principal.userId, createdAt,
+      );
+      this.record(projectId, principal.userId, 'research.calibration.create', 'calibration_proposal', id, { targetType, targetKey });
+      return this.calibration(this.calibrationRow(projectId, id));
+    });
   }
 
   reviewCalibration(projectId: string, id: string, input: JsonObject, principal: SessionPrincipal): JsonObject {
-    const row = this.calibrationRow(projectId, id);
     const status = enumValue(input.status, ['under_review', 'approved', 'rejected'], 'status');
-    if (status === 'approved') this.validateCalibration(row);
-    this.database.prepare('UPDATE calibration_proposals SET status=?, reviewed_by=?, reviewed_at=? WHERE id=? AND project_id=?')
-      .run(status, principal.userId, nowIso(), id, projectId);
-    this.record(projectId, principal.userId, 'research.calibration.review', 'calibration_proposal', id, { status });
-    return this.calibration(this.calibrationRow(projectId, id));
+    return this.database.transaction(() => {
+      const row = this.calibrationRow(projectId, id);
+      if (String(row.status) === 'applied') {
+        throw new BadRequestException('已应用的校准提案不能重新审批');
+      }
+      if (status === 'approved') this.validateCalibration(row);
+      const updated = this.database.prepare(
+        `UPDATE calibration_proposals
+            SET status=?, reviewed_by=?, reviewed_at=?
+          WHERE id=? AND project_id=? AND status<>'applied'`,
+      ).run(status, principal.userId, nowIso(), id, projectId);
+      if (Number(updated.changes) !== 1) throw new BadRequestException('校准提案状态已变化，请刷新后重试');
+      this.record(projectId, principal.userId, 'research.calibration.review', 'calibration_proposal', id, { status });
+      return this.calibration(this.calibrationRow(projectId, id));
+    });
   }
 
   listReleases(projectId: string): JsonObject[] {
@@ -366,62 +465,80 @@ export class ResearchService implements OnModuleInit {
   }
 
   createRelease(projectId: string, input: JsonObject, principal: SessionPrincipal): JsonObject {
-    const activeFormula = this.activeFormula(projectId);
-    const formulaId = typeof input.formulaVersionId === 'string' ? input.formulaVersionId : String(activeFormula.id);
-    const formula = this.formulaRow(projectId, formulaId);
-    const stored = parseJson<JsonObject>(formula.definition_json, {});
-    const definition = isRecord(stored.version) ? stored.version : {};
     const id = randomUUID();
-    const parent = this.activeRelease(projectId);
     const version = requireString(input.version, 'version', { max: 80, pattern: /^[0-9A-Za-z][0-9A-Za-z.+-]*$/u });
-    const bindings = this.validateBindings(projectId, input.bindings);
-    this.database.prepare(
-      `INSERT INTO release_manifests
-       (id,project_id,version,parent_id,status,app_version,build_id,formula_version_id,formula_digest,
-        execution_policy_version,execution_policy_digest,prompt_version,prompt_digest,
-        parameter_policy_version,parameter_policy_digest,evidence_catalog_version,evidence_catalog_digest,
-        bindings_json,notes,created_by,created_at)
-       VALUES (?,?,?,?,'draft','0.1.0',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    ).run(
-      id, projectId, version, typeof parent?.id === 'string' ? parent.id : null,
-      optionalString(input.buildId, 'buildId', 200) ?? '', formulaId, String(definition.digest ?? ''),
-      FORMULA_EXECUTION_POLICY_VERSION, FORMULA_EXECUTION_POLICY_DIGEST,
-      PROMPT_CONTRACT_VERSION, PROMPT_CONTRACT_DIGEST,
-      PARAMETER_POLICY_VERSION, PARAMETER_POLICY_DIGEST,
-      String(this.catalog.data.catalogVersion ?? 'unknown'), this.catalog.digest,
-      JSON.stringify(bindings), optionalString(input.notes, 'notes', 12_000) ?? '', principal.userId, nowIso(),
-    );
-    this.record(projectId, principal.userId, 'research.release.create', 'release_manifest', id, { version, formulaId, bindings });
-    return this.release(this.releaseRow(projectId, id));
+    const requestedFormulaId = input.formulaVersionId === undefined
+      ? undefined
+      : requireString(input.formulaVersionId, 'formulaVersionId', { max: 200 });
+    const buildId = optionalString(input.buildId, 'buildId', 200) ?? '';
+    const notes = optionalString(input.notes, 'notes', 12_000) ?? '';
+    return this.database.transaction(() => {
+      const activeFormula = this.activeFormula(projectId);
+      const formulaId = requestedFormulaId ?? String(activeFormula.id);
+      const formula = this.formulaRow(projectId, formulaId);
+      const stored = parseJson<JsonObject>(formula.definition_json, {});
+      const definition = isRecord(stored.version) ? stored.version : {};
+      const parent = this.activeRelease(projectId);
+      const bindings = this.validateBindings(projectId, input.bindings);
+      this.database.prepare(
+        `INSERT INTO release_manifests
+         (id,project_id,version,parent_id,status,app_version,build_id,formula_version_id,formula_digest,
+          execution_policy_version,execution_policy_digest,prompt_version,prompt_digest,
+          parameter_policy_version,parameter_policy_digest,evidence_catalog_version,evidence_catalog_digest,
+          bindings_json,notes,created_by,created_at)
+         VALUES (?,?,?,?,'draft','0.1.0',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ).run(
+        id, projectId, version, typeof parent?.id === 'string' ? parent.id : null,
+        buildId, formulaId, String(definition.digest ?? ''),
+        FORMULA_EXECUTION_POLICY_VERSION, FORMULA_EXECUTION_POLICY_DIGEST,
+        PROMPT_CONTRACT_VERSION, PROMPT_CONTRACT_DIGEST,
+        PARAMETER_POLICY_VERSION, PARAMETER_POLICY_DIGEST,
+        String(this.catalog.data.catalogVersion ?? 'unknown'), this.catalog.digest,
+        JSON.stringify(bindings), notes, principal.userId, nowIso(),
+      );
+      this.record(projectId, principal.userId, 'research.release.create', 'release_manifest', id, { version, formulaId, bindings });
+      return this.release(this.releaseRow(projectId, id));
+    });
   }
 
   reviewRelease(projectId: string, id: string, input: JsonObject, principal: SessionPrincipal): JsonObject {
-    const row = this.releaseRow(projectId, id);
     const status = enumValue(input.status, ['approved', 'rejected'], 'status');
-    if (String(row.status) !== 'draft') throw new BadRequestException('只有 draft 发布清单可以审批');
-    if (status === 'approved') this.validateReleaseForActivation(projectId, row);
-    this.database.prepare('UPDATE release_manifests SET status=?, approved_by=?, approved_at=? WHERE id=? AND project_id=?')
-      .run(status, principal.userId, nowIso(), id, projectId);
-    this.record(projectId, principal.userId, 'research.release.review', 'release_manifest', id, { status });
-    return this.release(this.releaseRow(projectId, id));
+    return this.database.transaction(() => {
+      const row = this.releaseRow(projectId, id);
+      if (String(row.status) !== 'draft') throw new BadRequestException('只有 draft 发布清单可以审批');
+      if (status === 'approved') this.validateReleaseForActivation(projectId, row);
+      const updated = this.database.prepare(
+        `UPDATE release_manifests SET status=?, approved_by=?, approved_at=?
+         WHERE id=? AND project_id=? AND status='draft'`,
+      ).run(status, principal.userId, nowIso(), id, projectId);
+      if (Number(updated.changes) !== 1) throw new BadRequestException('发布清单状态已变化，请刷新后重试');
+      this.record(projectId, principal.userId, 'research.release.review', 'release_manifest', id, { status });
+      return this.release(this.releaseRow(projectId, id));
+    });
   }
 
   activateRelease(projectId: string, id: string, principal: SessionPrincipal): JsonObject {
-    const row = this.releaseRow(projectId, id);
-    if (String(row.status) !== 'approved') throw new BadRequestException('只有 approved 发布清单可以激活');
-    this.validateReleaseForActivation(projectId, row);
     const now = nowIso();
-    this.database.transaction(() => {
+    return this.database.transaction(() => {
+      const row = this.releaseRow(projectId, id);
+      if (String(row.status) !== 'approved') throw new BadRequestException('只有 approved 发布清单可以激活');
+      this.validateReleaseForActivation(projectId, row);
       this.database.prepare("UPDATE release_manifests SET status='archived' WHERE project_id=? AND status='active'").run(projectId);
-      this.database.prepare("UPDATE release_manifests SET status='active', activated_at=? WHERE id=? AND project_id=?").run(now, id, projectId);
+      const activated = this.database.prepare(
+        "UPDATE release_manifests SET status='active', activated_at=? WHERE id=? AND project_id=? AND status='approved'",
+      ).run(now, id, projectId);
+      if (Number(activated.changes) !== 1) throw new BadRequestException('发布清单状态已变化，请刷新后重试');
       const bindings = parseJson<JsonObject>(row.bindings_json, {});
       for (const proposalId of stringArray(bindings.calibrationProposalIds)) {
-        this.database.prepare("UPDATE calibration_proposals SET status='applied', applied_release_id=? WHERE id=? AND project_id=? AND status='approved'")
+        const applied = this.database.prepare("UPDATE calibration_proposals SET status='applied', applied_release_id=? WHERE id=? AND project_id=? AND status='approved'")
           .run(id, proposalId, projectId);
+        if (Number(applied.changes) !== 1) {
+          throw new BadRequestException(`校准提案 ${proposalId} 状态已变化，请刷新后重试`);
+        }
       }
+      this.record(projectId, principal.userId, 'research.release.activate', 'release_manifest', id, { version: row.version });
+      return this.release(this.releaseRow(projectId, id));
     });
-    this.record(projectId, principal.userId, 'research.release.activate', 'release_manifest', id, { version: row.version });
-    return this.release(this.releaseRow(projectId, id));
   }
 
   activeRuntimeSnapshot(projectId: string): JsonObject {
@@ -470,6 +587,9 @@ export class ResearchService implements OnModuleInit {
     const now = nowIso();
     const sourceIds = new Map<string, string>();
     this.database.transaction(() => {
+      // Another process may have imported the same digest after bootstrapProject's
+      // optimistic read. Recheck only after acquiring the write lock.
+      if (this.currentCatalogImported(projectId)) return;
       for (const source of this.catalog.data.sources ?? []) {
         const parent = this.database.prepare(
           'SELECT id, version FROM evidence_sources WHERE project_id=? AND source_key=? ORDER BY version DESC LIMIT 1',
@@ -580,12 +700,16 @@ export class ResearchService implements OnModuleInit {
   }
 
   private ensureBaselineRelease(projectId: string, userId: string): void {
-    const existing = this.database.prepare('SELECT 1 FROM release_manifests WHERE project_id=? LIMIT 1').get(projectId);
-    if (existing) {
-      this.healStaleBaselineRelease(projectId, userId);
-      return;
-    }
-    this.insertBaselineRelease(projectId, userId);
+    this.database.transaction(() => {
+      // Serialize the check with insertion. Without the lock, two API processes
+      // can both observe an empty project and race on the active/version indexes.
+      const existing = this.database.prepare('SELECT 1 FROM release_manifests WHERE project_id=? LIMIT 1').get(projectId);
+      if (existing) {
+        this.healStaleBaselineRelease(projectId, userId);
+        return;
+      }
+      this.insertBaselineRelease(projectId, userId);
+    });
   }
 
   /**
@@ -681,10 +805,11 @@ export class ResearchService implements OnModuleInit {
   }
 
   private validateBindings(projectId: string, value: unknown): JsonObject {
-    const input = isRecord(value) ? value : {};
-    const datasetSnapshotIds = stringArray(input.datasetSnapshotIds);
-    const experimentResultIds = stringArray(input.experimentResultIds);
-    const calibrationProposalIds = stringArray(input.calibrationProposalIds);
+    if (value !== undefined && !isRecord(value)) throw new BadRequestException('bindings 必须是 JSON 对象');
+    const input = value === undefined ? {} : value as JsonObject;
+    const datasetSnapshotIds = bindingIds(input.datasetSnapshotIds, 'bindings.datasetSnapshotIds');
+    const experimentResultIds = bindingIds(input.experimentResultIds, 'bindings.experimentResultIds');
+    const calibrationProposalIds = bindingIds(input.calibrationProposalIds, 'bindings.calibrationProposalIds');
     for (const id of datasetSnapshotIds) this.datasetRow(projectId, id);
     for (const id of experimentResultIds) this.resultRow(projectId, id);
     for (const id of calibrationProposalIds) this.calibrationRow(projectId, id);
@@ -810,7 +935,11 @@ export class ResearchService implements OnModuleInit {
   }
 
   private project(projectId: string): JsonObject {
-    const row = this.database.prepare('SELECT * FROM projects WHERE id=? AND deleted_at IS NULL').get(projectId) as JsonObject | undefined;
+    const row = this.database.prepare(
+      `SELECT p.* FROM projects p
+       JOIN workspaces w ON w.id = p.workspace_id
+       WHERE p.id=? AND p.deleted_at IS NULL AND w.deleted_at IS NULL`,
+    ).get(projectId) as JsonObject | undefined;
     if (!row) throw new NotFoundException('项目不存在');
     return row;
   }
@@ -909,8 +1038,45 @@ function snakeToCamel(value: string): string {
   return value.replace(/_([a-z])/gu, (_match, letter: string) => letter.toUpperCase());
 }
 
-function json(value: unknown, fallback: unknown): string {
-  return JSON.stringify(value === undefined ? fallback : value);
+function jsonObject(value: unknown, field: string): string {
+  const resolved = value === undefined ? {} : value;
+  if (!isRecord(resolved)) throw new BadRequestException(`${field} 必须是 JSON 对象`);
+  return boundedJson(resolved, field);
+}
+
+function jsonArray(value: unknown, field: string): string {
+  const resolved = value === undefined ? [] : value;
+  if (!Array.isArray(resolved)) throw new BadRequestException(`${field} 必须是数组`);
+  return boundedJson(resolved, field);
+}
+
+function boundedJson(value: unknown, field: string): string {
+  assertJsonComplexity(value, field);
+  const serialized = JSON.stringify(value);
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_RESEARCH_JSON_BYTES) {
+    throw new PayloadTooLargeException(`${field} 不能超过 256 KiB`);
+  }
+  return serialized;
+}
+
+function bindingIds(value: unknown, field: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new BadRequestException(`${field} 必须是字符串数组`);
+  if (value.length > MAX_RELEASE_BINDINGS_PER_TYPE) {
+    throw new BadRequestException(`${field} 最多 ${MAX_RELEASE_BINDINGS_PER_TYPE} 项`);
+  }
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== 'string' || !item.trim() || item.length > 200) {
+      throw new BadRequestException(`${field} 必须是非空字符串数组`);
+    }
+    const id = item.trim();
+    if (seen.has(id)) throw new BadRequestException(`${field} 不能包含重复项`);
+    seen.add(id);
+    result.push(id);
+  }
+  return result;
 }
 
 function isRecord(value: unknown): value is JsonObject {

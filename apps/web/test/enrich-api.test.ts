@@ -62,11 +62,12 @@ test('merge 的 body 是传入对象的 JSON', async () => {
 });
 
 test('save 走 normalizeKnowledge,形状与 knowledge.list 一致', async () => {
-  stubFetch(200, { id: 'f1', projectId: 'p1', filename: 'INDEX.md', version: 2, bytes: 120, category: '未分类' });
+  stubFetch(200, { id: 'f1', projectId: 'p1', filename: 'INDEX.md', version: 2, bytes: 120, category: '未分类', evidenceStatus: '已知事实' });
   const saved = await api.intelligence.enrich.save('p1', { content: '# 正文', targetFile: 'INDEX.md' });
   // normalizeKnowledge 把 filename 映射成 name;调用方按 KnowledgeFile 用它
   assert.equal(saved.name, 'INDEX.md');
   assert.equal(saved.id, 'f1');
+  assert.equal(saved.kind, '已知事实', '证据类型必须优先于独立的文件分类');
 });
 
 test('后端 4xx 抛 ApiError 并透出后端原文', async () => {

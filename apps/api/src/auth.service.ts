@@ -7,12 +7,11 @@ import {
   Injectable,
   OnModuleInit,
   UnauthorizedException,
-  HttpException,
-  HttpStatus,
 } from '@nestjs/common';
 import { APP_OPTIONS, type ApiOptions } from './config.js';
 import { DatabaseService } from './database.service.js';
 import type { ApiKeyPrincipal, Permission, SessionPrincipal } from './models.js';
+import { RateLimitService } from './rate-limit.service.js';
 import { nowIso, parseJson, requireString, slugify } from './utils.js';
 
 interface UserRow {
@@ -25,12 +24,19 @@ interface UserRow {
   disabled_at: string | null;
 }
 
+const INSECURE_BOOTSTRAP_PASSWORDS = new Set([
+  'change-me-now-123!',
+  'replace-with-a-strong-password',
+]);
+const MAX_ACTIVE_SESSIONS_PER_USER = 10;
+const USAGE_TOUCH_INTERVAL_MS = 5 * 60_000;
+
 @Injectable()
 export class AuthService implements OnModuleInit {
-  private readonly loginFailures = new Map<string, { count: number; resetAt: number }>();
   constructor(
     @Inject(DatabaseService) private readonly database: DatabaseService,
     @Inject(APP_OPTIONS) private readonly options: ApiOptions,
+    @Inject(RateLimitService) private readonly rateLimits: RateLimitService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -52,6 +58,9 @@ export class AuthService implements OnModuleInit {
   async ensureBootstrapAdmin(): Promise<void> {
     const row = this.database.prepare('SELECT COUNT(*) AS count FROM users').get() as { count: number };
     if (Number(row.count) > 0) return;
+    if (this.options.production && INSECURE_BOOTSTRAP_PASSWORDS.has(this.options.adminPassword)) {
+      throw new Error('生产环境首次启动必须显式配置强 BOOTSTRAP_ADMIN_PASSWORD');
+    }
 
     const username = requireString(this.options.adminUsername, '管理员用户名', { min: 3, max: 64 });
     const passwordHash = await this.hashPassword(this.options.adminPassword);
@@ -59,6 +68,10 @@ export class AuthService implements OnModuleInit {
     const workspaceId = randomUUID();
     const now = nowIso();
     this.database.transaction(() => {
+      // 两个实例可同时完成上面的 Argon2 计算。拿到写锁后必须再检查一次，
+      // 否则第二个实例会用同一默认用户名撞 UNIQUE 并启动失败。
+      const current = this.database.prepare('SELECT COUNT(*) AS count FROM users').get() as { count: number };
+      if (Number(current.count) > 0) return;
       this.database
         .prepare(
           `INSERT INTO users
@@ -100,25 +113,27 @@ export class AuthService implements OnModuleInit {
     const workspaceId = randomUUID();
     const now = nowIso();
     const slug = this.uniqueWorkspaceSlug(input.workspaceName);
-    this.database
-      .prepare(
-        `INSERT INTO users
-           (id, username, password_hash, system_role, user_kind, must_change_password, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(userId, input.username, input.passwordHash, input.systemRole, input.userKind, input.mustChangePassword ? 1 : 0, now, now);
-    this.database
-      .prepare(
-        `INSERT INTO workspaces (id, slug, name, owner_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(workspaceId, slug, input.workspaceName, userId, now, now);
-    this.database
-      .prepare(
-        `INSERT INTO workspace_members (workspace_id, user_id, role, created_at, updated_at)
-         VALUES (?, ?, 'Owner', ?, ?)`,
-      )
-      .run(workspaceId, userId, now, now);
+    this.database.transaction(() => {
+      this.database
+        .prepare(
+          `INSERT INTO users
+             (id, username, password_hash, system_role, user_kind, must_change_password, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(userId, input.username, input.passwordHash, input.systemRole, input.userKind, input.mustChangePassword ? 1 : 0, now, now);
+      this.database
+        .prepare(
+          `INSERT INTO workspaces (id, slug, name, owner_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(workspaceId, slug, input.workspaceName, userId, now, now);
+      this.database
+        .prepare(
+          `INSERT INTO workspace_members (workspace_id, user_id, role, created_at, updated_at)
+           VALUES (?, ?, 'Owner', ?, ?)`,
+        )
+        .run(workspaceId, userId, now, now);
+    });
     return { userId, workspaceId };
   }
 
@@ -138,7 +153,9 @@ export class AuthService implements OnModuleInit {
     expiresAt: string;
   }> {
     const username = requireString(usernameInput, '用户名', { min: 3, max: 64 });
-    if (typeof passwordInput !== 'string') throw new UnauthorizedException('用户名或密码错误');
+    if (typeof passwordInput !== 'string' || passwordInput.length === 0 || passwordInput.length > 256) {
+      throw new UnauthorizedException('用户名或密码错误');
+    }
     const user = this.database
       .prepare('SELECT * FROM users WHERE username = ? COLLATE NOCASE')
       .get(username) as unknown as UserRow | undefined;
@@ -152,13 +169,25 @@ export class AuthService implements OnModuleInit {
     const csrfHash = this.digest(csrfToken);
     const now = nowIso();
     const expiresAt = new Date(Date.now() + this.options.sessionTtlMs).toISOString();
-    this.database
-      .prepare(
-        `INSERT INTO sessions
-           (token_hash, user_id, csrf_hash, expires_at, created_at, last_seen_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(tokenHash, user.id, csrfHash, expiresAt, now, now);
+    this.database.transaction(() => {
+      this.database.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(now);
+      // Keep nine existing sessions before inserting this one. BEGIN IMMEDIATE
+      // serializes concurrent logins across API instances, so the cap is exact.
+      this.database.prepare(
+        `DELETE FROM sessions
+          WHERE user_id=? AND token_hash IN (
+            SELECT token_hash FROM sessions WHERE user_id=?
+            ORDER BY created_at DESC, token_hash DESC LIMIT -1 OFFSET ?
+          )`,
+      ).run(user.id, user.id, MAX_ACTIVE_SESSIONS_PER_USER - 1);
+      this.database
+        .prepare(
+          `INSERT INTO sessions
+             (token_hash, user_id, csrf_hash, expires_at, created_at, last_seen_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(tokenHash, user.id, csrfHash, expiresAt, now, now);
+    });
 
     return {
       token,
@@ -177,41 +206,25 @@ export class AuthService implements OnModuleInit {
     };
   }
 
-  assertLoginAllowed(key: string): void {
-    const current = this.loginFailures.get(key);
-    if (!current) return;
-    if (current.resetAt <= Date.now()) {
-      this.loginFailures.delete(key);
-      return;
-    }
-    if (current.count >= 5) {
-      throw new HttpException('登录尝试过多，请稍后重试', HttpStatus.TOO_MANY_REQUESTS);
-    }
-  }
-
-  recordLoginFailure(key: string): void {
-    const current = this.loginFailures.get(key);
-    const now = Date.now();
-    if (this.loginFailures.size > 10_000) {
-      for (const [candidate, value] of this.loginFailures) {
-        if (value.resetAt <= now) this.loginFailures.delete(candidate);
-      }
-      if (this.loginFailures.size > 10_000) this.loginFailures.delete(this.loginFailures.keys().next().value as string);
-    }
-    this.loginFailures.set(key, current && current.resetAt > now
-      ? { count: current.count + 1, resetAt: current.resetAt }
-      : { count: 1, resetAt: now + 15 * 60_000 });
+  consumeLoginAttempt(key: string): void {
+    this.rateLimits.consume('login', key, {
+      maxAttempts: 5,
+      windowMs: 15 * 60_000,
+      message: '登录尝试过多，请稍后重试',
+    });
   }
 
   clearLoginFailures(key: string): void {
-    this.loginFailures.delete(key);
+    this.rateLimits.clear('login', key);
   }
 
   primaryWorkspaceRole(userId: string): string | null {
     const row = this.database
       .prepare(
-        `SELECT role FROM workspace_members WHERE user_id = ?
-         ORDER BY CASE role WHEN 'Owner' THEN 1 WHEN 'Admin' THEN 2 WHEN 'KnowledgeEditor' THEN 3 WHEN 'ContentEditor' THEN 4 ELSE 5 END
+        `SELECT wm.role FROM workspace_members wm
+         JOIN workspaces w ON w.id = wm.workspace_id
+         WHERE wm.user_id = ? AND w.deleted_at IS NULL
+         ORDER BY CASE wm.role WHEN 'Owner' THEN 1 WHEN 'Admin' THEN 2 WHEN 'KnowledgeEditor' THEN 3 WHEN 'ContentEditor' THEN 4 ELSE 5 END
          LIMIT 1`,
       )
       .get(userId) as { role: string } | undefined;
@@ -222,7 +235,7 @@ export class AuthService implements OnModuleInit {
     if (!token) throw new UnauthorizedException('请先登录');
     const row = this.database
       .prepare(
-        `SELECT s.token_hash, s.csrf_hash, s.expires_at,
+        `SELECT s.token_hash, s.csrf_hash, s.expires_at, s.last_seen_at,
                 u.id AS user_id, u.username, u.system_role, u.user_kind, u.must_change_password, u.disabled_at
          FROM sessions s JOIN users u ON u.id = s.user_id
          WHERE s.token_hash = ?`,
@@ -232,6 +245,7 @@ export class AuthService implements OnModuleInit {
           token_hash: string;
           csrf_hash: string;
           expires_at: string;
+          last_seen_at: string;
           user_id: string;
           username: string;
           system_role: 'admin' | 'user';
@@ -244,9 +258,11 @@ export class AuthService implements OnModuleInit {
       if (row) this.database.prepare('DELETE FROM sessions WHERE token_hash = ?').run(row.token_hash);
       throw new UnauthorizedException('会话已失效，请重新登录');
     }
-    this.database
-      .prepare('UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?')
-      .run(nowIso(), row.token_hash);
+    if (Date.parse(row.last_seen_at) <= Date.now() - USAGE_TOUCH_INTERVAL_MS) {
+      this.database
+        .prepare('UPDATE sessions SET last_seen_at = ? WHERE token_hash = ? AND last_seen_at = ?')
+        .run(nowIso(), row.token_hash, row.last_seen_at);
+    }
     return {
       kind: 'session',
       userId: row.user_id,
@@ -263,14 +279,19 @@ export class AuthService implements OnModuleInit {
     if (!secret?.startsWith('cak_')) throw new UnauthorizedException('API Key 无效');
     const row = this.database
       .prepare(
-        `SELECT id, workspace_id, permissions_json FROM api_keys
-         WHERE secret_hash = ? AND revoked_at IS NULL`,
+        `SELECT k.id, k.workspace_id, k.permissions_json, k.last_used_at FROM api_keys k
+         JOIN workspaces w ON w.id = k.workspace_id
+         WHERE k.secret_hash = ? AND k.revoked_at IS NULL AND w.deleted_at IS NULL`,
       )
       .get(this.digest(secret)) as
-      | { id: string; workspace_id: string; permissions_json: string }
+      | { id: string; workspace_id: string; permissions_json: string; last_used_at: string | null }
       | undefined;
     if (!row) throw new UnauthorizedException('API Key 无效');
-    this.database.prepare('UPDATE api_keys SET last_used_at = ? WHERE id = ?').run(nowIso(), row.id);
+    if (!row.last_used_at || Date.parse(row.last_used_at) <= Date.now() - USAGE_TOUCH_INTERVAL_MS) {
+      this.database.prepare(
+        'UPDATE api_keys SET last_used_at = ? WHERE id = ? AND last_used_at IS ?',
+      ).run(nowIso(), row.id, row.last_used_at);
+    }
     return {
       kind: 'apiKey',
       apiKeyId: row.id,
@@ -290,7 +311,7 @@ export class AuthService implements OnModuleInit {
   }
 
   async changePassword(principal: SessionPrincipal, current: unknown, next: unknown): Promise<void> {
-    if (typeof current !== 'string' || typeof next !== 'string') {
+    if (typeof current !== 'string' || current.length === 0 || current.length > 256 || typeof next !== 'string') {
       throw new BadRequestException('当前密码和新密码不能为空');
     }
     const user = this.database.prepare('SELECT * FROM users WHERE id = ?').get(principal.userId) as unknown as UserRow;
@@ -313,7 +334,7 @@ export class AuthService implements OnModuleInit {
     password: unknown;
     systemRole?: unknown;
     userKind?: unknown;
-  }): Promise<Record<string, unknown>> {
+  }, onCreated?: (user: Record<string, unknown>) => void): Promise<Record<string, unknown>> {
     const username = requireString(input.username, '用户名', {
       min: 3,
       max: 64,
@@ -324,19 +345,24 @@ export class AuthService implements OnModuleInit {
     const userKind = input.userKind === 'saas' ? 'saas' : 'research';
     const id = randomUUID();
     const now = nowIso();
+    const passwordHash = await this.hashPassword(input.password);
+    const result = { id, username, systemRole: role, userKind, mustChangePassword: true, createdAt: now };
     try {
-      this.database
-        .prepare(
-          `INSERT INTO users
-             (id, username, password_hash, system_role, user_kind, must_change_password, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
-        )
-        .run(id, username, await this.hashPassword(input.password), role, userKind, now, now);
+      return this.database.transaction(() => {
+        this.database
+          .prepare(
+            `INSERT INTO users
+               (id, username, password_hash, system_role, user_kind, must_change_password, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+          )
+          .run(id, username, passwordHash, role, userKind, now, now);
+        onCreated?.(result);
+        return result;
+      });
     } catch (error) {
       if (String(error).includes('UNIQUE')) throw new ConflictException('用户名已存在');
       throw error;
     }
-    return { id, username, systemRole: role, userKind, mustChangePassword: true, createdAt: now };
   }
 
   createApiKey(workspaceId: string, name: string, createdBy: string): Record<string, unknown> {

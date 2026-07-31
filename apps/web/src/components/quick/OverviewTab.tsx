@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
-import { ArrowRight, FileText, Gauge, Layers, Lightbulb, Map, Server, Trash2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ArrowRight, FileText, Gauge, Layers, Lightbulb, Map, RefreshCw, Server, Trash2, TriangleAlert } from 'lucide-react';
 import { useProjects } from '../ProjectContext';
 import { Button, Field, Modal, useToast } from '../Ui';
 import { api } from '../../lib/api';
+import { errorMessage } from '../../lib/errors';
 import {
   deriveNextAction,
   parseCities,
@@ -27,6 +28,15 @@ interface Props {
   onProjectDeleted: () => void;
 }
 
+type OverviewSource = 'intelligence' | 'opportunities' | 'generations' | 'quota';
+
+const SOURCE_LABELS: Record<OverviewSource, string> = {
+  intelligence: '内容地图',
+  opportunities: '选题池',
+  generations: '产出记录',
+  quota: '额度',
+};
+
 // 内容地图仪表格:tone 与文案按分析态给(V2InstrumentTone 无 muted,未分析用 blue 灰蓝表达「未知」)
 const MAP_CELL: Record<AnalysisState, { tone: V2InstrumentTone; value: string }> = {
   none: { tone: 'blue', value: '未分析' },
@@ -37,7 +47,7 @@ const MAP_CELL: Record<AnalysisState, { tone: V2InstrumentTone; value: string }>
 };
 
 export function OverviewTab({ project, busy, setBusy, fail, goTo, onProjectUpdated, onProjectDeleted }: Props) {
-  const { updateProject, removeProject, refresh } = useProjects();
+  const { updateProject, removeProject } = useProjects();
   const toast = useToast();
   const [intel, setIntel] = useState<ProjectIntelligence | null>(null);
   const [opps, setOpps] = useState<TopicOpportunity[]>([]);
@@ -49,35 +59,58 @@ export function OverviewTab({ project, busy, setBusy, fail, goTo, onProjectUpdat
   const [citiesInput, setCitiesInput] = useState('');
   const [doctorsInput, setDoctorsInput] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [loadingData, setLoadingData] = useState(true);
+  const [loadErrors, setLoadErrors] = useState<Partial<Record<OverviewSource, string>>>({});
+  const loadSequence = useRef(0);
+  const activeProjectId = useRef(project.id);
+  activeProjectId.current = project.id;
 
-  // 挂载/换项目:三路并行自载,各自静默回落为空值(总览只做读数,不阻塞)
+  const loadOverview = async (targetProjectId = project.id, workspaceId = project.workspaceId) => {
+    const sequence = ++loadSequence.current;
+    setLoadingData(true);
+    setLoadErrors({});
+    const results = await Promise.allSettled([
+      api.intelligence.get(targetProjectId),
+      api.opportunities.list(targetProjectId),
+      api.generations.list(targetProjectId),
+      api.settings.quota(workspaceId),
+    ] as const);
+    if (sequence !== loadSequence.current || activeProjectId.current !== targetProjectId) return;
+
+    const errors: Partial<Record<OverviewSource, string>> = {};
+    const [intelligenceResult, opportunitiesResult, generationsResult, quotaResult] = results;
+    if (intelligenceResult.status === 'fulfilled') {
+      setIntel(intelligenceResult.value.status === 'missing' ? null : intelligenceResult.value);
+    } else errors.intelligence = errorMessage(intelligenceResult.reason, '内容地图读取失败');
+    if (opportunitiesResult.status === 'fulfilled') setOpps(opportunitiesResult.value.items);
+    else errors.opportunities = errorMessage(opportunitiesResult.reason, '选题池读取失败');
+    if (generationsResult.status === 'fulfilled') setJobs(generationsResult.value.items);
+    else errors.generations = errorMessage(generationsResult.reason, '产出记录读取失败');
+    if (quotaResult.status === 'fulfilled') setQuota(quotaResult.value);
+    else errors.quota = errorMessage(quotaResult.reason, '额度读取失败');
+    setLoadErrors(errors);
+    setLoadingData(false);
+  };
+
+  // 挂载/换项目时四路并行读取。每一路单独保留失败语义，不能把网络故障
+  // 显示成“未分析”“0 个选题”或“没有产出”。
   useEffect(() => {
-    let cancelled = false;
+    loadSequence.current += 1;
     setIntel(null);
     setOpps([]);
     setJobs([]);
-    api.intelligence.get(project.id)
-      .then((r) => { if (!cancelled && r.status !== 'missing') setIntel(r); })
-      .catch(() => { /* 静默回落 */ });
-    api.opportunities.list(project.id)
-      .then((r) => { if (!cancelled) setOpps(r.items); })
-      .catch(() => { if (!cancelled) setOpps([]); });
-    api.generations.list(project.id)
-      .then((r) => { if (!cancelled) setJobs(r.items); })
-      .catch(() => { if (!cancelled) setJobs([]); });
-    // 额度:付费用户需要在生成前就知道还剩多少,而不是撞上 403 才发现。
-    // 同样静默回落——额度读不到不该拖垮总览其余读数。
     setQuota(null);
-    api.settings.quota(project.workspaceId)
-      .then((r) => { if (!cancelled) setQuota(r); })
-      .catch(() => { /* 静默回落:不显示额度格 */ });
+    setLoadErrors({});
+    void loadOverview(project.id, project.workspaceId);
     setRenaming(project.name);
     setDomain(project.domain ?? '');
     setDescription(project.description ?? '');
     setCitiesInput(formatCities(project.cities));
     setDoctorsInput(formatDoctors(project.doctors));
-    return () => { cancelled = true; };
-  }, [project]);
+    return () => { loadSequence.current += 1; };
+    // Requests are scoped by ids; text-field resets also happen when either id changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.id, project.workspaceId]);
 
   // 分析态推导(组件侧):ready 带 staleReasons 与 status='stale' 同属「需更新」;analyzing/queued 视为 none
   const staleReasons = intel?.staleReasons ?? [];
@@ -109,14 +142,26 @@ export function OverviewTab({ project, busy, setBusy, fail, goTo, onProjectUpdat
 
   const digest = overviewDigest(jobs);
   const quotaInfo = quotaCell(quota);
-  const mapCell = MAP_CELL[analysis];
-  const mapNote = analysis === 'stale'
+  const mapCell = loadErrors.intelligence
+    ? { tone: 'error' as const, value: '读取失败' }
+    : loadingData && !intel
+      ? { tone: 'blue' as const, value: '读取中' }
+      : MAP_CELL[analysis];
+  const mapNote = loadErrors.intelligence
+    ? loadErrors.intelligence
+    : analysis === 'stale'
     ? staleReasons.join('；') || '资料有更新'
     : analysis === 'failed'
       ? intel?.error || undefined
       : analysis === 'draft'
         ? '生成时会自动确认,不阻塞使用'
         : undefined;
+  const coreDataUnavailable = loadingData || Boolean(
+    loadErrors.intelligence || loadErrors.opportunities || loadErrors.generations,
+  );
+  const sourceFailures = (Object.keys(loadErrors) as OverviewSource[])
+    .map((source) => ({ source, message: loadErrors[source] }))
+    .filter((item): item is { source: OverviewSource; message: string } => Boolean(item.message));
 
   const rename = async () => {
     if (!renaming.trim() || renaming.trim() === project.name) return;
@@ -147,7 +192,6 @@ export function OverviewTab({ project, busy, setBusy, fail, goTo, onProjectUpdat
     setBusy(true);
     try {
       await removeProject(project.id);
-      await refresh();
       setConfirmDelete(false);
       setBusy(false);
       onProjectDeleted();
@@ -156,13 +200,23 @@ export function OverviewTab({ project, busy, setBusy, fail, goTo, onProjectUpdat
 
   return (
     <div className="qc-step">
+      {sourceFailures.length > 0 && (
+        <div className="inline-load-error" role="alert">
+          <TriangleAlert size={15} />
+          <span>
+            <strong>总览数据未完整加载</strong>
+            <small>{sourceFailures.map(({ source, message }) => `${SOURCE_LABELS[source]}：${message}`).join('；')}</small>
+          </span>
+          <Button variant="ghost" icon={<RefreshCw size={14} />} loading={loadingData} onClick={() => void loadOverview()}>重试</Button>
+        </div>
+      )}
       {/* 有额度可显示时扩到 5 格(BYOK 或读取失败时 quotaCell 返回 null,保持 4 格) */}
       <V2Instrument columns={4}>
         {/* text:「已就绪」「待刷新」是状态词不是读数,不用 31px 读数字号 */}
         <V2InstrumentCell text tone={mapCell.tone} icon={<Map size={14} />} label="内容地图" value={mapCell.value} note={mapNote} />
         <V2InstrumentCell tone="brand" icon={<FileText size={14} />} label="知识文件" value={project.knowledgeCount ?? 0} unit="个" />
-        <V2InstrumentCell tone="ai" icon={<Lightbulb size={14} />} label="选题池" value={opps.length} unit="个" note={`未处理 ${activeCount} · 收藏 ${collectedCount}`} />
-        <V2InstrumentCell tone="ok" icon={<Layers size={14} />} label="累计产出" value={jobs.length} unit="篇" />
+        <V2InstrumentCell text={Boolean(loadErrors.opportunities) || loadingData} tone={loadErrors.opportunities ? 'error' : 'ai'} icon={<Lightbulb size={14} />} label="选题池" value={loadErrors.opportunities ? '读取失败' : loadingData ? '读取中' : opps.length} unit={loadErrors.opportunities || loadingData ? undefined : '个'} note={loadErrors.opportunities || loadingData ? loadErrors.opportunities : `未处理 ${activeCount} · 收藏 ${collectedCount}`} />
+        <V2InstrumentCell text={Boolean(loadErrors.generations) || loadingData} tone={loadErrors.generations ? 'error' : 'ok'} icon={<Layers size={14} />} label="累计产出" value={loadErrors.generations ? '读取失败' : loadingData ? '读取中' : jobs.length} unit={loadErrors.generations || loadingData ? undefined : '篇'} note={loadErrors.generations} />
       </V2Instrument>
 
       {/* 额度单独一行:V2Instrument 是 4 列固定网格,塞第 5 格会让它独占第二行的
@@ -195,7 +249,11 @@ export function OverviewTab({ project, busy, setBusy, fail, goTo, onProjectUpdat
       <div className="qc-board">
         <section className="qc-board__card">
           <h3 className="qc-board__title">产出质量</h3>
-          {digest.settled === 0 ? (
+          {loadErrors.generations ? (
+            <p className="qc-hint qc-hint--error" role="alert">产出记录读取失败，当前不显示质量统计。</p>
+          ) : loadingData ? (
+            <p className="qc-hint" role="status">正在读取产出记录…</p>
+          ) : digest.settled === 0 ? (
             <p className="qc-hint">还没有已完成的产出。</p>
           ) : (
             <>
@@ -223,32 +281,32 @@ export function OverviewTab({ project, busy, setBusy, fail, goTo, onProjectUpdat
 
         <section className="qc-board__card">
           <h3 className="qc-board__title">下一步</h3>
-          <Button icon={<ArrowRight size={16} />} disabled={analyzing || busy} onClick={() => goTo(action.tab)}>{action.label}</Button>
-          {actionNote && <small className="qc-hint">{actionNote}</small>}
+          <Button icon={<ArrowRight size={16} />} disabled={analyzing || busy || coreDataUnavailable} onClick={() => goTo(action.tab)}>{coreDataUnavailable ? loadingData ? '正在读取数据' : '数据未完整加载' : action.label}</Button>
+          {!coreDataUnavailable && actionNote && <small className="qc-hint">{actionNote}</small>}
           <ul className="qc-todo">
-            {activeCount > 0 && (
+            {!loadErrors.opportunities && activeCount > 0 && (
               <li><button type="button" onClick={() => goTo('create')}>
                 <b>{activeCount}</b> 个选题待处理
               </button></li>
             )}
-            {digest.needsReview > 0 && (
+            {!loadErrors.generations && digest.needsReview > 0 && (
               <li><button type="button" onClick={() => goTo('history')}>
                 <b>{digest.needsReview}</b> 篇需人工核对
               </button></li>
             )}
-            {digest.failed > 0 && (
+            {!loadErrors.generations && digest.failed > 0 && (
               <li><button type="button" onClick={() => goTo('history')}>
                 <b>{digest.failed}</b> 篇失败可重试
               </button></li>
             )}
-            {activeCount === 0 && digest.needsReview === 0 && digest.failed === 0 && (
+            {!coreDataUnavailable && activeCount === 0 && digest.needsReview === 0 && digest.failed === 0 && (
               <li className="qc-todo__clear">没有待处理事项</li>
             )}
           </ul>
         </section>
       </div>
 
-      {digest.recent.length > 0 && (
+      {!loadErrors.generations && digest.recent.length > 0 && (
         <div className="qc-overview-recent">
           <span className="qc-overview-recent__label">最近产出</span>
           <ul>

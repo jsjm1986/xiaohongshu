@@ -141,14 +141,22 @@ test('一篇撞上余额不足后,排队中的其余任务被立刻判失败而�
   assert.equal(rows.length, 5);
   for (const row of rows) assert.equal(row.status, 'failed', `${row.id} 应失败`);
 
-  // 真正撞上供应商的那几篇带原始英文错误(排查要用);
-  // 被连带判掉的带能读懂的中文原因与出路。
-  const hitProvider = rows.filter((r) => /Insufficient Balance/.test(r.error ?? ''));
-  const cascaded = rows.filter((r) => /余额不足/.test(r.error ?? ''));
-  assert.ok(hitProvider.length >= 1, '至少一篇真的打到了供应商');
-  assert.ok(cascaded.length >= 1, `至少一篇是被连带判掉的,实际 ${JSON.stringify(rows.map((r) => r.error?.slice(0, 40)))}`);
-  assert.equal(hitProvider.length + cascaded.length, 5, '每篇要么撞墙要么被连带,不该有第三种');
-  for (const row of cascaded) assert.match(row.error ?? '', /产出区批量重试/);
+  // 命中供应商和被连带停止的任务都只保存安全业务文案。真实命中由下面的
+  // provider_outage 事件证明，不能再靠泄露供应商响应体来区分。
+  for (const row of rows) {
+    assert.match(row.error ?? '', /余额不足/u);
+    assert.match(row.error ?? '', /产出区批量重试/u);
+    assert.doesNotMatch(row.error ?? '', /Insufficient Balance|insufficient_quota|provider rejected/iu);
+  }
+  const outageEvents = db.prepare(
+    `SELECT job_id, details_json FROM generation_events
+      WHERE event='provider_outage' AND job_id IN (${jobIds.map(() => '?').join(',')})`,
+  ).all(...jobIds) as Array<{ job_id: string; details_json: string }>;
+  assert.ok(outageEvents.length >= 1, '至少一篇真的打到了供应商并留下安全事件');
+  assert.ok(
+    outageEvents.some((event) => Number(JSON.parse(event.details_json).clearedQueuedJobs) >= 1),
+    '至少一次真实命中应连带停止仍在排队的任务',
+  );
 
   /**
    * 关键:被连带判掉的那几篇,一次模型调用都没发起 —— 这正是省下来的成本。
@@ -161,8 +169,8 @@ test('一篇撞上余额不足后,排队中的其余任务被立刻判失败而�
   const calls = stubCalls - callsBefore;
   const CALLS_PER_JOB = 3;
   assert.ok(
-    calls <= hitProvider.length * CALLS_PER_JOB,
-    `调用数应只与真正撞墙的 ${hitProvider.length} 篇相关(≤${hitProvider.length * CALLS_PER_JOB}),实际 ${calls} 次`,
+    calls <= outageEvents.length * CALLS_PER_JOB,
+    `调用数应只与真正撞墙的 ${outageEvents.length} 篇相关(≤${outageEvents.length * CALLS_PER_JOB}),实际 ${calls} 次`,
   );
   assert.ok(
     calls < 5 * CALLS_PER_JOB,
@@ -184,7 +192,10 @@ test('事件流里留下 provider_outage 记录,便于事后排查', () => {
     `SELECT details_json FROM generation_events WHERE event='provider_outage' AND job_id IN (${jobIds.map(() => '?').join(',')})`,
   ).all(...jobIds) as Array<{ details_json: string }>;
   assert.ok(rows.length >= 1, '应写入 provider_outage 事件');
-  const payload = JSON.parse(rows[0]!.details_json);
-  assert.equal(payload.kind, 'insufficient_balance');
-  assert.ok(payload.clearedQueuedJobs >= 1, `应记录清掉的条数,实际 ${payload.clearedQueuedJobs}`);
+  const payloads = rows.map((row) => JSON.parse(row.details_json) as { kind: string; clearedQueuedJobs: number });
+  assert.ok(payloads.every((payload) => payload.kind === 'insufficient_balance'));
+  assert.ok(
+    payloads.some((payload) => payload.clearedQueuedJobs >= 1),
+    `至少一次应记录清掉的条数,实际 ${payloads.map((payload) => payload.clearedQueuedJobs).join(',')}`,
+  );
 });
