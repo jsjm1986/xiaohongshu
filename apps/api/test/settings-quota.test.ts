@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { createApplication } from '../src/app.js';
+import { APP_OPTIONS, type ApiOptions } from '../src/config.js';
 import { DatabaseService } from '../src/database.service.js';
 import { SettingsService } from '../src/settings.service.js';
 
@@ -15,6 +16,7 @@ let cookie = '';
 let csrf = '';
 
 const PASSWORD = 'Quota-bootstrap-123!';
+const NEW_PASSWORD = 'Quota-updated-456!';
 
 async function request(path: string, options: RequestInit = {}) {
   const headers = new Headers(options.headers);
@@ -28,7 +30,15 @@ async function request(path: string, options: RequestInit = {}) {
 
 before(async () => {
   dataDir = await mkdtemp(join(tmpdir(), 'content-agent-quota-'));
-  app = await createApplication({ dataDir, adminPassword: PASSWORD, logger: false });
+  app = await createApplication({
+    dataDir,
+    adminPassword: PASSWORD,
+    logger: false,
+    masterEncryptionKey: 'quota-test-master-encryption-key',
+    platformApiKey: 'platform-test-key',
+    platformBaseUrl: 'https://platform.example.test/v1',
+    platformTransport: 'responses',
+  });
   await app.listen(0, '127.0.0.1');
   baseUrl = await app.getUrl();
   const login = await request('/api/auth/login', {
@@ -37,6 +47,11 @@ before(async () => {
   });
   cookie = login.response.headers.get('set-cookie')!.split(';', 1)[0]!;
   csrf = login.body.csrfToken;
+  const changed = await request('/api/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ currentPassword: PASSWORD, newPassword: NEW_PASSWORD }),
+  });
+  assert.equal(changed.response.status, 201);
 });
 
 after(async () => {
@@ -149,4 +164,238 @@ test('BYOK 工作区不走平台额度:扣减是空操作', async () => {
   settings.consumePlatformQuota(workspaceId);
   const row = db.prepare('SELECT quota_used FROM workspace_settings WHERE workspace_id=?').get(workspaceId) as { quota_used: number };
   assert.equal(Number(row.quota_used), 1);
+});
+
+test('公开示例 SESSION_SECRET 不能回退为 BYOK 加密主密钥', async () => {
+  const snapshot = await request('/api/settings/quota');
+  const workspaceId = snapshot.body.workspaceId as string;
+  const db = app.get(DatabaseService);
+  const insecure = new SettingsService(
+    db,
+    { ...db.options, masterEncryptionKey: 'replace-with-at-least-32-random-characters' },
+    { record: () => undefined } as never,
+  );
+
+  assert.throws(
+    () => insecure.update(
+      workspaceId,
+      { providerMode: 'byok', apiKey: 'test-key-that-must-not-be-encrypted' },
+      { userId: 'u-test' } as never,
+    ),
+    /MASTER_ENCRYPTION_KEY|非示例值/u,
+  );
+  const row = db.prepare('SELECT encrypted_api_key FROM workspace_settings WHERE workspace_id = ?')
+    .get(workspaceId) as { encrypted_api_key: string | null };
+  assert.equal(row.encrypted_api_key, null, '拒绝后不能留下以公开密钥加密的密文');
+});
+
+test('BYOK 默认拒绝 HTTP、内网、凭据、查询和片段 URL', async () => {
+  const db = app.get(DatabaseService);
+  const workspace = db.prepare('SELECT id FROM workspaces LIMIT 1').get() as { id: string };
+  const originalBaseUrl = 'https://api.example.com/v1';
+  db.prepare(
+    "UPDATE workspace_settings SET provider_mode='platform', base_url=?, transport='responses', encrypted_api_key=NULL WHERE workspace_id=?",
+  ).run(originalBaseUrl, workspace.id);
+
+  const unsafeUrls = [
+    'http://api.example.com/v1',
+    'https://localhost/v1',
+    'https://127.0.0.1/v1',
+    'https://10.0.0.1/v1',
+    'https://user:password@api.example.com/v1',
+    'https://api.example.com/v1?token=secret',
+    'https://api.example.com/v1?',
+    'https://api.example.com/v1#fragment',
+    'https://api.example.com/v1#',
+  ];
+
+  for (const apiBaseUrl of unsafeUrls) {
+    const { response } = await request('/api/settings', {
+      method: 'PATCH',
+      body: JSON.stringify({ providerMode: 'byok', apiKey: 'byok-test-key', apiBaseUrl }),
+    });
+    assert.equal(response.status, 400, `${apiBaseUrl} 必须被拒绝`);
+  }
+
+  const row = db.prepare(
+    'SELECT provider_mode, base_url, encrypted_api_key FROM workspace_settings WHERE workspace_id=?',
+  ).get(workspace.id) as { provider_mode: string; base_url: string; encrypted_api_key: string | null };
+  assert.equal(row.provider_mode, 'platform', '非法设置不得切换供应商模式');
+  assert.equal(row.base_url, originalBaseUrl, '非法设置不得污染已保存 URL');
+  assert.equal(row.encrypted_api_key, null, '非法设置不得提前写入密钥');
+});
+
+test('私网 HTTP BYOK 必须同时开启两个显式开关', async () => {
+  const db = app.get(DatabaseService);
+  const options = app.get<ApiOptions>(APP_OPTIONS);
+  const workspace = db.prepare('SELECT id FROM workspaces LIMIT 1').get() as { id: string };
+  const privateUrl = 'http://127.0.0.1:9999/v1';
+  const restore = { allowHttp: options.byokAllowHttp, allowPrivate: options.byokAllowPrivateNetwork };
+  db.prepare(
+    "UPDATE workspace_settings SET provider_mode='platform', base_url='https://api.example.com/v1', encrypted_api_key=NULL WHERE workspace_id=?",
+  ).run(workspace.id);
+
+  try {
+    options.byokAllowHttp = true;
+    options.byokAllowPrivateNetwork = false;
+    let result = await request('/api/settings', {
+      method: 'PATCH',
+      body: JSON.stringify({ providerMode: 'byok', apiKey: 'byok-test-key', apiBaseUrl: privateUrl }),
+    });
+    assert.equal(result.response.status, 400, '只开启 HTTP 不得放行私网');
+
+    options.byokAllowHttp = false;
+    options.byokAllowPrivateNetwork = true;
+    result = await request('/api/settings', {
+      method: 'PATCH',
+      body: JSON.stringify({ providerMode: 'byok', apiKey: 'byok-test-key', apiBaseUrl: privateUrl }),
+    });
+    assert.equal(result.response.status, 400, '只开启私网不得放行明文 HTTP');
+
+    options.byokAllowHttp = true;
+    options.byokAllowPrivateNetwork = true;
+    result = await request('/api/settings', {
+      method: 'PATCH',
+      body: JSON.stringify({ providerMode: 'byok', apiKey: 'byok-test-key', apiBaseUrl: privateUrl }),
+    });
+    assert.equal(result.response.status, 200);
+    assert.equal(result.body.providerMode, 'byok');
+    assert.equal(result.body.apiBaseUrl, privateUrl);
+  } finally {
+    options.byokAllowHttp = restore.allowHttp;
+    options.byokAllowPrivateNetwork = restore.allowPrivate;
+    db.prepare(
+      "UPDATE workspace_settings SET provider_mode='platform', base_url='https://api.example.com/v1', transport='responses', encrypted_api_key=NULL WHERE workspace_id=?",
+    ).run(workspace.id);
+  }
+});
+
+test('切换 BYOK 时会重新校验数据库中的存量 URL', async () => {
+  const db = app.get(DatabaseService);
+  const workspace = db.prepare('SELECT id FROM workspaces LIMIT 1').get() as { id: string };
+  const saved = await request('/api/settings', {
+    method: 'PATCH',
+    body: JSON.stringify({
+      providerMode: 'byok',
+      apiKey: 'byok-test-key',
+      apiBaseUrl: 'https://api.example.com/v1',
+    }),
+  });
+  assert.equal(saved.response.status, 200);
+  db.prepare(
+    "UPDATE workspace_settings SET provider_mode='platform', base_url='http://127.0.0.1:9999/v1' WHERE workspace_id=?",
+  ).run(workspace.id);
+
+  try {
+    const { response } = await request('/api/settings', {
+      method: 'PATCH',
+      body: JSON.stringify({ providerMode: 'byok' }),
+    });
+    assert.equal(response.status, 400, '未随 PATCH 提交 URL 时也必须校验最终生效值');
+    const row = db.prepare('SELECT provider_mode FROM workspace_settings WHERE workspace_id=?')
+      .get(workspace.id) as { provider_mode: string };
+    assert.equal(row.provider_mode, 'platform', '拒绝后不得部分切换到 BYOK');
+  } finally {
+    db.prepare(
+      "UPDATE workspace_settings SET provider_mode='platform', base_url='https://api.example.com/v1', encrypted_api_key=NULL WHERE workspace_id=?",
+    ).run(workspace.id);
+  }
+});
+
+test('平台公开设置忽略数据库中的租户 URL 与 transport', async () => {
+  const db = app.get(DatabaseService);
+  const options = app.get<ApiOptions>(APP_OPTIONS);
+  const workspace = db.prepare('SELECT id FROM workspaces LIMIT 1').get() as { id: string };
+  db.prepare(
+    "UPDATE workspace_settings SET provider_mode='platform', base_url='http://127.0.0.1:9/v1', transport='chat_completions' WHERE workspace_id=?",
+  ).run(workspace.id);
+
+  try {
+    const { response, body } = await request('/api/settings');
+    assert.equal(response.status, 200);
+    assert.equal(body.providerMode, 'platform');
+    assert.equal(body.apiBaseUrl, options.platformBaseUrl);
+    assert.equal(body.transport, options.platformTransport);
+  } finally {
+    db.prepare(
+      'UPDATE workspace_settings SET base_url=?, transport=? WHERE workspace_id=?',
+    ).run(options.platformBaseUrl, options.platformTransport, workspace.id);
+  }
+});
+
+test('设置更新严格拒绝非法字段且不污染已保存配置', async () => {
+  const db = app.get(DatabaseService);
+  const workspace = db.prepare('SELECT id FROM workspaces LIMIT 1').get() as { id: string };
+  db.prepare("UPDATE workspace_settings SET provider_mode='platform', provider='openai', model='stable-model', base_url='https://api.example.com/v1', transport='responses', encrypted_api_key=NULL, monthly_quota=100, default_temperature=0.8, config_json='{}' WHERE workspace_id=?").run(workspace.id);
+  const before = db.prepare('SELECT provider_mode, provider, model, base_url, transport, encrypted_api_key, monthly_quota, default_temperature, config_json FROM workspace_settings WHERE workspace_id=?').get(workspace.id);
+
+  const invalidBodies: string[] = [
+    JSON.stringify({ providerMode: 'unknown' }),
+    JSON.stringify({ provider: '' }),
+    JSON.stringify({ model: '   ' }),
+    JSON.stringify({ transport: 'legacy' }),
+    '{"defaultTemperature":1e309}',
+    JSON.stringify({ defaultTemperature: -0.1 }),
+    JSON.stringify({ monthlyQuota: 1.5 }),
+    JSON.stringify({ monthlyQuota: 1_000_001 }),
+    JSON.stringify({ generationDefaults: [] }),
+    JSON.stringify({ clearApiKey: 'true' }),
+    JSON.stringify({ apiKey: 'x'.repeat(8_193) }),
+  ];
+  for (const body of invalidBodies) {
+    const result = await request('/api/settings', { method: 'PATCH', body });
+    assert.equal(result.response.status, 400, '非法设置应返回 400');
+  }
+
+  const after = db.prepare('SELECT provider_mode, provider, model, base_url, transport, encrypted_api_key, monthly_quota, default_temperature, config_json FROM workspace_settings WHERE workspace_id=?').get(workspace.id);
+  assert.deepEqual(after, before, '任何被拒请求都不能留下部分更新');
+});
+
+test('过深 JSON 在服务层处理前被拒绝且合法 prototype 领域字段保留', async () => {
+  let nested: Record<string, unknown> = { value: true };
+  for (let depth = 0; depth < 40; depth += 1) nested = { child: nested };
+  const rejected = await request('/api/settings', {
+    method: 'PATCH',
+    body: JSON.stringify({ generationDefaults: nested }),
+  });
+  assert.equal(rejected.response.status, 400);
+  assert.match(String(rejected.body.message), /嵌套层级过深/u);
+
+  const accepted = await request('/api/settings', {
+    method: 'PATCH',
+    body: JSON.stringify({ generationDefaults: { scenario: { prototype: 'option_comparison' } } }),
+  });
+  assert.equal(accepted.response.status, 200, JSON.stringify(accepted.body));
+  assert.deepEqual(accepted.body.generationDefaults, { scenario: { prototype: 'option_comparison' } });
+});
+
+test('清除 BYOK 密钥回到平台模式且冲突请求不清除现有密钥', async () => {
+  const db = app.get(DatabaseService);
+  const workspace = db.prepare('SELECT id FROM workspaces LIMIT 1').get() as { id: string };
+  const saved = await request('/api/settings', {
+    method: 'PATCH',
+    body: JSON.stringify({ providerMode: 'byok', apiKey: 'existing-byok-key', apiBaseUrl: 'https://api.example.com/v1' }),
+  });
+  assert.equal(saved.response.status, 200);
+  const encryptedBefore = (db.prepare('SELECT encrypted_api_key FROM workspace_settings WHERE workspace_id=?').get(workspace.id) as { encrypted_api_key: string }).encrypted_api_key;
+  assert.ok(encryptedBefore);
+
+  const conflict = await request('/api/settings', {
+    method: 'PATCH',
+    body: JSON.stringify({ apiKey: 'replacement-key', clearApiKey: true }),
+  });
+  assert.equal(conflict.response.status, 400);
+  const afterConflict = db.prepare('SELECT encrypted_api_key FROM workspace_settings WHERE workspace_id=?').get(workspace.id) as { encrypted_api_key: string };
+  assert.equal(afterConflict.encrypted_api_key, encryptedBefore);
+
+  const cleared = await request('/api/settings', {
+    method: 'PATCH',
+    body: JSON.stringify({ providerMode: 'byok', clearApiKey: true }),
+  });
+  assert.equal(cleared.response.status, 200, JSON.stringify(cleared.body));
+  assert.equal(cleared.body.providerMode, 'platform');
+  assert.equal(cleared.body.hasApiKey, true, '平台密钥仍由部署配置提供');
+  const row = db.prepare('SELECT provider_mode, encrypted_api_key FROM workspace_settings WHERE workspace_id=?').get(workspace.id) as { provider_mode: string; encrypted_api_key: string | null };
+  assert.equal(row.provider_mode, 'platform');
+  assert.equal(row.encrypted_api_key, null);
 });

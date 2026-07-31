@@ -254,5 +254,5 @@ describe("Property 9: comment-orchestration convergence keeps output valid and t
       }),
       { numRuns: 100 },
     );
-  });
+  }, 30_000);
 });

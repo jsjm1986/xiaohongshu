@@ -174,10 +174,13 @@ test('软删的任务不被清:它已经不在队列里,再判一次失败只是
   seedQueued('gone', projectA);
   const service = app.get(GenerationService);
   service.softDelete('gone');
+  const deletedBeforeOutage = statusOf('gone');
+  assert.equal(deletedBeforeOutage.status, 'failed', '软删会立即终止尚未完成的任务');
+  assert.match(deletedBeforeOutage.error ?? '', /已删除/u);
   seedQueued('alive', projectA);
 
   assert.equal(failQueued(projectA, '余额不足'), 1);
-  assert.equal(statusOf('gone').status, 'queued', '软删的行状态不该被改写');
+  assert.deepEqual(statusOf('gone'), deletedBeforeOutage, 'outage 清理不该覆盖软删任务的终态与原因');
   assert.equal(statusOf('alive').status, 'failed');
 });
 

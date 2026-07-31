@@ -148,4 +148,23 @@ describe("OpenAI-compatible client", () => {
     await expect(promise).rejects.toBeInstanceOf(ModelProviderError);
     await expect(promise).rejects.not.toThrow(/top-secret/u);
   });
+
+  it("rejects provider responses that exceed the configured byte limit", async () => {
+    const fetch = vi.fn(async () => new Response("123456"));
+    const client = new OpenAICompatibleClient({
+      apiKey: "secret",
+      model: "m",
+      maxResponseBytes: 5,
+      fetch,
+    });
+    await expect(client.generate({ messages })).rejects.toThrow(/size limit/u);
+  });
+
+  it("rejects provider JSON that exceeds structural complexity limits", async () => {
+    let deep: Record<string, unknown> = { leaf: true };
+    for (let index = 0; index < 34; index += 1) deep = { nested: deep };
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ output_text: "{}", deep })));
+    const client = new OpenAICompatibleClient({ apiKey: "secret", model: "m", fetch });
+    await expect(client.generate({ messages })).rejects.toThrow(/structural complexity/u);
+  });
 });

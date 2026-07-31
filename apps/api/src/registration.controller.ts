@@ -9,8 +9,7 @@ export class RegistrationController {
   @Post()
   async submit(@Ip() ip: string, @Body() rawBody: unknown) {
     const key = ip || 'unknown';
-    this.registration.assertSubmitAllowed(key);
-    this.registration.recordSubmit(key);
+    this.registration.consumeSubmitAttempt(key);
     const body = requireObject(rawBody);
     return this.registration.submit({
       username: body.username,

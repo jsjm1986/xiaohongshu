@@ -296,19 +296,33 @@ test('模型返回 502 时退还额度,并给中文可行动文案', async () =>
   const settings = app.get(SettingsService);
   const workspace = db.prepare('SELECT id FROM workspaces LIMIT 1').get() as { id: string };
   settings.ensure(workspace.id);
-  const stub = createServer((_req, res) => {
+  let trustedHits = 0;
+  const trustedAuthorization: Array<string | undefined> = [];
+  const stub = createServer((req, res) => {
+    trustedHits += 1;
+    trustedAuthorization.push(req.headers.authorization);
     res.writeHead(502, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: { message: 'Bad gateway' } }));
   });
   await new Promise<void>((resolve) => stub.listen(0, '127.0.0.1', resolve));
   const port = (stub.address() as { port: number }).port;
 
-  // base_url 在设置行建出来的那一刻就落库了(SettingsService.ensure 写的是当时的
-  // platformBaseUrl),而 provider() 读行内值优先。只改注入选项不够,行也要改,
-  // 否则请求打到 before 里配的 127.0.0.1:1 变成「连接失败」——那是另一种错误。
+  let untrustedHits = 0;
+  const untrustedAuthorization: Array<string | undefined> = [];
+  const untrusted = createServer((req, res) => {
+    untrustedHits += 1;
+    untrustedAuthorization.push(req.headers.authorization);
+    res.writeHead(502, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Untrusted endpoint' } }));
+  });
+  await new Promise<void>((resolve) => untrusted.listen(0, '127.0.0.1', resolve));
+  const untrustedPort = (untrusted.address() as { port: number }).port;
+
+  // 平台端点只能来自部署配置。即使租户设置行被旧版本或直接 SQL 污染，改稿链也
+  // 不得访问行内地址，更不能把平台 Authorization 发过去。
   const baseUrlBefore = (db.prepare('SELECT base_url FROM workspace_settings WHERE workspace_id=?').get(workspace.id) as { base_url: string }).base_url;
   db.prepare("UPDATE workspace_settings SET provider_mode='platform', monthly_quota=100, quota_used=5, base_url=? WHERE workspace_id=?")
-    .run(`http://127.0.0.1:${port}/v1`, workspace.id);
+    .run(`http://127.0.0.1:${untrustedPort}/v1`, workspace.id);
 
   const options = app.get<Record<string, unknown>>(APP_OPTIONS);
   const restore = { apiKey: options.platformApiKey, baseUrl: options.platformBaseUrl, attempts: options.modelRetryAttempts, delay: options.modelRetryBaseDelayMs };
@@ -329,9 +343,16 @@ test('模型返回 502 时退还额度,并给中文可行动文案', async () =>
     options.modelRetryAttempts = restore.attempts;
     options.modelRetryBaseDelayMs = restore.delay;
     db.prepare('UPDATE workspace_settings SET base_url=? WHERE workspace_id=?').run(baseUrlBefore, workspace.id);
-    await new Promise<void>((resolve) => stub.close(() => resolve()));
+    await Promise.all([
+      new Promise<void>((resolve) => stub.close(() => resolve())),
+      new Promise<void>((resolve) => untrusted.close(() => resolve())),
+    ]);
   }
 
+  assert.ok(trustedHits > 0, '改稿请求必须到达部署配置的可信平台端点');
+  assert.ok(trustedAuthorization.every((value) => value === 'Bearer stub-key'), '平台密钥只能发送到可信端点');
+  assert.equal(untrustedHits, 0, '数据库中的租户端点不得被平台改稿链访问');
+  assert.deepEqual(untrustedAuthorization, [], '租户端点不得收到平台 Authorization');
   assert.equal(revision.status, 'failed');
   assert.match(revision.error, /模型服务暂时不可用/u, `文案应是中文可行动话术，实际：${revision.error}`);
   assert.match(revision.error, /已退还本次额度/u);

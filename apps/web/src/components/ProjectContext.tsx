@@ -1,6 +1,6 @@
 import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api';
-import { demoProjects } from '../lib/fixtures';
+import { errorMessage } from '../lib/errors';
 import type { Project } from '../types';
 
 interface ProjectContextValue {
@@ -9,6 +9,7 @@ interface ProjectContextValue {
   projectId: string;
   setProjectId: (id: string) => void;
   loading: boolean;
+  error: string | null;
   refresh: () => Promise<void>;
   addProject: (input: Pick<Project, 'name' | 'description' | 'domain'>) => Promise<Project>;
   updateProject: (id: string, input: Partial<Project>) => Promise<Project>;
@@ -21,47 +22,47 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectIdState] = useState(localStorage.getItem('content-agent-project') || '');
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const refresh = async () => {
+    setLoading(true);
+    setError(null);
     try {
       const response = await api.projects.list();
       setProjects(response.items);
-    } catch {
-      setProjects(demoProjects);
+    } catch (requestError) {
+      setError(errorMessage(requestError, '项目列表加载失败'));
+    } finally {
+      setLoading(false);
     }
   };
 
   useEffect(() => {
-    refresh().finally(() => setLoading(false));
+    void refresh();
   }, []);
 
   useEffect(() => {
-    if (!projectId && projects[0]) setProjectIdState(projects[0].id);
-    if (projectId && projects.length && !projects.some((project) => project.id === projectId)) {
-      setProjectIdState(projects[0].id);
+    if (loading || error) return;
+    const nextId = projects.some((project) => project.id === projectId)
+      ? projectId
+      : projects[0]?.id ?? '';
+    if (nextId === projectId) return;
+    setProjectIdState(nextId);
+    if (nextId) {
+      localStorage.setItem('content-agent-project', nextId);
+    } else {
+      localStorage.removeItem('content-agent-project');
     }
-  }, [projectId, projects]);
+  }, [projectId, projects, loading, error]);
 
   const setProjectId = (id: string) => {
     setProjectIdState(id);
-    localStorage.setItem('content-agent-project', id);
+    if (id) localStorage.setItem('content-agent-project', id);
+    else localStorage.removeItem('content-agent-project');
   };
 
   const addProject = async (input: Pick<Project, 'name' | 'description' | 'domain'>) => {
-    let project: Project;
-    try {
-      const workspaces = await api.workspaces.list().catch(() => []);
-      project = await api.projects.create({ ...input, workspaceId: workspaces[0]?.id });
-    } catch {
-      project = {
-        id: `local-${Date.now()}`,
-        ...input,
-        status: 'active',
-        knowledgeCount: 0,
-        generationCount: 0,
-        updatedAt: new Date().toISOString(),
-      };
-    }
+    const project = await api.projects.create(input);
     setProjects((current) => [project, ...current]);
     setProjectId(project.id);
     return project;
@@ -89,12 +90,13 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       projectId,
       setProjectId,
       loading,
+      error,
       refresh,
       addProject,
       updateProject,
       removeProject,
     }),
-    [projects, projectId, loading],
+    [projects, projectId, loading, error],
   );
 
   return <ProjectContext.Provider value={value}>{children}</ProjectContext.Provider>;

@@ -75,7 +75,8 @@ test('已有的 HttpException 原样透出,不被覆盖', () => {
   assert.equal(analysisFailureException(bad), bad);
 });
 
-test('非网关错误保留原文,至少比 Internal server error 多一点线索', () => {
-  const msg = messageOf(new Error('something broke in stage 2'));
-  assert.match(msg, /something broke in stage 2/);
+test('非网关错误也不泄露内部阶段、端点或凭据', () => {
+  const msg = messageOf(new Error('stage=2 https://private.example sk-secret-credential'));
+  assert.match(msg, /分析失败|重试/u);
+  assert.doesNotMatch(msg, /stage=2|private\.example|secret-credential/u);
 });

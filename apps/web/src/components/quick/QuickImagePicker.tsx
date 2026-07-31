@@ -6,6 +6,7 @@ import type { ImageAsset, Project } from '../../types';
 
 const MAX_SELECTED = 9;
 const MAX_BYTES = 8 * 1024 * 1024;
+const PAGE_SIZE = 24;
 
 interface Props {
   project: Project;
@@ -22,22 +23,53 @@ interface Props {
 export function QuickImagePicker({ project, busy, fail, selectedIds, onChange }: Props) {
   const toast = useToast();
   const [assets, setAssets] = useState<ImageAsset[]>([]);
+  const [total, setTotal] = useState(0);
   const [working, setWorking] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const requestSeq = useRef(0);
   // 壳的 fail 每次渲染都是新引用,经 ref 调用以免 load 依赖抖动重复拉取
   const failRef = useRef(fail);
   failRef.current = fail;
 
   const load = useCallback(async () => {
+    const seq = ++requestSeq.current;
     try {
-      const list = await api.imageAssets.list(project.id);
+      const list = await api.imageAssets.list(project.id, { limit: PAGE_SIZE, offset: 0 });
+      if (seq !== requestSeq.current) return;
       setAssets(list.items);
+      setTotal(list.total);
     } catch (e) {
-      failRef.current(e, '加载源素材图失败');
+      if (seq === requestSeq.current) failRef.current(e, '加载源素材图失败');
     }
   }, [project.id]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    setAssets([]);
+    setTotal(0);
+    setLoadingMore(false);
+    void load();
+    return () => { requestSeq.current += 1; };
+  }, [load]);
+
+  const loadMore = async () => {
+    const seq = ++requestSeq.current;
+    const offset = assets.length;
+    setLoadingMore(true);
+    try {
+      const list = await api.imageAssets.list(project.id, { limit: PAGE_SIZE, offset });
+      if (seq !== requestSeq.current) return;
+      setAssets((current) => {
+        const known = new Set(current.map((item) => item.id));
+        return [...current, ...list.items.filter((item) => !known.has(item.id))];
+      });
+      setTotal(list.total);
+    } catch (e) {
+      if (seq === requestSeq.current) failRef.current(e, '加载更多源素材图失败');
+    } finally {
+      if (seq === requestSeq.current) setLoadingMore(false);
+    }
+  };
 
   const disabled = busy || working;
 
@@ -99,6 +131,7 @@ export function QuickImagePicker({ project, busy, fail, selectedIds, onChange }:
     try {
       await api.imageAssets.remove(project.id, asset.id);
       setAssets((current) => current.filter((item) => item.id !== asset.id));
+      setTotal((current) => Math.max(0, current - 1));
       if (selectedIds.includes(asset.id)) onChange(selectedIds.filter((id) => id !== asset.id));
     } catch (e) {
       failRef.current(e, '删除图片失败');
@@ -119,7 +152,7 @@ export function QuickImagePicker({ project, busy, fail, selectedIds, onChange }:
           <span className="qc-empty__icon"><Images size={18} /></span>
           可不选源素材图；上传原图只作生成参考，不会产出成品图。
         </div>
-      ) : (
+      ) : (<>
         <div className="qc-asset-grid">
           {assets.map((asset) => {
             const selected = selectedIds.includes(asset.id);
@@ -150,7 +183,14 @@ export function QuickImagePicker({ project, busy, fail, selectedIds, onChange }:
             );
           })}
         </div>
-      )}
+        {assets.length < total && (
+          <div className="qc-picker__more">
+            <Button variant="ghost" loading={loadingMore} disabled={disabled} onClick={() => void loadMore()}>
+              加载更多（已显示 {assets.length}/{total}）
+            </Button>
+          </div>
+        )}
+      </>)}
     </div>
   );
 }

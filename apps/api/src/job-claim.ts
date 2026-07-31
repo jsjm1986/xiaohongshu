@@ -13,8 +13,8 @@ export const RESTART_INTERRUPTION_LIMIT = 3;
  * 多次打断(3 次)」而实际上没有任何一次真正的重启。
  *
  * 修法是让 DB 成为唯一权威:
- *  - claimed_by 记录归属,领取靠单条 UPDATE 的 changes 判定成败(SQLite 单写者
- *    模型保证两个实例不可能都拿到 1);
+ *  - claimed_by 记录归属,候选选择与归属写入放在同一条 UPDATE ... RETURNING 中
+ *    (SQLite 单写者模型保证两个实例不会同时持有同一行);
  *  - heartbeat_at 区分「实例死了」与「实例在正常跑」,回收只动前者。
  *
  * 计数仍写在 resolution_snapshot_json.restartInterruptions,避免为此加一列。
@@ -23,7 +23,7 @@ export const RESTART_INTERRUPTION_LIMIT = 3;
 /**
  * 认领/心跳/回收对哪张表生效。
  *
- * 泛化而不是复制:多实例正确性的判据(单条 UPDATE 的 changes、只看心跳不看归属)
+ * 泛化而不是复制:多实例正确性的判据(单条原子领取、只看心跳不看归属)
  * 只该有一处实现。仓库里 analysis_tasks 已经是第三份独立实现,它能用,并进来属于
  * 无关重构、不在本次范围;这里只让 revision_tasks 接到同一份实现上。
  *
@@ -40,6 +40,8 @@ export interface ClaimTableSpec {
   hasClaimedAt: boolean;
   /** 重新入队时一并复位的列(不含 status/claimed_by/heartbeat_at/updated_at) */
   resetColumns: string;
+  /** 父任务、项目与工作区仍有效的相关子查询。 */
+  parentAlive: string;
 }
 
 export const GENERATION_JOBS_SPEC: ClaimTableSpec = {
@@ -48,6 +50,8 @@ export const GENERATION_JOBS_SPEC: ClaimTableSpec = {
   softDelete: true,
   hasClaimedAt: true,
   resetColumns: 'progress=0, error=NULL, claimed_at=NULL',
+  parentAlive:
+    'EXISTS (SELECT 1 FROM projects p JOIN workspaces w ON w.id=p.workspace_id WHERE p.id=generation_jobs.project_id AND p.deleted_at IS NULL AND w.deleted_at IS NULL)',
 };
 
 export const REVISION_TASKS_SPEC: ClaimTableSpec = {
@@ -56,10 +60,16 @@ export const REVISION_TASKS_SPEC: ClaimTableSpec = {
   softDelete: false,
   hasClaimedAt: false,
   resetColumns: 'progress=0, error=NULL',
+  parentAlive:
+    'EXISTS (SELECT 1 FROM generation_jobs j JOIN projects p ON p.id=j.project_id JOIN workspaces w ON w.id=p.workspace_id WHERE j.id=revision_tasks.job_id AND j.deleted_at IS NULL AND p.deleted_at IS NULL AND w.deleted_at IS NULL)',
 };
 
 function aliveClause(spec: ClaimTableSpec): string {
-  return spec.softDelete ? ' AND deleted_at IS NULL' : '';
+  const clauses = [
+    spec.softDelete ? spec.table + '.deleted_at IS NULL' : '',
+    spec.parentAlive,
+  ].filter(Boolean);
+  return clauses.map((clause) => ' AND ' + clause).join('');
 }
 
 function interruptionCount(raw: string): number {
@@ -88,9 +98,9 @@ function withInterruptionCount(raw: string, count: number): string {
 /**
  * 领取下一个排队任务,领到则返回它的 id。
  *
- * 子查询挑最早排队的一条,外层 `AND status='queued'` 再确认一次——两者之间存在
- * 竞态窗口,少了这个守卫,两个实例可能都通过子查询选到同一行。加上它之后
- * changes===1 就是「本实例独占领到」的充分证据。
+ * 候选子查询与归属写入属于同一条写语句。SQLite 取得写锁后基于最新快照选择
+ * 最早排队行,并通过 RETURNING 返回实际领到的 id;后执行的实例会继续选择下一行。
+ * 外层 status/deleted_at 条件保留为防御性约束,确保只有仍可领取的行会被更新。
  *
  * 领取即置 running:让「被领取」和「在跑」成为同一个原子事实,不留中间态。
  */
@@ -100,31 +110,27 @@ export function claimNext(
   instanceId: string,
   now: string,
 ): string | undefined {
-  // 先取候选 id 再按 id 更新,而不是「UPDATE ... WHERE id=(SELECT ...)」后回查:
-  // 回查无法可靠区分本实例同一时刻领到的多条,会返回错的 id。
-  const candidate = database
-    .prepare(
-      `SELECT id FROM ${spec.table}
-        WHERE status='queued'${aliveClause(spec)}
-        ORDER BY created_at, id
-        LIMIT 1`,
-    )
-    .get() as { id: string } | undefined;
-  if (!candidate) return undefined;
   const claimedAtAssign = spec.hasClaimedAt ? 'claimed_at=?, ' : '';
   const params = spec.hasClaimedAt
-    ? [instanceId, now, now, now, candidate.id]
-    : [instanceId, now, now, candidate.id];
-  const result = database
+    ? [instanceId, now, now, now]
+    : [instanceId, now, now];
+  const claimed = database
     .prepare(
       `UPDATE ${spec.table}
           SET status='running', claimed_by=?, ${claimedAtAssign}heartbeat_at=?, updated_at=?
-        WHERE id=? AND status='queued'`,
+        WHERE id=(
+          SELECT id FROM ${spec.table}
+           WHERE status='queued'${aliveClause(spec)}
+           ORDER BY created_at, id
+           LIMIT 1
+        )
+          AND status='queued'${aliveClause(spec)}
+        RETURNING id`,
     )
-    .run(...params);
-  // changes===0 说明这一瞬间被别的实例抢先领走了。不重试:调用方在循环里,
-  // 下一轮会取到新的候选。
-  return result.changes ? candidate.id : undefined;
+    .get(...params) as { id: string } | undefined;
+  // 候选选择、状态确认和归属写入处于同一条 SQLite 写语句中。并发实例会按写锁
+  // 串行执行,后执行者会直接看到队列里的下一条,不会把一次抢输误报成队列为空。
+  return claimed?.id;
 }
 
 /**
@@ -139,7 +145,10 @@ export function heartbeatTask(
   now: string,
 ): boolean {
   const result = database
-    .prepare(`UPDATE ${spec.table} SET heartbeat_at=?, updated_at=? WHERE id=? AND claimed_by=?`)
+    .prepare(
+      `UPDATE ${spec.table} SET heartbeat_at=?, updated_at=?
+        WHERE id=? AND status='running' AND claimed_by=?${aliveClause(spec)}`,
+    )
     .run(now, now, id, instanceId);
   return result.changes > 0;
 }
@@ -190,53 +199,74 @@ export function reclaimStale(
   now: string,
   claimTimeoutMs: number,
   failMessage: (attempts: number) => string,
+  onFailed?: (id: string) => void,
 ): ReclaimResult {
   const deadline = new Date(new Date(now).getTime() - claimTimeoutMs).toISOString();
   const attemptSelect = spec.attemptColumn ?? 'resolution_snapshot_json';
   const rows = database
     .prepare(
-      `SELECT id, ${attemptSelect} AS attempt_source
+      `SELECT id, claimed_by, heartbeat_at, ${attemptSelect} AS attempt_source
          FROM ${spec.table}
         WHERE status='running'${aliveClause(spec)}
           AND (heartbeat_at IS NULL OR heartbeat_at < ?)`,
     )
-    .all(deadline) as unknown as { id: string; attempt_source: string | number | null }[];
+    .all(deadline) as unknown as {
+      id: string;
+      claimed_by: string | null;
+      heartbeat_at: string | null;
+      attempt_source: string | number | null;
+    }[];
   const result: ReclaimResult = { requeued: [], failed: [] };
   if (!rows.length) return result;
 
-  const failStatement = database.prepare(
-    `UPDATE ${spec.table} SET status='failed', error=?, claimed_by=NULL, heartbeat_at=NULL, updated_at=? WHERE id=?`,
-  );
-  const requeueStatement = database.prepare(
-    spec.attemptColumn
-      ? `UPDATE ${spec.table}
-            SET status='queued', ${spec.resetColumns}, ${spec.attemptColumn}=?, claimed_by=NULL,
-                heartbeat_at=NULL, updated_at=?
-          WHERE id=?`
-      : `UPDATE ${spec.table}
-            SET status='queued', ${spec.resetColumns}, claimed_by=NULL, heartbeat_at=NULL,
-                resolution_snapshot_json=?, updated_at=?
-          WHERE id=?`,
-  );
-
-  for (const row of rows) {
-    const raw = row.attempt_source;
-    const previous = spec.attemptColumn
-      ? (typeof raw === 'number' ? raw : 0)
-      : interruptionCount(String(raw ?? '{}'));
-    const attempts = previous + 1;
-    if (attempts > RESTART_INTERRUPTION_LIMIT) {
-      failStatement.run(failMessage(attempts - 1), now, row.id);
-      result.failed.push(row.id);
-      continue;
-    }
-    requeueStatement.run(
-      spec.attemptColumn ? attempts : withInterruptionCount(String(raw ?? '{}'), attempts),
-      now,
-      row.id,
+  database.transaction(() => {
+    const claimedAtReset = spec.hasClaimedAt ? ', claimed_at=NULL' : '';
+    const ownershipGuard =
+      `id=? AND status='running'${aliveClause(spec)}
+       AND claimed_by IS ? AND heartbeat_at IS ? AND ${attemptSelect} IS ?
+       AND (heartbeat_at IS NULL OR heartbeat_at < ?)`;
+    const failStatement = database.prepare(
+      `UPDATE ${spec.table}
+          SET status='failed', error=?, claimed_by=NULL, heartbeat_at=NULL${claimedAtReset}, updated_at=?
+        WHERE ${ownershipGuard}`,
     );
-    result.requeued.push(row.id);
-  }
+    const requeueStatement = database.prepare(
+      spec.attemptColumn
+        ? `UPDATE ${spec.table}
+              SET status='queued', ${spec.resetColumns}, ${spec.attemptColumn}=?, claimed_by=NULL,
+                  heartbeat_at=NULL, updated_at=?
+            WHERE ${ownershipGuard}`
+        : `UPDATE ${spec.table}
+              SET status='queued', ${spec.resetColumns}, claimed_by=NULL, heartbeat_at=NULL,
+                  resolution_snapshot_json=?, updated_at=?
+            WHERE ${ownershipGuard}`,
+    );
+
+    for (const row of rows) {
+      const raw = row.attempt_source;
+      const previous = spec.attemptColumn
+        ? (typeof raw === 'number' ? raw : 0)
+        : interruptionCount(String(raw ?? '{}'));
+      const attempts = previous + 1;
+      const guardParams = [row.id, row.claimed_by, row.heartbeat_at, raw, deadline];
+      if (attempts > RESTART_INTERRUPTION_LIMIT) {
+        const changed = failStatement.run(failMessage(attempts - 1), now, ...guardParams).changes;
+        if (changed === 1) {
+          // 修改任务在这里同步结清额度。回调仍处于本次 BEGIN IMMEDIATE 内,任何
+          // 退款/记账错误都会连同 failed 状态一起回滚。
+          onFailed?.(row.id);
+          result.failed.push(row.id);
+        }
+        continue;
+      }
+      const changed = requeueStatement.run(
+        spec.attemptColumn ? attempts : withInterruptionCount(String(raw ?? '{}'), attempts),
+        now,
+        ...guardParams,
+      ).changes;
+      if (changed === 1) result.requeued.push(row.id);
+    }
+  });
   return result;
 }
 
@@ -255,7 +285,10 @@ export function reclaimStaleJobs(
 /** 排队总数。队列在 DB 里,这是全局真值,不再是某个实例的内存视角。 */
 export function queuedJobCount(database: DatabaseService): number {
   const row = database
-    .prepare("SELECT COUNT(*) AS value FROM generation_jobs WHERE status='queued' AND deleted_at IS NULL")
+    .prepare(
+      `SELECT COUNT(*) AS value FROM generation_jobs
+        WHERE status='queued'${aliveClause(GENERATION_JOBS_SPEC)}`,
+    )
     .get() as { value: number };
   return Number(row.value);
 }
@@ -269,13 +302,16 @@ export function queuedJobCount(database: DatabaseService): number {
  */
 export function queuedJobPosition(database: DatabaseService, jobId: string): number | undefined {
   const self = database
-    .prepare("SELECT created_at FROM generation_jobs WHERE id=? AND status='queued' AND deleted_at IS NULL")
+    .prepare(
+      `SELECT created_at FROM generation_jobs
+        WHERE id=? AND status='queued'${aliveClause(GENERATION_JOBS_SPEC)}`,
+    )
     .get(jobId) as { created_at: string } | undefined;
   if (!self) return undefined;
   const row = database
     .prepare(
       `SELECT COUNT(*) AS value FROM generation_jobs
-        WHERE status='queued' AND deleted_at IS NULL
+        WHERE status='queued'${aliveClause(GENERATION_JOBS_SPEC)}
           AND (created_at < ? OR (created_at = ? AND id < ?))`,
     )
     .get(self.created_at, self.created_at, jobId) as { value: number };

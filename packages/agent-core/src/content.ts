@@ -20,6 +20,7 @@ import type {
 } from "./types.js";
 import { evaluatePlanToCopyAlignment, isProhibitiveBoundary } from "./artifacts.js";
 import { conservativeEvidenceSupport } from "./knowledge.js";
+import { assertModelJsonComplexity } from "./model.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -226,16 +227,22 @@ export function parseJsonObject(text: string): Record<string, unknown> {
   let selectedScore = -1;
   let lastParseError: unknown;
   for (const candidate of candidates) {
+    let parsed: unknown;
     try {
-      const parsed: unknown = JSON.parse(candidate);
-      if (!isRecord(parsed)) continue;
-      const score = modelObjectScore(parsed);
-      if (score >= selectedScore) {
-        selected = parsed;
-        selectedScore = score;
-      }
+      parsed = JSON.parse(candidate);
     } catch (error) {
       lastParseError = error;
+      continue;
+    }
+    if (!isRecord(parsed)) continue;
+    // Every parsed provider object is untrusted. Reject an abusive candidate
+    // before scoring or normalization, even when later text contains a valid
+    // object that would otherwise hide it.
+    assertModelJsonComplexity(parsed);
+    const score = modelObjectScore(parsed);
+    if (score >= selectedScore) {
+      selected = parsed;
+      selectedScore = score;
     }
   }
   if (selected) return selected;

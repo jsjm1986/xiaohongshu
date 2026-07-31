@@ -32,7 +32,7 @@ import {
 } from "../components/Ui";
 import { V2Hero } from "../components/V2";
 import { InlineProgress } from "../components/quick/InlineProgress";
-import { api } from "../lib/api";
+import { api, ApiError } from "../lib/api";
 import {
   commentNodeKindLabel,
   commentThreadKindLabel,
@@ -49,7 +49,7 @@ import {
   resolveValidationReadinessHeuristic,
   type DiagnosticProxyView,
 } from "../lib/diagnostic-proxy";
-import { demoGenerations } from "../lib/fixtures";
+import { errorMessage } from "../lib/errors";
 import {
   isRevisionInFlight,
   revisionBoxState,
@@ -57,10 +57,6 @@ import {
   revisionStageText,
   submitRevision,
 } from "../lib/revision-progress";
-import {
-  generationRecordNotice,
-  ordinaryDiagnosticsForDisplay,
-} from "../lib/generation-record";
 import { resolveProductionArtifactView } from "../lib/image-production";
 import { resolveOpportunitySelectionAuditView } from "../lib/opportunity-rank";
 import { resolveReaderStateView } from "../lib/reader-state";
@@ -80,7 +76,8 @@ export function GenerationResultPage() {
   const { id = "" } = useParams();
   const [job, setJob] = useState<GenerationJob | null>(null);
   const [loading, setLoading] = useState(true);
-  const [recordSource, setRecordSource] = useState<"loading" | "server" | "fallback">("loading");
+  const [loadFailure, setLoadFailure] = useState<{ message: string; status?: number } | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [selectedId, setSelectedId] = useState("");
   const [revision, setRevision] = useState("");
   const [detailsOpen, setDetailsOpen] = useState(true);
@@ -90,34 +87,35 @@ export function GenerationResultPage() {
   useEffect(() => {
     let timer: number | undefined;
     let alive = true;
+    setLoading(true);
+    setLoadFailure(null);
+    setJob(null);
+    setSelectedId("");
     const load = async () => {
       try {
         const data = await api.generations.get(id);
         if (!alive) return;
         setJob(data);
-        setRecordSource("server");
+        setLoadFailure(null);
+        setLoading(false);
         if (data.status === "queued" || data.status === "running")
-          timer = window.setTimeout(load, 1800);
-      } catch {
-        const stored = sessionStorage.getItem("content-agent-demo-generation");
-        const fallback = stored
-          ? (JSON.parse(stored) as GenerationJob)
-          : demoGenerations.find((item) => item.id === id) ||
-            demoGenerations[0];
-        if (alive) {
-          setJob(fallback);
-          setRecordSource("fallback");
-        }
-      } finally {
-        if (alive) setLoading(false);
+          timer = window.setTimeout(() => void load(), 1800);
+      } catch (error) {
+        if (!alive) return;
+        setJob(null);
+        setLoadFailure({
+          message: errorMessage(error, "无法读取生成记录，请稍后重试。"),
+          status: error instanceof ApiError ? error.status : undefined,
+        });
+        setLoading(false);
       }
     };
-    load();
+    void load();
     return () => {
       alive = false;
       if (timer) window.clearTimeout(timer);
     };
-  }, [id]);
+  }, [id, loadAttempt]);
 
   useEffect(() => {
     if (!selectedId && job?.candidates?.[0])
@@ -141,8 +139,6 @@ export function GenerationResultPage() {
       job?.candidates?.[0],
     [job, selectedId],
   );
-  const isFallback = recordSource === "fallback";
-  const recordNotice = generationRecordNotice(isFallback);
   const publishable = selected?.validation?.valid === true;
   const impactDetails = useMemo(
     () => {
@@ -177,8 +173,10 @@ export function GenerationResultPage() {
     [selected],
   );
   const ordinaryDiagnostics = useMemo(
-    () => ordinaryDiagnosticsForDisplay(selected, isFallback),
-    [selected, isFallback],
+    () => selected?.diagnostics?.filter(
+      (diagnostic) => !isDiagnosticProxyFormulaId(diagnostic.formulaId),
+    ) || [],
+    [selected],
   );
   const readerStateViews = useMemo(
     () => selected ? readerStates(selected).map(resolveReaderStateView) : [],
@@ -223,9 +221,7 @@ export function GenerationResultPage() {
    * 三条要靠测试锁住的硬约束(失败不清空指令、失败不改 job、失败必须报错),而仓库
    * 没有 React 渲染设施,留在组件里就没有能变红的测试。
    *
-   * 被删掉的「演示模式」兜底原本就在这段的 catch 里:它把修改指令追加进正文并提示
-   * 「修改说明已记录」。Cloudflare 约 100 秒超时切断同步请求后正好落到那里,用户看到
-   * 「已记录」、正文却被污染,而服务端已经扣了额度。
+   * 修改失败不得清空指令或改写页面记录，避免把未被服务端受理的内容显示成成功。
    */
   const handleRevise = async () => {
     if (!job || !selected || !revision.trim() || revisionBox.buttonDisabled) return;
@@ -247,6 +243,18 @@ export function GenerationResultPage() {
         <p>我们会同时还原公式、知识和配置快照</p>
       </div>
     );
+  if (loadFailure) {
+    const notFound = loadFailure.status === 404;
+    const forbidden = loadFailure.status === 401 || loadFailure.status === 403;
+    return (
+      <EmptyState
+        icon={<TriangleAlert size={25} />}
+        title={notFound ? "未找到这次生成" : forbidden ? "无法访问这次生成" : "读取生成记录失败"}
+        description={loadFailure.message}
+        action={<div className="empty-state__actions"><Button icon={<RefreshCcw size={16} />} onClick={() => setLoadAttempt((value) => value + 1)}>重新加载</Button><Button variant="ghost" onClick={() => navigate("/history")}>返回历史</Button></div>}
+      />
+    );
+  }
   if (!job)
     return (
       <EmptyState
@@ -350,12 +358,7 @@ export function GenerationResultPage() {
         </div>
       )}
 
-      {recordNotice.isFallback && <div className="generation-fallback-notice" role="status">
-        <TriangleAlert size={18} />
-        <div><strong>{recordNotice.label}</strong><p>{recordNotice.detail}</p></div>
-      </div>}
-
-      {recordSource === "server" && job.releaseManifestId && <section className="generation-release-proof">
+      {job.releaseManifestId && <section className="generation-release-proof">
         <PackageCheck size={19} />
         <div>
           <strong>本次生成已冻结运行版本：{job.researchSnapshot?.version || job.releaseManifestId}</strong>
@@ -373,9 +376,9 @@ export function GenerationResultPage() {
             <h2>3 个候选版本</h2>
             <p>随机种子 {job.seed || "—"} · 内容可复现</p>
           </div>
-          <Badge tone={recordNotice.isFallback ? "warning" : "neutral"}>
-            {recordNotice.isFallback ? <TriangleAlert size={13} /> : <Check size={13} />}
-            {recordNotice.label}
+          <Badge tone="neutral">
+            <Check size={13} />
+            候选与系统校验快照已记录
           </Badge>
         </header>
         <div className="candidate-grid">

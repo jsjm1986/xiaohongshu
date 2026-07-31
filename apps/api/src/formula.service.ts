@@ -14,11 +14,11 @@ import {
   type FormulaDefinition,
   type FormulaVersion,
 } from '@content-agent/agent-core';
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException, PayloadTooLargeException } from '@nestjs/common';
 import { AuditService } from './audit.service.js';
 import { DatabaseService } from './database.service.js';
 import type { SessionPrincipal } from './models.js';
-import { nowIso } from './utils.js';
+import { nowIso, optionalString, requireObject, requireString } from './utils.js';
 
 interface FormulaRow {
   id: string;
@@ -45,6 +45,8 @@ interface FormulaStorageIssue {
 }
 
 const PLANNING_FORMULA_IDS = new Set(['F38', 'F39', 'F40', 'F41', 'F42', 'F43']);
+const MAX_FORMULAS_PER_VERSION = 200;
+const MAX_FORMULA_DEFINITION_BYTES = 1024 * 1024;
 
 type FormulaCalculationIssueCode =
   | 'required_input_missing'
@@ -104,46 +106,57 @@ export class FormulaService {
   ) {}
 
   ensureDefault(projectId: string, principal: SessionPrincipal): FormulaVersion {
-    const existing = this.database
-      .prepare("SELECT * FROM formula_versions WHERE project_id = ? AND status = 'active' ORDER BY version DESC LIMIT 1")
-      .get(projectId) as unknown as FormulaRow | undefined;
-    if (existing) {
-      const stored = this.parse(existing);
-      return this.ensureReviewedDefaults(projectId, existing, stored, principal);
-    }
+    return this.database.transaction(() => {
+      const existing = this.database
+        .prepare("SELECT * FROM formula_versions WHERE project_id = ? AND status = 'active' ORDER BY version DESC LIMIT 1")
+        .get(projectId) as unknown as FormulaRow | undefined;
+      if (existing) {
+        const stored = this.parse(existing);
+        return this.ensureReviewedDefaults(projectId, existing, stored, principal);
+      }
 
-    const latest = this.database
-      .prepare('SELECT * FROM formula_versions WHERE project_id = ? ORDER BY version DESC LIMIT 1')
-      .get(projectId) as unknown as FormulaRow | undefined;
-    if (latest) {
-      const stored = this.parse(latest);
-      return this.ensureReviewedDefaults(projectId, latest, stored, principal);
-    }
+      const latest = this.database
+        .prepare('SELECT * FROM formula_versions WHERE project_id = ? ORDER BY version DESC LIMIT 1')
+        .get(projectId) as unknown as FormulaRow | undefined;
+      if (latest) {
+        const stored = this.parse(latest);
+        return this.ensureReviewedDefaults(projectId, latest, stored, principal);
+      }
 
-    const id = randomUUID();
-    const createdAt = nowIso();
-    const version = createFormulaVersion({
-      id,
-      projectId,
-      version: '1.0.0',
-      status: 'active',
-      createdAt,
-      formulas: DEFAULT_FORMULA_VERSION.formulas,
+      const id = randomUUID();
+      const createdAt = nowIso();
+      const version = createFormulaVersion({
+        id,
+        projectId,
+        version: '1.0.0',
+        status: 'active',
+        createdAt,
+        formulas: DEFAULT_FORMULA_VERSION.formulas,
+      });
+      const stored: StoredFormulaDefinition = {
+        name: '完整文案公式',
+        description: 'F01–F43 默认方法论种子',
+        version,
+        config: {},
+      };
+      this.database
+        .prepare(
+          `INSERT INTO formula_versions
+            (id, project_id, version, status, definition_json, created_by, created_at, activated_at)
+           VALUES (?, ?, 1, 'active', ?, ?, ?, ?)`,
+        )
+        .run(id, projectId, JSON.stringify(stored), principal.userId, createdAt, createdAt);
+      const project = this.database.prepare('SELECT workspace_id FROM projects WHERE id=?').get(projectId) as { workspace_id: string };
+      this.audit.record({
+        workspaceId: project.workspace_id,
+        userId: principal.userId,
+        action: 'formula.bootstrap',
+        entityType: 'formula_version',
+        entityId: id,
+        details: { projectId, version: 1 },
+      });
+      return version;
     });
-    const stored: StoredFormulaDefinition = {
-      name: '完整文案公式',
-      description: 'F01–F43 默认方法论种子',
-      version,
-      config: {},
-    };
-    this.database
-      .prepare(
-        `INSERT INTO formula_versions
-          (id, project_id, version, status, definition_json, created_by, created_at, activated_at)
-         VALUES (?, ?, 1, 'active', ?, ?, ?, ?)`,
-      )
-      .run(id, projectId, JSON.stringify(stored), principal.userId, createdAt, createdAt);
-    return version;
   }
 
   private ensureReviewedDefaults(
@@ -183,36 +196,36 @@ export class FormulaService {
       }),
     );
     const migrated = base.version.formulas.map((formula) => replacements.get(formula.id) ?? formula);
-    const nextNumber = Number(
-      (this.database.prepare(
-        'SELECT COALESCE(MAX(version), 0) + 1 AS value FROM formula_versions WHERE project_id = ?',
-      ).get(projectId) as { value: number }).value,
-    );
     const id = randomUUID();
     const createdAt = nowIso();
-    const version = createFormulaVersion({
-      id,
-      projectId,
-      parentId: base.version.id,
-      version: `${nextNumber}.0.0`,
-      status: 'active',
-      createdAt,
-      formulas: [...migrated, ...missing],
-    });
-    const issues = validateFormulaVersion(version);
-    if (issues.length) throw new BadRequestException({ message: '公式自动升级校验失败', issues });
-    const stored: StoredFormulaDefinition = {
-      name: base.name,
-      description: `${base.description || '项目公式'}；从 ${base.version.version} 派生并同步已复核默认能力`,
-      version,
-      config: base.config ?? {},
-    };
-    const invalidatedReleaseIds = (this.database.prepare(
-      `SELECT id FROM release_manifests
-       WHERE project_id=? AND status='active'
-         AND (formula_version_id IS NULL OR formula_version_id<>? OR formula_digest<>?)`,
-    ).all(projectId, id, version.digest) as Array<{ id: string }>).map((row) => row.id);
-    this.database.transaction(() => {
+    const { version } = this.database.transaction(() => {
+      const nextNumber = Number(
+        (this.database.prepare(
+          'SELECT COALESCE(MAX(version), 0) + 1 AS value FROM formula_versions WHERE project_id = ?',
+        ).get(projectId) as { value: number }).value,
+      );
+      const version = createFormulaVersion({
+        id,
+        projectId,
+        parentId: base.version.id,
+        version: `${nextNumber}.0.0`,
+        status: 'active',
+        createdAt,
+        formulas: [...migrated, ...missing],
+      });
+      const issues = validateFormulaVersion(version);
+      if (issues.length) throw new BadRequestException({ message: '公式自动升级校验失败', issues });
+      const stored: StoredFormulaDefinition = {
+        name: base.name,
+        description: `${base.description || '项目公式'}；从 ${base.version.version} 派生并同步已复核默认能力`,
+        version,
+        config: base.config ?? {},
+      };
+      const invalidatedReleaseIds = (this.database.prepare(
+        `SELECT id FROM release_manifests
+         WHERE project_id=? AND status='active'
+           AND (formula_version_id IS NULL OR formula_version_id<>? OR formula_digest<>?)`,
+      ).all(projectId, id, version.digest) as Array<{ id: string }>).map((row) => row.id);
       this.database.prepare(
         "UPDATE formula_versions SET status='archived' WHERE project_id=? AND status='active'",
       ).run(projectId);
@@ -226,30 +239,31 @@ export class FormulaService {
          WHERE project_id=? AND status='active'
            AND (formula_version_id IS NULL OR formula_version_id<>? OR formula_digest<>?)`,
       ).run(projectId, id, version.digest);
-    });
-    const project = this.database.prepare('SELECT workspace_id FROM projects WHERE id=?').get(projectId) as { workspace_id: string };
-    this.audit.record({
-      workspaceId: project.workspace_id,
-      userId: principal.userId,
-      action: 'formula.auto-upgrade',
-      entityType: 'formula_version',
-      entityId: id,
-      details: {
-        projectId,
-        parentId: baseRow.id,
-        invalidatedReleaseIds,
-        addedFormulaIds: missing.map((formula) => formula.id),
-        replacedFormulaIds: replacementIds,
-        ...(replacementIds.includes('F30') ? { f30Migration: F30_MIGRATION_DESCRIPTOR } : {}),
-        ...(replacementIds.some((formulaId) => formulaId === 'F32' || formulaId === 'F33')
-          ? {
-              f32F33Migration: {
-                ...F32_F33_MIGRATION_DESCRIPTOR,
-                migratedFormulaIds: replacementIds.filter((formulaId) => formulaId === 'F32' || formulaId === 'F33'),
-              },
-            }
-          : {}),
-      },
+      const project = this.database.prepare('SELECT workspace_id FROM projects WHERE id=?').get(projectId) as { workspace_id: string };
+      this.audit.record({
+        workspaceId: project.workspace_id,
+        userId: principal.userId,
+        action: 'formula.auto-upgrade',
+        entityType: 'formula_version',
+        entityId: id,
+        details: {
+          projectId,
+          parentId: baseRow.id,
+          invalidatedReleaseIds,
+          addedFormulaIds: missing.map((formula) => formula.id),
+          replacedFormulaIds: replacementIds,
+          ...(replacementIds.includes('F30') ? { f30Migration: F30_MIGRATION_DESCRIPTOR } : {}),
+          ...(replacementIds.some((formulaId) => formulaId === 'F32' || formulaId === 'F33')
+            ? {
+                f32F33Migration: {
+                  ...F32_F33_MIGRATION_DESCRIPTOR,
+                  migratedFormulaIds: replacementIds.filter((formulaId) => formulaId === 'F32' || formulaId === 'F33'),
+                },
+              }
+            : {}),
+        },
+      });
+      return { version };
     });
     return version;
   }
@@ -441,7 +455,9 @@ export class FormulaService {
     input: Record<string, unknown>,
     principal: SessionPrincipal,
   ): Record<string, unknown> {
-    const baseId = typeof input.parentId === 'string' ? input.parentId : undefined;
+    const baseId = input.parentId === undefined
+      ? undefined
+      : requireString(input.parentId, 'parentId', { max: 200 });
     const base = baseId
       ? this.get(baseId)
       : this.draftBase(projectId, principal);
@@ -449,51 +465,87 @@ export class FormulaService {
       throw new BadRequestException('不能跨项目复制公式版本');
     }
 
-    const nextNumber = Number(
-      (this.database.prepare('SELECT COALESCE(MAX(version), 0) + 1 AS value FROM formula_versions WHERE project_id = ?').get(projectId) as { value: number }).value,
-    );
-    const formulas = Array.isArray(input.formulas)
-      ? (input.formulas as FormulaDefinition[])
-      : base.version.formulas;
+    if (input.formulas !== undefined && !Array.isArray(input.formulas)) {
+      throw new BadRequestException('formulas 必须是数组');
+    }
+    const formulas = input.formulas === undefined
+      ? base.version.formulas
+      : input.formulas as FormulaDefinition[];
+    if (formulas.length > MAX_FORMULAS_PER_VERSION) {
+      throw new BadRequestException(`每个公式版本最多包含 ${MAX_FORMULAS_PER_VERSION} 条公式`);
+    }
     const id = randomUUID();
     const createdAt = nowIso();
-    const requestedVersion = typeof input.version === 'string' ? input.version.trim() : '';
-    let version: FormulaVersion;
-    try {
-      version = createFormulaVersion({
-        id,
-        projectId,
-        parentId: base.version.id,
-        version: /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(requestedVersion)
-          ? requestedVersion
-          : `${nextNumber}.0.0-draft`,
-        status: 'draft',
-        createdAt,
-        formulas,
+    const requestedVersion = input.version === undefined
+      ? ''
+      : requireString(input.version, 'version', {
+          max: 80,
+          pattern: /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u,
+        });
+    const name = input.name === undefined
+      ? base.name
+      : requireString(input.name, 'name', { max: 200 });
+    const description = input.description === undefined
+      ? '从当前启用版本复制'
+      : optionalString(input.description, 'description', 12_000) ?? '';
+    const config = input.config === undefined
+      ? base.config ?? {}
+      : requireObject(input.config);
+    const { nextNumber } = this.database.transaction(() => {
+      const nextNumber = Number(
+        (this.database.prepare(
+          'SELECT COALESCE(MAX(version), 0) + 1 AS value FROM formula_versions WHERE project_id = ?',
+        ).get(projectId) as { value: number }).value,
+      );
+      let version: FormulaVersion;
+      try {
+        version = createFormulaVersion({
+          id,
+          projectId,
+          parentId: base.version.id,
+          version: /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(requestedVersion)
+            ? requestedVersion
+            : `${nextNumber}.0.0-draft`,
+          status: 'draft',
+          createdAt,
+          formulas,
+        });
+      } catch (error) {
+        throw new BadRequestException({
+          message: '公式 Schema 校验失败',
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      }
+      const issues = validateFormulaVersion(version);
+      if (issues.length) throw new BadRequestException({ message: '公式 Schema 校验失败', issues });
+      const stored: StoredFormulaDefinition = {
+        name,
+        description,
+        version,
+        config,
+      };
+      const storedJson = JSON.stringify(stored);
+      if (Buffer.byteLength(storedJson, 'utf8') > MAX_FORMULA_DEFINITION_BYTES) {
+        throw new PayloadTooLargeException('公式版本定义不能超过 1 MiB');
+      }
+      this.database
+        .prepare(
+          `INSERT INTO formula_versions
+            (id, project_id, version, status, definition_json, created_by, created_at)
+           VALUES (?, ?, ?, 'draft', ?, ?, ?)`,
+        )
+        .run(id, projectId, nextNumber, storedJson, principal.userId, createdAt);
+      const project = this.database.prepare('SELECT workspace_id FROM projects WHERE id = ?').get(projectId) as { workspace_id: string };
+      this.audit.record({
+        workspaceId: project.workspace_id,
+        userId: principal.userId,
+        action: 'formula.create',
+        entityType: 'formula_version',
+        entityId: id,
+        details: { projectId, version: nextNumber },
       });
-    } catch (error) {
-      throw new BadRequestException({
-        message: '公式 Schema 校验失败',
-        detail: error instanceof Error ? error.message : String(error),
-      });
-    }
-    const issues = validateFormulaVersion(version);
-    if (issues.length) throw new BadRequestException({ message: '公式 Schema 校验失败', issues });
-    const stored: StoredFormulaDefinition = {
-      name: typeof input.name === 'string' ? input.name : base.name,
-      description: typeof input.description === 'string' ? input.description : '从当前启用版本复制',
-      version,
-      config: input.config && typeof input.config === 'object' ? (input.config as Record<string, unknown>) : base.config,
-    };
-    this.database
-      .prepare(
-        `INSERT INTO formula_versions
-          (id, project_id, version, status, definition_json, created_by, created_at)
-         VALUES (?, ?, ?, 'draft', ?, ?, ?)`,
-      )
-      .run(id, projectId, nextNumber, JSON.stringify(stored), principal.userId, createdAt);
-    const project = this.database.prepare('SELECT workspace_id FROM projects WHERE id = ?').get(projectId) as { workspace_id: string };
-    this.audit.record({ workspaceId: project.workspace_id, userId: principal.userId, action: 'formula.create', entityType: 'formula_version', entityId: id, details: { projectId, version: nextNumber } });
+      return { nextNumber };
+    });
     return this.publicRow(this.get(id).row);
   }
 
@@ -518,38 +570,39 @@ export class FormulaService {
   }
 
   activate(id: string, principal: SessionPrincipal): Record<string, unknown> {
-    const item = this.get(id);
-    const issues = validateFormulaVersion(item.version);
-    if (issues.length) throw new BadRequestException({ message: '公式 Schema 校验失败', issues });
     const now = nowIso();
-    const invalidatedReleaseIds = (this.database.prepare(
-      `SELECT id FROM release_manifests
-       WHERE project_id=? AND status='active'
-         AND (formula_version_id IS NULL OR formula_version_id<>? OR formula_digest<>?)`,
-    ).all(item.row.project_id, id, item.version.digest) as Array<{ id: string }>).map((row) => row.id);
-    this.database.transaction(() => {
+    return this.database.transaction(() => {
+      const item = this.get(id);
+      const issues = validateFormulaVersion(item.version);
+      if (issues.length) throw new BadRequestException({ message: '公式 Schema 校验失败', issues });
+      const invalidatedReleaseIds = (this.database.prepare(
+        `SELECT id FROM release_manifests
+         WHERE project_id=? AND status='active'
+           AND (formula_version_id IS NULL OR formula_version_id<>? OR formula_digest<>?)`,
+      ).all(item.row.project_id, id, item.version.digest) as Array<{ id: string }>).map((row) => row.id);
       this.database
         .prepare("UPDATE formula_versions SET status = 'archived' WHERE project_id = ? AND status = 'active'")
         .run(item.row.project_id);
-      this.database
-        .prepare("UPDATE formula_versions SET status = 'active', activated_at = ? WHERE id = ?")
-        .run(now, id);
+      const activated = this.database
+        .prepare("UPDATE formula_versions SET status = 'active', activated_at = ? WHERE id = ? AND project_id = ?")
+        .run(now, id, item.row.project_id);
+      if (Number(activated.changes) !== 1) throw new NotFoundException('公式版本不存在');
       this.database.prepare(
         `UPDATE release_manifests SET status='archived'
          WHERE project_id=? AND status='active'
            AND (formula_version_id IS NULL OR formula_version_id<>? OR formula_digest<>?)`,
       ).run(item.row.project_id, id, item.version.digest);
+      const project = this.database.prepare('SELECT workspace_id FROM projects WHERE id = ?').get(item.row.project_id) as { workspace_id: string };
+      this.audit.record({
+        workspaceId: project.workspace_id,
+        userId: principal.userId,
+        action: 'formula.activate',
+        entityType: 'formula_version',
+        entityId: id,
+        details: { projectId: item.row.project_id, invalidatedReleaseIds },
+      });
+      return this.publicRow(this.get(id).row);
     });
-    const project = this.database.prepare('SELECT workspace_id FROM projects WHERE id = ?').get(item.row.project_id) as { workspace_id: string };
-    this.audit.record({
-      workspaceId: project.workspace_id,
-      userId: principal.userId,
-      action: 'formula.activate',
-      entityType: 'formula_version',
-      entityId: id,
-      details: { projectId: item.row.project_id, invalidatedReleaseIds },
-    });
-    return this.publicRow(this.get(id).row);
   }
 
   private parse(row: FormulaRow): StoredFormulaDefinition {

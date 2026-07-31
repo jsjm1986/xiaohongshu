@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Button, Field, Modal, useToast } from '../Ui';
-import { api, ApiError } from '../../lib/api';
+import { api } from '../../lib/api';
+import { errorMessage } from '../../lib/errors';
 import { autoApproveAndGenerate, quickCandidateFields, type QuickCandidateView } from '../../lib/quick-generation';
 import { InlineProgress } from './InlineProgress';
 import { buildPresetValuesFromOverrides } from '../../lib/preset-save';
-import { writeLocalPresets } from '../../lib/presets';
 import { quotaExhausted, type QuotaSnapshot } from '../../lib/quota-view';
 import { SUPPORT_HINT } from '../../lib/support';
 import type { CommentRichnessLevel, SimpleSettingOverrides } from '../../lib/simple-generation';
@@ -67,6 +67,9 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
   const [saveOpen, setSaveOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [presetDraft, setPresetDraft] = useState({ name: '', description: '' });
+  const [presetLoadError, setPresetLoadError] = useState<string | null>(null);
+  const [presetLoading, setPresetLoading] = useState(false);
+  const [presetLoadAttempt, setPresetLoadAttempt] = useState(0);
   /**
    * 额度:生成入口自己也要知道。
    *
@@ -85,19 +88,30 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
   const projectId = project?.id;
   const presetsEmpty = presets.length === 0;
   useEffect(() => {
-    if (!projectId || !presetsEmpty) return;
+    if (!projectId || !presetsEmpty) {
+      setPresetLoadError(null);
+      setPresetLoading(false);
+      return;
+    }
     let cancelled = false;
+    setPresetLoadError(null);
+    setPresetLoading(true);
     api.presets.list(projectId)
       .then((list) => {
         if (cancelled) return;
         setPresets(list.items);
         setPresetId(list.items.find((p) => p.isDefault)?.id ?? list.items[0]?.id);
       })
-      .catch(() => { /* 静默回落：保持空态，选题时仍会再拉一次 */ });
+      .catch((error) => {
+        if (!cancelled) setPresetLoadError(errorMessage(error, '读取预设失败'));
+      })
+      .finally(() => {
+        if (!cancelled) setPresetLoading(false);
+      });
     return () => { cancelled = true; };
     // setPresets/setPresetId 是壳的 setState 包装，每次渲染新引用，不进依赖
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, presetsEmpty]);
+  }, [projectId, presetsEmpty, presetLoadAttempt]);
 
   // 额度只在进区时拉一次:它的变化粒度是「每次生成 +1」,不必轮询;生成成功后
   // 重拉一次(见 generate 末尾),让余量当场跟上。
@@ -148,7 +162,7 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
       setPresets(presets.map((p) => ({ ...p, isDefault: p.id === presetId })));
       toast.push(`「${currentPreset?.name ?? ''}」已设为默认预设`);
     } catch (e) {
-      toast.push(e instanceof Error ? e.message : '设为默认失败', 'error');
+      toast.push(errorMessage(e, '设为默认失败'), 'error');
     } finally {
       setPresetWorking(false);
     }
@@ -168,54 +182,30 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
       setPresets([...presets, created]);
       setPresetId(created.id);
       toast.push(`已存为预设「${created.name}」`);
-    } catch (e) {
-      // 照 GeneratorPage 的模式:4xx 校验错误直接提示;服务不可用(网络/5xx/404)落 localStorage
-      if (e instanceof ApiError && e.status !== 404 && e.status < 500) {
-        toast.push(e.message || '预设未通过服务端校验', 'error');
-      } else {
-        const created: ContentPreset = {
-          id: `local-${Date.now()}`,
-          projectId: project.id,
-          source: 'project',
-          ...input,
-          createdAt: new Date().toISOString(),
-        };
-        const next = [...presets, created];
-        setPresets(next);
-        writeLocalPresets(project.id, next.filter((p) => p.source === 'project'));
-        setPresetId(created.id);
-        toast.push('服务器不可用，预设仅保存在这台浏览器', 'info');
-      }
-    } finally {
-      setPresetWorking(false);
       setSaveOpen(false);
       setPresetDraft({ name: '', description: '' });
+    } catch (e) {
+      toast.push(errorMessage(e, '保存预设失败'), 'error');
+    } finally {
+      setPresetWorking(false);
     }
   };
 
   const removePreset = async () => {
     if (!project || !currentPreset || currentPreset.source !== 'project') return;
     setPresetWorking(true);
-    let removed = true;
     try {
       await api.presets.remove(project.id, currentPreset.id);
-      toast.push(`预设「${currentPreset.name}」已删除`);
-    } catch (e) {
-      if (e instanceof ApiError && e.status !== 404 && e.status < 500) {
-        removed = false;
-        toast.push(e.message || '无法删除预设', 'error');
-      } else {
-        toast.push('服务器不可用，只删除了这台浏览器的副本', 'info');
-      }
-    }
-    if (removed) {
       const next = presets.filter((p) => p.id !== currentPreset.id);
       setPresets(next);
-      writeLocalPresets(project.id, next.filter((p) => p.source === 'project'));
       setPresetId(next.find((p) => p.isDefault)?.id ?? next[0]?.id);
+      toast.push(`预设「${currentPreset.name}」已删除`);
+      setDeleteOpen(false);
+    } catch (e) {
+      toast.push(errorMessage(e, '删除预设失败'), 'error');
+    } finally {
+      setPresetWorking(false);
     }
-    setPresetWorking(false);
-    setDeleteOpen(false);
   };
 
   return (
@@ -243,6 +233,12 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
               disabled={busy || presetWorking}
             />
           </Field>
+          {presetLoadError && (
+            <div className="inline-load-error" role="alert">
+              <span><strong>预设加载失败</strong><small>{presetLoadError}</small></span>
+              <Button variant="ghost" loading={presetLoading} onClick={() => setPresetLoadAttempt((value) => value + 1)}>重试</Button>
+            </div>
+          )}
           <div className="qc-preset-actions">
             <Button variant="ghost" disabled={!presetId || currentPreset?.isDefault || busy || presetWorking} onClick={() => void makeDefault()}>设为默认</Button>
             {currentPreset?.source === 'project' && (

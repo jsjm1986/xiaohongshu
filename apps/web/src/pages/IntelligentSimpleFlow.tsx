@@ -26,6 +26,7 @@ import {
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, EmptyState, Field, Modal, Skeleton, useToast } from "../components/Ui";
 import { api } from "../lib/api";
+import { errorMessage } from "../lib/errors";
 import { GAP_SOURCE_OPTIONS, sourceForAnswer } from "../lib/gap-source";
 import { gapMetricsInput, imageQualityPayload } from "../lib/metric-payload";
 import {
@@ -67,6 +68,7 @@ import type {
 } from "../types";
 
 type PoolTab = "gaps" | "strategies";
+const IMAGE_PAGE_SIZE = 24;
 
 const blueprintModuleMeta: Record<ProjectBlueprintModule["moduleKey"], { label: string; description: string }> = {
   knowledge_map: { label: "知识来源地图", description: "区分项目事实、行业资料、动态信息、边界与仅供风格分析的样本。" },
@@ -301,9 +303,13 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const [gaps, setGaps] = useState<InformationGap[]>([]);
   const [strategies, setStrategies] = useState<ExpressionStrategy[]>([]);
   const [assets, setAssets] = useState<ImageAsset[]>([]);
+  const [assetsTotal, setAssetsTotal] = useState(0);
+  const [assetsLoadingMore, setAssetsLoadingMore] = useState(false);
   const [selectedOpportunityId, setSelectedOpportunityId] = useState("");
   const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [templateError, setTemplateError] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const [modulesExpanded, setModulesExpanded] = useState(false);
   const [reanalyzeOpen, setReanalyzeOpen] = useState(false);
@@ -348,44 +354,99 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const [collectionFilter, setCollectionFilter] = useState<"all" | "active" | "collected" | "archived">("all");
   const fileInput = useRef<HTMLInputElement>(null);
   const evidenceSectionsCache = useRef(new Map<string, KnowledgeEvidenceDocument[]>());
+  const activeProjectId = useRef(projectId);
+  const loadRequestSeq = useRef(0);
+  const assetRequestSeq = useRef(0);
+  const taskRequestSeq = useRef(0);
+  const templateRequestSeq = useRef(0);
+  activeProjectId.current = projectId;
   const toast = useToast();
 
   // Surface the most recent analysis task so background failures/retries stay
   // visible; never coerced from intelligence.status alone. Non-fatal.
-  const refreshLatestTask = () => {
-    if (!projectId) return Promise.resolve();
-    return api.intelligence.tasks.list(projectId).then((tasks) => {
+  const refreshLatestTask = (requestedProjectId = projectId) => {
+    if (!requestedProjectId) return Promise.resolve();
+    const seq = ++taskRequestSeq.current;
+    return api.intelligence.tasks.list(requestedProjectId).then((tasks) => {
+      if (activeProjectId.current !== requestedProjectId || seq !== taskRequestSeq.current) return;
       const sorted = [...tasks].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
       setLatestTask(sorted.find((task) => task.kind === "project") ?? null);
     }).catch(() => { /* non-fatal */ });
   };
 
-  const load = async () => {
-    if (!projectId) return;
+  const loadPromptTemplates = (requestedProjectId = projectId) => {
+    if (!requestedProjectId) return Promise.resolve();
+    const seq = ++templateRequestSeq.current;
+    setTemplateError("");
+    return api.promptTemplates.list(requestedProjectId).then((nextTemplates) => {
+      if (activeProjectId.current !== requestedProjectId || seq !== templateRequestSeq.current) return;
+      setTemplates(nextTemplates);
+    }).catch((error: unknown) => {
+      if (activeProjectId.current !== requestedProjectId || seq !== templateRequestSeq.current) return;
+      setTemplates([]);
+      setTemplateError(errorMessage(error, "方向模板加载失败"));
+    });
+  };
+
+  const load = async (requestedProjectId = projectId) => {
+    if (!requestedProjectId) {
+      setLoading(false);
+      return;
+    }
+    const seq = ++loadRequestSeq.current;
+    const assetSeq = ++assetRequestSeq.current;
     setLoading(true);
+    setLoadError("");
+    void loadPromptTemplates(requestedProjectId);
     try {
       const [nextIntelligence, nextBlueprintModules, nextOpportunities, nextGaps, nextStrategies, nextAssets] = await Promise.all([
-        api.intelligence.get(projectId).catch(() => ({ projectId, status: "missing" as const })),
-        api.blueprintModules.list(projectId).catch(() => []),
-        api.opportunities.list(projectId).catch(() => ({ items: [], total: 0 })),
-        api.informationGaps.list(projectId).catch(() => ({ items: [], total: 0 })),
-        api.expressionStrategies.list(projectId).catch(() => ({ items: [], total: 0 })),
-        api.imageAssets.list(projectId).catch(() => ({ items: [], total: 0 })),
+        api.intelligence.get(requestedProjectId),
+        api.blueprintModules.list(requestedProjectId),
+        api.opportunities.list(requestedProjectId),
+        api.informationGaps.list(requestedProjectId),
+        api.expressionStrategies.list(requestedProjectId),
+        api.imageAssets.list(requestedProjectId, { limit: IMAGE_PAGE_SIZE, offset: 0 }),
       ]);
+      if (activeProjectId.current !== requestedProjectId || seq !== loadRequestSeq.current) return;
       setIntelligence(nextIntelligence);
       setBlueprintModules(latestBlueprintModules(nextBlueprintModules));
       setOpportunities(nextOpportunities.items);
       setGaps(nextGaps.items);
       setStrategies(nextStrategies.items);
-      setAssets(nextAssets.items.map((asset) => ({ ...asset, previewUrl: asset.previewUrl || api.imageAssets.contentUrl(projectId, asset.id) })));
+      if (assetSeq === assetRequestSeq.current) {
+        setAssets(nextAssets.items.map((asset) => ({ ...asset, previewUrl: asset.previewUrl || api.imageAssets.contentUrl(requestedProjectId, asset.id) })));
+        setAssetsTotal(nextAssets.total);
+      }
+      void refreshLatestTask(requestedProjectId);
+    } catch (error) {
+      if (activeProjectId.current === requestedProjectId && seq === loadRequestSeq.current) {
+        setLoadError(errorMessage(error, "项目智能规划加载失败"));
+      }
     } finally {
-      setLoading(false);
+      if (activeProjectId.current === requestedProjectId && seq === loadRequestSeq.current) setLoading(false);
     }
-    api.promptTemplates.list(projectId).then(setTemplates).catch(() => undefined);
-    refreshLatestTask();
   };
 
   useEffect(() => {
+    loadRequestSeq.current += 1;
+    assetRequestSeq.current += 1;
+    taskRequestSeq.current += 1;
+    templateRequestSeq.current += 1;
+    setIntelligence(null);
+    setLatestTask(null);
+    setBlueprintModules([]);
+    setOpportunities([]);
+    setGaps([]);
+    setStrategies([]);
+    setAssets([]);
+    setAssetsTotal(0);
+    setAssetsLoadingMore(false);
+    setTemplates([]);
+    setLoadError("");
+    setTemplateError("");
+    setAnalyzing(false);
+    setRefreshing(false);
+    setUploading(false);
     setSelectedOpportunityId("");
     setSelectedAssetIds([]);
     setSettingOverrides({});
@@ -393,7 +454,13 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     setModulesExpanded(false);
     setBatchMode(false);
     setBatchSelected(new Set());
-    void load();
+    void load(projectId);
+    return () => {
+      loadRequestSeq.current += 1;
+      assetRequestSeq.current += 1;
+      taskRequestSeq.current += 1;
+      templateRequestSeq.current += 1;
+    };
   }, [projectId]);
 
   // 批量管理模式:Esc 退出并清空选择集
@@ -411,23 +478,27 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
 
   useEffect(() => {
     if (!intelligence || !["queued", "analyzing"].includes(intelligence.status)) return;
+    const requestedProjectId = projectId;
+    let cancelled = false;
     const timer = window.setInterval(() => {
-      api.intelligence.get(projectId).then((next) => {
+      api.intelligence.get(requestedProjectId).then((next) => {
+        if (cancelled || activeProjectId.current !== requestedProjectId) return;
         setIntelligence(next);
         if (next.status === "ready") {
           window.clearInterval(timer);
-          void runRefresh();
+          void runRefresh(undefined, requestedProjectId);
         }
       }).catch(() => undefined);
-      refreshLatestTask();
+      void refreshLatestTask(requestedProjectId);
     }, 1800);
-    return () => window.clearInterval(timer);
+    return () => { cancelled = true; window.clearInterval(timer); };
   }, [intelligence?.status, projectId]);
 
   // 真实后台进度：分析/换一批进行中轮询任务状态(状态与尝试次数均来自 analysis_tasks)
   useEffect(() => {
     if (!refreshing && !analyzing) return;
-    const timer = window.setInterval(() => { void refreshLatestTask(); }, 1800);
+    const requestedProjectId = projectId;
+    const timer = window.setInterval(() => { void refreshLatestTask(requestedProjectId); }, 1800);
     return () => window.clearInterval(timer);
   }, [refreshing, analyzing, projectId]);
 
@@ -543,47 +614,59 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const openEnrich = (ids?: string[]) => { setEnrichGapIds(ids); setEnrichOpen(true); };
   /** 补充保存后重拉缺口:补进去的内容要经重新分析才会改变缺口状态,但文件已变。 */
   const refreshGapsAfterEnrich = () => {
-    void api.informationGaps.list(projectId).then((r) => setGaps(r.items)).catch(() => {});
+    const requestedProjectId = projectId;
+    void api.informationGaps.list(requestedProjectId).then((result) => {
+      if (activeProjectId.current === requestedProjectId) setGaps(result.items);
+    }).catch(() => {});
   };
 
   const filteredGaps = useMemo(() => gaps.filter((item) => !search || `${item.label}${item.question}${item.category}`.toLowerCase().includes(search.toLowerCase())), [gaps, search]);
   const filteredStrategies = useMemo(() => strategies.filter((item) => !search || `${item.name}${item.description}`.toLowerCase().includes(search.toLowerCase())), [strategies, search]);
 
   const analyzeProject = async () => {
+    const requestedProjectId = projectId;
     setAnalyzing(true);
     try {
-      const result = await api.intelligence.analyze(projectId, true);
+      const result = await api.intelligence.analyze(requestedProjectId, true);
+      if (activeProjectId.current !== requestedProjectId) return;
       setIntelligence(result.intelligence);
       setBlueprintModules(latestBlueprintModules(result.blueprintModules));
       setGaps(result.informationGaps);
       setStrategies(result.expressionStrategies);
       setOpportunities(result.topicOpportunities);
       setSelectedOpportunityId("");
-      await refreshLatestTask();
+      await refreshLatestTask(requestedProjectId);
+      if (activeProjectId.current !== requestedProjectId) return;
       toast.push("项目分析完成，请确认分析结果后用于创作", "info");
     } catch (error) {
-      toast.push(error instanceof Error ? error.message : "项目分析失败", "error");
+      if (activeProjectId.current === requestedProjectId) {
+        toast.push(errorMessage(error, "项目分析失败"), "error");
+      }
     } finally {
-      setAnalyzing(false);
+      if (activeProjectId.current === requestedProjectId) setAnalyzing(false);
     }
   };
 
-  const runRefresh = async (guidanceArg?: string) => {
+  const runRefresh = async (guidanceArg?: string, requestedProjectId = projectId) => {
+    if (activeProjectId.current !== requestedProjectId) return;
     // 弹窗即关:进度移到第 2 步面板内联真实任务状态,不做假百分比
     setRefreshOpen(false);
     setGuidance("");
     setRefreshing(true);
     try {
-      const result = await api.opportunities.refresh(projectId, guidanceArg?.trim() || undefined);
+      const result = await api.opportunities.refresh(requestedProjectId, guidanceArg?.trim() || undefined);
+      if (activeProjectId.current !== requestedProjectId) return;
       setOpportunities(result.items);
       setSelectedOpportunityId("");
-      api.promptTemplates.list(projectId).then(setTemplates).catch(() => undefined);
+      void loadPromptTemplates(requestedProjectId);
       toast.push(`已追加一批新选题（${result.items.length} 个），旧选题已保留`, "info");
-      void refreshLatestTask();
+      void refreshLatestTask(requestedProjectId);
     } catch (error) {
-      toast.push(error instanceof Error ? error.message : "选题刷新失败", "error");
+      if (activeProjectId.current === requestedProjectId) {
+        toast.push(errorMessage(error, "选题刷新失败"), "error");
+      }
     } finally {
-      setRefreshing(false);
+      if (activeProjectId.current === requestedProjectId) setRefreshing(false);
     }
   };
 
@@ -663,6 +746,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const uploadImages = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = [...(event.target.files || [])];
     if (!files.length) return;
+    const requestedProjectId = projectId;
     setUploading(true);
     try {
       for (const file of files.slice(0, 9)) {
@@ -670,13 +754,47 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
           toast.push(`${file.name} 不是支持的图片或超过 8 MiB`, "error");
           continue;
         }
-        const created = await api.imageAssets.upload(projectId, file);
-        const analyzed = await api.imageAssets.analyze(projectId, created.id).catch(() => created);
-        setAssets((current) => [{ ...analyzed, previewUrl: api.imageAssets.contentUrl(projectId, analyzed.id) }, ...current.filter((item) => item.id !== analyzed.id)]);
+        const created = await api.imageAssets.upload(requestedProjectId, file);
+        const analyzed = await api.imageAssets.analyze(requestedProjectId, created.id).catch(() => created);
+        if (activeProjectId.current !== requestedProjectId) continue;
+        setAssets((current) => [{ ...analyzed, previewUrl: api.imageAssets.contentUrl(requestedProjectId, analyzed.id) }, ...current.filter((item) => item.id !== analyzed.id)]);
+        setAssetsTotal((current) => current + 1);
+      }
+    } catch (error) {
+      if (activeProjectId.current === requestedProjectId) {
+        toast.push(errorMessage(error, "源素材上传失败"), "error");
       }
     } finally {
-      setUploading(false);
+      if (activeProjectId.current === requestedProjectId) setUploading(false);
       event.target.value = "";
+    }
+  };
+
+  const loadMoreAssets = async () => {
+    if (assetsLoadingMore || assets.length >= assetsTotal) return;
+    const requestedProjectId = projectId;
+    const seq = ++assetRequestSeq.current;
+    const offset = assets.length;
+    setAssetsLoadingMore(true);
+    try {
+      const result = await api.imageAssets.list(requestedProjectId, { limit: IMAGE_PAGE_SIZE, offset });
+      if (activeProjectId.current !== requestedProjectId || seq !== assetRequestSeq.current) return;
+      setAssets((current) => {
+        const known = new Set(current.map((item) => item.id));
+        const additions = result.items
+          .filter((item) => !known.has(item.id))
+          .map((item) => ({ ...item, previewUrl: item.previewUrl || api.imageAssets.contentUrl(requestedProjectId, item.id) }));
+        return [...current, ...additions];
+      });
+      setAssetsTotal(result.total);
+    } catch (error) {
+      if (activeProjectId.current === requestedProjectId && seq === assetRequestSeq.current) {
+        toast.push(errorMessage(error, "更多源素材加载失败"), "error");
+      }
+    } finally {
+      if (activeProjectId.current === requestedProjectId && seq === assetRequestSeq.current) {
+        setAssetsLoadingMore(false);
+      }
     }
   };
 
@@ -958,6 +1076,13 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   };
 
   if (loading) return <section className="intelligence-flow"><Skeleton lines={10} /></section>;
+  if (loadError) return <section className="intelligence-flow">
+    <div className="inline-load-error" role="alert">
+      <TriangleAlert size={18} />
+      <span><strong>项目智能规划加载失败</strong><small>{loadError}。页面不会把请求失败伪装成空项目。</small></span>
+      <Button variant="ghost" icon={<RefreshCw size={15} />} onClick={() => void load(projectId)}>重试</Button>
+    </div>
+  </section>;
 
   const stepStates = [
     {
@@ -1152,7 +1277,10 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     <section className="image-library panel" id="step-4">
       <header><div><span>第 4 步 · 可选</span><h2>选择源素材，让多模态模型观察并参与规划</h2><p>可跳过：不上传也能生成（仅出图片计划与文字简报）。上传原图则让多模态模型观察真实素材、参与图片规划；正式生成时会再次发送原图。</p></div><Button loading={uploading} disabled={!selectedOpportunity} icon={<ImagePlus size={16} />} onClick={() => fileInput.current?.click()}>上传源素材</Button><input ref={fileInput} hidden multiple type="file" accept="image/jpeg,image/png,image/webp" onChange={uploadImages} /></header>
       <div className="image-library-boundary"><Images size={17} /><div><strong>这里的状态上限：源素材观察 / 计划参考</strong><p>批准观察只表示“原图中可见什么”已确认；选中只表示“图片计划可以参考它”。这里不会生成最终图片，也不会产生真实入口截图或实际部署记录。</p></div><Badge tone="warning">不是最终图片资产</Badge></div>
-      {assets.length ? <div className="asset-grid">{assets.map((asset) => { const selected = selectedAssetIds.includes(asset.id); return <article className={`asset-card ${selected ? "selected" : ""}`} key={asset.id}><button type="button" className="asset-card__image" onClick={() => setSelectedAssetIds((current) => selected ? current.filter((id) => id !== asset.id) : current.length < 9 ? [...current, asset.id] : current)}><img src={asset.previewUrl || api.imageAssets.contentUrl(projectId, asset.id)} alt={asset.filename} /><span>{selected && <Check size={16} />}</span></button><div><strong>{asset.filename}</strong><small>{asset.analysis?.imageType || "等待源素材分析"} · {asset.approved ? "源素材观察已确认" : asset.status === "ready" ? "AI 源素材观察待确认" : asset.status}</small>{asset.analysis && <p title={asset.analysis.visibleFacts.join("；")}>{asset.analysis.scene || asset.analysis.visibleFacts.slice(0, 2).join("；") || "模型未提取到可见事实"}</p>}<div>{selected && <Badge tone="blue">计划参考源素材</Badge>}{asset.approved ? <Badge tone="positive">批准的源素材可见观察</Badge> : asset.status === "ready" ? <button type="button" onClick={() => void approveAsset(asset)}>确认上述源素材观察</button> : null}{asset.analysis && asset.latestAnalysisId ? <button type="button" onClick={() => openQualityEditor(asset)}><Pencil size={13} /> 编辑质量评估</button> : null}</div></div></article>; })}</div> : <EmptyState icon={<Images size={24} />} title="源素材图库还是空的" description="可不选源素材，只生成结构化图片计划和文字简报；上传原图也不会在这里生成最终图片资产。" />}
+      {assets.length ? <>
+        <div className="asset-grid">{assets.map((asset) => { const selected = selectedAssetIds.includes(asset.id); return <article className={`asset-card ${selected ? "selected" : ""}`} key={asset.id}><button type="button" className="asset-card__image" onClick={() => setSelectedAssetIds((current) => selected ? current.filter((id) => id !== asset.id) : current.length < 9 ? [...current, asset.id] : current)}><img src={asset.previewUrl || api.imageAssets.contentUrl(projectId, asset.id)} alt={asset.filename} /><span>{selected && <Check size={16} />}</span></button><div><strong>{asset.filename}</strong><small>{asset.analysis?.imageType || "等待源素材分析"} · {asset.approved ? "源素材观察已确认" : asset.status === "ready" ? "AI 源素材观察待确认" : asset.status}</small>{asset.analysis && <p title={asset.analysis.visibleFacts.join("；")}>{asset.analysis.scene || asset.analysis.visibleFacts.slice(0, 2).join("；") || "模型未提取到可见事实"}</p>}<div>{selected && <Badge tone="blue">计划参考源素材</Badge>}{asset.approved ? <Badge tone="positive">批准的源素材可见观察</Badge> : asset.status === "ready" ? <button type="button" onClick={() => void approveAsset(asset)}>确认上述源素材观察</button> : null}{asset.analysis && asset.latestAnalysisId ? <button type="button" onClick={() => openQualityEditor(asset)}><Pencil size={13} /> 编辑质量评估</button> : null}</div></div></article>; })}</div>
+        {assets.length < assetsTotal && <div className="asset-library-more"><Button variant="ghost" loading={assetsLoadingMore} onClick={() => void loadMoreAssets()}>加载更多（已显示 {assets.length}/{assetsTotal}）</Button></div>}
+      </> : <EmptyState icon={<Images size={24} />} title="源素材图库还是空的" description="可不选源素材，只生成结构化图片计划和文字简报；上传原图也不会在这里生成最终图片资产。" />}
       <footer className="intelligence-run"><div><strong>{selectedOpportunity ? `已选择：${selectedOpportunity.title}` : "请先选择一张选题卡"}</strong><p>{selectedAssetIds.length} 张源素材已选 · 只作为三套图片计划与 imageBrief 的参考输入</p>{!blueprintReady ? <small>七项项目创作模型尚未全部确认，正式生成已锁定。</small> : selectedOpportunity && missingDependencyCount > 0 ? <small>引用资源缺失：请换一批，或在资源池修复引用。</small> : selectedOpportunity && pendingDependencyCount > 0 ? <small>将先独立确认 {opportunityDependencies.unapprovedGaps.length} 个信息缺口和 {opportunityDependencies.unapprovedStrategies.length} 个表达策略，再确认选题；不会隐式级联。</small> : selectedOpportunity?.status !== "approved" && selectedOpportunity ? <small>继续后会明确确认这张选题卡；AI 草案不会在未确认时进入生成。</small> : selectedOpportunity ? <small>选题及其引用依赖均已独立确认。</small> : null}</div><Button disabled={!selectedOpportunity || intelligence?.status !== "ready" || !blueprintReady} loading={submitting || preparing} icon={<Sparkles size={17} />} onClick={() => void preview()}>{selectedOpportunity && pendingDependencyCount > 0 ? `先确认 ${pendingDependencyCount} 项依赖并预览` : selectedOpportunity?.status === "approved" ? "预览并生成 3 套内容方案" : "确认选题并预览"}</Button></footer>
     </section>
 
@@ -1176,6 +1304,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     <Modal open={refreshOpen} onClose={() => setRefreshOpen(false)} title="换一批新选题" description="基于现有蓝图与已确认信息缺口重新生成一批并追加保留；旧选题不会被删除。约几十秒，消耗一次模型额度。" footer={<><Button variant="secondary" loading={refreshing} onClick={() => void runRefresh(undefined)}>直接生成</Button><Button loading={refreshing} disabled={!guidance.trim()} onClick={() => void runRefresh(guidance.trim())}>按引导生成</Button></>}>
       <div className="guidance-panel">
         <textarea value={guidance} rows={3} maxLength={600} placeholder="可留空直接生成；或用一句话引导本批选题方向，例如：多聚焦术后恢复期的真实顾虑；可临时放宽到相邻话题。" onChange={(event) => setGuidance(event.target.value)} />
+        {templateError && <div className="inline-load-error" role="alert"><TriangleAlert size={15} /><span><strong>方向模板暂不可用</strong><small>{templateError}。仍可直接填写本次方向，不会被当作模板为空。</small></span><Button variant="ghost" onClick={() => void loadPromptTemplates(projectId)}>重试</Button></div>}
         {templates.length > 0 && (
           <div className="guidance-templates">
             {templates.map((template) => (

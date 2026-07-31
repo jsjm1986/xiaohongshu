@@ -354,3 +354,90 @@ test('代码合同 digest 漂移后：未绑定研究产物的基线自愈，绑
   assert.equal(untouched!.id, healed!.id, '绑过研究产物的发布不得被自动替换');
   assert.equal(untouched!.prompt_digest, 'stale-digest-again');
 });
+
+test('experiment result review rechecks project ownership at the final write boundary', async () => {
+  const database = app.get(DatabaseService);
+  const research = app.get(ResearchService);
+  const targetProject = await post('/api/projects', { name: '审批竞态目标项目' });
+  const externalProject = await post('/api/projects', { name: '审批竞态外部项目' });
+  assert.equal(targetProject.response.status, 201, JSON.stringify(targetProject.body));
+  assert.equal(externalProject.response.status, 201, JSON.stringify(externalProject.body));
+
+  const createExperiment = async (ownerProjectId: string, experimentKey: string) => post(
+    '/api/projects/' + ownerProjectId + '/research/experiments',
+    {
+      experimentKey,
+      title: '审批归属竞态实验',
+      hypothesis: '审批写入前必须重新确认结果仍属于请求项目。',
+      design: { arms: ['control', 'candidate'], assignment: 'fixed' },
+      metrics: ['review_boundary'],
+      analysisPlan: { primaryMetric: 'review_boundary', stoppingRule: 'fixed-n' },
+    },
+  );
+  const targetExperiment = await createExperiment(targetProject.body.id, 'review-race-target');
+  const externalExperiment = await createExperiment(externalProject.body.id, 'review-race-external');
+  assert.equal(targetExperiment.response.status, 201, JSON.stringify(targetExperiment.body));
+  assert.equal(externalExperiment.response.status, 201, JSON.stringify(externalExperiment.body));
+
+  for (const status of ['preregistered', 'running']) {
+    const transitioned = await post(
+      '/api/projects/' + targetProject.body.id + '/research/experiments/' + targetExperiment.body.id + '/transition',
+      { status },
+    );
+    assert.equal(transitioned.response.status, 201, JSON.stringify(transitioned.body));
+  }
+  const result = await post(
+    '/api/projects/' + targetProject.body.id + '/research/experiments/' + targetExperiment.body.id + '/results',
+    { result: { review_boundary: 1 }, conclusion: 'supports' },
+  );
+  assert.equal(result.response.status, 201, JSON.stringify(result.body));
+
+  const mutableResearch = research as unknown as {
+    resultRow?: (ownerProjectId: string, resultId: string) => Record<string, unknown>;
+  };
+  const originalResultRow = mutableResearch.resultRow!.bind(research);
+  let associationChanged = false;
+  mutableResearch.resultRow = (ownerProjectId, resultId) => {
+    const row = originalResultRow(ownerProjectId, resultId);
+    if (!associationChanged && ownerProjectId === targetProject.body.id && resultId === result.body.id) {
+      associationChanged = true;
+      database.prepare(
+        'UPDATE experiment_results SET experiment_version_id=? WHERE id=?',
+      ).run(externalExperiment.body.id, result.body.id);
+    }
+    return row;
+  };
+
+  const auditCount = () => Number((database.prepare(
+    "SELECT COUNT(*) AS count FROM audit_logs WHERE action='research.experiment-result.review' AND entity_id=?",
+  ).get(result.body.id) as { count: number }).count);
+  const beforeAuditCount = auditCount();
+  try {
+    const reviewed = await post(
+      '/api/projects/' + targetProject.body.id + '/research/experiment-results/' + result.body.id + '/review',
+      { status: 'approved' },
+    );
+    assert.equal(reviewed.response.status, 404, JSON.stringify(reviewed.body));
+  } finally {
+    delete mutableResearch.resultRow;
+  }
+
+  assert.equal(associationChanged, true, 'the test must move the result after the initial ownership check');
+  const stored = database.prepare(
+    'SELECT status, reviewed_by, reviewed_at, experiment_version_id FROM experiment_results WHERE id=?',
+  ).get(result.body.id) as {
+    status: string;
+    reviewed_by: string | null;
+    reviewed_at: string | null;
+    experiment_version_id: string;
+  };
+  assert.equal(
+    stored.experiment_version_id,
+    targetExperiment.body.id,
+    'the rejected review must roll back the injected cross-project reassignment too',
+  );
+  assert.equal(stored.status, 'draft');
+  assert.equal(stored.reviewed_by, null);
+  assert.equal(stored.reviewed_at, null);
+  assert.equal(auditCount(), beforeAuditCount, 'a rejected cross-project review must not be audited as successful');
+});

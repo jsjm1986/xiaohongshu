@@ -5,9 +5,11 @@ import {
   EyeOff,
   KeyRound,
   LockKeyhole,
+  RefreshCcw,
   Save,
   Server,
   ShieldCheck,
+  TriangleAlert,
   UserRound,
 } from "lucide-react";
 import { type FormEvent, useEffect, useState } from "react";
@@ -16,13 +18,14 @@ import { useProjects } from "../components/ProjectContext";
 import {
   Badge,
   Button,
+  EmptyState,
   Field,
   Skeleton,
   useToast,
 } from "../components/Ui";
 import { V2Hero } from "../components/V2";
 import { api } from "../lib/api";
-import { demoSettings } from "../lib/fixtures";
+import { errorMessage } from "../lib/errors";
 import type { AppSettings } from "../types";
 
 type SettingsTab = "model" | "quota" | "account";
@@ -36,6 +39,7 @@ export function SettingsPage() {
   const [tab, setTab] = useState<SettingsTab>("model");
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
@@ -55,12 +59,21 @@ export function SettingsPage() {
     if (user?.mustChangePassword) setTab("account");
   }, [user?.mustChangePassword]);
 
+  const loadSettings = async () => {
+    setLoading(true);
+    setLoadError(null);
+    setSettings(null);
+    try {
+      setSettings(await api.settings.get(currentProject?.workspaceId));
+    } catch (error) {
+      setLoadError(errorMessage(error, "模型设置加载失败"));
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    api.settings
-      .get(currentProject?.workspaceId)
-      .then(setSettings)
-      .catch(() => setSettings(demoSettings))
-      .finally(() => setLoading(false));
+    void loadSettings();
   }, [currentProject?.workspaceId]);
 
   const saveSettings = async () => {
@@ -75,11 +88,11 @@ export function SettingsPage() {
         }),
       );
       toast.push("设置已保存");
-    } catch {
-      toast.push("演示模式：设置已在本地保存", "info");
+      setApiKey("");
+    } catch (error) {
+      toast.push(errorMessage(error, "设置保存失败"), "error");
     } finally {
       setSaving(false);
-      setApiKey("");
     }
   };
 
@@ -96,11 +109,11 @@ export function SettingsPage() {
         }),
       );
       toast.push("已清除保存的密钥");
-    } catch {
-      toast.push("清除失败", "error");
+      setApiKey("");
+    } catch (error) {
+      toast.push(errorMessage(error, "密钥清除失败"), "error");
     } finally {
       setSaving(false);
-      setApiKey("");
     }
   };
 
@@ -271,8 +284,17 @@ export function SettingsPage() {
           </button>
         </aside>
         <main className="settings-content">
-          {loading || !settings ? (
+          {tab === "account" ? (
+            accountSections
+          ) : loading ? (
             <Skeleton lines={7} />
+          ) : loadError || !settings ? (
+            <EmptyState
+              icon={<TriangleAlert size={24} />}
+              title="模型设置加载失败"
+              description={loadError || "服务端没有返回可用设置。"}
+              action={<Button variant="secondary" icon={<RefreshCcw size={16} />} onClick={() => void loadSettings()}>重试</Button>}
+            />
           ) : tab === "model" ? (
             <>
               <section className="settings-section">
@@ -434,7 +456,7 @@ export function SettingsPage() {
                 </div>
               </section>
             </>
-          ) : tab === "quota" ? (
+          ) : (
             <>
               <section className="settings-section quota-section">
                 <header>
@@ -511,8 +533,6 @@ export function SettingsPage() {
                 </div>
               </section>
             </>
-          ) : (
-            accountSections
           )}
         </main>
       </div>

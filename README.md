@@ -28,6 +28,10 @@ OPENAI_TRANSPORT=chat_completions
 
 `KNOWLEDGE_CONTEXT_TOKENS` 控制总输入预算。项目知识在安全预算内会全部注入；超过预算才读取 `INDEX.md` 或自动索引并渐进展开相关章节。
 
+模型请求默认超时 90 秒，最多进行 6 次总尝试，按 4、8、16、32、64 秒指数退避；同时最多发出 2 个模型请求。可分别用 `CONTENT_AGENT_MODEL_TIMEOUT_MS`、`CONTENT_AGENT_MODEL_RETRY_ATTEMPTS`、`CONTENT_AGENT_MODEL_RETRY_BASE_DELAY_MS` 和 `CONTENT_AGENT_MODEL_MAX_CONCURRENT` 调整，其中尝试次数和并发数只允许 1 至 8。任务默认每 15 秒写入心跳，90 秒未更新才允许其他实例回收；`CONTENT_AGENT_JOB_CLAIM_TIMEOUT_MS` 必须严格大于 `CONTENT_AGENT_JOB_HEARTBEAT_MS`。
+
+工作区 BYOK 地址默认只允许不含用户名、密码、查询参数或片段的公网 HTTPS URL，并在每次请求及重定向时重新校验解析结果。只有受信、隔离且由你管理的内网网关才应启用 `CONTENT_AGENT_BYOK_ALLOW_HTTP` 或 `CONTENT_AGENT_BYOK_ALLOW_PRIVATE_NETWORK`；这两个开关会削弱 SSRF 防护。
+
 ## 可调方法与预设
 
 生成页提供简单模式和设置模式。简单模式选择内置或项目预设；设置模式可在“目标视图”和“公式视图”之间切换，调整信息窗口、正文/评论分工、证据边界、表达方式及运行参数。每个参数都包含公式关联、中文解释、调高/调低影响和认识地位说明。
@@ -93,4 +97,4 @@ Copy-Item .env.example .env
 docker compose up -d --build
 ```
 
-对公网部署时，应在本应用前配置 HTTPS 反向代理，并定期备份 `data/`。
+对公网部署时，必须在本应用前配置 HTTPS 反向代理，并定期备份 `data/`。生产模式会返回 HSTS，并默认给会话与 CSRF Cookie 添加 `Secure`；反向代理应只向外提供 HTTPS。若仅在可信本机通过 HTTP 调试，可显式设置 `CONTENT_AGENT_SECURE_COOKIES=false`，但不要在公网部署中关闭。

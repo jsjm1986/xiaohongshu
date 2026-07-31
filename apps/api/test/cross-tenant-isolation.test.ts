@@ -83,7 +83,7 @@ async function createTenant(username: string, password: string, workspaceId: str
   const row = db.prepare('SELECT id FROM users WHERE username = ?').get(username) as { id: string };
   db.prepare(
     'INSERT INTO workspace_members (workspace_id, user_id, role, grants_json, denies_json, created_at, updated_at)' +
-      " VALUES (?, ?, 'Owner', '[]', '[]', datetime('now'), datetime('now'))",
+      " VALUES (?, ?, 'Admin', '[]', '[]', datetime('now'), datetime('now'))",
   ).run(workspaceId, row.id);
   // 建号即需改密,先清掉这个门,否则任何写请求都被 PASSWORD_CHANGE_REQUIRED 拦下,
   // 测出来的 403 就不是越权判定的功劳了。
@@ -309,7 +309,7 @@ test('BYOK 密钥只以布尔标记出现,任何会话都读不到密文或明�
   // 给 B 存一把真 Key,再从 A 和 B 两侧确认响应里只有 hasApiKey,没有密钥本体。
   const saved = await call('/api/settings', {
     method: 'PATCH',
-    body: JSON.stringify({ workspaceId: workspaceB, providerMode: 'byok', provider: 'deepseek', apiKey: 'sk-tenant-b-secret-key' }),
+    body: JSON.stringify({ workspaceId: workspaceB, providerMode: 'byok', provider: 'deepseek', apiKey: 'byok-test-key-material' }),
   }, tenantB);
   assert.equal(saved.status, 200, `B 存 Key 失败: ${JSON.stringify(saved.body)}`);
   assert.equal(saved.body.hasApiKey, true, '存完应显示已配置');
@@ -319,7 +319,7 @@ test('BYOK 密钥只以布尔标记出现,任何会话都读不到密文或明�
   const stored = db.prepare('SELECT encrypted_api_key FROM workspace_settings WHERE workspace_id = ?')
     .get(workspaceB) as { encrypted_api_key: string | null };
   assert.ok(stored.encrypted_api_key, '应落库');
-  assert.ok(!stored.encrypted_api_key!.includes('sk-tenant-b-secret-key'), '落库必须是密文');
+  assert.ok(!stored.encrypted_api_key!.includes('byok-test-key-material'), '落库必须是密文');
 
   // A 侧:既读不到 B 的设置,自己的设置里也不该出现 B 的 Key 痕迹
   const cross = await call(`/api/settings?workspaceId=${workspaceB}`, {}, tenantA);
@@ -406,7 +406,7 @@ test('反向对照:授予成员身份后,同样的请求变为 200', async () =>
 
   db.prepare(
     'INSERT INTO workspace_members (workspace_id, user_id, role, grants_json, denies_json, created_at, updated_at)' +
-      " VALUES (?, ?, 'Owner', '[]', '[]', datetime('now'), datetime('now'))",
+      " VALUES (?, ?, 'Admin', '[]', '[]', datetime('now'), datetime('now'))",
   ).run(workspaceB, userA.id);
 
   for (const path of [

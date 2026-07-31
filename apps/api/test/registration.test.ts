@@ -7,6 +7,7 @@ import { DatabaseService, SCHEMA_VERSION } from '../src/database.service.js';
 import type { ApiOptions } from '../src/config.js';
 import { AuthService } from '../src/auth.service.js';
 import { RegistrationService } from '../src/registration.service.js';
+import { RateLimitService } from '../src/rate-limit.service.js';
 
 function makeDb(): DatabaseService {
   const dir = mkdtempSync(join(tmpdir(), 'reg-test-'));
@@ -22,7 +23,7 @@ function makeDb(): DatabaseService {
 
 function makeAuth(db: DatabaseService): AuthService {
   const options = { adminUsername: 'admin', adminPassword: 'Admin-change-me-2026!', sessionTtlMs: 3_600_000 } as unknown as ApiOptions;
-  return new AuthService(db, options);
+  return new AuthService(db, options, new RateLimitService(db));
 }
 
 test('migration v11 adds user_kind column and bumps user_version', () => {
@@ -64,9 +65,22 @@ test('provisionUserWithWorkspace creates user + workspace + Owner member', async
   assert.equal(member.role, 'Owner');
 });
 
+test('production bootstrap refuses the documented placeholder password', async () => {
+  const db = makeDb();
+  const auth = new AuthService(db, {
+    ...db.options,
+    production: true,
+    adminUsername: 'admin',
+    adminPassword: 'change-me-now-123!',
+  }, new RateLimitService(db));
+  await assert.rejects(() => auth.ensureBootstrapAdmin(), /生产环境.*BOOTSTRAP_ADMIN_PASSWORD/u);
+  const count = db.prepare('SELECT COUNT(*) AS value FROM users').get() as { value: number };
+  assert.equal(Number(count.value), 0);
+});
+
 function makeReg(db: DatabaseService, auth: AuthService): RegistrationService {
   const audit = { record: () => undefined } as any;
-  return new RegistrationService(db, auth, audit);
+  return new RegistrationService(db, auth, audit, new RateLimitService(db));
 }
 
 const validInput = () => ({
@@ -126,14 +140,15 @@ test('reject stores note and allows re-apply with same username', async () => {
   await reg.submit(validInput());
   const req = db.prepare('SELECT id FROM registration_requests WHERE username = ?').get('clinicA') as any;
   reg.reject(req.id, 'admin-id', '资料不全');
-  assert.equal(reg.loginHintFor('clinicA')?.status, 'rejected');
+  assert.equal((await reg.loginHintFor('clinicA', validInput().password))?.status, 'rejected');
+  assert.equal(await reg.loginHintFor('clinicA', 'wrong-password'), null, '仅凭用户名不得探测审核状态或拒绝原因');
   await reg.submit(validInput()); // 拒绝后可重申,不抛错
-  assert.equal(reg.loginHintFor('clinicA')?.status, 'pending');
+  assert.equal((await reg.loginHintFor('clinicA', validInput().password))?.status, 'pending');
 });
 
 test('rate limit blocks after threshold per key', async () => {
   const db = makeDb();
   const reg = makeReg(db, makeAuth(db));
-  for (let i = 0; i < 5; i++) reg.recordSubmit('1.2.3.4');
-  assert.throws(() => reg.assertSubmitAllowed('1.2.3.4'), /频繁|too many/i);
+  for (let i = 0; i < 5; i++) reg.consumeSubmitAttempt('1.2.3.4');
+  assert.throws(() => reg.consumeSubmitAttempt('1.2.3.4'), /频繁|too many/i);
 });

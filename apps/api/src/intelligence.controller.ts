@@ -9,6 +9,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Req,
   Res,
   StreamableFile,
@@ -23,7 +24,7 @@ import { IntelligenceEnrichService } from './intelligence-enrich.service.js';
 import { parseDraftRequest, parseMergeRequest, parseSaveRequest } from './intelligence-enrich.types.js';
 import { IntelligenceService } from './intelligence.service.js';
 import type { AuthenticatedRequest, SessionPrincipal } from './models.js';
-import { requireObject } from './utils.js';
+import { parsePagination, requireObject } from './utils.js';
 
 interface UploadedImage {
   originalname: string;
@@ -321,8 +322,12 @@ export class IntelligenceController {
 
   @Get('image-assets')
   @RequirePermission({ permission: 'project.read', projectParam: 'projectId' })
-  listImages(@Param('projectId') projectId: string) {
-    return this.intelligence.listImages(projectId);
+  listImages(
+    @Param('projectId') projectId: string,
+    @Query('limit') rawLimit?: string,
+    @Query('offset') rawOffset?: string,
+  ) {
+    return this.intelligence.listImages(projectId, parsePagination(rawLimit, rawOffset));
   }
 
   @Post('image-assets')
@@ -368,8 +373,13 @@ export class IntelligenceController {
 
   @Get('image-assets/:assetId/analyses')
   @RequirePermission({ permission: 'project.read', projectParam: 'projectId' })
-  imageAnalyses(@Param('projectId') projectId: string, @Param('assetId') assetId: string) {
-    return this.intelligence.listImageAnalyses(projectId, assetId);
+  imageAnalyses(
+    @Param('projectId') projectId: string,
+    @Param('assetId') assetId: string,
+    @Query('limit') rawLimit?: string,
+    @Query('offset') rawOffset?: string,
+  ) {
+    return this.intelligence.listImageAnalyses(projectId, assetId, parsePagination(rawLimit, rawOffset));
   }
 
   @Post('image-assets/:assetId/analyze')
@@ -435,5 +445,6 @@ export class IntelligenceController {
 }
 
 function objectOrEmpty(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  if (value === undefined || value === null) return {};
+  return requireObject(value);
 }

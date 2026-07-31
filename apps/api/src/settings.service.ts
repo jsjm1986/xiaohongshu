@@ -1,11 +1,15 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { BadRequestException, ForbiddenException, Inject, Injectable } from '@nestjs/common';
-import { APP_OPTIONS, type ApiOptions } from './config.js';
+import { APP_OPTIONS, isUsableMasterEncryptionKey, type ApiOptions } from './config.js';
 import { AuditService } from './audit.service.js';
 import { DatabaseService } from './database.service.js';
 import type { SessionPrincipal } from './models.js';
+import { validateByokBaseUrl } from './safe-model-fetch.js';
 import { QUOTA_EXHAUSTED_MESSAGE } from './support.js';
-import { nowIso, parseJson } from './utils.js';
+import { assertJsonComplexity, nowIso, parseJson, requireString } from './utils.js';
+
+const MAX_API_KEY_LENGTH = 8_192;
+const MAX_MONTHLY_QUOTA = 1_000_000;
 
 interface SettingsRow {
   workspace_id: string;
@@ -46,25 +50,28 @@ export class SettingsService {
     const now = nowIso();
     this.database
       .prepare(
-        `INSERT INTO workspace_settings
+        `INSERT OR IGNORE INTO workspace_settings
           (workspace_id, provider_mode, provider, model, base_url, transport,
            monthly_quota, quota_used, default_temperature, updated_by, updated_at)
          VALUES (?, 'platform', 'openai', ?, ?, ?, 100, 0, 0.8, ?, ?)`,
       )
       .run(workspaceId, this.options.platformModel, this.options.platformBaseUrl, this.options.platformTransport, userId ?? null, now);
-    return this.row(workspaceId)!;
+    const created = this.row(workspaceId);
+    if (!created) throw new Error('工作区设置初始化失败');
+    return created;
   }
 
   publicSettings(workspaceId: string, userId?: string): Record<string, unknown> {
     const row = this.ensure(workspaceId, userId);
+    const byok = row.provider_mode === 'byok';
     return {
       workspaceId,
       providerMode: row.provider_mode,
       provider: row.provider,
       model: row.model || this.options.platformModel,
-      apiBaseUrl: row.base_url || this.options.platformBaseUrl,
-      transport: row.transport,
-      hasApiKey: row.provider_mode === 'platform' ? Boolean(this.options.platformApiKey) : Boolean(row.encrypted_api_key),
+      apiBaseUrl: byok ? row.base_url : this.options.platformBaseUrl,
+      transport: byok ? row.transport : this.options.platformTransport,
+      hasApiKey: byok ? Boolean(row.encrypted_api_key) : Boolean(this.options.platformApiKey),
       monthlyQuota: row.monthly_quota,
       quotaUsed: row.quota_used,
       defaultTemperature: row.default_temperature,
@@ -92,35 +99,84 @@ export class SettingsService {
   }
 
   update(workspaceId: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
+    return this.database.transaction(() => {
     const current = this.ensure(workspaceId, principal.userId);
-    const providerMode = body.providerMode === 'byok' ? 'byok' : body.providerMode === 'platform' ? 'platform' : current.provider_mode;
-    const provider = typeof body.provider === 'string' ? body.provider.slice(0, 64) : current.provider;
-    const model = typeof body.model === 'string' && body.model.trim() ? body.model.trim().slice(0, 128) : current.model;
-    const baseUrl = typeof body.apiBaseUrl === 'string' && body.apiBaseUrl.trim() ? this.validateBaseUrl(body.apiBaseUrl) : current.base_url;
-    const transport = body.transport === 'chat_completions' ? 'chat_completions' : body.transport === 'responses' ? 'responses' : current.transport;
-    const temperature = typeof body.defaultTemperature === 'number'
-      ? Math.max(0, Math.min(2, body.defaultTemperature))
-      : current.default_temperature;
-    const monthlyQuota = typeof body.monthlyQuota === 'number'
-      ? Math.max(0, Math.floor(body.monthlyQuota))
-      : current.monthly_quota;
-    const generationDefaults = body.generationDefaults && typeof body.generationDefaults === 'object'
-      ? body.generationDefaults
-      : parseJson(current.config_json, {});
+    let providerMode = current.provider_mode;
+    if (Object.hasOwn(body, 'providerMode')) {
+      if (body.providerMode !== 'platform' && body.providerMode !== 'byok') {
+        throw new BadRequestException('providerMode 必须是 platform 或 byok');
+      }
+      providerMode = body.providerMode;
+    }
+    const provider = Object.hasOwn(body, 'provider')
+      ? requireString(body.provider, 'provider', { max: 64 })
+      : current.provider;
+    const model = Object.hasOwn(body, 'model')
+      ? requireString(body.model, 'model', { max: 128 })
+      : current.model;
+    const baseUrl = Object.hasOwn(body, 'apiBaseUrl')
+      ? this.validateBaseUrl(requireString(body.apiBaseUrl, 'apiBaseUrl', { max: 2_000 }))
+      : current.base_url;
+    let transport = current.transport;
+    if (Object.hasOwn(body, 'transport')) {
+      if (body.transport !== 'responses' && body.transport !== 'chat_completions') {
+        throw new BadRequestException('transport 必须是 responses 或 chat_completions');
+      }
+      transport = body.transport;
+    }
+    let temperature = current.default_temperature;
+    if (Object.hasOwn(body, 'defaultTemperature')) {
+      if (typeof body.defaultTemperature !== 'number' || !Number.isFinite(body.defaultTemperature)
+        || body.defaultTemperature < 0 || body.defaultTemperature > 2) {
+        throw new BadRequestException('defaultTemperature 必须是 0-2 之间的有限数值');
+      }
+      temperature = body.defaultTemperature;
+    }
+    let monthlyQuota = current.monthly_quota;
+    if (Object.hasOwn(body, 'monthlyQuota')) {
+      if (typeof body.monthlyQuota !== 'number' || !Number.isSafeInteger(body.monthlyQuota)
+        || body.monthlyQuota < 0 || body.monthlyQuota > MAX_MONTHLY_QUOTA) {
+        throw new BadRequestException(`monthlyQuota 必须是 0-${MAX_MONTHLY_QUOTA} 之间的安全整数`);
+      }
+      monthlyQuota = body.monthlyQuota;
+    }
+    let generationDefaults: Record<string, unknown> = parseJson(current.config_json, {});
+    if (Object.hasOwn(body, 'generationDefaults')) {
+      if (!body.generationDefaults || typeof body.generationDefaults !== 'object' || Array.isArray(body.generationDefaults)) {
+        throw new BadRequestException('generationDefaults 必须是 JSON 对象');
+      }
+      assertJsonComplexity(body.generationDefaults, 'generationDefaults');
+      generationDefaults = body.generationDefaults as Record<string, unknown>;
+    }
+    if (Object.hasOwn(body, 'clearApiKey') && typeof body.clearApiKey !== 'boolean') {
+      throw new BadRequestException('clearApiKey 必须是布尔值');
+    }
+    if (body.clearApiKey === true && typeof body.apiKey === 'string' && body.apiKey.trim()) {
+      throw new BadRequestException('apiKey 与 clearApiKey 不能同时提交');
+    }
     let encryptedKey = current.encrypted_api_key;
-    if (typeof body.apiKey === 'string' && body.apiKey.trim()) encryptedKey = this.encrypt(body.apiKey.trim());
-    if (body.clearApiKey === true) encryptedKey = null;
+    if (Object.hasOwn(body, 'apiKey')) {
+      const apiKey = requireString(body.apiKey, 'apiKey', { max: MAX_API_KEY_LENGTH });
+      encryptedKey = this.encrypt(apiKey);
+    }
+    if (body.clearApiKey === true) {
+      encryptedKey = null;
+      providerMode = 'platform';
+    }
     if (providerMode === 'byok' && !encryptedKey) throw new BadRequestException('BYOK 模式必须先保存 API Key');
+    if (providerMode === 'byok') this.validateBaseUrl(baseUrl);
 
-    this.database
+    const updated = this.database
       .prepare(
         `UPDATE workspace_settings SET provider_mode = ?, provider = ?, model = ?, base_url = ?,
           transport = ?, encrypted_api_key = ?, monthly_quota = ?, default_temperature = ?,
           config_json = ?, updated_by = ?, updated_at = ? WHERE workspace_id = ?`,
       )
       .run(providerMode, provider, model, baseUrl, transport, encryptedKey, monthlyQuota, temperature, JSON.stringify(generationDefaults), principal.userId, nowIso(), workspaceId);
+    if (Number(updated.changes) !== 1) throw new BadRequestException('工作区设置不存在');
     this.audit.record({ workspaceId, userId: principal.userId, action: 'settings.update', entityType: 'workspace', entityId: workspaceId, details: { providerMode, provider, model, transport, monthlyQuota, apiKeyChanged: typeof body.apiKey === 'string' || body.clearApiKey === true } });
     return this.publicSettings(workspaceId, principal.userId);
+    });
   }
 
   provider(workspaceId: string, userId?: string): ResolvedProviderSettings {
@@ -130,8 +186,8 @@ export class SettingsService {
       mode: row.provider_mode,
       provider: row.provider,
       model: row.model || this.options.platformModel,
-      baseUrl: row.base_url || this.options.platformBaseUrl,
-      transport: row.transport,
+      baseUrl: byok ? this.validateBaseUrl(row.base_url) : this.options.platformBaseUrl,
+      transport: byok ? row.transport : this.options.platformTransport,
       apiKey: byok ? (row.encrypted_api_key ? this.decrypt(row.encrypted_api_key) : '') : this.options.platformApiKey,
       temperature: row.default_temperature,
     };
@@ -162,22 +218,26 @@ export class SettingsService {
   }
 
   /**
-   * 退还一次额度。
+   * 原子退还额度。
    *
    * 额度是在调用模型**之前**扣的(必须如此:先扣才防得住并发超额)。但实测知识库
    * 分析在中继返回 HTTP 500 时,三次重试全败、任务标 failed,而额度已经扣掉——
    * 用户什么都没拿到却少了一次。对按次计费的产品这是实质性的错账。
    *
-   * 只在「确认没有产出任何结果」的失败路径上退。下限保护到 0:并发下重复退还
-   * 不该把计数打成负数。
+   * 只在「确认没有产出任何结果」的失败路径上退。一次 SQL 支持退还多次并把下限
+   * 保护到 0:调用方可以把它嵌在任务终态事务里,不会留下「任务账已归零、工作区
+   * 额度还没退」的崩溃窗口。这里也不按当前 provider_mode 过滤:任务可能在 platform
+   * 模式扣款后才切到 BYOK,历史扣款仍然必须退。
    */
-  refundPlatformQuota(workspaceId: string): void {
-    const row = this.ensure(workspaceId);
-    if (row.provider_mode !== 'platform') return;
-    if (row.quota_used <= 0) return;
-    this.database
-      .prepare('UPDATE workspace_settings SET quota_used = MAX(0, quota_used - 1), updated_at = ? WHERE workspace_id = ?')
-      .run(nowIso(), workspaceId);
+  refundPlatformQuota(workspaceId: string, count = 1): void {
+    const normalizedCount = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+    if (!normalizedCount) return;
+    const result = this.database
+      .prepare('UPDATE workspace_settings SET quota_used = MAX(0, quota_used - ?), updated_at = ? WHERE workspace_id = ?')
+      .run(normalizedCount, nowIso(), workspaceId);
+    // 有扣款账却没有 settings 行属于数据损坏。抛错让调用方的外层事务整体回滚,
+    // 不能把任务账先清掉、把用户应退额度静默丢掉。
+    if (!result.changes) throw new Error('工作区额度设置不存在，无法退还额度');
   }
 
   workspaceConfig(workspaceId: string): Record<string, unknown> {
@@ -205,15 +265,19 @@ export class SettingsService {
   }
 
   private validateBaseUrl(value: string): string {
-    let url: URL;
-    try { url = new URL(value); } catch { throw new BadRequestException('API Base URL 无效'); }
-    if (!['http:', 'https:'].includes(url.protocol)) throw new BadRequestException('API Base URL 只支持 HTTP/HTTPS');
-    return url.toString().replace(/\/$/u, '');
+    try {
+      return validateByokBaseUrl(value, {
+        allowHttp: this.options.byokAllowHttp,
+        allowPrivateNetwork: this.options.byokAllowPrivateNetwork,
+      });
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'API Base URL 无效');
+    }
   }
 
   private key(): Buffer {
-    if (this.options.masterEncryptionKey.length < 16) {
-      throw new BadRequestException('保存 BYOK 前必须配置至少 16 字符的 MASTER_ENCRYPTION_KEY');
+    if (!isUsableMasterEncryptionKey(this.options.masterEncryptionKey)) {
+      throw new BadRequestException('保存 BYOK 前必须配置至少 16 字符且非示例值的 MASTER_ENCRYPTION_KEY');
     }
     return createHash('sha256').update(this.options.masterEncryptionKey).digest();
   }

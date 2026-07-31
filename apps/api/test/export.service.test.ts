@@ -322,7 +322,9 @@ test('exports a complete package as Markdown and deterministic JSON', async () =
 
 test('exports valid DOCX and PDF buffers containing document signatures', async () => {
   const service = new ExportService();
+  const localStorageDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   const docx = await service.exportPackage(contentPackage, 'docx', { docxFontName: 'Noto Sans CJK SC' });
+  assert.deepEqual(Object.getOwnPropertyDescriptor(globalThis, 'localStorage'), localStorageDescriptor);
   assert.equal(docx.subarray(0, 2).toString('ascii'), 'PK');
   assert.ok(docx.byteLength > 1_000);
 

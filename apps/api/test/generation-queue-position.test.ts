@@ -134,8 +134,8 @@ test('列表也带 queuePosition:产出区要显示每条排在第几', async ()
   seedJob('q-list-b', 'queued', '2026-07-26T00:00:02.000Z');
 
   const { body } = await request(`/api/generations?projectId=${projectId}`);
-  const a = body.find((j: any) => j.id === 'q-list-a');
-  const bJob = body.find((j: any) => j.id === 'q-list-b');
+  const a = body.items.find((j: any) => j.id === 'q-list-a');
+  const bJob = body.items.find((j: any) => j.id === 'q-list-b');
   assert.equal(a.queuePosition, 1);
   assert.equal(bJob.queuePosition, 2);
 });
@@ -151,7 +151,7 @@ test('不排队的任务连 queueLength 都不带:已完成的稿子带全局队
   assert.equal(detail.body.queueLength, undefined);
 
   const list = await request(`/api/generations?projectId=${projectId}`);
-  const row = list.body.find((j: any) => j.id === 'c-api');
+  const row = list.body.items.find((j: any) => j.id === 'c-api');
   assert.equal(row.queueLength, undefined);
 });
 

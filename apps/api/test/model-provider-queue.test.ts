@@ -106,6 +106,36 @@ test('4xx 客户端错误仍然立即放弃，不浪费重试', async () => {
   assert.equal(attempts, 1);
 });
 
+test('重试调试日志不泄露供应商响应、端点或凭据', async () => {
+  const previousDebug = process.env.CONTENT_AGENT_DEBUG_RETRY;
+  const previousConsoleError = console.error;
+  const logs: string[] = [];
+  process.env.CONTENT_AGENT_DEBUG_RETRY = '1';
+  console.error = (...args: unknown[]) => { logs.push(args.map(String).join(' ')); };
+  try {
+    const provider: ModelProvider = {
+      generate: async () => {
+        throw new ModelProviderError('https://private-gateway.example/v1 returned sk-secret-credential and tenant response text', 502);
+      },
+    };
+    const wrapped = retryModelProvider(provider, { maxAttempts: 1, baseDelayMs: 0, sleep: async () => undefined });
+    await assert.rejects(() => wrapped.generate({
+      messages: [],
+      metadata: { purpose: 'analysis\nforged-log-line' },
+    }));
+  } finally {
+    console.error = previousConsoleError;
+    if (previousDebug === undefined) delete process.env.CONTENT_AGENT_DEBUG_RETRY;
+    else process.env.CONTENT_AGENT_DEBUG_RETRY = previousDebug;
+  }
+
+  assert.equal(logs.length, 1);
+  assert.match(logs[0]!, /purpose=analysis_forged-log-line/u);
+  assert.match(logs[0]!, /status=502/u);
+  assert.doesNotMatch(logs[0]!, /private-gateway|secret-credential|tenant response/u);
+  assert.equal(logs[0]!.split('\n').length, 1, '日志字段不能注入新日志行');
+});
+
 /**
  * 退避基数必须可配置且默认够宽。
  *

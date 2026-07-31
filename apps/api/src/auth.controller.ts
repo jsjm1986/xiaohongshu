@@ -28,16 +28,18 @@ export class AuthController {
   @Post('login')
   async login(@Body() rawBody: unknown, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
     const body = requireObject(rawBody);
-    const loginKey = `${request.ip}:${String(body.username ?? '').toLowerCase()}`;
-    this.auth.assertLoginAllowed(loginKey);
+    const usernameKey = typeof body.username === 'string'
+      ? body.username.trim().toLowerCase().slice(0, 64)
+      : 'invalid';
+    const loginKey = `${request.ip}:${usernameKey}`;
+    this.auth.consumeLoginAttempt(loginKey);
     let result: Awaited<ReturnType<AuthService['login']>>;
     try {
       result = await this.auth.login(body.username, body.password);
       this.auth.clearLoginFailures(loginKey);
     } catch (error) {
-      this.auth.recordLoginFailure(loginKey);
       if (error instanceof UnauthorizedException && typeof body.username === 'string') {
-        const hint = this.registration.loginHintFor(body.username);
+        const hint = await this.registration.loginHintFor(body.username, body.password);
         if (hint?.status === 'pending') throw new UnauthorizedException('你的申请正在审核中,请耐心等待');
         if (hint?.status === 'rejected') throw new UnauthorizedException(`申请未通过:${hint.note || '请联系客服'}`);
       }

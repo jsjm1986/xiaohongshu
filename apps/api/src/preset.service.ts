@@ -155,31 +155,33 @@ export class PresetService {
   }
 
   create(projectId: string, body: Record<string, unknown>, principal: SessionPrincipal): PublicPreset {
-    const project = this.resources.projectRow(projectId);
     const name = requireString(body.name, 'name', { max: 100 });
     const description = typeof body.description === 'string' ? body.description.trim().slice(0, 500) : '';
     const requestedBase = typeof body.basePresetId === 'string' ? body.basePresetId : DEFAULT_PRESET_ID;
-    const base = this.get(projectId, requestedBase);
     const inputValues = normalizeParameterValues(body.values, {
       partial: true,
       rejectUnknown: true,
     }).values;
-    const basePresetId = base.source === 'builtin' ? base.id : base.basePresetId ?? DEFAULT_PRESET_ID;
-    const baseValues = this.publicBuiltin(projectId, basePresetId, '').values;
-    const target = { ...base.values, ...inputValues };
-    const difference = differenceFrom(baseValues, target);
     const id = randomUUID();
     const now = nowIso();
-    this.database
-      .prepare(
-        `INSERT INTO generation_presets
-          (id, project_id, name, description, base_preset_id, values_json,
-           created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(id, projectId, name, description, basePresetId, JSON.stringify(difference), principal.userId, now, now);
-    this.record(project, principal, 'preset.create', id, { projectId, basePresetId });
-    return this.get(projectId, id);
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      const base = this.get(projectId, requestedBase);
+      const basePresetId = base.source === 'builtin' ? base.id : base.basePresetId ?? DEFAULT_PRESET_ID;
+      const baseValues = this.publicBuiltin(projectId, basePresetId, '').values;
+      const target = { ...base.values, ...inputValues };
+      const difference = differenceFrom(baseValues, target);
+      this.database
+        .prepare(
+          `INSERT INTO generation_presets
+            (id, project_id, name, description, base_preset_id, values_json,
+             created_by, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(id, projectId, name, description, basePresetId, JSON.stringify(difference), principal.userId, now, now);
+      this.record(project, principal, 'preset.create', id, { projectId, basePresetId });
+      return this.get(projectId, id);
+    });
   }
 
   update(
@@ -188,25 +190,28 @@ export class PresetService {
     body: Record<string, unknown>,
     principal: SessionPrincipal,
   ): PublicPreset {
-    const project = this.resources.projectRow(projectId);
-    const row = this.row(projectId, presetId);
-    const current = this.publicCustom(row, this.defaultId(projectId));
-    const name = typeof body.name === 'string' ? requireString(body.name, 'name', { max: 100 }) : row.name;
-    const description = typeof body.description === 'string' ? body.description.trim().slice(0, 500) : row.description;
     const incoming = body.values === undefined
       ? {}
       : normalizeParameterValues(body.values, { partial: true, rejectUnknown: true }).values;
-    const baseValues = this.publicBuiltin(projectId, row.base_preset_id, '').values;
-    const target = body.replaceValues === true ? { ...baseValues, ...incoming } : { ...current.values, ...incoming };
-    const difference = differenceFrom(baseValues, target);
-    this.database
-      .prepare(
-        `UPDATE generation_presets SET name=?, description=?, values_json=?, updated_at=?
-         WHERE id=? AND project_id=?`,
-      )
-      .run(name, description, JSON.stringify(difference), nowIso(), presetId, projectId);
-    this.record(project, principal, 'preset.update', presetId, { projectId });
-    return this.get(projectId, presetId);
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      const row = this.row(projectId, presetId);
+      const current = this.publicCustom(row, this.defaultId(projectId));
+      const name = typeof body.name === 'string' ? requireString(body.name, 'name', { max: 100 }) : row.name;
+      const description = typeof body.description === 'string' ? body.description.trim().slice(0, 500) : row.description;
+      const baseValues = this.publicBuiltin(projectId, row.base_preset_id, '').values;
+      const target = body.replaceValues === true ? { ...baseValues, ...incoming } : { ...current.values, ...incoming };
+      const difference = differenceFrom(baseValues, target);
+      const updated = this.database
+        .prepare(
+          `UPDATE generation_presets SET name=?, description=?, values_json=?, updated_at=?
+           WHERE id=? AND project_id=? AND deleted_at IS NULL`,
+        )
+        .run(name, description, JSON.stringify(difference), nowIso(), presetId, projectId);
+      if (Number(updated.changes) !== 1) throw new NotFoundException('自定义预设不存在');
+      this.record(project, principal, 'preset.update', presetId, { projectId });
+      return this.get(projectId, presetId);
+    });
   }
 
   copy(
@@ -225,34 +230,37 @@ export class PresetService {
   }
 
   setDefault(projectId: string, presetId: string, principal: SessionPrincipal): PublicPreset {
-    const project = this.resources.projectRow(projectId);
-    this.get(projectId, presetId);
-    this.database
-      .prepare(
-        `INSERT INTO project_preset_defaults (project_id, preset_id, updated_by, updated_at)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(project_id) DO UPDATE SET preset_id=excluded.preset_id,
-           updated_by=excluded.updated_by, updated_at=excluded.updated_at`,
-      )
-      .run(projectId, presetId, principal.userId, nowIso());
-    this.record(project, principal, 'preset.set-default', presetId, { projectId });
-    return this.get(projectId, presetId);
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      this.get(projectId, presetId);
+      this.database
+        .prepare(
+          `INSERT INTO project_preset_defaults (project_id, preset_id, updated_by, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(project_id) DO UPDATE SET preset_id=excluded.preset_id,
+             updated_by=excluded.updated_by, updated_at=excluded.updated_at`,
+        )
+        .run(projectId, presetId, principal.userId, nowIso());
+      this.record(project, principal, 'preset.set-default', presetId, { projectId });
+      return this.get(projectId, presetId);
+    });
   }
 
   remove(projectId: string, presetId: string, principal: SessionPrincipal): void {
     if (BUILTIN_PRESET_MAP.has(presetId)) throw new BadRequestException('内置预设不能删除，可以复制后修改');
-    const project = this.resources.projectRow(projectId);
-    this.row(projectId, presetId);
     const now = nowIso();
     this.database.transaction(() => {
-      this.database
+      const project = this.resources.projectRow(projectId);
+      this.row(projectId, presetId);
+      const removed = this.database
         .prepare('UPDATE generation_presets SET deleted_at=?, updated_at=? WHERE id=? AND project_id=?')
         .run(now, now, presetId, projectId);
+      if (Number(removed.changes) !== 1) throw new NotFoundException('自定义预设不存在');
       this.database
         .prepare('DELETE FROM project_preset_defaults WHERE project_id=? AND preset_id=?')
         .run(projectId, presetId);
+      this.record(project, principal, 'preset.delete', presetId, { projectId });
     });
-    this.record(project, principal, 'preset.delete', presetId, { projectId });
   }
 
   styleProfile(projectId: string): Record<string, unknown> {
@@ -283,61 +291,65 @@ export class PresetService {
     body: Record<string, unknown>,
     principal: SessionPrincipal,
   ): Record<string, unknown> {
-    const project = this.resources.projectRow(projectId);
-    const raw = isRecord(body.values) ? body.values : body;
-    const current = parseJson<Record<string, unknown>>(project.style_profile_json, {});
-    const baseStyleProfileId = typeof raw.baseStyleProfileId === 'string'
-      ? raw.baseStyleProfileId
-      : typeof raw.styleProfileId === 'string'
-        ? raw.styleProfileId
-        : typeof current.baseStyleProfileId === 'string'
-          ? current.baseStyleProfileId
-          : undefined;
-    if (baseStyleProfileId && !BUILTIN_STYLE_MAP.has(baseStyleProfileId)) {
-      throw new BadRequestException('未知的内置风格画像');
-    }
-    const parameterInput = isRecord(raw.parameterValues)
-      ? raw.parameterValues
-      : Object.fromEntries(Object.entries(raw).filter(([key]) => CORE_PARAMETER_IDS.has(key)));
-    const incomingParameterValues = normalizeParameterValues(parameterInput, {
-      partial: true,
-      rejectUnknown: true,
-    }).values;
-    const currentParameterValues = normalizeParameterValues(current.parameterValues, {
-      partial: true,
-      clamp: true,
-    }).values;
-    const parameterValues = { ...currentParameterValues, ...incomingParameterValues };
-    if (typeof raw.preferredTone === 'string' && raw.preferredTone.trim()) {
-      parameterValues.expression_voice = raw.preferredTone.trim().slice(0, 1_000);
-    }
-    const config = isRecord(raw.config)
-      ? safeCoreOverrides(raw.config)
-      : isRecord(current.config)
-        ? current.config
-        : {};
-    const next = {
-      baseStyleProfileId,
-      parameterValues,
-      config,
-      preferredTone: typeof raw.preferredTone === 'string' ? raw.preferredTone.trim().slice(0, 1_000) : current.preferredTone,
-      preferredStructures: raw.preferredStructures === undefined ? stringArray(current.preferredStructures) : stringArray(raw.preferredStructures),
-      avoidedPatterns: raw.avoidedPatterns === undefined ? stringArray(current.avoidedPatterns) : stringArray(raw.avoidedPatterns),
-      examples: raw.examples === undefined ? stringArray(current.examples) : stringArray(raw.examples),
-      notes: typeof raw.notes === 'string' ? raw.notes.slice(0, 2_000) : current.notes,
-      updatedBy: principal.userId,
-    };
-    const now = nowIso();
-    this.database
-      .prepare(
-        `UPDATE projects SET style_profile_json=?, style_profile_version=style_profile_version+1,
-          style_profile_updated_at=?, updated_at=? WHERE id=?`,
-      )
-      .run(JSON.stringify(next), now, now, projectId);
-    this.record(project, principal, 'style-profile.update', projectId, {
-      previousVersion: Number(project.style_profile_version ?? 1), baseStyleProfileId,
+    return this.database.transaction(() => {
+      const project = this.resources.projectRow(projectId);
+      const raw = isRecord(body.values) ? body.values : body;
+      const current = parseJson<Record<string, unknown>>(project.style_profile_json, {});
+      const baseStyleProfileId = typeof raw.baseStyleProfileId === 'string'
+        ? raw.baseStyleProfileId
+        : typeof raw.styleProfileId === 'string'
+          ? raw.styleProfileId
+          : typeof current.baseStyleProfileId === 'string'
+            ? current.baseStyleProfileId
+            : undefined;
+      if (baseStyleProfileId && !BUILTIN_STYLE_MAP.has(baseStyleProfileId)) {
+        throw new BadRequestException('未知的内置风格画像');
+      }
+      const parameterInput = isRecord(raw.parameterValues)
+        ? raw.parameterValues
+        : Object.fromEntries(Object.entries(raw).filter(([key]) => CORE_PARAMETER_IDS.has(key)));
+      const incomingParameterValues = normalizeParameterValues(parameterInput, {
+        partial: true,
+        rejectUnknown: true,
+      }).values;
+      const currentParameterValues = normalizeParameterValues(current.parameterValues, {
+        partial: true,
+        clamp: true,
+      }).values;
+      const parameterValues = { ...currentParameterValues, ...incomingParameterValues };
+      if (typeof raw.preferredTone === 'string' && raw.preferredTone.trim()) {
+        parameterValues.expression_voice = raw.preferredTone.trim().slice(0, 1_000);
+      }
+      const config = isRecord(raw.config)
+        ? safeCoreOverrides(raw.config)
+        : isRecord(current.config)
+          ? current.config
+          : {};
+      const next = {
+        baseStyleProfileId,
+        parameterValues,
+        config,
+        preferredTone: typeof raw.preferredTone === 'string' ? raw.preferredTone.trim().slice(0, 1_000) : current.preferredTone,
+        preferredStructures: raw.preferredStructures === undefined ? stringArray(current.preferredStructures) : stringArray(raw.preferredStructures),
+        avoidedPatterns: raw.avoidedPatterns === undefined ? stringArray(current.avoidedPatterns) : stringArray(raw.avoidedPatterns),
+        examples: raw.examples === undefined ? stringArray(current.examples) : stringArray(raw.examples),
+        notes: typeof raw.notes === 'string' ? raw.notes.slice(0, 2_000) : current.notes,
+        updatedBy: principal.userId,
+      };
+      const now = nowIso();
+      const updated = this.database
+        .prepare(
+          `UPDATE projects SET style_profile_json=?, style_profile_version=style_profile_version+1,
+            style_profile_updated_at=?, updated_at=?
+           WHERE id=? AND deleted_at IS NULL`,
+        )
+        .run(JSON.stringify(next), now, now, projectId);
+      if (Number(updated.changes) !== 1) throw new NotFoundException('项目不存在');
+      this.record(project, principal, 'style-profile.update', projectId, {
+        previousVersion: Number(project.style_profile_version ?? 1), baseStyleProfileId,
+      });
+      return this.styleProfile(projectId);
     });
-    return this.styleProfile(projectId);
   }
 
   resolve(projectId: string, raw: Record<string, unknown>, principal: SessionPrincipal): ConfigResolutionResult {

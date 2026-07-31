@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
+  NotFoundException,
   SetMetadata,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -22,6 +23,35 @@ import {
 } from './models.js';
 import { parseJson } from './utils.js';
 
+function throwSaasRestricted(): never {
+  throw new ForbiddenException({
+    statusCode: 403,
+    code: 'SAAS_RESTRICTED',
+    message: 'SaaS 用户仅可使用极简创作',
+  });
+}
+
+function enforceSaasBoundary(principal: SessionPrincipal, request: Request): void {
+  if (principal.userKind === 'saas' && !isSaasApiAllowed(request.method, request.path)) {
+    throwSaasRestricted();
+  }
+}
+
+function passwordChangeRoute(url: string): boolean {
+  const path = url.split('?', 1)[0];
+  return path === '/api/auth/change-password' || path === '/api/auth/logout';
+}
+
+function enforcePasswordChange(principal: SessionPrincipal, request: Request): void {
+  if (principal.mustChangePassword && !passwordChangeRoute(request.url)) {
+    throw new ForbiddenException({
+      statusCode: 403,
+      code: 'PASSWORD_CHANGE_REQUIRED',
+      message: '首次登录后必须修改密码',
+    });
+  }
+}
+
 @Injectable()
 export class SessionAuthGuard implements CanActivate {
   constructor(@Inject(AuthService) private readonly auth: AuthService) {}
@@ -31,13 +61,7 @@ export class SessionAuthGuard implements CanActivate {
     const request = expressRequest as unknown as AuthenticatedRequest;
     const principal = this.auth.authenticateSession(request.cookies?.ca_session);
     request.principal = principal;
-    if (principal.userKind === 'saas' && !isSaasApiAllowed(expressRequest.method, expressRequest.path)) {
-      throw new ForbiddenException({
-        statusCode: 403,
-        code: 'SAAS_RESTRICTED',
-        message: 'SaaS 用户仅可使用极简创作',
-      });
-    }
+    enforceSaasBoundary(principal, expressRequest);
     return true;
   }
 }
@@ -47,22 +71,14 @@ export class CsrfGuard implements CanActivate {
   constructor(@Inject(AuthService) private readonly auth: AuthService) {}
 
   canActivate(context: ExecutionContext): boolean {
-    const request = context.switchToHttp().getRequest<Request>() as unknown as AuthenticatedRequest;
-    if (['GET', 'HEAD', 'OPTIONS'].includes(request.method)) return true;
+    const expressRequest = context.switchToHttp().getRequest<Request>();
+    const request = expressRequest as unknown as AuthenticatedRequest;
     const principal = request.principal as SessionPrincipal;
-    const header = request.headers['x-csrf-token'];
-    this.auth.validateCsrf(principal, Array.isArray(header) ? header[0] : header);
-    if (
-      principal.mustChangePassword &&
-      !request.url.startsWith('/api/auth/change-password') &&
-      !request.url.startsWith('/api/auth/logout')
-    ) {
-      throw new ForbiddenException({
-        statusCode: 403,
-        code: 'PASSWORD_CHANGE_REQUIRED',
-        message: '首次登录后必须修改密码',
-      });
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
+      const header = request.headers['x-csrf-token'];
+      this.auth.validateCsrf(principal, Array.isArray(header) ? header[0] : header);
     }
+    enforcePasswordChange(principal, expressRequest);
     return true;
   }
 }
@@ -72,7 +88,8 @@ export class ReadOnlyAuthGuard implements CanActivate {
   constructor(@Inject(AuthService) private readonly auth: AuthService) {}
 
   canActivate(context: ExecutionContext): boolean {
-    const request = context.switchToHttp().getRequest<Request>() as unknown as AuthenticatedRequest;
+    const expressRequest = context.switchToHttp().getRequest<Request>();
+    const request = expressRequest as unknown as AuthenticatedRequest;
     const authorization = request.headers.authorization;
     const auth = Array.isArray(authorization) ? authorization[0] : authorization;
     if (auth?.startsWith('Bearer ')) {
@@ -81,7 +98,10 @@ export class ReadOnlyAuthGuard implements CanActivate {
         throw new ForbiddenException('API Key 缺少 api.read 权限');
       }
     } else {
-      request.principal = this.auth.authenticateSession(request.cookies?.ca_session);
+      const principal = this.auth.authenticateSession(request.cookies?.ca_session);
+      request.principal = principal;
+      enforcePasswordChange(principal, expressRequest);
+      enforceSaasBoundary(principal, expressRequest);
     }
     return true;
   }
@@ -118,10 +138,9 @@ export class PermissionGuard implements CanActivate {
     const request = context.switchToHttp().getRequest<Request>() as unknown as AuthenticatedRequest;
     const principal = request.principal;
     if (principal.kind !== 'session') throw new UnauthorizedException();
-    if (principal.systemRole === 'admin') return true;
 
     const body = request.body && typeof request.body === 'object' ? (request.body as Record<string, unknown>) : {};
-    let projectId =
+    const projectId =
       (requirement.projectParam && request.params[requirement.projectParam]) ||
       (requirement.projectBody && String(body[requirement.projectBody] ?? '')) ||
       (requirement.projectQuery && String(request.query[requirement.projectQuery] ?? '')) ||
@@ -132,13 +151,26 @@ export class PermissionGuard implements CanActivate {
       (requirement.workspaceQuery && String(request.query[requirement.workspaceQuery] ?? '')) ||
       undefined;
 
-    if (projectId && !workspaceId) {
+    if (projectId) {
       const project = this.database
-        .prepare('SELECT workspace_id FROM projects WHERE id = ? AND deleted_at IS NULL')
+        .prepare(
+          `SELECT p.workspace_id FROM projects p
+           JOIN workspaces w ON w.id = p.workspace_id
+           WHERE p.id = ? AND p.deleted_at IS NULL AND w.deleted_at IS NULL`,
+        )
         .get(projectId) as { workspace_id: string } | undefined;
-      workspaceId = project?.workspace_id;
+      if (!project) throw new NotFoundException('项目不存在');
+      if (workspaceId && workspaceId !== project.workspace_id) {
+        throw new ForbiddenException('项目与工作区权限作用域不一致');
+      }
+      workspaceId = project.workspace_id;
     }
     if (!workspaceId) throw new ForbiddenException('无法确定权限作用域');
+    const workspace = this.database
+      .prepare('SELECT 1 FROM workspaces WHERE id = ? AND deleted_at IS NULL')
+      .get(workspaceId);
+    if (!workspace) throw new NotFoundException('工作区不存在');
+    if (principal.systemRole === 'admin') return true;
     if (!this.hasPermission(principal.userId, workspaceId, requirement.permission, projectId)) {
       throw new ForbiddenException(`缺少权限：${requirement.permission}`);
     }
@@ -146,15 +178,32 @@ export class PermissionGuard implements CanActivate {
   }
 
   hasPermission(userId: string, workspaceId: string, permission: Permission, projectId?: string): boolean {
+    if (projectId) {
+      const activeProject = this.database
+        .prepare(
+          `SELECT 1 FROM projects p
+           JOIN workspaces w ON w.id = p.workspace_id
+           WHERE p.id = ? AND p.workspace_id = ?
+             AND p.deleted_at IS NULL AND w.deleted_at IS NULL`,
+        )
+        .get(projectId, workspaceId);
+      if (!activeProject) return false;
+    }
     const membership = this.database
       .prepare(
-        `SELECT role, grants_json, denies_json FROM workspace_members
-         WHERE workspace_id = ? AND user_id = ?`,
+        `SELECT wm.role, wm.grants_json, wm.denies_json, w.owner_id
+           FROM workspace_members wm
+           JOIN workspaces w ON w.id = wm.workspace_id
+          WHERE wm.workspace_id = ? AND wm.user_id = ? AND w.deleted_at IS NULL`,
       )
       .get(workspaceId, userId) as
-      | { role: WorkspaceRole; grants_json: string; denies_json: string }
+      | { role: WorkspaceRole; grants_json: string; denies_json: string; owner_id: string }
       | undefined;
     if (!membership) return false;
+    // owner_id is the canonical ownership authority. Permission overrides are
+    // intentionally ignored here so legacy/corrupt ACL rows cannot lock the
+    // workspace owner out of the controls needed to repair them.
+    if (membership.owner_id === userId) return true;
 
     const grants = new Set<Permission>([
       ...ROLE_PERMISSIONS[membership.role],

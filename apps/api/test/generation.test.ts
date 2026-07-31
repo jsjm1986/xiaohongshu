@@ -820,7 +820,7 @@ test('formula registry, settings and deterministic generation form one working f
       providerMode: 'byok',
       provider: 'OpenAI Compatible',
       transport: 'chat_completions',
-      apiBaseUrl: 'http://127.0.0.1:9999/v1',
+      apiBaseUrl: 'https://api.example.com/v1',
       model: 'local-model',
       apiKey: keyValue,
     }),

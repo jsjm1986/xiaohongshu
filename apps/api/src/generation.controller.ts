@@ -18,10 +18,11 @@ export class GenerationController {
   @Get()
   list(@Req() request: Request, @Query('projectId') projectId?: string) {
     if (projectId) this.assert(request, projectId, 'project.read');
-    return this.generations.list(projectId).filter((job) => {
+    const items = this.generations.list(projectId).filter((job) => {
       if (projectId) return true;
       try { this.assert(request, String(job.projectId), 'project.read'); return true; } catch { return false; }
     });
+    return { items, total: items.length };
   }
 
   @Get(':id')

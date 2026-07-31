@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
-import { Star, Archive, Trash2, X, Lightbulb, SearchX } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Star, Archive, Trash2, X, Lightbulb, SearchX, RefreshCw, TriangleAlert } from 'lucide-react';
 import { Button, Field, Modal, useToast } from '../Ui';
 import { api } from '../../lib/api';
+import { errorMessage } from '../../lib/errors';
 import { filterOpportunities, type OpportunityFilter } from '../../lib/quick-channel-state';
 import { topicCardFields } from '../../lib/topic-card';
 import type { ContentPreset, Project, PromptTemplate, TopicOpportunity } from '../../types';
@@ -37,30 +38,70 @@ export function TopicTab({ project, opportunities, opportunityId, busy, setBusy,
   const [showGuidance, setShowGuidance] = useState(false);
   const [filter, setFilter] = useState<OpportunityFilter>('all');
   const [templates, setTemplates] = useState<PromptTemplate[]>([]);
+  const [topicLoading, setTopicLoading] = useState(false);
+  const [topicLoadError, setTopicLoadError] = useState<string | null>(null);
+  const [templateLoading, setTemplateLoading] = useState(false);
+  const [templateLoadError, setTemplateLoadError] = useState<string | null>(null);
+  const [topicLoadAttempt, setTopicLoadAttempt] = useState(0);
+  const [templateLoadAttempt, setTemplateLoadAttempt] = useState(0);
   const [confirmDeleteOpp, setConfirmDeleteOpp] = useState<TopicOpportunity | null>(null);
   const [showSaveTpl, setShowSaveTpl] = useState(false);
   const [tplLabel, setTplLabel] = useState('');
+  const topicLoadSequence = useRef(0);
+  const templateLoadSequence = useRef(0);
+  const activeProjectId = useRef(project?.id);
+  activeProjectId.current = project?.id;
 
   const projectId = project?.id;
   useEffect(() => {
-    if (!projectId) { setTemplates([]); return; }
-    let cancelled = false;
+    const sequence = ++templateLoadSequence.current;
+    setTemplates([]);
+    setTemplateLoadError(null);
+    if (!projectId) { setTemplateLoading(false); return; }
+    setTemplateLoading(true);
     api.promptTemplates.list(projectId)
-      .then((list) => { if (!cancelled) setTemplates(list); })
-      .catch(() => { if (!cancelled) setTemplates([]); });
-    return () => { cancelled = true; };
-  }, [projectId]);
+      .then((list) => {
+        if (sequence === templateLoadSequence.current && activeProjectId.current === projectId) setTemplates(list);
+      })
+      .catch((error) => {
+        if (sequence === templateLoadSequence.current && activeProjectId.current === projectId) {
+          setTemplateLoadError(errorMessage(error, '方向模板读取失败'));
+        }
+      })
+      .finally(() => {
+        if (sequence === templateLoadSequence.current && activeProjectId.current === projectId) setTemplateLoading(false);
+      });
+    return () => { templateLoadSequence.current += 1; };
+  }, [projectId, templateLoadAttempt]);
 
-  // 自补足:老项目进工作区时选题池可能未加载,挂载时若为空且非 busy 拉一次(静默)
+  // 自补足：老项目进入工作区时共享选题池可能尚未加载。失败必须保留为
+  // 明确错误，不能把网络故障展示成“还没有选题”。
   useEffect(() => {
-    if (!projectId || opportunities.length > 0 || busy) return;
-    let cancelled = false;
+    const sequence = ++topicLoadSequence.current;
+    setTopicLoadError(null);
+    if (!projectId) { setTopicLoading(false); return; }
+    if (opportunities.length > 0 && topicLoadAttempt === 0) {
+      setTopicLoading(false);
+      return;
+    }
+    setTopicLoading(true);
     api.opportunities.list(projectId)
-      .then((r) => { if (!cancelled) setOpportunities(r.items); })
-      .catch(() => { /* 静默回落:保持空态 */ });
-    return () => { cancelled = true; };
+      .then((result) => {
+        if (sequence === topicLoadSequence.current && activeProjectId.current === projectId) {
+          setOpportunities(result.items);
+        }
+      })
+      .catch((error) => {
+        if (sequence === topicLoadSequence.current && activeProjectId.current === projectId) {
+          setTopicLoadError(errorMessage(error, '选题池读取失败'));
+        }
+      })
+      .finally(() => {
+        if (sequence === topicLoadSequence.current && activeProjectId.current === projectId) setTopicLoading(false);
+      });
+    return () => { topicLoadSequence.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
+  }, [projectId, topicLoadAttempt]);
 
   const visible = filterOpportunities(opportunities, filter);
 
@@ -76,12 +117,18 @@ export function TopicTab({ project, opportunities, opportunityId, busy, setBusy,
 
   const refresh = async () => {
     if (!project) return;
+    const targetProjectId = project.id;
     setBusy(true);
     try {
-      const opps = await api.opportunities.refresh(project.id, guidance.trim() || undefined);
+      const opps = await api.opportunities.refresh(targetProjectId, guidance.trim() || undefined);
+      if (activeProjectId.current !== targetProjectId) return;
       onAnalyzed(opps.items);
+      setTopicLoadError(null);
+      setGuidance('');
       setBusy(false);
-    } catch (e) { fail(e, '换一批失败'); }
+    } catch (e) {
+      if (activeProjectId.current === targetProjectId) fail(e, '换一批失败');
+    }
   };
 
   const replaceOpp = (updated: TopicOpportunity) =>
@@ -125,15 +172,20 @@ export function TopicTab({ project, opportunities, opportunityId, busy, setBusy,
 
   const saveTemplate = async () => {
     if (!project || !tplLabel.trim() || !guidance.trim()) return;
+    const targetProjectId = project.id;
     setBusy(true);
     try {
-      await api.promptTemplates.create(project.id, tplLabel.trim(), guidance.trim());
-      setTemplates(await api.promptTemplates.list(project.id));
+      const created = await api.promptTemplates.create(targetProjectId, tplLabel.trim(), guidance.trim());
+      if (activeProjectId.current !== targetProjectId) return;
+      setTemplates((current) => [created, ...current.filter((template) => template.id !== created.id)]);
+      setTemplateLoadError(null);
       setTplLabel('');
       setShowSaveTpl(false);
       toast.push('已存为模板');
       setBusy(false);
-    } catch (e) { fail(e, '保存模板失败'); }
+    } catch (e) {
+      if (activeProjectId.current === targetProjectId) fail(e, '保存模板失败');
+    }
   };
 
   const removeTemplate = async (id: string) => {
@@ -149,6 +201,13 @@ export function TopicTab({ project, opportunities, opportunityId, busy, setBusy,
 
   return (
     <div className="qc-step">
+      {topicLoadError && (
+        <div className="inline-load-error" role="alert">
+          <TriangleAlert size={15} />
+          <span><strong>选题池读取失败</strong><small>{topicLoadError}{opportunities.length > 0 ? '。当前显示的是上次已加载数据。' : ''}</small></span>
+          <Button variant="ghost" icon={<RefreshCw size={14} />} loading={topicLoading} onClick={() => setTopicLoadAttempt((value) => value + 1)}>重试</Button>
+        </div>
+      )}
       <div className="chip-group qc-filter-chips">
         {FILTER_CHIPS.map((c) => (
           <button key={c.key} type="button" className={`chip${filter === c.key ? ' chip--active' : ''}`} onClick={() => setFilter(c.key)}>{c.label}</button>
@@ -228,7 +287,8 @@ export function TopicTab({ project, opportunities, opportunityId, busy, setBusy,
           </div>
           );
         })}
-        {visible.length === 0 && (
+        {topicLoading && opportunities.length === 0 && <div className="qc-empty" role="status">正在读取选题池…</div>}
+        {!topicLoading && !topicLoadError && visible.length === 0 && (
           opportunities.length === 0 ? (
             <div className="qc-empty">
               <span className="qc-empty__icon"><Lightbulb size={18} /></span>
@@ -257,6 +317,14 @@ export function TopicTab({ project, opportunities, opportunityId, busy, setBusy,
           <Field label="引导词（可留空）">
             <textarea value={guidance} rows={2} maxLength={600} placeholder="例如：多一些针对术后恢复期的选题" onChange={(e) => setGuidance(e.target.value)} />
           </Field>
+          {templateLoadError && (
+            <div className="inline-load-error" role="alert">
+              <TriangleAlert size={14} />
+              <span><strong>方向模板读取失败</strong><small>{templateLoadError}</small></span>
+              <Button variant="ghost" loading={templateLoading} onClick={() => setTemplateLoadAttempt((value) => value + 1)}>重试</Button>
+            </div>
+          )}
+          {templateLoading && !templateLoadError && <small className="qc-hint" role="status">正在读取方向模板…</small>}
           {!showSaveTpl ? (
             <div className="qc-project-row">
               <Button variant="ghost" disabled={busy || !guidance.trim()} onClick={() => setShowSaveTpl(true)}>存为模板</Button>

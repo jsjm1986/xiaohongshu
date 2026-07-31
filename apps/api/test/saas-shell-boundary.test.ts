@@ -123,6 +123,12 @@ test('专家版接口一律 403 且带 SAAS_RESTRICTED', async () => {
     '/api/admin/users',
     '/api/admin/registrations',
     '/api/audit',
+    // V1 使用另一个 guard；此前 SaaS 会话可从真实 /v1 路径绕过 /api 白名单。
+    '/v1/projects',
+    // /api/projects 同时挂着基础版与管理端点，不能再按整个前缀放行。
+    '/api/projects/any-project/acl',
+    '/api/projects/any-project/style-profile',
+    '/api/projects/any-project/coverage',
   ];
   for (const path of expertPaths) {
     const { response, body } = await request(path, {}, tenantCookie, '');
@@ -131,7 +137,7 @@ test('专家版接口一律 403 且带 SAAS_RESTRICTED', async () => {
   }
 });
 
-test('research 子路径即使挂在放行前缀下也拒绝', async () => {
+test('research 子路径即使挂在项目控制器下也拒绝', async () => {
   // 刚开通的租户还没有项目,所以自己建一个(/api/projects 对 saas 放行)。
   const workspaces = await request('/api/workspaces', {}, tenantCookie, '');
   const workspaceId = workspaces.body[0]?.id as string;
@@ -149,7 +155,7 @@ test('research 子路径即使挂在放行前缀下也拒绝', async () => {
   assert.ok([200, 201].includes(created.response.status), `建项目失败 ${created.response.status}: ${JSON.stringify(created.body)}`);
   const projectId = created.body.id as string;
 
-  // /api/projects 整个前缀是放行的,但 research 子路径被显式排除(禁止优先)
+  // 白名单只列基础版真实路由，research 不在其中。
   const { response, body } = await request(`/api/projects/${projectId}/research/claims`, {}, tenantCookie, '');
   assert.equal(response.status, 403, `research 子路径必须拦下,实际 ${response.status}`);
   assert.equal(body.code, 'SAAS_RESTRICTED');

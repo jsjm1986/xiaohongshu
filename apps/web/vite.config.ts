@@ -14,6 +14,7 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    sourcemap: true,
+    // Production source maps expose application source and internal contracts.
+    sourcemap: false,
   },
 });

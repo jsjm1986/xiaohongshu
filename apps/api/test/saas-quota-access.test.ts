@@ -22,6 +22,7 @@ let saasCookie = '';
 const PASSWORD = 'SaasQuota-bootstrap-123!';
 const ADMIN_NEW_PASSWORD = 'SaasQuota-rotated-456!';
 const SAAS_PASSWORD = 'SaasUser-pass-12345!';
+const SAAS_NEW_PASSWORD = 'SaasUser-rotated-456!';
 
 async function request(path: string, options: RequestInit = {}, cookie = adminCookie, csrf = adminCsrf) {
   const headers = new Headers(options.headers);
@@ -79,6 +80,11 @@ before(async () => {
   }, '', '');
   assert.equal(saasLogin.response.status, 201, `saas 登录失败: ${JSON.stringify(saasLogin.body)}`);
   saasCookie = saasLogin.response.headers.get('set-cookie')!.split(';', 1)[0]!;
+  const saasChanged = await request('/api/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ currentPassword: SAAS_PASSWORD, newPassword: SAAS_NEW_PASSWORD }),
+  }, saasCookie, saasLogin.body.csrfToken);
+  assert.equal(saasChanged.response.status, 201, `saas 改密失败: ${JSON.stringify(saasChanged.body)}`);
 });
 
 after(async () => {

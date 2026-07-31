@@ -11,7 +11,7 @@ import { DatabaseService } from '../src/database.service.js';
  * GET /api/generations/:id/reader 挂在请求链上的样子。
  *
  * generation-reader-view.test.ts 已经锁死纯函数的字段集,这里证明三件事:
- * 路由真的通、SaaS 会话真的放行(白名单是前缀 /api/generations,不用改但要有证据)、
+ * 路由真的通、SaaS 会话真的被精确的 method + route-shape 白名单放行、
  * 越权项目照样 403。
  */
 
@@ -27,6 +27,7 @@ let jobId = '';
 const PASSWORD = 'ReaderRoute-bootstrap-123!';
 const ADMIN_NEW_PASSWORD = 'ReaderRoute-rotated-456!';
 const SAAS_PASSWORD = 'ReaderRoute-saas-12345!';
+const SAAS_NEW_PASSWORD = 'ReaderRoute-saas-rotated-456!';
 
 async function request(path: string, options: RequestInit = {}, cookie = adminCookie, csrf = adminCsrf) {
   const headers = new Headers(options.headers);
@@ -138,6 +139,11 @@ before(async () => {
   }, '', '');
   assert.equal(saasLogin.response.status, 201, `saas 登录失败: ${JSON.stringify(saasLogin.body)}`);
   saasCookie = saasLogin.response.headers.get('set-cookie')!.split(';', 1)[0]!;
+  const saasChanged = await request('/api/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ currentPassword: SAAS_PASSWORD, newPassword: SAAS_NEW_PASSWORD }),
+  }, saasCookie, saasLogin.body.csrfToken);
+  assert.equal(saasChanged.response.status, 201, `saas 改密失败: ${JSON.stringify(saasChanged.body)}`);
 });
 
 after(async () => {

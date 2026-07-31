@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { BadRequestException, ConflictException, HttpException, HttpStatus, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { verify } from '@node-rs/argon2';
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { AuditService } from './audit.service.js';
 import { AuthService } from './auth.service.js';
 import { DatabaseService } from './database.service.js';
+import { RateLimitService } from './rate-limit.service.js';
 import { nowIso, requireString } from './utils.js';
 
 const PHONE_RE = /^1[3-9]\d{9}$/;
@@ -24,29 +26,15 @@ export class RegistrationService {
     @Inject(DatabaseService) private readonly database: DatabaseService,
     @Inject(AuthService) private readonly auth: AuthService,
     @Inject(AuditService) private readonly audit: AuditService,
+    @Inject(RateLimitService) private readonly rateLimits: RateLimitService,
   ) {}
 
-  private readonly submitFailures = new Map<string, { count: number; resetAt: number }>();
-
-  assertSubmitAllowed(key: string): void {
-    const current = this.submitFailures.get(key);
-    if (!current) return;
-    if (current.resetAt <= Date.now()) { this.submitFailures.delete(key); return; }
-    if (current.count >= 5) throw new HttpException('申请过于频繁,请稍后再试', HttpStatus.TOO_MANY_REQUESTS);
-  }
-
-  recordSubmit(key: string): void {
-    const now = Date.now();
-    const current = this.submitFailures.get(key);
-    if (this.submitFailures.size > 10_000) {
-      for (const [candidate, value] of this.submitFailures) {
-        if (value.resetAt <= now) this.submitFailures.delete(candidate);
-      }
-      if (this.submitFailures.size > 10_000) this.submitFailures.delete(this.submitFailures.keys().next().value as string);
-    }
-    this.submitFailures.set(key, current && current.resetAt > now
-      ? { count: current.count + 1, resetAt: current.resetAt }
-      : { count: 1, resetAt: now + 15 * 60_000 });
+  consumeSubmitAttempt(key: string): void {
+    this.rateLimits.consume('registration', key, {
+      maxAttempts: 5,
+      windowMs: 15 * 60_000,
+      message: '申请过于频繁,请稍后再试',
+    });
   }
 
   async submit(input: { username: unknown; password: unknown; organizationName: unknown; phone: unknown }): Promise<{ ok: true }> {
@@ -111,9 +99,14 @@ export class RegistrationService {
       });
       const now = nowIso();
       const reviewedBy = this.resolveReviewer(reviewerId);
-      this.database
-        .prepare("UPDATE registration_requests SET status = 'approved', created_user_id = ?, reviewed_by = ?, reviewed_at = ?, updated_at = ? WHERE id = ?")
+      const approved = this.database
+        .prepare(
+          `UPDATE registration_requests
+           SET status = 'approved', created_user_id = ?, reviewed_by = ?, reviewed_at = ?, updated_at = ?
+           WHERE id = ? AND status = 'pending'`,
+        )
         .run(userId, reviewedBy, now, now, id);
+      if (Number(approved.changes) !== 1) throw new ConflictException('该申请已处理');
       this.audit.record({ workspaceId, userId: reviewerId, action: 'registration.approve', entityType: 'registration', entityId: id, details: { username: req.username } });
       return { userId, workspaceId };
     });
@@ -121,22 +114,33 @@ export class RegistrationService {
 
   reject(id: string, reviewerId: string, reason: string): void {
     const note = requireString(reason, '拒绝原因', { max: 500 });
-    const req = this.database.prepare('SELECT status FROM registration_requests WHERE id = ?').get(id) as { status: string } | undefined;
-    if (!req) throw new NotFoundException('申请不存在');
-    if (req.status !== 'pending') throw new ConflictException('该申请已处理');
-    const now = nowIso();
-    const reviewedBy = this.resolveReviewer(reviewerId);
-    this.database
-      .prepare("UPDATE registration_requests SET status = 'rejected', review_note = ?, reviewed_by = ?, reviewed_at = ?, updated_at = ? WHERE id = ?")
-      .run(note, reviewedBy, now, now, id);
-    this.audit.record({ userId: reviewerId, action: 'registration.reject', entityType: 'registration', entityId: id, details: { reason: note } });
+    this.database.transaction(() => {
+      const req = this.database.prepare('SELECT status FROM registration_requests WHERE id = ?').get(id) as { status: string } | undefined;
+      if (!req) throw new NotFoundException('申请不存在');
+      if (req.status !== 'pending') throw new ConflictException('该申请已处理');
+      const now = nowIso();
+      const reviewedBy = this.resolveReviewer(reviewerId);
+      const rejected = this.database
+        .prepare(
+          `UPDATE registration_requests
+           SET status = 'rejected', review_note = ?, reviewed_by = ?, reviewed_at = ?, updated_at = ?
+           WHERE id = ? AND status = 'pending'`,
+        )
+        .run(note, reviewedBy, now, now, id);
+      if (Number(rejected.changes) !== 1) throw new ConflictException('该申请已处理');
+      this.audit.record({ userId: reviewerId, action: 'registration.reject', entityType: 'registration', entityId: id, details: { reason: note } });
+    });
   }
 
-  loginHintFor(username: string): { status: 'pending' } | { status: 'rejected'; note: string } | null {
+  async loginHintFor(
+    username: string,
+    password: unknown,
+  ): Promise<{ status: 'pending' } | { status: 'rejected'; note: string } | null> {
+    if (typeof password !== 'string' || password.length === 0 || password.length > 256) return null;
     const row = this.database
-      .prepare("SELECT status, review_note FROM registration_requests WHERE username = ? COLLATE NOCASE ORDER BY created_at DESC LIMIT 1")
-      .get(username) as { status: string; review_note: string | null } | undefined;
-    if (!row) return null;
+      .prepare("SELECT status, review_note, password_hash FROM registration_requests WHERE username = ? COLLATE NOCASE ORDER BY created_at DESC LIMIT 1")
+      .get(username) as { status: string; review_note: string | null; password_hash: string } | undefined;
+    if (!row || !(await verify(row.password_hash, password))) return null;
     if (row.status === 'pending') return { status: 'pending' };
     if (row.status === 'rejected') return { status: 'rejected', note: row.review_note ?? '' };
     return null;

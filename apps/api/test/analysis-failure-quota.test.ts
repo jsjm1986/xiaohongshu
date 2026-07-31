@@ -17,7 +17,7 @@ import { SettingsService } from '../src/settings.service.js';
  *
  * 这里锁两件事:
  *  1. 额度退还是真的会把计数减回去,且有 0 下限保护(并发重复退不能打成负数)
- *  2. BYOK 工作区不参与平台配额,退还对它是空操作
+ *  2. BYOK 工作区不扣平台额度；但平台扣款后切到 BYOK 的历史账仍能退还
  *
  * 报错话术的分类在 analysis-failure-message.test.ts 里单独锁(纯函数,不需要起服务)。
  */
@@ -80,11 +80,24 @@ test('退还有 0 下限,不会把计数打成负数', () => {
   assert.equal(usedCount(ws), 0);
 });
 
-test('BYOK 工作区不参与平台配额,退还是空操作', () => {
+test('BYOK 工作区不参与平台配额,消费是空操作', () => {
   const settings = app.get(SettingsService);
   const ws = setQuota('byok', 100, 7);
-  settings.refundPlatformQuota(ws);
+  settings.consumePlatformQuota(ws);
   assert.equal(usedCount(ws), 7, 'BYOK 不该被改动');
+});
+
+test('平台扣款后切到 BYOK,仍能退还这笔历史平台额度', () => {
+  const settings = app.get(SettingsService);
+  const ws = setQuota('platform', 100, 7);
+  settings.consumePlatformQuota(ws);
+  assert.equal(usedCount(ws), 8);
+
+  app.get(DatabaseService)
+    .prepare("UPDATE workspace_settings SET provider_mode='byok' WHERE workspace_id=?")
+    .run(ws);
+  settings.refundPlatformQuota(ws);
+  assert.equal(usedCount(ws), 7, '退款必须按已发生的扣款,不能按结算时的模式跳过');
 });
 
 // 额度用尽时 consume 会抛 403,此时**没有扣成功**,不该再退——否则用户会白得一次

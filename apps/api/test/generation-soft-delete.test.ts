@@ -7,6 +7,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { createApplication } from '../src/app.js';
 import { DatabaseService } from '../src/database.service.js';
 import { GenerationService } from '../src/generation.service.js';
+import { SettingsService } from '../src/settings.service.js';
 
 /**
  * 产出的软删除与撤销。
@@ -85,7 +86,7 @@ test('DELETE 把任务从列表里摘掉,其余任务不受影响', async () => 
   seedJob('d-gone', 'completed');
 
   const before = await request(`/api/generations?projectId=${projectId}`);
-  const idsBefore = (before.body.items ?? before.body).map((j: any) => j.id);
+  const idsBefore = before.body.items.map((j: any) => j.id);
   assert.ok(idsBefore.includes('d-gone'));
 
   const del = await request('/api/generations/d-gone', { method: 'DELETE' });
@@ -93,7 +94,7 @@ test('DELETE 把任务从列表里摘掉,其余任务不受影响', async () => 
   assert.equal(del.body.alreadyDeleted, false);
 
   const after = await request(`/api/generations?projectId=${projectId}`);
-  const idsAfter = (after.body.items ?? after.body).map((j: any) => j.id);
+  const idsAfter = after.body.items.map((j: any) => j.id);
   assert.ok(!idsAfter.includes('d-gone'), '已删的不该出现在列表里');
   assert.ok(idsAfter.includes('d-keep'), '别的任务不受影响');
 });
@@ -125,7 +126,7 @@ test('restore 撤销删除,任务回到列表', async () => {
   assert.equal(res.body.alreadyActive, false);
 
   const list = await request(`/api/generations?projectId=${projectId}`);
-  const ids = (list.body.items ?? list.body).map((j: any) => j.id);
+  const ids = list.body.items.map((j: any) => j.id);
   assert.ok(ids.includes('d-gone'), '恢复后应回到列表');
 });
 
@@ -155,21 +156,137 @@ test('删除排队中的任务后它不再排队,也不会被领取去跑', asyn
   await request('/api/generations/d-queued', { method: 'DELETE' });
 
   assert.equal(service.queuePosition('d-queued'), undefined, '已删任务不该还有排队位次');
-  const claimable = app.get(DatabaseService)
-    .prepare("SELECT id FROM generation_jobs WHERE status='queued' AND deleted_at IS NULL")
-    .all() as Array<{ id: string }>;
-  assert.ok(!claimable.some((row) => row.id === 'd-queued'), '已删任务不该出现在可领取集合里');
+  const row = app.get(DatabaseService)
+    .prepare(
+      `SELECT status, progress, error, completed_at, claimed_by, claimed_at, heartbeat_at
+         FROM generation_jobs WHERE id=?`,
+    )
+    .get('d-queued') as Record<string, unknown>;
+  assert.equal(row.status, 'failed', '删除必须把排队任务结为终态,不能留下隐藏的 queued');
+  assert.equal(row.progress, 100);
+  assert.match(String(row.error), /生成任务已删除/u);
+  assert.ok(row.completed_at);
+  assert.equal(row.claimed_by, null);
+  assert.equal(row.claimed_at, null);
+  assert.equal(row.heartbeat_at, null);
 });
 
-// 撤销一个排队任务不重新入队:用户删它往往正是为了让它别跑(省额度、改主意)
+// 撤销只恢复可见性:删除时旧任务已经结为 failed,不会重新进入 DB 队列。
 test('恢复排队任务不会自动开跑:用户删它往往正是为了让它别跑', async () => {
   const db = app.get(DatabaseService);
   await request('/api/generations/d-queued/restore', { method: 'POST' });
 
-  // 恢复后状态不该被改成 queued 之外的东西,更不该被领取(claimed_by 仍为空)。
+  // 恢复后保持失败终态,真正重试必须显式创建一条新任务。
   const row = db.prepare('SELECT status, claimed_by FROM generation_jobs WHERE id=?')
     .get('d-queued') as { status: string; claimed_by: string | null };
+  assert.equal(row.status, 'failed');
   assert.equal(row.claimed_by, null, '恢复不该顺带领取开跑');
+});
+
+test('删除运行中的生成任务会清租约并拒绝旧执行者迟到产物', async () => {
+  const db = app.get(DatabaseService);
+  seedJob('d-running', 'running');
+  const heartbeat = new Date().toISOString();
+  db.prepare(
+    `UPDATE generation_jobs
+        SET progress=45, claimed_by='old-generation-worker', claimed_at=?, heartbeat_at=?
+      WHERE id='d-running'`,
+  ).run(heartbeat, heartbeat);
+
+  const removed = await request('/api/generations/d-running', { method: 'DELETE' });
+  assert.equal(removed.response.status, 200, JSON.stringify(removed.body));
+  const row = db.prepare(
+    `SELECT status, progress, error, completed_at, claimed_by, claimed_at, heartbeat_at
+       FROM generation_jobs WHERE id='d-running'`,
+  ).get() as Record<string, unknown>;
+  assert.equal(row.status, 'failed');
+  assert.equal(row.progress, 100);
+  assert.match(String(row.error), /生成任务已删除/u);
+  assert.ok(row.completed_at);
+  assert.equal(row.claimed_by, null);
+  assert.equal(row.claimed_at, null);
+  assert.equal(row.heartbeat_at, null);
+
+  assert.throws(() => db.transaction(() => {
+    db.prepare(
+      `INSERT INTO content_packages
+         (id, job_id, project_id, candidate_index, content_json, created_at, updated_at)
+       VALUES ('stale-generation-package', 'd-running', ?, 0, '{}', ?, ?)`,
+    ).run(projectId, heartbeat, heartbeat);
+    const completed = db.prepare(
+      `UPDATE generation_jobs SET status='completed'
+        WHERE id='d-running' AND status='running' AND claimed_by='old-generation-worker'`,
+    ).run();
+    if (completed.changes !== 1) throw new Error('generation claim lost');
+  }), /claim lost/u);
+  assert.equal(
+    (db.prepare("SELECT COUNT(*) AS value FROM content_packages WHERE id='stale-generation-package'")
+      .get() as { value: number }).value,
+    0,
+  );
+});
+
+test('删除有活跃改稿的产出会退款一次、终止改稿并拒绝旧执行者迟到产物', async () => {
+  const db = app.get(DatabaseService);
+  const admin = db.prepare("SELECT id FROM users WHERE username='admin'").get() as { id: string };
+  const project = db.prepare('SELECT workspace_id FROM projects WHERE id=?').get(projectId) as { workspace_id: string };
+  app.get(SettingsService).ensure(project.workspace_id, admin.id);
+  db.prepare('UPDATE workspace_settings SET monthly_quota=100, quota_used=7 WHERE workspace_id=?')
+    .run(project.workspace_id);
+  seedJob('d-revision-parent', 'completed');
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO revision_tasks
+       (id, job_id, package_id, candidate_id, instruction, status, progress, attempt_count,
+        created_by, created_at, updated_at, claimed_by, heartbeat_at, quota_consumed_count)
+     VALUES ('d-revision-active', 'd-revision-parent', 'old-package', 'candidate', '删除边界',
+             'running', 55, 1, ?, ?, ?, 'old-revision-worker', ?, 2)`,
+  ).run(admin.id, now, now, now);
+
+  const removed = await request('/api/generations/d-revision-parent', { method: 'DELETE' });
+  assert.equal(removed.response.status, 200, JSON.stringify(removed.body));
+  const quota = db.prepare('SELECT quota_used FROM workspace_settings WHERE workspace_id=?')
+    .get(project.workspace_id) as { quota_used: number };
+  assert.equal(quota.quota_used, 5, '两次未交付的改稿扣款都应退还');
+  const revision = db.prepare(
+    `SELECT status, progress, error, completed_at, claimed_by, heartbeat_at, quota_consumed_count
+       FROM revision_tasks WHERE id='d-revision-active'`,
+  ).get() as Record<string, unknown>;
+  assert.equal(revision.status, 'failed');
+  assert.equal(revision.progress, 100);
+  assert.match(String(revision.error), /生成任务已删除/u);
+  assert.ok(revision.completed_at);
+  assert.equal(revision.claimed_by, null);
+  assert.equal(revision.heartbeat_at, null);
+  assert.equal(revision.quota_consumed_count, 0);
+
+  const repeated = await request('/api/generations/d-revision-parent', { method: 'DELETE' });
+  assert.equal(repeated.response.status, 200);
+  assert.equal(repeated.body.alreadyDeleted, true);
+  assert.equal(
+    (db.prepare('SELECT quota_used FROM workspace_settings WHERE workspace_id=?')
+      .get(project.workspace_id) as { quota_used: number }).quota_used,
+    5,
+    '幂等删除不能重复退款',
+  );
+
+  assert.throws(() => db.transaction(() => {
+    db.prepare(
+      `INSERT INTO content_packages
+         (id, job_id, project_id, candidate_index, content_json, created_at, updated_at)
+       VALUES ('stale-revision-package', 'd-revision-parent', ?, 0, '{}', ?, ?)`,
+    ).run(projectId, now, now);
+    const completed = db.prepare(
+      `UPDATE revision_tasks SET status='completed', result_package_id='stale-revision-package'
+        WHERE id='d-revision-active' AND status='running' AND claimed_by='old-revision-worker'`,
+    ).run();
+    if (completed.changes !== 1) throw new Error('revision claim lost');
+  }), /claim lost/u);
+  assert.equal(
+    (db.prepare("SELECT COUNT(*) AS value FROM content_packages WHERE id='stale-revision-package'")
+      .get() as { value: number }).value,
+    0,
+  );
 });
 
 test('删除不存在的任务返回 404', async () => {

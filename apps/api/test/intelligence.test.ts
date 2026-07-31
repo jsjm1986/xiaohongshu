@@ -176,6 +176,105 @@ test('migrates a v3 database to the current schema with source-image boundaries'
   }
 });
 
+test('generation coverage rejects inconsistent references and remains idempotent', async () => {
+  const { app, request, user } = await startApp();
+  const database = app.get(DatabaseService);
+  const intelligence = app.get(IntelligenceService);
+  const projectA = await request('/api/projects', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Coverage project A' }),
+  });
+  const projectB = await request('/api/projects', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Coverage project B' }),
+  });
+  assert.equal(projectA.response.status, 201, JSON.stringify(projectA.body));
+  assert.equal(projectB.response.status, 201, JSON.stringify(projectB.body));
+
+  const projectAId = String(projectA.body.id);
+  const projectBId = String(projectB.body.id);
+  const userId = String(user.id);
+  const jobA = randomUUID();
+  const otherJobA = randomUUID();
+  const jobB = randomUUID();
+  const packageA = randomUUID();
+  const otherJobPackageA = randomUUID();
+  const packageB = randomUUID();
+  const mismatchedProjectPackage = randomUUID();
+  const opportunityA = randomUUID();
+  const opportunityB = randomUUID();
+
+  const insertJob = database.prepare(
+    `INSERT INTO generation_jobs
+       (id, project_id, status, config_json, seed, created_by, created_at, updated_at)
+     VALUES (?, ?, 'completed', '{}', 'coverage-test', ?, datetime('now'), datetime('now'))`,
+  );
+  insertJob.run(jobA, projectAId, userId);
+  insertJob.run(otherJobA, projectAId, userId);
+  insertJob.run(jobB, projectBId, userId);
+
+  const insertPackage = database.prepare(
+    `INSERT INTO content_packages
+       (id, job_id, project_id, candidate_index, content_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, '{}', datetime('now'), datetime('now'))`,
+  );
+  insertPackage.run(packageA, jobA, projectAId, 0);
+  insertPackage.run(otherJobPackageA, otherJobA, projectAId, 0);
+  insertPackage.run(packageB, jobB, projectBId, 0);
+  // The schema has independent FKs for job and project, so this logically corrupt pair is representable.
+  insertPackage.run(mismatchedProjectPackage, jobA, projectBId, 1);
+
+  const insertOpportunity = database.prepare(
+    `INSERT INTO topic_opportunities
+       (id, project_id, title, created_by, created_at, updated_at)
+     VALUES (?, ?, 'coverage opportunity', ?, datetime('now'), datetime('now'))`,
+  );
+  insertOpportunity.run(opportunityA, projectAId, userId);
+  insertOpportunity.run(opportunityB, projectBId, userId);
+
+  const record = (overrides: Partial<Parameters<IntelligenceService['recordGenerationCoverage']>[0]> = {}) =>
+    intelligence.recordGenerationCoverage({
+      projectId: projectAId,
+      jobId: jobA,
+      packageId: packageA,
+      opportunityId: opportunityA,
+      candidateIndex: 0,
+      signature: { marker: 'first' },
+      fallback: { fallback: true },
+      createdBy: userId,
+      ...overrides,
+    });
+  const rejected = (overrides: Partial<Parameters<IntelligenceService['recordGenerationCoverage']>[0]>) => {
+    assert.throws(
+      () => record(overrides),
+      /Generation coverage references must belong to the requested project and job./u,
+    );
+  };
+
+  rejected({ jobId: jobB, packageId: packageB });
+  rejected({ packageId: packageB });
+  rejected({ packageId: otherJobPackageA });
+  rejected({ packageId: mismatchedProjectPackage });
+  rejected({ opportunityId: opportunityB });
+  assert.equal(Number((database.prepare(
+    'SELECT COUNT(*) AS count FROM coverage_records',
+  ).get() as { count: number }).count), 0);
+
+  record({ signature: { marker: 'first', stable: true } });
+  record({ signature: { marker: 'second', shouldNotOverwrite: true } });
+  const rows = database.prepare(
+    `SELECT project_id, generation_job_id, content_package_id, opportunity_id, signature_json
+       FROM coverage_records
+      WHERE project_id=? AND generation_job_id=? AND content_package_id=?`,
+  ).all(projectAId, jobA, packageA) as Array<Record<string, unknown>>;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.project_id, projectAId);
+  assert.equal(rows[0]!.generation_job_id, jobA);
+  assert.equal(rows[0]!.content_package_id, packageA);
+  assert.equal(rows[0]!.opportunity_id, opportunityA);
+  assert.deepEqual(JSON.parse(String(rows[0]!.signature_json)), { marker: 'first', stable: true });
+});
+
 test('derives both exact official F30 parents while format or description customizations remain fail-closed', async () => {
   const { app, request, user } = await startApp();
   const database = app.get(DatabaseService);
@@ -1589,4 +1688,9 @@ test('project analysis is cached and failed retries do not create intelligence f
   const tasks = await request(`/api/projects/${project.body.id}/intelligence/analysis-tasks`);
   assert.equal(tasks.body[0].status, 'failed');
   assert.equal(tasks.body[0].attemptCount, 3);
+  assert.doesNotMatch(String(tasks.body[0].error), /HTTP 500|temporary failure|127\.0\.0\.1/u);
+  const storedTask = app.get(DatabaseService).prepare(
+    'SELECT error FROM analysis_tasks WHERE id=?',
+  ).get(tasks.body[0].id) as { error: string };
+  assert.doesNotMatch(storedTask.error, /HTTP 500|temporary failure|127\.0\.0\.1/u);
 });
