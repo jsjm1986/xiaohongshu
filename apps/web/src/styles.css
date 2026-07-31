@@ -1253,8 +1253,20 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .revealed-key { display: grid; gap: 12px; }
 .revealed-key p { color: var(--amber); font-size: 9px; }
 .revealed-key code { padding: 12px; overflow-wrap: anywhere; border: 1px solid var(--line); border-radius: 8px; background: #f7f8f6; color: var(--ink); font-size: 9px; }
-.quota-admin { margin-top: 18px; padding-top: 16px; display: flex; align-items: end; gap: 10px; border-top: 1px solid var(--line); }
-.quota-admin .field { flex: 1; margin: 0; }
+.quota-admin {
+  margin: 0;
+  padding: 20px 24px 22px;
+  border-top: 1px solid var(--line);
+  background: #fafbf9;
+}
+.quota-admin__heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.quota-admin__heading > div { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.quota-admin__heading strong { color: var(--ink); font-size: 12px; }
+.quota-admin__heading span { color: var(--muted); font-size: 10px; line-height: 1.5; }
+.quota-admin__controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)) auto; align-items: start; gap: 16px; }
+.quota-admin__controls .field { min-width: 0; margin: 0; }
+.quota-admin__controls .field small { min-height: 33px; }
+.quota-admin__submit { align-self: start; margin-top: 27px; white-space: nowrap; }
 
 /* Settings */
 .settings-layout { display: grid; grid-template-columns: 235px minmax(0, 800px); gap: 15px; align-items: start; }
@@ -1267,6 +1279,7 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .settings-nav small { color: var(--muted); font-size: 8px; }
 .settings-content { display: flex; flex-direction: column; gap: 13px; }
 .settings-section { border: 1px solid var(--line); border-radius: 12px; background: #fff; box-shadow: var(--shadow-sm); }
+.quota-section { overflow: hidden; }
 .settings-section > header { padding: 18px 20px; display: flex; align-items: flex-start; justify-content: space-between; border-bottom: 1px solid var(--line); }
 .settings-section > header h2 { margin-bottom: 4px; font-size: 14px; }
 .settings-section > header p { margin: 0; color: var(--muted); font-size: 9px; }
@@ -1415,6 +1428,8 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   .image-frame-list, .deployment-summary, .reader-state-details, .reader-state-hypotheses, .production-stage-grid, .production-alignment-grid, .formula-image-output-boundary > div { grid-template-columns: 1fr; }
   .production-artifact-ledger > header, .formula-image-output-boundary > header { align-items: flex-start; flex-direction: column; }
   .quota-rules > div { grid-template-columns: 1fr; gap: 3px; padding: 10px 0; }
+  .quota-admin__controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .quota-admin__submit { grid-column: 1 / -1; justify-self: end; margin-top: 0; }
   .toast-stack { left: 13px; right: 13px; }
   .toast { min-width: 0; width: 100%; }
 }
@@ -1428,6 +1443,11 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   .project-switcher { min-width: 120px; max-width: 145px; }
   .project-switcher select { font-size: 10px; }
   .mode-switch button { padding: 8px; }
+  .quota-admin { padding: 18px; }
+  .quota-admin__heading { flex-direction: column; }
+  .quota-admin__controls { grid-template-columns: 1fr; }
+  .quota-admin__controls .field small { min-height: 0; }
+  .quota-admin__submit { width: 100%; grid-column: auto; justify-self: stretch; }
   .mode-switch button > svg:last-child { display: none; }
   .wizard-card__footer { padding: 10px; }
   .wizard-card__footer .button { padding-left: 10px; padding-right: 10px; }
