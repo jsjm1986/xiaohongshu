@@ -779,12 +779,10 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
   enqueueRevision(jobId: string, candidateId: string, instruction: string, principal: SessionPrincipal): Record<string, unknown> {
     const task = this.revisions.enqueue(jobId, candidateId, instruction, principal);
     this.event(jobId, 'revision_queued', { revisionId: task.id, candidateId });
-    // 立刻(下一拍)尝试领取,新任务不必等下一个回收定时器周期。
-    //
-    // 推到 setImmediate 而不是就地调用:claimNext 是同步的,就地调用会在本次响应
-    // 组装之前把状态改成 running,于是「受理」的返回体里 activeRevision 已经是
-    // running——用户按下按钮那一刻拿到的应当是 queued。延后一拍不影响启动速度。
-    setImmediate(() => this.tick(() => this.drainRevisions()));
+    // 给受理响应一个可观察的 queued 窗口。setImmediate 会在下一条 HTTP 请求到达前
+    // 领取任务；若前置校验随即失败，紧接着的重复点击会把终态误当成可再次入队。
+    // 100ms 不影响分钟级修改任务的吞吐，同时让重复提交稳定命中活跃任务约束。
+    setTimeout(() => this.tick(() => this.drainRevisions()), 100);
     // 返回完整 job:前端拿到的 candidates 仍是旧版本,activeRevision 告诉它在改。
     return this.get(jobId);
   }
@@ -899,6 +897,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
   private drainRevisions(): void {
     // 关停途中不再领新活:领了也跑不完,而且写库会撞上已关闭的连接。
     if (this.stopped) return;
+    this.settleOrphanedQueuedRevisions();
     while (this.activeRevisions < this.maxConcurrentRevisions) {
       const revisionId = claimNext(this.database, REVISION_TASKS_SPEC, this.options.instanceId, nowIso());
       if (!revisionId) return;
@@ -913,6 +912,43 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
           });
       });
     }
+  }
+
+  /** 父资源已删除的排队任务永远无法被 claimNext 领取，必须主动结算。 */
+  private settleOrphanedQueuedRevisions(): void {
+    const rows = this.database
+      .prepare(
+        `SELECT r.id, r.job_id, p.workspace_id
+           FROM revision_tasks r
+           JOIN generation_jobs j ON j.id = r.job_id
+           JOIN projects p ON p.id = j.project_id
+           JOIN workspaces w ON w.id = p.workspace_id
+          WHERE r.status = 'queued'
+            AND (j.deleted_at IS NOT NULL OR p.deleted_at IS NOT NULL OR w.deleted_at IS NOT NULL)`,
+      )
+      .all() as unknown as Array<{ id: string; job_id: string; workspace_id: string }>;
+    if (rows.length === 0) return;
+
+    const now = nowIso();
+    this.database.transaction(() => {
+      for (const row of rows) {
+        const failed = this.database
+          .prepare(
+            `UPDATE revision_tasks
+                SET status='failed', progress=100, error=?, completed_at=?, updated_at=?,
+                    claimed_by=NULL, heartbeat_at=NULL
+              WHERE id=? AND status='queued'`,
+          )
+          .run('修改任务所属资源已删除，任务已停止', now, now, row.id);
+        if (failed.changes !== 1) continue;
+        const refunded = this.settleRevisionQuota(row.id, row.workspace_id, 0);
+        this.event(row.job_id, 'revision_failed', {
+          revisionId: row.id,
+          message: '修改任务所属资源已删除，任务已停止',
+          refundedQuota: refunded,
+        });
+      }
+    });
   }
 
   private startRevisionHeartbeat(revisionId: string): void {

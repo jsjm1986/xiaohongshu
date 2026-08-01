@@ -339,7 +339,7 @@ export function KnowledgePage() {
           <>
 {pendingGapCount > 0 && (
               <button type="button" className="v2-hero__link" onClick={() => setEnrichOpen(true)}>
-                <WandSparkles size={15} /> {enrichButtonLabel(pendingGapCount)}
+                <WandSparkles size={15} /> {enrichButtonLabel(pendingGapCount, gapTiers)}
               </button>
             )}
             <button type="button" className="v2-hero__link" onClick={() => setEntryOpen(true)}>

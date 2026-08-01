@@ -120,21 +120,36 @@ test('答案抄自知识库 → evidence_backed,且真的带回证据 id', async
   assert.match(row.sectionEvidenceIds[0], /^evidence_section_/u);
 });
 
-test('多行答案且无资料支撑 → will_be_dropped,并说明原因', async () => {
-  await createGap(projectId, { label: '资质编号', answer: '编号待确认\n证件在门店' });
+test('多行人工答案在批准前不可用，批准后稳定进入 approved_only', async () => {
+  const created = await createGap(projectId, {
+    label: '资质编号',
+    answer: '编号待确认\n证件在门店',
+    sourceStatus: 'user_supplied',
+  });
 
-  const result = await request(`/api/projects/${projectId}/knowledge/preflight`);
-  const row = result.body.gaps.find((gap: any) => gap.label === '资质编号');
-  assert.equal(row.tier, 'will_be_dropped', JSON.stringify(row));
-  assert.match(row.reasons.join(''), /换行/u);
+  const before = await request(`/api/projects/${projectId}/knowledge/preflight`);
+  const draftRow = before.body.gaps.find((gap: any) => gap.label === '资质编号');
+  assert.equal(draftRow.tier, 'will_be_dropped', JSON.stringify(draftRow));
+  assert.match(draftRow.reasons.join(''), /审批记录/u);
+
+  const approved = await request(`/api/projects/${projectId}/information-gaps/${created.id}/approve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved' }),
+  });
+  assert.equal(approved.response.status, 201, JSON.stringify(approved.body));
+
+  const after = await request(`/api/projects/${projectId}/knowledge/preflight`);
+  const approvedRow = after.body.gaps.find((gap: any) => gap.label === '资质编号');
+  assert.equal(approvedRow.tier, 'approved_only', JSON.stringify(approvedRow));
+  assert.deepEqual(approvedRow.sectionEvidenceIds, []);
 });
 
-test('单行答案无资料支撑 → approved_only', async () => {
+test('单行答案没有来源标记和审批记录时不能自证', async () => {
   await createGap(projectId, { label: '营业时间', answer: '每天九点到六点' });
 
   const result = await request(`/api/projects/${projectId}/knowledge/preflight`);
   const row = result.body.gaps.find((gap: any) => gap.label === '营业时间');
-  assert.equal(row.tier, 'approved_only', JSON.stringify(row));
+  assert.equal(row.tier, 'will_be_dropped', JSON.stringify(row));
   assert.deepEqual(row.sectionEvidenceIds, []);
 });
 
@@ -166,8 +181,8 @@ test('空知识库项目也能预检,不报 500', async () => {
   const result = await request(`/api/projects/${otherProjectId}/knowledge/preflight`);
   assert.equal(result.response.status, 200, JSON.stringify(result.body));
   const row = result.body.gaps.find((gap: any) => gap.label === '别的项目的缺口');
-  // 无资料可依,单行答案仍可自证
-  assert.equal(row.tier, 'approved_only');
+  // 无资料、无来源标记、无审批记录，不能靠规划对象自证。
+  assert.equal(row.tier, 'will_be_dropped');
 });
 
 test('传了资料但没分析过 → analysis=missing 且 canGenerate=false', async () => {
@@ -245,7 +260,53 @@ test('认不出的 sourceStatus 不会污染分档', async () => {
 
   const result = await request(`/api/projects/${projectId}/knowledge/preflight`);
   const row = result.body.gaps.find((gap: any) => gap.label === '停车方式');
-  assert.equal(row.tier, 'approved_only', JSON.stringify(row));
+  assert.equal(row.tier, 'will_be_dropped', JSON.stringify(row));
+});
+
+test('预检只读取最新分析批次，同时保留人工创建的缺口', async () => {
+  const db = app.get(DatabaseService);
+  const now = new Date().toISOString();
+  const oldTaskId = 'preflight-old-task';
+  const currentTaskId = 'preflight-current-task';
+  const oldResultId = 'preflight-old-result';
+  const currentResultId = 'preflight-current-result';
+  const creator = db.prepare('SELECT created_by FROM projects WHERE id=?').get(projectId) as { created_by: string };
+
+  for (const [taskId, resultId, version] of [
+    [oldTaskId, oldResultId, 1],
+    [currentTaskId, currentResultId, 2],
+  ] as const) {
+    db.prepare(
+      `INSERT INTO analysis_tasks
+       (id, project_id, kind, target_id, status, source_fingerprint, attempt_count, result_id,
+        created_by, created_at, updated_at, completed_at)
+       VALUES (?, ?, 'project', NULL, 'completed', ?, 1, ?, ?, ?, ?, ?)`,
+    ).run(taskId, projectId, `fingerprint-${version}`, resultId, creator.created_by, now, now, now);
+    db.prepare(
+      `INSERT INTO project_intelligence
+       (id, project_id, version, status, source_fingerprint, map_json, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, 'draft', ?, '{}', ?, ?, ?)`,
+    ).run(resultId, projectId, version, `fingerprint-${version}`, creator.created_by, now, now);
+  }
+
+  for (const [id, sourceAnalysisId, title] of [
+    ['preflight-old-gap', oldTaskId, '旧分析批次缺口'],
+    ['preflight-current-gap', currentTaskId, '当前分析批次缺口'],
+  ] as const) {
+    db.prepare(
+      `INSERT INTO information_gaps
+       (id, project_id, title, priority, status, source_analysis_id, data_json,
+        created_by, created_at, updated_at)
+       VALUES (?, ?, ?, 50, 'draft', ?, '{"answer":"","sourceStatus":"unknown"}', ?, ?, ?)`,
+    ).run(id, projectId, title, sourceAnalysisId, creator.created_by, now, now);
+  }
+
+  const result = await request(`/api/projects/${projectId}/knowledge/preflight`);
+  assert.equal(result.response.status, 200, JSON.stringify(result.body));
+  const labels = result.body.gaps.map((gap: any) => gap.label);
+  assert.ok(labels.includes('当前分析批次缺口'));
+  assert.ok(!labels.includes('旧分析批次缺口'), '历史分析缺口不能污染当前完善度');
+  assert.ok(labels.includes('营业时间'), '人工创建且 source_analysis_id 为空的缺口应继续保留');
 });
 
 test('未登录取不到预检', async () => {

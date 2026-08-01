@@ -4289,6 +4289,11 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .draft-item__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
 .draft-item__header h4 { margin: 0; font-size: var(--font-sm); }
 .draft-item__question { margin: 0 0 10px; color: var(--muted); font-size: var(--font-xs); }
+.draft-item__reason { margin: -2px 0 10px; color: var(--ink-2); font-size: var(--font-xs); line-height: 1.55; }
+.draft-item__sources { margin: 0 0 11px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); font-size: var(--font-xs); }
+.draft-item__sources summary { cursor: pointer; color: var(--ink-2); font-weight: 600; }
+.draft-item__sources blockquote { display: grid; gap: 4px; margin: 9px 0 0; padding: 8px 10px; border-left: 2px solid var(--green); background: var(--surface); color: var(--muted); line-height: 1.55; }
+.draft-item__sources strong { color: var(--ink-2); font-size: var(--font-2xs); }
 .draft-item__body { margin: 0; padding: 11px; border-radius: 7px; background: var(--surface-soft); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--font-sm); line-height: 1.7; }
 .draft-item__label { display: block; margin-bottom: 5px; font-size: var(--font-xs); font-weight: 600; color: var(--ink-2); }
 .draft-item__textarea { width: 100%; padding: 11px; border: 1px solid var(--line); border-radius: 7px; font: inherit; font-size: var(--font-sm); line-height: 1.7; resize: vertical; }

@@ -25,7 +25,7 @@ interface Props {
    * 缺口池入口没有文件列表(该页不拉 knowledge.list),那里不显示选择器,
    * 沿用后端算出的默认目标——不为了 UI 一致去加一条网络往返。
    */
-  files?: ReadonlyArray<{ name: string }>;
+  files?: ReadonlyArray<{ name: string; category?: string; version?: number }>;
 }
 
 const TITLES: Record<ModalStep, string> = {
@@ -47,12 +47,12 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete,
   const [items, setItems] = useState<DraftItem[]>([]);
   const [preview, setPreview] = useState('');
   const [targetFile, setTargetFile] = useState('');
+  const [baseFileId, setBaseFileId] = useState<string | null>(null);
   const [isNewFile, setIsNewFile] = useState(false);
-  const [hedgeLoss, setHedgeLoss] = useState(0);
   const [error, setError] = useState<string | null>(null);
   /** 起草条数少于待补总数时的说明(超出单次上限,或模型漏答)。 */
   const [shortfall, setShortfall] = useState<string | null>(null);
-  /** 正文读不出来的知识文件。模型没看到它们,推断质量会受影响。 */
+  /** 正文读不出来的知识文件。模型没看到它们,整理结果会受影响。 */
   const [unreadable, setUnreadable] = useState<string[]>([]);
   const toast = useToast();
 
@@ -65,6 +65,7 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete,
     setPreview('');
     // 目标文件也要归零:上次选的是「并入 A」,这次重开还留着就会悄悄写到 A 上。
     setTargetFile('');
+    setBaseFileId(null);
     setError(null);
     setShortfall(null);
     setUnreadable([]);
@@ -103,8 +104,8 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete,
       });
       setPreview(result.preview);
       setTargetFile(result.targetFile);
+      setBaseFileId(result.baseFileId);
       setIsNewFile(result.isNewFile);
-      setHedgeLoss(result.hedgeLossCount);
       setStep('preview');
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : '合并失败');
@@ -116,13 +117,10 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete,
     setStep('saving');
     setError(null);
     try {
-      await api.intelligence.enrich.save(projectId, { content: preview, targetFile });
+      await api.intelligence.enrich.save(projectId, { content: preview, targetFile, baseFileId });
       /*
-       * 不说「生效」。冒烟实测:补充保存后重新分析,原先空白的缺口仍是 unknown——
-       * 这是对的,草稿如实写的是「此项资料缺失」,分析器据此标 factEligible=false。
-       * 但「生效」会让用户以为重新分析后缺口就消失,发现还在就以为功能坏了。
-       * 文案统一在 enrichSavedHint():既不承诺缺口关闭,也要指出关闭的路径
-       * (填进缺口答案并选「我确认过」),否则用户只知道走不通、不知道该往哪走。
+       * 用户逐条确认/修改后保存的版本按业务定义属于已知事实。资料变化会让旧分析
+       * 失效，提示用户重新分析以更新知识地图和缺口，但不承诺所有缺口必然消失。
        */
       toast.push(enrichSavedHint());
       onComplete();
@@ -194,8 +192,9 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete,
         <div className="enrich-editing">
           <div className="enrich-drafts">
             <p className="enrich-hint">
-              以下内容由 AI 推断,<strong>不是已核实的事实</strong>。请逐条审查:
-              准确的直接保留,有偏差的改掉,不需要的删除。
+              已有资料由 AI 整理，缺少的项目事实由你填写。请逐条核实：准确的点<strong>“确认内容属实”</strong>，
+              有偏差的修改，不知道的可以暂不处理。只有确认或填写过的明确事实才能写入知识库，
+              保存后将作为“已知事实”参与分析与生成。
             </p>
             {/*
               起草条数少于按钮上写的待补数时必须说清楚。
@@ -221,8 +220,8 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete,
             )}
             {/*
               目标文件必须可选。API 一直支持 targetFile,前端只回显不给选,结果是
-              33.6 KB 原始资料没被触碰,补充内容独立成 2.9 KB 的 INDEX.md(证据类型
-              「猜想」)——用户的资料和 AI 的补充各自躺着,没有合流。
+              33.6 KB 原始资料没被触碰,补充内容独立成 2.9 KB 的 INDEX.md——
+              用户的资料和 AI 的补充各自躺着,没有合流。
               放在合并之前:合并要读目标文件的原文,选完再合并才对得上。
               没有文件列表时(缺口池入口)不渲染,沿用后端算出的默认目标。
             */}
@@ -252,34 +251,16 @@ export function KnowledgeEnrichmentModal({ open, projectId, onClose, onComplete,
               这是融合后的完整文档,将{isNewFile ? '新建 ' : '保存为 '}
               <code>{targetFile}</code>
               {isNewFile ? '' : ' 的新版本(旧版本仍可查看)'}。
-              保存后这份资料的证据类型是「猜想」,核实过再改成「已知事实」。
+              保存后这份资料的证据类型是「已知事实」，表示你已核实并确认最终内容。
             </span>
           </p>
-          {/*
-            必须说清这一点,否则用户会以为「补充一次缺口就消失」。
-            草稿如实写的是「资料未提及,待确认」,而不是编造答案,所以重新分析时
-            这些内容会被正确判成不可引用,缺口仍然开着——这是对的,不是没生效。
-            实测(宠物医院冒烟)确认:分析确实读到了新文件,但标成 factEligible:false。
-          */}
           <p className="enrich-notice">
             <Info size={15} aria-hidden="true" />
             <span>
-              补充理清的是<strong>该问什么</strong>,不是替你答出真事实。
-              这些内容标注的多是「资料未提及,待确认」,所以重新分析后
-              <strong>缺口通常仍然开着</strong>——这是正常的。
-              要让缺口真正闭合,得把核实过的事实填进去,再把证据类型改成「已知事实」。
+              点击确认保存表示你对这份最终 Markdown 做事实背书。
+              保存后请重新分析知识库，系统会基于新版已知事实更新知识地图和信息缺口。
             </span>
           </p>
-          {hedgeLoss > 0 && (
-            <p className="enrich-warning" role="alert">
-              <TriangleAlert size={15} aria-hidden="true" />
-              <span>
-                合并时有 {hedgeLoss} 处「待确认 / 是否 / 可能」这类不确定说法消失了。
-                模型偶尔会把「待确认:主材是否达到 E1 级」改写成「主材达到 E1 级」,
-                <strong>凭空变成事实</strong>。保存前请重点核对下面这份文档里的肯定句。
-              </span>
-            </p>
-          )}
           <pre className="enrich-preview__body">{preview}</pre>
         </div>
       )}

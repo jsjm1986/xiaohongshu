@@ -79,7 +79,7 @@ export const TIER_NOTE: Record<KnowledgePreflightTier, string> = {
   evidence_backed: '答案能在你上传的资料里找到出处',
   approved_only: '你填写并确认过,生成会用;但它不是资料里的事实',
   evidence_stale: '出处已失效,重新分析会更新引用',
-  will_be_dropped: '生成时会被丢掉,需要改格式或补资料',
+  will_be_dropped: '生成时会被丢掉,需要完成负责人审批或补资料',
   blank: '需要你补充真实资料',
 };
 
@@ -175,8 +175,8 @@ export function preflightHeadline(preflight: KnowledgePreflight | null): Preflig
   if (!canGenerate) {
     /*
      * 引用失效要单独说。实测存在 analysis='approved' 而引用全失效的项目
-     * (零个知识文件 + 49 条 supplied_fact 缺口),此时旧文案让用户「改掉会被
-     * 丢弃的答案格式」——改格式没用,要做的是重新分析重建引用。
+     * (零个知识文件 + 49 条 supplied_fact 缺口),此时必须指向重新分析或恢复资料,
+     * 不能把旧引用误报成仍可使用。
      */
     const staleOpen = requiredOpen.filter((gap) => gap.tier === 'evidence_stale').length;
     if (staleOpen === requiredOpen.length) {
@@ -194,8 +194,8 @@ export function preflightHeadline(preflight: KnowledgePreflight | null): Preflig
       text: `还不能生成:${requiredOpen.length} 条必答缺口没落实`,
       tone: 'error',
       nextStep: staleOpen > 0
-        ? `补上缺资料的那几条,或改掉会被丢弃的答案格式;其中 ${staleOpen} 条是引用失效,重新分析会一并更新引用,原资料已删除的要重新上传。`
-        : '补上这几条的真实资料,或改掉会被丢弃的答案格式。',
+        ? `补上缺资料的那几条,或完成负责人审批;其中 ${staleOpen} 条是引用失效,重新分析会一并更新引用,原资料已删除的要重新上传。`
+        : '补上这几条的真实资料,或完成负责人审批。',
       // needsAnalysis 是必填 boolean,不能条件展开。混合情形也给 true:
       // 重新分析是其中一部分缺口的唯一出路,不给跳转等于藏起出路。
       needsAnalysis: staleOpen > 0,
@@ -206,7 +206,7 @@ export function preflightHeadline(preflight: KnowledgePreflight | null): Preflig
       ...base,
       text: `可以生成,但 ${tiers.will_be_dropped} 条答案会被丢弃`,
       tone: 'warn',
-      nextStep: '这些答案生成时用不上,按下面的提示改格式或补资料。',
+      nextStep: '这些答案生成时用不上,请完成负责人审批或补充资料。',
     };
   }
   if (tiers.blank > 0) {

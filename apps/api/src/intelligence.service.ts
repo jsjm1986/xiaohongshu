@@ -16,6 +16,7 @@ import {
 } from '@nestjs/common';
 import {
   PROJECT_BLUEPRINT_MODULE_KEYS,
+  conservativeEvidenceSupport,
   assertModelJsonComplexity,
   estimateTokens,
   normalizeProjectCreativeBlueprint,
@@ -39,6 +40,11 @@ import {
   type TopicOpportunity,
 } from '@content-agent/agent-core';
 import sharp from 'sharp';
+import {
+  blueprintEvidenceIssues,
+  validateAnalysisEvidence,
+  type AnalysisEvidenceEntry,
+} from './analysis-evidence.js';
 import { AuditService } from './audit.service.js';
 import { APP_OPTIONS, type ApiOptions } from './config.js';
 import { DatabaseService } from './database.service.js';
@@ -272,7 +278,8 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
 
   listIntelligence(projectId: string): Record<string, unknown>[] {
     this.resources.projectRow(projectId);
-    return this.rows('project_intelligence', projectId, 'version DESC').map((row) => this.mapIntelligence(row));
+    return this.rows('project_intelligence', projectId, 'version DESC, created_at DESC, id DESC')
+      .map((row) => this.mapIntelligence(row));
   }
 
   getIntelligence(projectId: string, id: string): Record<string, unknown> {
@@ -387,7 +394,20 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  approveBlueprintModule(projectId: string, id: string, body: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
+  async approveBlueprintModule(projectId: string, id: string, body: Record<string, unknown>, principal: SessionPrincipal): Promise<Record<string, unknown>> {
+    const requested = body.status ?? (body.approved === false ? 'rejected' : 'approved');
+    if (requested === 'approved') {
+      const current = this.row('project_blueprint_modules', projectId, id);
+      const issues = blueprintEvidenceIssues({
+        moduleKey: String(current.module_key),
+        data: parseJson<Record<string, unknown>>(current.data_json, {}),
+        evidence: await this.currentAnalysisEvidence(projectId),
+      });
+      if (issues.length) {
+        const summary = issues.slice(0, 5).map((issue) => `${issue.path}: ${issue.reason}`).join('; ');
+        throw new BadRequestException(`蓝图中的资料事实缺少当前有效证据，不能批准：${summary}`);
+      }
+    }
     return this.approveResource(
       'project_blueprint_modules', projectId, id, body, principal,
       this.mapBlueprintModule.bind(this), 'blueprint-module',
@@ -396,7 +416,20 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
 
   listGaps(projectId: string): Record<string, unknown>[] {
     this.resources.projectRow(projectId);
-    return this.rows('information_gaps', projectId, 'priority DESC, updated_at DESC').map((row) => this.mapGap(row));
+    return this.currentGapRows(projectId).map((row) => this.mapGap(row));
+  }
+
+  /** 当前业务视图只包含最新分析批次，以及用户手工创建的缺口。历史批次仍留库审计。 */
+  currentGapAnalysisTaskId(projectId: string): string | null {
+    const row = this.database.prepare(
+      `SELECT t.id
+         FROM project_intelligence pi
+         JOIN analysis_tasks t ON t.result_id=pi.id AND t.status='completed' AND t.deleted_at IS NULL
+        WHERE pi.project_id=? AND pi.deleted_at IS NULL
+        ORDER BY pi.version DESC, pi.created_at DESC, pi.id DESC
+        LIMIT 1`,
+    ).get(projectId) as { id: string } | undefined;
+    return row?.id ?? null;
   }
 
   getGap(projectId: string, id: string): Record<string, unknown> {
@@ -1137,7 +1170,15 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     const source = await this.projectAnalysisSource(project);
     if (!force) {
       const cached = this.cachedTask(projectId, 'project', null, source.fingerprint);
-      if (cached?.result_id) return this.projectAnalysisResult(cached, true);
+      if (cached?.result_id) {
+        const cachedResult = this.database.prepare(
+          `SELECT status FROM project_intelligence
+            WHERE id=? AND project_id=? AND deleted_at IS NULL`,
+        ).get(cached.result_id, projectId) as { status: string } | undefined;
+        if (cachedResult && ['draft', 'approved'].includes(cachedResult.status)) {
+          return this.projectAnalysisResult(cached, true);
+        }
+      }
     }
     const task = this.createTask(projectId, 'project', null, source.fingerprint, principal);
     try {
@@ -1146,21 +1187,29 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
         project, principal, projectBlueprintAnalysisPrompt(source.sourceJson), [], task.id,
       );
       // Extract stage 1 structured output so stage 2 can build on it (data-flow chaining, 需求 6.2).
-      const intelligence = isRecord(blueprintPayload.intelligence) ? blueprintPayload.intelligence : blueprintPayload;
-      const blueprintModules = isRecord(blueprintPayload.blueprintModules) ? blueprintPayload.blueprintModules : {};
+      const rawIntelligence = isRecord(blueprintPayload.intelligence) ? blueprintPayload.intelligence : blueprintPayload;
+      const rawBlueprintModules = isRecord(blueprintPayload.blueprintModules) ? blueprintPayload.blueprintModules : {};
       // Fail-fast (需求 6.6): validate blueprint completeness right after stage 1 and BEFORE stage 2 begins.
       // A missing module terminates the analysis so stage 2 never runs on an empty/incomplete blueprint.
-      const missingBlueprintModules = PROJECT_BLUEPRINT_MODULE_KEYS.filter((key) => !isRecord(blueprintModules[key]));
+      const missingBlueprintModules = PROJECT_BLUEPRINT_MODULE_KEYS.filter((key) => !isRecord(rawBlueprintModules[key]));
       if (missingBlueprintModules.length) {
         throw new AnalysisGatewayError(
           `The analysis model omitted required project blueprint modules: ${missingBlueprintModules.join(', ')}.`,
         );
       }
+      const validatedStage1 = validateAnalysisEvidence({
+        intelligence: rawIntelligence,
+        blueprintModules: rawBlueprintModules,
+        evidence: source.evidence,
+      });
+      const intelligence = validatedStage1.intelligence;
+      intelligence.knowledgeCoverage = source.coverage;
+      const blueprintModules = validatedStage1.blueprintModules;
       // Stage 2/3: planning resources, grounded on the stage 1 blueprint.
       const planningPayload = await this.analyzeWithCurrentModel(
         project, principal, projectPlanningResourcesPrompt(source.sourceJson, { intelligence, blueprintModules }), [], task.id,
       );
-      const planningGaps = recordArray(planningPayload.informationGaps);
+      const planningGaps = recordArray(planningPayload.informationGaps).map((gap) => this.validateAnalyzedGapEvidence(gap, source.evidence, source.coverage));
       const strategies = recordArray(planningPayload.expressionStrategies);
       // Fail-fast (需求 6.6): planning resources (informationGaps) are stage 3's required input.
       // If empty, terminate before stage 3 rather than feeding an empty gap catalog forward.
@@ -1199,6 +1248,11 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       return this.database.transaction(() => {
         const currentProject = this.resources.projectRow(projectId);
         this.assertOwnedTask(task.id, projectId, 'project', null);
+        if (this.projectAnalysisRevision(projectId) !== source.revision) {
+          throw new ConflictException('项目资料在分析期间发生了变化，本次结果未保存，请重新分析。');
+        }
+        // 新分析成为当前批次时只淘汰旧分析派生产物；人工创建的缺口不应因强制重跑被抹掉审批。
+        this.invalidatePriorAnalysisResults(projectId, now);
         const version = this.nextVersion('project_intelligence', projectId);
         this.database.prepare(
           `INSERT INTO project_intelligence
@@ -1236,6 +1290,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
           gapCount: gaps.length,
           strategyCount: strategies.length,
           opportunityCount: opportunities.length,
+          evidenceValidationIssueCount: validatedStage1.issues.length,
         });
         return this.projectAnalysisResult(this.taskRow(task.id), false);
       });
@@ -1252,12 +1307,12 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   ): Promise<Record<string, unknown>> {
     const project = this.resources.projectRow(projectId);
     const source = await this.projectAnalysisSource(project);
-    const gapRows = this.approvedRows('information_gaps', projectId, 'priority DESC');
+    const gapRows = this.currentGapRows(projectId).filter((row) => row.status === 'approved');
     const gaps = gapRows.map(normalizeGap);
     const gapIdMap = new Map<string, string>(gapRows.map((row) => [String(row.id), String(row.id)]));
-    const existingTitles = (this.database.prepare(
-      `SELECT title FROM topic_opportunities WHERE project_id=? AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 60`,
-    ).all(projectId) as Array<{ title: string }>).map((row) => row.title);
+    const existingOpportunityRows = this.topicRefreshOpportunityRows(projectId);
+    const existingTitles = existingOpportunityRows.map((row) => row.title);
+    const inputRevision = this.topicRefreshInputRevision(source.revision, gapRows, existingOpportunityRows);
     const userGuidance = typeof input.userGuidance === 'string' ? input.userGuidance.trim().slice(0, 600) : '';
     const batchId = randomUUID();
     const DIVERSITY_TEMPERATURE = 0.85;
@@ -1276,6 +1331,15 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       return this.database.transaction(() => {
         const currentProject = this.resources.projectRow(projectId);
         this.assertOwnedTask(task.id, projectId, 'project', null);
+        const currentGapRows = this.currentGapRows(projectId).filter((row) => row.status === 'approved');
+        const currentInputRevision = this.topicRefreshInputRevision(
+          this.projectAnalysisRevision(projectId),
+          currentGapRows,
+          this.topicRefreshOpportunityRows(projectId),
+        );
+        if (currentInputRevision !== inputRevision) {
+          throw new ConflictException('项目资料或信息缺口在选题刷新期间发生了变化，本次结果未保存，请重试。');
+        }
         this.database.prepare(
           `INSERT INTO opportunity_batches
              (id, project_id, analysis_task_id, trigger, user_guidance, temperature, opportunity_count, created_by, created_at)
@@ -1407,9 +1471,44 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
 
   markProjectStale(projectId: string): void {
     const now = nowIso();
-    for (const table of ['project_intelligence', 'project_blueprint_modules', 'information_gaps', 'expression_strategies', 'topic_opportunities']) {
-      this.database.prepare(`UPDATE ${table} SET status='stale', updated_at=? WHERE project_id=? AND status='approved' AND deleted_at IS NULL`).run(now, projectId);
+    for (const table of ['project_intelligence', 'project_blueprint_modules']) {
+      this.database.prepare(
+        `UPDATE ${table} SET status='stale', approved_by=NULL, approved_at=NULL, updated_at=?
+          WHERE project_id=? AND status IN ('draft', 'approved') AND deleted_at IS NULL`,
+      ).run(now, projectId);
     }
+    for (const table of ['information_gaps', 'expression_strategies']) {
+      this.database.prepare(
+        `UPDATE ${table} SET status='stale', approved_by=NULL, approved_at=NULL, updated_at=?
+          WHERE project_id=? AND source_analysis_id IS NOT NULL
+            AND status IN ('draft', 'approved') AND deleted_at IS NULL`,
+      ).run(now, projectId);
+    }
+    this.database.prepare(
+      `UPDATE topic_opportunities SET status='stale', approved_by=NULL, approved_at=NULL, updated_at=?
+        WHERE project_id=? AND status IN ('draft', 'approved') AND deleted_at IS NULL`,
+    ).run(now, projectId);
+  }
+
+  private invalidatePriorAnalysisResults(projectId: string, now: string): void {
+    for (const table of ['project_intelligence', 'project_blueprint_modules']) {
+      this.database.prepare(
+        `UPDATE ${table} SET status='stale', approved_by=NULL, approved_at=NULL, updated_at=?
+          WHERE project_id=? AND status IN ('draft', 'approved') AND deleted_at IS NULL`,
+      ).run(now, projectId);
+    }
+    for (const table of ['information_gaps', 'expression_strategies']) {
+      this.database.prepare(
+        `UPDATE ${table} SET status='stale', approved_by=NULL, approved_at=NULL, updated_at=?
+          WHERE project_id=? AND source_analysis_id IS NOT NULL
+            AND status IN ('draft', 'approved') AND deleted_at IS NULL`,
+      ).run(now, projectId);
+    }
+    // 选题即使是人工创建，也依赖当前分析、蓝图和缺口审批快照。
+    this.database.prepare(
+      `UPDATE topic_opportunities SET status='stale', approved_by=NULL, approved_at=NULL, updated_at=?
+        WHERE project_id=? AND status IN ('draft', 'approved') AND deleted_at IS NULL`,
+    ).run(now, projectId);
   }
 
   prepareGeneration(projectId: string, raw: Record<string, unknown>): PreparedPlanningContext {
@@ -1488,7 +1587,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestException('An approved project analysis is required before formal generation.');
     }
     const projectBlueprint = this.approvedProjectBlueprint(projectId, intelligence);
-    const gaps = this.approvedRows('information_gaps', projectId, 'priority DESC').map((row) => {
+    const gaps = this.currentGapRows(projectId).filter((row) => row.status === 'approved').map((row) => {
       assertResourceMetricsReady('information_gaps', row);
       return normalizeGap(row);
     }).filter((item) => item.enabled !== false);
@@ -1811,7 +1910,9 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     return 'user_supplied';
   }
 
-  private async projectAnalysisSource(project: Record<string, unknown>): Promise<{ fingerprint: string; sourceJson: string }> {
+  private async projectAnalysisSource(project: Record<string, unknown>): Promise<{ fingerprint: string; sourceJson: string; revision: string; evidence: AnalysisEvidenceEntry[]; coverage: Array<Record<string, unknown>> }> {
+    const currentProject = this.resources.projectRow(String(project.id));
+    const revisionBefore = this.projectAnalysisRevision(String(currentProject.id));
     const knowledgeRows = this.database.prepare(
       `WITH ranked AS (
          SELECT *, ROW_NUMBER() OVER (
@@ -1822,14 +1923,16 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
          WHERE project_id=? AND deleted_at IS NULL
        )
        SELECT * FROM ranked WHERE version_rank=1 ORDER BY filename`,
-    ).all(project.id as string) as unknown as Record<string, unknown>[];
+    ).all(currentProject.id as string) as unknown as Record<string, unknown>[];
     assertKnowledgeRowsBudget('项目分析', knowledgeRows);
     const knowledge: Array<Record<string, unknown>> = [];
+    const evidence: AnalysisEvidenceEntry[] = [];
+    const coverage: Array<Record<string, unknown>> = [];
     let actualKnowledgeBytes = 0;
     for (const row of knowledgeRows) {
       const content = await readStoredText({
         dataDir: this.database.options.dataDir,
-        projectDir: join(this.database.knowledgeDir, String(project.id)),
+        projectDir: join(this.database.knowledgeDir, String(currentProject.id)),
         storagePath: String(row.storage_path),
       }, MAX_KNOWLEDGE_BYTES);
       actualKnowledgeBytes += Buffer.byteLength(content, 'utf8');
@@ -1848,7 +1951,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
         const metadata = parseJson<Record<string, unknown>>(String(row.metadata_json), {});
         const document = indexKnowledgeSource({
           id: String(row.id),
-          projectId: String(project.id),
+          projectId: String(currentProject.id),
           path: String(row.filename),
           content,
           version: String(row.version),
@@ -1867,10 +1970,23 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
           query: '',
           budget: { maxInputTokens: 100_000_000, systemPromptTokens: 0, formulaPromptTokens: 0, outputReserveTokens: 0, safetyMarginTokens: 0 },
         });
+        const analysisSourceStatus: AnalysisEvidenceEntry['sourceStatus'] = document.metadata.evidenceStatus === 'observed'
+          || document.metadata.evidenceStatus === 'user_supplied'
+          ? 'supplied_fact'
+          : document.metadata.evidenceStatus === 'inferred' ? 'inference' : 'unknown';
         evidenceSections = selection.sections
           .filter((section) => section.documentId !== 'generated')
-          .map((section) => ({ evidenceId: evidenceIdForSection(section), heading: section.heading ?? '' }));
+          .map((section) => {
+            const evidenceId = evidenceIdForSection(section);
+            evidence.push({ id: evidenceId, text: section.content, sourceStatus: analysisSourceStatus });
+            return { evidenceId, heading: section.heading ?? '' };
+          });
       }
+      coverage.push({
+        documentId: String(row.id),
+        filename: String(row.filename),
+        status: 'fully_disclosed',
+      });
       knowledge.push({
         filename: row.filename,
         category: row.category,
@@ -1890,7 +2006,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       `SELECT COUNT(*) AS item_count,
               COALESCE(SUM(LENGTH(CAST(v.observation_json AS BLOB))), 0) AS total_bytes
        ${imageJoin}`,
-    ).get(project.id as string) as { item_count: number; total_bytes: number };
+    ).get(currentProject.id as string) as { item_count: number; total_bytes: number };
     this.assertApprovedImageObservationBudget(
       Number(imageUsage.item_count),
       Number(imageUsage.total_bytes),
@@ -1899,7 +2015,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       `SELECT a.*, v.id AS analysis_id, v.version AS analysis_version,
               v.source_fingerprint AS analysis_fingerprint, v.observation_json
        ${imageJoin} ORDER BY a.created_at`,
-    ).all(project.id as string) as unknown as Array<Record<string, unknown>>;
+    ).all(currentProject.id as string) as unknown as Array<Record<string, unknown>>;
     const approvedImageObservations = imageRows.map((row) => {
       const observation = parseJson<unknown>(row.observation_json, {});
       try {
@@ -1910,7 +2026,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
           code: 'ANALYSIS_IMAGE_CONTEXT_LIMIT',
         });
       }
-      return normalizeImageAnalysis({
+      const normalized = normalizeImageAnalysis({
       id: String(row.id),
       project_id: String(row.project_id),
       filename: String(row.filename),
@@ -1930,26 +2046,143 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       source_fingerprint: row.analysis_fingerprint,
         observation_json: row.observation_json,
       });
+      const observedFacts = uniqueStrings(normalized.observedFacts);
+      const visibleText = uniqueStrings(normalized.visibleText);
+      if (observedFacts.length || visibleText.length) {
+        const quote = JSON.stringify({ observedFacts, visibleText });
+        // Keep this identity byte-for-byte aligned with agent-core imageAnalysisEvidenceId().
+        const identity = JSON.stringify({ assetId: normalized.assetId, observedFacts, visibleText });
+        const id = `evidence_image_${createHash('sha256').update(identity, 'utf8').digest('hex').slice(0, 20)}`;
+        evidence.push({ id, text: quote, sourceStatus: 'approved_observation' });
+        normalized.evidenceIds = [...new Set([...uniqueStrings(normalized.evidenceIds), id])];
+      }
+      return normalized;
     });
     const source = {
       project: {
-        id: project.id,
-        name: project.name,
-        description: project.description,
-        profile: parseJson(project.profile_json, {}),
-        updatedAt: project.updated_at,
+        id: currentProject.id,
+        name: currentProject.name,
+        description: currentProject.description,
+        profile: parseJson(currentProject.profile_json, {}),
+        updatedAt: currentProject.updated_at,
       },
       knowledge,
+      knowledgeCoverage: coverage,
       approvedImageObservations,
     };
     const sourceJson = JSON.stringify(source);
     // Stage 1 has the largest fixed instruction block. Validate it here so a
     // prompt-limit failure occurs before an analysis task or quota entry exists.
     this.assertAnalysisPromptBudget(projectBlueprintAnalysisPrompt(sourceJson), '项目分析');
+    const revision = this.projectAnalysisRevision(String(currentProject.id));
+    if (revision !== revisionBefore) {
+      throw new ConflictException('项目资料在读取期间发生了变化，请重新开始分析。');
+    }
     return {
       fingerprint: this.fingerprint(source),
       sourceJson,
+      revision,
+      evidence,
+      coverage,
     };
+  }
+
+  private async currentAnalysisEvidence(projectId: string): Promise<AnalysisEvidenceEntry[]> {
+    const project = this.resources.projectRow(projectId);
+    return (await this.projectAnalysisSource(project)).evidence;
+  }
+
+  private validateAnalyzedGapEvidence(
+    raw: Record<string, unknown>,
+    evidence: readonly AnalysisEvidenceEntry[],
+    coverage: readonly Record<string, unknown>[],
+  ): Record<string, unknown> {
+    const gap = structuredClone(raw);
+    const catalog = new Map(evidence.map((item) => [item.id, item.text]));
+    const evidenceIds = uniqueStrings(gap.evidenceIds);
+    const statement = textFrom(gap.answer ?? gap.framework, 8_000);
+    const supplied = gap.sourceStatus === 'supplied_fact';
+    const supported = supplied && Boolean(statement) && evidenceIds.length > 0
+      && evidenceIds.every((id) => catalog.has(id))
+      && evidenceIds.some((id) => {
+        const text = catalog.get(id);
+        return text ? conservativeEvidenceSupport(statement, text) : false;
+      });
+    if (supplied && !supported) {
+      gap.sourceStatus = 'inference';
+      gap.evidenceIds = [];
+      gap.evidenceValidationIssues = [{
+        path: 'informationGap', statement, reason: evidenceIds.some((id) => !catalog.has(id)) ? 'unknown_evidence' : 'unsupported_statement', evidenceIds,
+      }];
+    }
+    const fullyScanned = coverage.length === 0 || coverage.every((item) => item.status === 'fully_disclosed');
+    gap.knowledgeFindingStatus = supported
+      ? 'supported'
+      : fullyScanned ? 'not_found_after_full_scan' : 'not_assessed_due_to_coverage';
+    if (gap.knowledgeAction === 'organize_existing' && !supported) gap.knowledgeAction = 'none';
+    if (gap.knowledgeAction === 'ask_user' && !fullyScanned) gap.knowledgeAction = 'none';
+    return gap;
+  }
+
+  /**
+   * 分析源的数据库修订指纹。最终写入事务内再次比较，避免分析期间上传/改分类后
+   * 旧快照仍被保存成可批准结果。文件正文由不可变版本行的 sha256 表示。
+   */
+  private projectAnalysisRevision(projectId: string): string {
+    const project = this.database.prepare(
+      `SELECT id, name, description, profile_json, updated_at
+         FROM projects WHERE id=? AND deleted_at IS NULL`,
+    ).get(projectId);
+    const knowledge = this.database.prepare(
+      `WITH ranked AS (
+         SELECT id, filename, storage_path, sha256, version, category, evidence_status,
+                metadata_json, created_at,
+                ROW_NUMBER() OVER (
+                  PARTITION BY filename ORDER BY version DESC, created_at DESC, id DESC
+                ) AS version_rank
+           FROM knowledge_files
+          WHERE project_id=? AND deleted_at IS NULL
+       )
+       SELECT id, filename, storage_path, sha256, version, category, evidence_status,
+              metadata_json, created_at
+         FROM ranked WHERE version_rank=1 ORDER BY filename`,
+    ).all(projectId);
+    const images = this.database.prepare(
+      `SELECT a.id, a.filename, a.sha256, a.width, a.height, a.updated_at,
+              v.id AS analysis_id, v.version, v.source_fingerprint, v.observation_json, v.updated_at AS analysis_updated_at
+         FROM image_assets a
+         JOIN image_analysis_versions v ON v.id=(
+           SELECT selected.id FROM image_analysis_versions selected
+            WHERE selected.image_asset_id=a.id AND selected.status='approved' AND selected.deleted_at IS NULL
+            ORDER BY selected.version DESC, selected.created_at DESC, selected.id DESC LIMIT 1
+         )
+        WHERE a.project_id=? AND a.deleted_at IS NULL
+        ORDER BY a.id`,
+    ).all(projectId);
+    return this.fingerprint({ project, knowledge, images });
+  }
+
+  private topicRefreshOpportunityRows(projectId: string): Array<{ id: string; title: string; updated_at: string }> {
+    return this.database.prepare(
+      `SELECT id, title, updated_at FROM topic_opportunities
+        WHERE project_id=? AND deleted_at IS NULL
+        ORDER BY updated_at DESC, id DESC LIMIT 60`,
+    ).all(projectId) as Array<{ id: string; title: string; updated_at: string }>;
+  }
+
+  private topicRefreshInputRevision(
+    sourceRevision: string,
+    gapRows: Array<Record<string, unknown>>,
+    opportunityRows: Array<{ id: string; title: string; updated_at: string }>,
+  ): string {
+    const gaps = gapRows.map((row) => ({
+      id: row.id,
+      status: row.status,
+      priority: row.priority,
+      dataJson: row.data_json,
+      updatedAt: row.updated_at,
+    }));
+    return this.fingerprint({ sourceRevision, gaps, opportunityRows });
   }
 
   private assertApprovedImageObservationBudget(itemCount: number, totalBytes: number): void {
@@ -2395,6 +2628,16 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     return this.database.prepare(
       `SELECT * FROM ${table} WHERE project_id=? AND deleted_at IS NULL ORDER BY ${order}`,
     ).all(projectId) as unknown as Record<string, unknown>[];
+  }
+
+  currentGapRows(projectId: string): Record<string, unknown>[] {
+    const analysisTaskId = this.currentGapAnalysisTaskId(projectId);
+    return this.database.prepare(
+      `SELECT * FROM information_gaps
+        WHERE project_id=? AND deleted_at IS NULL
+          AND (source_analysis_id IS NULL OR source_analysis_id IS ?)
+        ORDER BY priority DESC, updated_at DESC, id DESC`,
+    ).all(projectId, analysisTaskId) as unknown as Record<string, unknown>[];
   }
 
   private approvedRows(table: string, projectId: string, order: string): Record<string, unknown>[] {
@@ -2974,7 +3217,8 @@ function projectPlanningResourcesPrompt(sourceJson: string, blueprint?: Blueprin
   sections.push(
     'Independently enumerate real decision tasks, recurring questions and information gaps in this domain; do not limit discovery to what the knowledge files explicitly answer. Project answers and boundaries must still use only supplied evidence.',
     'Knowledge entries in the shared source carry `evidenceSections` ([{evidenceId, heading}]) — these are the ONLY citable evidence handles. For EVERY gap the knowledge can answer even partially, you MUST fill `answer` (use the supplied wording and keep its qualifiers such as 以当期确认为准 / 源资料称), fill `boundary`, and cite the matching section ids in `evidenceIds`; set `sourceStatus` to "supplied_fact" for those. When the knowledge file itself offers a standard-answer or FAQ passage, prefer its wording. Leave `answer` empty and `evidenceIds` empty ONLY when nothing supplied supports an answer, and set `sourceStatus` to inference/hypothesis/unknown accordingly. Never invent evidence ids that are not listed in `evidenceSections`.',
-    'informationGaps item={"key":"stable_unique_key","title":"","description":"","priority":50,"label":"","question":"","category":"decision","audienceStages":["collecting"],"importance":0.5,"decisionLeverage":0.5,"proofability":0.3,"answer":"","framework":"","boundary":"","evidenceIds":[],"required":false,"preferredChannels":["N.body","Cref"],"sourceStatus":"supplied_fact|inference|hypothesis|unknown"}.',
+    'informationGaps item={"key":"stable_unique_key","title":"","description":"","priority":50,"label":"","question":"","category":"decision","audienceStages":["collecting"],"importance":0.5,"decisionLeverage":0.5,"proofability":0.3,"answer":"","framework":"","boundary":"","evidenceIds":[],"required":false,"preferredChannels":["N.body","Cref"],"sourceStatus":"supplied_fact|inference|hypothesis|unknown","knowledgeAction":"organize_existing|ask_user|none","knowledgeReason":""}.',
+    'knowledgeAction is independent from content planning. Use organize_existing only when supplied knowledge already contains project-specific facts that should be consolidated into clearer Markdown. Use ask_user only when a missing, ambiguous, or conflicting PROJECT-SPECIFIC fact would materially affect later generation and only the project owner can resolve it. Use none for audience questions, domain education, optional angles, and planning gaps that do not require a new project fact. Do not treat every information gap as a knowledge-document defect. knowledgeReason must briefly state why the selected action applies.',
     'importance, decisionLeverage and proofability are MANDATORY review-priority heuristics: emit a 0..1 number for every gap and NEVER null. They are uncalibrated, non-causal ordering aids for human review, not facts, predictions or population measurements. When evidence is weak still give a conservative estimate (e.g. proofability <= 0.3 when no verifiable source supports an answer) and record the weakness by setting sourceStatus to inference or hypothesis. Do not lower the estimate to null; null blocks human approval.',
     'expressionStrategies item={"name":"","description":"","label":"","prototype":"narrow_request|live_moment|expectation_reversal|process_log|outcome_observation|retrospective_update|relationship_moment|option_comparison","openingMode":"","narrativeMode":"","bodyRole":"","imageRole":"","commentMode":"","voice":"","sequence":[],"targetChannels":["H","N.imageBrief","N.title","N.body","Cref"]}.',
     'Produce 12 to 18 diverse editable information gaps and exactly 8 materially different expression strategies. Keep unanswered gaps visible; do not fabricate project answers. Every gap key must be unique and stable within this response.',
@@ -3427,6 +3671,8 @@ function normalizeProjectIntelligence(projectId: string, raw: unknown): Record<s
     evidenceIds: uniqueStrings(data.evidenceIds),
     domainAtlas: isRecord(data.domainAtlas) ? data.domainAtlas : {},
     evidenceLedger: Array.isArray(data.evidenceLedger) ? data.evidenceLedger : [],
+    evidenceValidationIssues: Array.isArray(data.evidenceValidationIssues) ? data.evidenceValidationIssues : [],
+    knowledgeCoverage: Array.isArray(data.knowledgeCoverage) ? data.knowledgeCoverage : [],
   };
 }
 
@@ -3461,6 +3707,22 @@ export function normalizeGap(row: Record<string, unknown>): Record<string, unkno
     sourceStatus: typeof data.sourceStatus === 'string' && GAP_SOURCE_STATUSES.has(data.sourceStatus)
       ? data.sourceStatus
       : undefined,
+    ...(data.sourceStatus === 'user_supplied'
+      && row.status === 'approved'
+      && typeof row.approved_by === 'string' && row.approved_by
+      && typeof row.approved_at === 'string' && row.approved_at
+      && (textFrom(data.answer, 8_000) || textFrom(data.framework, 4_000))
+      ? { humanConfirmation: { confirmedBy: row.approved_by, confirmedAt: row.approved_at } }
+      : {}),
+    knowledgeAction: data.knowledgeAction === 'organize_existing' || data.knowledgeAction === 'ask_user'
+      || data.knowledgeAction === 'none'
+      ? data.knowledgeAction
+      : 'none',
+    knowledgeReason: textFrom(data.knowledgeReason, 1_000) || undefined,
+    knowledgeFindingStatus: [
+      'supported', 'not_found_after_full_scan', 'not_assessed_due_to_coverage', 'conflicting', 'stale_reference',
+    ].includes(String(data.knowledgeFindingStatus)) ? data.knowledgeFindingStatus : undefined,
+    evidenceValidationIssues: Array.isArray(data.evidenceValidationIssues) ? data.evidenceValidationIssues : [],
     required: data.required === true,
     preferredChannels: contentChannels(data.preferredChannels),
     enabled: data.enabled !== false,

@@ -50,7 +50,10 @@ function stage1BlueprintPayload(): Record<string, unknown> {
         decisionTasks: ['STAGE1_DECISION_TASK'], vocabulary: ['适用边界'],
       },
       audience_model: {
-        states: [{ id: 'collector', label: '信息收集者', stages: ['collecting'], goals: ['补全依据'], hesitationReasons: [] }],
+        states: [{
+          id: 'collector', label: '信息收集者', stages: ['collecting'], goals: ['补全依据'], hesitationReasons: [],
+          source: { status: 'supplied_fact', evidenceIds: ['invented-evidence-id'] },
+        }],
       },
       scenario_model: {
         families: [{ id: 'compare', label: '课程比较', prototype: 'option_comparison' }],
@@ -64,8 +67,8 @@ function stage1BlueprintPayload(): Record<string, unknown> {
     },
     intelligence: {
       industry: 'STAGE1_INDUSTRY', domain: 'STAGE1_DOMAIN', projectSummary: 'STAGE1_PROJECT_SUMMARY',
-      verifiedFacts: [], differentiators: [], audienceStates: ['collecting'], hardBoundaries: [],
-      prohibitedClaims: [], dynamicUnknowns: [], evidenceIds: [],
+      verifiedFacts: ['模型声称已经核验但没有台账的事实'], differentiators: [], audienceStates: ['collecting'], hardBoundaries: [],
+      prohibitedClaims: [], dynamicUnknowns: [], evidenceIds: [], evidenceLedger: [],
     },
   };
 }
@@ -266,6 +269,19 @@ test('three-stage project analysis assembles in fixed order, chains each stage o
       '每个蓝图模块都应有非空的结构化 data',
     );
 
+    // P1 证据核验：模型声称 verified 的事实没有台账时不得落入 verifiedFacts；蓝图伪
+    // supplied_fact 自动降为 inference，并将问题留在分析结果供审批界面展示。
+    const normalizedIntelligence = result.intelligence as Record<string, unknown>;
+    assert.deepEqual(normalizedIntelligence.verifiedFacts, []);
+    const validationIssues = normalizedIntelligence.evidenceValidationIssues as Array<Record<string, unknown>>;
+    assert.ok(validationIssues.some((issue) => issue.reason === 'missing_ledger'));
+    assert.ok(validationIssues.some((issue) => issue.reason === 'unknown_evidence'));
+    assert.ok(Array.isArray(normalizedIntelligence.knowledgeCoverage));
+    const audienceModule = blueprintModules.find((module) => module.moduleKey === 'audience_model')!;
+    const audienceState = ((audienceModule.data as any).states as any[])[0];
+    assert.equal(audienceState.source.status, 'inference');
+    assert.deepEqual(audienceState.source.evidenceIds, []);
+
     // gap 形状：id / title / question 齐全，且两轴字段（度量 + metricStatus/unknownMetrics）存在。
     const gaps = result.informationGaps as Array<Record<string, unknown>>;
     assert.ok(gaps.length >= 1);
@@ -297,6 +313,24 @@ test('three-stage project analysis assembles in fixed order, chains each stage o
     }
     assert.ok(Array.isArray(opportunity.gapIds) && (opportunity.gapIds as unknown[]).length >= 1, 'opportunity 应引用至少一个缺口');
     assert.equal((opportunity.gapIds as string[])[0], gap.id, 'opportunity.gapIds 应解析为阶段 2 落库缺口的存储 id');
+
+    // 人工编辑路径不能享受分析器的自动降级：用户明确保留 supplied_fact 但给出无效
+    // evidenceId 时，审批必须返回可操作的 400，而不是把结构批准误当成事实批准。
+    const edited = await request(`/api/projects/${projectId}/blueprint-modules/${audienceModule.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ data: {
+        states: [{
+          id: 'collector', label: '全国用户都偏爱低价', stages: ['collecting'], goals: ['低价'],
+          source: { status: 'supplied_fact', evidenceIds: ['still-invented'] },
+        }],
+      } }),
+    });
+    assert.equal(edited.response.status, 200, JSON.stringify(edited.body));
+    const rejectedApproval = await request(`/api/projects/${projectId}/blueprint-modules/${edited.body.id}/approve`, {
+      method: 'POST', body: JSON.stringify({ status: 'approved' }),
+    });
+    assert.equal(rejectedApproval.response.status, 400, JSON.stringify(rejectedApproval.body));
+    assert.match(String(rejectedApproval.body.message), /缺少当前有效证据/u);
   } finally {
     await app.close();
     await rm(dataDir, { recursive: true, force: true });

@@ -1,8 +1,18 @@
 import { BadRequestException } from '@nestjs/common';
 import { optionalString, requireObject, requireString } from './utils.js';
 
-/** AI 对推断把握程度的自评。用于前端标注,低把握的要重点审查。 */
+/** AI 整理现有资料时对证据明确程度的自评。 */
 export type EnrichConfidence = 'low' | 'medium' | 'high';
+
+/** 这条规划缺口是否需要转成 Markdown 知识。 */
+export type KnowledgeAction = 'organize_existing' | 'ask_user' | 'none';
+
+export interface DraftSourceExcerpt {
+  evidenceId: string;
+  filename: string;
+  heading: string;
+  excerpt: string;
+}
 
 /** 用户对单条草稿的处置。 */
 export type MergeItemStatus = 'confirmed' | 'edited' | 'deleted';
@@ -14,6 +24,9 @@ export interface DraftItem {
   priority: number;
   aiDraft: string;
   confidence: EnrichConfidence;
+  knowledgeAction: Exclude<KnowledgeAction, 'none'>;
+  knowledgeReason: string;
+  sources: DraftSourceExcerpt[];
 }
 
 export interface EnrichDraftResult {
@@ -32,7 +45,7 @@ export interface EnrichDraftResult {
    * 正文读不出来的知识文件名。
    *
    * 存储层丢文件、权限变更都会让某个文件读不到。整批起草不该因为一个文件挂掉,
-   * 但也不能装作无事发生——模型少看了一份资料,推断质量会变,用户有权知道。
+   * 但也不能装作无事发生——模型少看了一份资料,整理结果会受影响,用户有权知道。
    */
   unreadableFiles: string[];
 }
@@ -46,36 +59,13 @@ export interface MergeItem {
 export interface MergePreview {
   preview: string;
   targetFile: string;
+  /** 合并时读取的目标版本。null 表示当时目标文件不存在。 */
+  baseFileId: string | null;
   isNewFile: boolean;
-  /**
-   * 合并把不确定标记吃掉了多少条。
-   *
-   * 这是**提示**,不是门:不阻断保存,只在预览页提醒用户重点看哪里。
-   * 实测发现的问题——合并那一步会把「待确认:主材是否达到 E1 级」改写成
-   * 「主材达到 E1 级」,凭空造出一条事实。提示词已经明确禁止,但模型不总是听,
-   * 而这类改写用户扫一眼预览很难发现。
-   */
+  /** 兼容旧客户端的保留字段；确定性合并不改写内容，因此恒为 0。 */
   hedgeLossCount: number;
-}
-
-/**
- * 不确定标记。合并前后各数一次,少了就说明模型把限定词吃掉了。
- *
- * 只做计数,不做语义判断:词面统计够用来提示「这里值得重看」,
- * 而判断某句话是否真的从推断变成了断言需要理解上下文,不是正则能干的事。
- */
-export const HEDGE_MARKERS = [
-  '待确认', '建议补充', '建议明确', '建议确认', '尚未提供', '未提及', '未包含',
-  '信息缺失', '属信息空白', '请用户补充', '需与', '需确认', '有待',
-  '是否', '可能', '通常', '一般', '应会', '原则上', '?', '？',
-] as const;
-
-export function countHedges(text: string): number {
-  let total = 0;
-  for (const marker of HEDGE_MARKERS) {
-    total += text.split(marker).length - 1;
-  }
-  return total;
+  /** 确定性追加的条目数。 */
+  appendedCount: number;
 }
 
 /*
@@ -135,7 +125,7 @@ export function parseMergeRequest(body: unknown): { items: MergeItem[]; targetFi
     return { gapId, status: status as MergeItemStatus, content };
   });
 
-  // 总长度在入口就挡住:合并提示词会把所有 content 拼进去,过长会撞模型上下文上限。
+  // 总长度在入口就挡住，避免确定性追加生成超大文档并超过知识文件上限。
   const totalChars = items.reduce((sum, item) => sum + (item.content?.length ?? 0), 0);
   if (totalChars > MAX_TOTAL_CONTENT_CHARS) {
     throw new BadRequestException(`补充内容总长度超过 ${MAX_TOTAL_CONTENT_CHARS} 字符`);
@@ -167,11 +157,17 @@ export function parseDraftRequest(body: unknown): { gapIds?: string[] } {
 }
 
 /** 解析 save 请求。content 按字节校验——2 MiB 是 knowledge.import 的硬上限。 */
-export function parseSaveRequest(body: unknown): { content: string; targetFile: string } {
+export function parseSaveRequest(body: unknown): { content: string; targetFile: string; baseFileId: string | null } {
   const raw = requireObject(body);
   const content = requireString(raw.content, 'content', { max: MAX_SAVE_CONTENT_BYTES });
   if (Buffer.byteLength(content, 'utf8') > MAX_SAVE_CONTENT_BYTES) {
     throw new BadRequestException('content 不能超过 2 MiB');
   }
-  return { content, targetFile: parseTargetFile(raw.targetFile, 'targetFile') };
+  if (raw.baseFileId !== null && typeof raw.baseFileId !== 'string') {
+    throw new BadRequestException('baseFileId 必须是字符串或 null');
+  }
+  const baseFileId = raw.baseFileId === null
+    ? null
+    : requireString(raw.baseFileId, 'baseFileId', { max: 200 });
+  return { content, targetFile: parseTargetFile(raw.targetFile, 'targetFile'), baseFileId };
 }

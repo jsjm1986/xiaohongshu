@@ -58,7 +58,7 @@ export class IntelligenceController {
    * information_gaps 驱动,而缺口是分析产物。
    */
   @Post('intelligence/enrich/draft')
-  @RequirePermission({ permission: 'project.write', projectParam: 'projectId' })
+  @RequirePermission({ permission: ['project.write', 'knowledge.read'], projectParam: 'projectId' })
   enrichDraft(@Req() request: Request, @Param('projectId') projectId: string, @Body() body?: unknown) {
     // body 可缺省:不带就整批起草,带 gapIds 就只补指定的几条(缺口池的单条精补)
     const { gapIds } = parseDraftRequest(body);
@@ -66,7 +66,7 @@ export class IntelligenceController {
   }
 
   @Post('intelligence/enrich/merge')
-  @RequirePermission({ permission: 'project.write', projectParam: 'projectId' })
+  @RequirePermission({ permission: ['project.write', 'knowledge.read'], projectParam: 'projectId' })
   enrichMerge(@Req() request: Request, @Param('projectId') projectId: string, @Body() body: unknown) {
     const { items, targetFile } = parseMergeRequest(body);
     return this.enrich.mergeEnrichedKnowledge(projectId, items, targetFile, this.principal(request));
@@ -81,8 +81,8 @@ export class IntelligenceController {
   @Post('intelligence/enrich/save')
   @RequirePermission({ permission: 'knowledge.import', projectParam: 'projectId' })
   enrichSave(@Req() request: Request, @Param('projectId') projectId: string, @Body() body: unknown) {
-    const { content, targetFile } = parseSaveRequest(body);
-    return this.enrich.saveEnrichedKnowledge(projectId, content, targetFile, this.principal(request));
+    const { content, targetFile, baseFileId } = parseSaveRequest(body);
+    return this.enrich.saveEnrichedKnowledge(projectId, content, targetFile, baseFileId, this.principal(request));
   }
 
   @Get('intelligence/analysis-tasks/:taskId')

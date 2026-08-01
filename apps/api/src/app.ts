@@ -15,6 +15,9 @@ export async function createApplication(options: ApiOptionsInput = {}): Promise<
     logger: resolvedOptions.logger ? ['error', 'warn', 'log'] : false,
     bodyParser: false,
   });
+  // The production tunnel connects from loopback. Trust only that directly
+  // connected proxy so LAN clients cannot spoof X-Forwarded-For themselves.
+  app.getHttpAdapter().getInstance().set('trust proxy', 'loopback');
   app.use(json({ limit: '3mb' }));
   app.use(urlencoded({ extended: false, limit: '64kb' }));
   app.use(cookieParser());

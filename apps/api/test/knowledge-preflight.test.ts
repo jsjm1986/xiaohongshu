@@ -3,8 +3,6 @@ import { test } from 'node:test';
 import {
   analysisStateFrom,
   classifyGap,
-  normalizeForSelfProof,
-  selfProofSurvives,
   summarize,
   type PreflightGapInput,
 } from '../src/knowledge-preflight.js';
@@ -12,9 +10,9 @@ import {
 /**
  * 知识库完善度预检的分档逻辑。
  *
- * 这套判据必须和生成端 bindGapEvidence(engine.ts:549)一致:仪表盘说「已确认,可直接
- * 引用」而生成时把答案丢掉,是这次要根治的偏差。最关键的一档是 will_be_dropped ——
- * 答案没有资料支撑、且格式破坏了规划上下文自证,当前界面完全看不见它。
+ * 这套判据必须和生成端 bindGapEvidence 一致:无资料答案只有在来源明确为
+ * user_supplied 且数据库冻结了批准人/批准时间时才可引用。文本中的换行、引号或
+ * 反斜杠不再影响事实效力；没有真实审批元数据时任何格式都不能自证。
  */
 
 function gap(overrides: Partial<PreflightGapInput> = {}): PreflightGapInput {
@@ -30,6 +28,7 @@ function gap(overrides: Partial<PreflightGapInput> = {}): PreflightGapInput {
     sectionEvidenceIds: [],
     // 默认「项目里没有任何可用证据」,想测引用仍然存在的用例要显式传入。
     availableEvidenceIds: new Set<string>(),
+    humanConfirmed: false,
     ...overrides,
   };
 }
@@ -43,35 +42,31 @@ test('答案能在上传资料里找到支撑 → evidence_backed', () => {
   assert.deepEqual(result.sectionEvidenceIds, ['evidence_section_abc123']);
 });
 
-test('单行答案无资料支撑 → approved_only(生成会采用,但依据是人工填写)', () => {
-  const result = classifyGap(gap({ answer: '整装报价包含主材与人工' }));
+test('真实人工审批的单行答案无资料支撑 → approved_only', () => {
+  const result = classifyGap(gap({ answer: '整装报价包含主材与人工', sourceStatus: 'user_supplied', humanConfirmed: true }));
   assert.equal(result.tier, 'approved_only');
   // 措辞必须说清依据来自人工确认,不能让用户以为这是资料里的事实
-  assert.match(result.reasons.join(''), /你填写并确认过/u);
+  assert.match(result.reasons.join(''), /项目负责人明确确认/u);
 });
 
-test('多行答案无资料支撑 → will_be_dropped,并指出是换行', () => {
-  const result = classifyGap(gap({ answer: '整装报价包含主材\n不含家电' }));
-  assert.equal(result.tier, 'will_be_dropped');
-  assert.match(result.reasons.join(''), /换行/u);
+test('真实人工审批与文本格式无关:多行答案仍为 approved_only', () => {
+  const result = classifyGap(gap({ answer: '整装报价包含主材\n不含家电', sourceStatus: 'user_supplied', humanConfirmed: true }));
+  assert.equal(result.tier, 'approved_only');
 });
 
-test('含半角双引号无资料支撑 → will_be_dropped,并指出是双引号', () => {
-  const result = classifyGap(gap({ answer: '报价按"套内面积"计算' }));
-  assert.equal(result.tier, 'will_be_dropped');
-  assert.match(result.reasons.join(''), /双引号/u);
+test('真实人工审批与文本格式无关:半角双引号仍为 approved_only', () => {
+  const result = classifyGap(gap({ answer: '报价按"套内面积"计算', sourceStatus: 'user_supplied', humanConfirmed: true }));
+  assert.equal(result.tier, 'approved_only');
 });
 
-test('含制表符或反斜杠无资料支撑 → will_be_dropped', () => {
-  assert.equal(classifyGap(gap({ answer: '主材\t人工' })).tier, 'will_be_dropped');
-  assert.equal(classifyGap(gap({ answer: '见 C:\\报价单' })).tier, 'will_be_dropped');
+test('真实人工审批与文本格式无关:制表符和反斜杠仍为 approved_only', () => {
+  assert.equal(classifyGap(gap({ answer: '主材\t人工', sourceStatus: 'user_supplied', humanConfirmed: true })).tier, 'approved_only');
+  assert.equal(classifyGap(gap({ answer: '见 C:\\报价单', sourceStatus: 'user_supplied', humanConfirmed: true })).tier, 'approved_only');
 });
 
-test('中文引号与中文标点不破坏自证 → approved_only', () => {
-  // JSON 转义只对 " \ 和控制字符插反斜杠,中文标点不受影响。
-  // 这一条守住「不要把所有标点都当成危险字符」——过度告警会让提示失去意义。
-  assert.equal(classifyGap(gap({ answer: '报价按「套内面积」计算' })).tier, 'approved_only');
-  assert.equal(classifyGap(gap({ answer: '含主材、人工；不含家电。' })).tier, 'approved_only');
+test('仅有单行文本也不能自证', () => {
+  assert.equal(classifyGap(gap({ answer: '报价按「套内面积」计算' })).tier, 'will_be_dropped');
+  assert.equal(classifyGap(gap({ answer: '含主材、人工；不含家电。' })).tier, 'will_be_dropped');
 });
 
 test('没有答案 → blank', () => {
@@ -80,7 +75,7 @@ test('没有答案 → blank', () => {
 });
 
 test('只有 framework 也算提出了答案,与生成端 (answer || framework) 一致', () => {
-  const result = classifyGap(gap({ framework: '按面积段位分档报价' }));
+  const result = classifyGap(gap({ framework: '按面积段位分档报价', sourceStatus: 'user_supplied', humanConfirmed: true }));
   assert.equal(result.tier, 'approved_only');
 });
 
@@ -109,8 +104,8 @@ test('引用仍然存在、只是没支撑这条答案 → 不得报失效', () 
   }));
   assert.deepEqual(result.staleDeclaredEvidenceIds, [], '引用还在就不能说失效');
   assert.doesNotMatch(result.reasons.join(''), /失效/u);
-  // 分档仍应如实反映「没有资料支撑」
-  assert.equal(result.tier, 'approved_only');
+  // 引用仍存在不等于它支持答案；没有人工审批时仍会被丢弃。
+  assert.equal(result.tier, 'will_be_dropped');
 });
 
 test('失效提示指向重新分析,不是让用户逐条重选', () => {
@@ -136,9 +131,8 @@ test('必答缺口站不住 → canGenerate=false 并列出它', () => {
 });
 
 test('必答缺口仅人工批准也算站得住:与生成端一致,不比它更严', () => {
-  // approved_only 在生成端会被采用(经规划上下文自证),预检不能把它判成阻断项,
-  // 否则仪表盘会说不能生成而实际能生成——反向的不一致同样有害。
-  const rows = [classifyGap(gap({ required: true, answer: '单行答案就够' }))];
+  // 只有正式审批元数据才能与生成端构造的人工 EvidenceReference 对齐。
+  const rows = [classifyGap(gap({ required: true, answer: '单行答案就够', sourceStatus: 'user_supplied', humanConfirmed: true }))];
   assert.equal(summarize(rows, 'approved').canGenerate, true);
 });
 
@@ -152,7 +146,7 @@ test('空白的必答缺口同样阻断', () => {
 test('分档计数与按分类覆盖', () => {
   const rows = [
     classifyGap(gap({ id: '1', category: 'decision', answer: 'a', sectionEvidenceIds: ['e1'] })),
-    classifyGap(gap({ id: '2', category: 'decision', answer: '单行答案' })),
+    classifyGap(gap({ id: '2', category: 'decision', answer: '单行答案', sourceStatus: 'user_supplied', humanConfirmed: true })),
     classifyGap(gap({ id: '3', category: 'risk', answer: '多行\n答案' })),
     classifyGap(gap({ id: '4', category: '' })),
   ];
@@ -183,18 +177,6 @@ test('同字符集内按分类名排序', () => {
     summarize(rows).byCategory.map((item) => item.category),
     ['audience', 'decision', 'risk'],
   );
-});
-
-test('归一化与生成端 planningEvidenceSupports 逐字一致', () => {
-  // 复刻的是 .normalize("NFKC").replace(/\s+/gu, "")。两边分叉就会让预检结论失真。
-  assert.equal(normalizeForSelfProof(' 全角Ａ  与\t半角A '), '全角A与半角A');
-});
-
-test('自证判定:太短的答案不算', () => {
-  // 生成端要求归一后长度 >= 2
-  assert.equal(selfProofSurvives('a'), false);
-  assert.equal(selfProofSurvives(''), false);
-  assert.equal(selfProofSurvives('ab'), true);
 });
 
 test('空缺口列表在未分析时不能伪报可生成', () => {
@@ -269,16 +251,14 @@ test('没有失效引用作证时不进新档:supplied_fact 是上一轮的判�
     availableEvidenceIds: new Set(['evidence_section_alive']),
     sourceStatus: 'supplied_fact',
   }));
-  assert.equal(result.tier, 'approved_only');
+  assert.equal(result.tier, 'will_be_dropped');
 });
 
-test('只认 supplied_fact:user_supplied 本来就是人工确认,不该改口', () => {
-  const result = classifyGap(gap({
-    answer: '我到院面诊后才确定',
-    declaredEvidenceIds: ['evidence_section_deadbeef'],
-    sourceStatus: 'user_supplied',
-  }));
-  assert.equal(result.tier, 'approved_only');
+test('user_supplied 还必须带真实审批元数据', () => {
+  const unapproved = classifyGap(gap({ answer: '我到院面诊后才确定', sourceStatus: 'user_supplied' }));
+  const approved = classifyGap(gap({ answer: '我到院面诊后才确定', sourceStatus: 'user_supplied', humanConfirmed: true }));
+  assert.equal(unapproved.tier, 'will_be_dropped');
+  assert.equal(approved.tier, 'approved_only');
 });
 
 test('内容仍能匹配上就仍算有资料支撑:引用失效不改变这个事实', () => {
@@ -292,14 +272,13 @@ test('内容仍能匹配上就仍算有资料支撑:引用失效不改变这个�
   assert.equal(result.tier, 'evidence_backed');
 });
 
-test('格式坏的仍归会被丢弃:重新分析修不了换行,逐字符提示不能丢', () => {
+test('supplied_fact 的失效引用不因文本格式改变分档', () => {
   const result = classifyGap(gap({
     answer: '第一行\n第二行',
     declaredEvidenceIds: ['evidence_section_deadbeef'],
     sourceStatus: 'supplied_fact',
   }));
-  assert.equal(result.tier, 'will_be_dropped');
-  assert.ok(result.reasons.some((reason) => /换行/u.test(reason)), result.reasons.join('|'));
+  assert.equal(result.tier, 'evidence_stale');
 });
 
 test('认不出的 sourceStatus 不进新档:库里真有 unacknowledged 这种值', () => {
@@ -308,7 +287,7 @@ test('认不出的 sourceStatus 不进新档:库里真有 unacknowledged 这种�
     declaredEvidenceIds: ['evidence_section_deadbeef'],
     sourceStatus: 'unacknowledged',
   }));
-  assert.equal(result.tier, 'approved_only');
+  assert.equal(result.tier, 'will_be_dropped');
 });
 
 test('必答缺口落在 evidence_stale → 不算已落实,挣住生成', () => {

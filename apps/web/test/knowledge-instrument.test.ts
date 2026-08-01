@@ -307,8 +307,8 @@ test('待处理排序:引用失效比「会被丢弃」轻,比「仅人工确认
 
 /**
  * 分析已确认 + 引用失效,是真实存在的组合(项目「眼袋王」:analysis 为 approved、
- * 零个知识文件、49 条 supplied_fact 缺口)。旧文案在这里说「改掉会被丢弃的答案
- * 格式」——改格式没用,要做的是重新分析。
+ * 零个知识文件、49 条 supplied_fact 缺口)。此时必须指向重新分析或恢复资料,
+ * 不能声称旧引用仍可使用。
  */
 test('分析已确认但必答缺口引用失效 → 指向重新分析,并给出跳转', () => {
   const view = preflightHeadline(preflight({
@@ -330,7 +330,7 @@ test('分析已确认但必答缺口引用失效 → 指向重新分析,并给�
   assert.equal(view?.tone, 'error');
 });
 
-test('必答缺口不是引用失效时,仍走原来的补资料/改格式文案', () => {
+test('必答缺口不是引用失效时,指向补资料或负责人审批', () => {
   const view = preflightHeadline(preflight({
     analysis: 'approved',
     canGenerate: false,
@@ -342,8 +342,9 @@ test('必答缺口不是引用失效时,仍走原来的补资料/改格式文案
     ],
   }));
   // 混合情形不能整条说成「引用已失效」:另一条 blank 缺口重新分析救不回来,
-  // 用户仍得去补资料/改格式。这里必须留住格式那半句,否则等于漏掉一半出路。
-  assert.match(view!.nextStep, /格式/u);
+  // 用户仍得去补资料或完成负责人审批。
+  assert.match(view!.nextStep, /资料|审批/u);
+  assert.doesNotMatch(view!.nextStep, /格式/u);
   assert.match(view!.text, /没落实/u);
   assert.doesNotMatch(view!.text, /引用已失效/u);
   // 但也要点出其中有引用失效,并给跳转:重新分析是那部分缺口的唯一出路
@@ -357,7 +358,8 @@ test('必答缺口全无引用问题时,不提重新分析也不给跳转', () =
     canGenerate: false,
     requiredOpen: [{ id: 'g1', label: '价格信息', tier: 'blank' }],
   }));
-  assert.match(view!.nextStep, /资料|格式/u);
+  assert.match(view!.nextStep, /资料|审批/u);
+  assert.doesNotMatch(view!.nextStep, /格式/u);
   assert.equal(view?.needsAnalysis, false);
 });
 

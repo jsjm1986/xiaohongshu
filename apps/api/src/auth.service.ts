@@ -206,16 +206,25 @@ export class AuthService implements OnModuleInit {
     };
   }
 
-  consumeLoginAttempt(key: string): void {
-    this.rateLimits.consume('login', key, {
+  consumeLoginAttempt(sourceKey: string, usernameKey: string): void {
+    // Bound credential stuffing across many usernames without creating a
+    // username-global bucket that an attacker could use to lock out a victim.
+    this.rateLimits.consume('login-source', sourceKey, {
+      maxAttempts: 60,
+      windowMs: 15 * 60_000,
+      message: '登录尝试过多，请稍后重试',
+    });
+    this.rateLimits.consume('login-source-account', `${sourceKey}:${usernameKey}`, {
       maxAttempts: 5,
       windowMs: 15 * 60_000,
       message: '登录尝试过多，请稍后重试',
     });
   }
 
-  clearLoginFailures(key: string): void {
-    this.rateLimits.clear('login', key);
+  clearLoginFailures(sourceKey: string, usernameKey: string): void {
+    // Keep the source-wide budget: successful logins must not let a credential
+    // stuffing client reset its allowance after every known-good account.
+    this.rateLimits.clear('login-source-account', `${sourceKey}:${usernameKey}`);
   }
 
   primaryWorkspaceRole(userId: string): string | null {

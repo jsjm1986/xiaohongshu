@@ -20,7 +20,8 @@ import type { DraftItem, EnrichDraft } from '../src/lib/enrich-types';
 function draft(patch: Partial<EnrichDraft> = {}): EnrichDraft {
   return {
     gapId: 'g1', title: '价格', question: '多少钱?', priority: 90,
-    aiDraft: '约 7000 元,待确认。', confidence: 'medium',
+    aiDraft: '项目标准价格为 7000 元。', confidence: 'medium',
+    knowledgeAction: 'organize_existing', knowledgeReason: '原资料信息分散。', sources: [],
     ...patch,
   };
 }
@@ -36,21 +37,21 @@ test('toDraftItems 一律初始为 pending:没审过就不算确认', () => {
 });
 
 test('effectiveContent: userContent 为空或纯空白时回落 aiDraft', () => {
-  assert.equal(effectiveContent(item()), '约 7000 元,待确认。');
-  assert.equal(effectiveContent(item({ userContent: '' })), '约 7000 元,待确认。');
-  assert.equal(effectiveContent(item({ userContent: '   ' })), '约 7000 元,待确认。');
+  assert.equal(effectiveContent(item()), '项目标准价格为 7000 元。');
+  assert.equal(effectiveContent(item({ userContent: '' })), '项目标准价格为 7000 元。');
+  assert.equal(effectiveContent(item({ userContent: '   ' })), '项目标准价格为 7000 元。');
   assert.equal(effectiveContent(item({ userContent: '用户写的' })), '用户写的');
 });
 
 test('toMergeItems 剔除 deleted', () => {
   const merged = toMergeItems([
-    item({ gapId: 'a' }),
+    item({ gapId: 'a', status: 'confirmed' }),
     item({ gapId: 'b', status: 'deleted' }),
   ]);
   assert.deepEqual(merged.map((i) => i.gapId), ['a']);
 });
 
-test('toMergeItems: pending → confirmed,edited/editing → edited', () => {
+test('toMergeItems 只发送明确确认或修改完成的条目', () => {
   const merged = toMergeItems([
     item({ gapId: 'a', status: 'pending' }),
     item({ gapId: 'b', status: 'confirmed' }),
@@ -59,13 +60,16 @@ test('toMergeItems: pending → confirmed,edited/editing → edited', () => {
   ]);
   assert.deepEqual(
     merged.map((i) => [i.gapId, i.status]),
-    [['a', 'confirmed'], ['b', 'confirmed'], ['c', 'edited'], ['d', 'edited']],
+    [['b', 'confirmed'], ['c', 'edited']],
   );
 });
 
 test('toMergeItems 每条都带正文:后端不缓存草稿,拿不到就没法合并', () => {
-  const merged = toMergeItems([item(), item({ gapId: 'b', userContent: '改过的' })]);
-  assert.deepEqual(merged.map((i) => i.content), ['约 7000 元,待确认。', '改过的']);
+  const merged = toMergeItems([
+    item({ status: 'confirmed' }),
+    item({ gapId: 'b', status: 'edited', userContent: '改过的' }),
+  ]);
+  assert.deepEqual(merged.map((i) => i.content), ['项目标准价格为 7000 元。', '改过的']);
 });
 
 test('hasUnsavedEdits: 只有 pending / confirmed / deleted 时为 false', () => {
@@ -86,9 +90,23 @@ test('canMerge: 有一条正文空白时为 false', () => {
   assert.equal(canMerge([item(), item({ gapId: 'b', aiDraft: '' })]), false);
 });
 
-test('canMerge: 正常情况为 true,被删掉的空条目不影响', () => {
-  assert.equal(canMerge([item()]), true);
-  assert.equal(canMerge([item(), item({ gapId: 'b', aiDraft: '', status: 'deleted' })]), true);
+test('canMerge: 未确认或仍在编辑时为 false', () => {
+  assert.equal(canMerge([item()]), false);
+  assert.equal(canMerge([item({ status: 'editing' })]), false);
+});
+
+test('canMerge: 用户问题未填写或仍含未决占位时为 false', () => {
+  assert.equal(canMerge([item({ knowledgeAction: 'ask_user', aiDraft: '', status: 'edited', userContent: '' })]), false);
+  assert.equal(canMerge([item({ status: 'confirmed', aiDraft: '资料未提及具体价格。' })]), false);
+  assert.equal(canMerge([item({ status: 'confirmed', aiDraft: '具体价格是多少？' })]), false);
+});
+
+test('canMerge: 全部有效条目确认后为 true,被删条目不影响', () => {
+  assert.equal(canMerge([item({ status: 'confirmed' })]), true);
+  assert.equal(canMerge([
+    item({ status: 'edited', userContent: '项目标准价格已经人工修改为 6800 元。' }),
+    item({ gapId: 'b', aiDraft: '', status: 'deleted' }),
+  ]), true);
 });
 
 test('applyDraftChange 只改中标那条,长度与顺序不变', () => {
@@ -120,8 +138,8 @@ test('commitEdit: 改回和原稿一致(含首尾空白差异)时退回 pending 
 test('commitEdit: aiDraft 自带首尾空白时也能认出「没改动」', () => {
   // 模型输出常带尾随换行。两边都要 trim 后再比,否则用户什么都没改也会被标成「已修改」,
   // 关闭时还会弹一次「有未提交的改动」。
-  const base = item({ status: 'editing', aiDraft: '\n约 7000 元,待确认。\n' });
-  const next = commitEdit(base, '约 7000 元,待确认。');
+  const base = item({ status: 'editing', aiDraft: '\n项目标准价格为 7000 元。\n' });
+  const next = commitEdit(base, '项目标准价格为 7000 元。');
   assert.equal(next.status, 'pending');
   assert.equal(next.userContent, undefined);
 });

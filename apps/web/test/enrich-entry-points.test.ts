@@ -54,11 +54,10 @@ test('入口按钮只在真有待补充缺口时出现', () => {
 });
 
 test('缺口池的单条精补按钮只给待补充的缺口', () => {
-  // 已有答案的缺口后端会拒(见 generateEnrichmentDraft),显示按钮就是误导
+  // 只有分析器明确判定属于知识完善的缺口才显示，规划类缺口不能混进来。
   const source = read('../src/pages/IntelligentSimpleFlow.tsx');
   assert.match(source, /isGapPending\(gap\) &&[\s\S]{0,120}openEnrich\(\[gap\.id\]\)/);
-  // 判据要和后端 pendingGaps 一致
-  assert.match(source, /const isGapPending[\s\S]{0,400}hypothesis/);
+  assert.match(source, /const isGapPending[\s\S]{0,300}knowledgeAction[\s\S]{0,200}organize_existing[\s\S]{0,100}ask_user/);
 });
 
 test('弹窗支持只补指定缺口,缺省则整批', () => {
@@ -88,6 +87,7 @@ test('保存后的说明不承诺缺口会消失', () => {
     /建议重新分析以让补充内容生效/,
     '不能承诺「生效」——重新分析后缺口仍会是待补充状态',
   );
-  assert.match(source, /待确认/, '要说明补充进去的是待确认内容');
-  assert.match(source, /真实|真事实|核实/, '要说明只有填入真实信息缺口才会关闭');
+  assert.match(source, /已知事实/, '要说明保存内容已经过人工确认');
+  assert.match(source, /核实|事实背书/, '要说明用户需要对最终事实负责');
+  assert.match(source, /更新知识地图和信息缺口/, '只能承诺重新计算，不能承诺缺口关闭');
 });

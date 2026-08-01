@@ -47,7 +47,12 @@ async function request(path: string, options: RequestInit = {}) {
 async function createGap(title: string) {
   const res = await request(`/api/projects/${projectId}/information-gaps`, {
     method: 'POST',
-    body: JSON.stringify({ title, question: `${title}的具体情况?`, sourceStatus: 'unknown' }),
+    body: JSON.stringify({
+      title,
+      question: `${title}的具体情况?`,
+      sourceStatus: 'unknown',
+      knowledgeAction: 'organize_existing',
+    }),
   });
   assert.equal(res.response.status, 201, JSON.stringify(res.body));
   return res.body.id as string;
