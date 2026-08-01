@@ -279,7 +279,7 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
                 {/* 放在「重新分析」旁边:补充完就该重新分析,两个动作挨着最顺 */}
                 {pendingGapCount > 0 && (
                   <Button variant="secondary" icon={<WandSparkles size={15} />} disabled={busy || analyzing} onClick={() => setEnrichOpen(true)}>
-                    {enrichButtonLabel(pendingGapCount)}
+                    {enrichButtonLabel(pendingGapCount, stats)}
                   </Button>
                 )}
                 <Button variant={isStale ? 'primary' : 'ghost'} loading={busy} disabled={busy || analyzing} onClick={() => void analyze()}>重新分析</Button>

@@ -31,12 +31,12 @@ export class AuthController {
     const usernameKey = typeof body.username === 'string'
       ? body.username.trim().toLowerCase().slice(0, 64)
       : 'invalid';
-    const loginKey = `${request.ip}:${usernameKey}`;
-    this.auth.consumeLoginAttempt(loginKey);
+    const sourceKey = request.ip || request.socket.remoteAddress || 'unknown';
+    this.auth.consumeLoginAttempt(sourceKey, usernameKey);
     let result: Awaited<ReturnType<AuthService['login']>>;
     try {
       result = await this.auth.login(body.username, body.password);
-      this.auth.clearLoginFailures(loginKey);
+      this.auth.clearLoginFailures(sourceKey, usernameKey);
     } catch (error) {
       if (error instanceof UnauthorizedException && typeof body.username === 'string') {
         const hint = await this.registration.loginHintFor(body.username, body.password);

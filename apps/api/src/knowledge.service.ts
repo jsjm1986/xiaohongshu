@@ -3,6 +3,7 @@ import { mkdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { basename, extname, join, relative } from 'node:path';
 import {
   BadRequestException,
+  ConflictException,
   Inject,
   Injectable,
   NotFoundException,
@@ -109,6 +110,12 @@ export class KnowledgeService {
     category?: string;
     evidenceStatus?: string;
     metadata?: Record<string, unknown>;
+    /** undefined=普通导入不做并发校验；null=期望目标尚不存在；string=期望该行仍是最新版。 */
+    expectedLatestFileId?: string | null;
+    /** 并发校验通过后，在同一事务里沿用目标文件的当前分类。 */
+    inheritLatestCategory?: boolean;
+    /** 禁止把新版本写进指定分类；检查与插入在同一事务内完成。 */
+    disallowedLatestCategory?: string;
     principal: SessionPrincipal;
   }): Promise<Record<string, unknown>> {
     this.resources.projectRow(input.projectId);
@@ -134,6 +141,26 @@ export class KnowledgeService {
       await rename(temporary, target);
       return this.database.transaction(() => {
         const project = this.resources.projectRow(input.projectId);
+        let latest: { id: string; category: string } | undefined;
+        if (
+          input.expectedLatestFileId !== undefined
+          || input.inheritLatestCategory
+          || input.disallowedLatestCategory !== undefined
+        ) {
+          latest = this.database.prepare(
+            `SELECT id, category FROM knowledge_files
+              WHERE project_id=? AND filename=? AND deleted_at IS NULL
+              ORDER BY version DESC, created_at DESC, id DESC LIMIT 1`,
+          ).get(input.projectId, cleanFilename) as { id: string; category: string } | undefined;
+        }
+        if (input.expectedLatestFileId !== undefined) {
+          if ((latest?.id ?? null) !== input.expectedLatestFileId) {
+            throw new ConflictException('目标知识文件在预览后已被更新，请返回重新生成合并预览');
+          }
+        }
+        if (latest && input.disallowedLatestCategory === latest.category) {
+          throw new BadRequestException('AI 补全不能合并进参考语料，请选择项目事实资料或新建知识地图');
+        }
         const versionRow = this.database
           .prepare(
             `SELECT COALESCE(MAX(version), 0) AS version FROM knowledge_files
@@ -157,7 +184,7 @@ export class KnowledgeService {
             buffer.byteLength,
             createHash('sha256').update(buffer).digest('hex'),
             version,
-            (input.category ?? 'general').slice(0, 80),
+            (input.inheritLatestCategory && latest ? latest.category : input.category ?? 'general').slice(0, 80),
             (input.evidenceStatus ?? 'unknown').slice(0, 80),
             JSON.stringify(input.metadata ?? {}),
             input.principal.userId,
@@ -457,13 +484,7 @@ export class KnowledgeService {
         .filter((section) => section.documentId !== 'generated')
         .map((section) => evidenceIdForSection(section)),
     );
-    const rows = this.database
-      .prepare(
-        `SELECT id, title, status, data_json FROM information_gaps
-         WHERE project_id = ? AND deleted_at IS NULL
-         ORDER BY priority DESC, updated_at DESC`,
-      )
-      .all(projectId) as unknown as Array<Record<string, unknown>>;
+    const rows = this.intelligence.currentGapRows(projectId) as Array<Record<string, unknown>>;
 
     const gaps: PreflightGapResult[] = rows.map((row) => {
       const data = parseJson<Record<string, unknown>>(String(row.data_json), {});
@@ -493,6 +514,10 @@ export class KnowledgeService {
         sourceStatus: typeof data.sourceStatus === 'string' && GAP_SOURCE_STATUSES.has(data.sourceStatus)
           ? data.sourceStatus
           : undefined,
+        humanConfirmed: data.sourceStatus === 'user_supplied'
+          && row.status === 'approved'
+          && typeof row.approved_by === 'string' && row.approved_by.length > 0
+          && typeof row.approved_at === 'string' && row.approved_at.length > 0,
       });
     });
 
@@ -505,7 +530,7 @@ export class KnowledgeService {
       .prepare(
         `SELECT status FROM project_intelligence
          WHERE project_id = ? AND deleted_at IS NULL
-         ORDER BY CASE status WHEN 'approved' THEN 0 ELSE 1 END, version DESC
+         ORDER BY version DESC, created_at DESC, id DESC
          LIMIT 1`,
       )
       .get(projectId) as { status?: string } | undefined;

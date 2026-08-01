@@ -8,6 +8,7 @@ import {
   confidenceLabel,
   confirmDraft,
   deleteDraft,
+  isResolvedKnowledge,
   restoreDraft,
 } from '../../lib/enrich-flow';
 import type { DraftItem } from '../../lib/enrich-types';
@@ -29,6 +30,48 @@ export function DraftItemCard({ item, onChange }: { item: DraftItem; onChange: (
 
   const label = confidenceLabel(item.confidence);
 
+  if (item.knowledgeAction === 'ask_user') {
+    return (
+      <article className="draft-item draft-item--low">
+        <header className="draft-item__header">
+          <h4>{item.title}</h4>
+          <Badge tone="danger">需要你提供事实</Badge>
+        </header>
+        {item.question && (
+          <p className="draft-item__question">{item.question}</p>
+        )}
+        {item.knowledgeReason && (
+          <p className="draft-item__note">{item.knowledgeReason}</p>
+        )}
+        <label className="draft-item__label" htmlFor={`draft-${item.gapId}`}>你的明确答案</label>
+        <textarea
+          id={`draft-${item.gapId}`}
+          className="draft-item__textarea"
+          value={text}
+          rows={6}
+          placeholder="填写你确认过的项目事实；不知道可以暂不处理"
+          onChange={(event) => setText(event.target.value)}
+        />
+        <footer className="draft-item__actions">
+          {item.status === 'edited' && (
+            <span className="draft-item__confirmed"><CheckCircle2 size={14} aria-hidden="true" /> 已填写并确认</span>
+          )}
+          <button type="button" className="draft-item__action" onClick={() => onChange(deleteDraft(item))}>
+            <Trash2 size={13} aria-hidden="true" /> 暂不处理
+          </button>
+          <button
+            type="button"
+            className="draft-item__action draft-item__action--primary"
+            disabled={!isResolvedKnowledge(text)}
+            onClick={() => onChange({ ...item, status: 'edited', userContent: text })}
+          >
+            保存并确认
+          </button>
+        </footer>
+      </article>
+    );
+  }
+
   return (
     <article className={`draft-item draft-item--${item.confidence}`}>
       <header className="draft-item__header">
@@ -36,6 +79,28 @@ export function DraftItemCard({ item, onChange }: { item: DraftItem; onChange: (
         <Badge tone={label.tone}>{label.text}</Badge>
       </header>
       {item.question && <p className="draft-item__question">{item.question}</p>}
+
+      {item.knowledgeReason && (
+        <p className="draft-item__reason">
+          <span>整理原因：</span>
+          <span>{item.knowledgeReason}</span>
+        </p>
+      )}
+      {item.sources.length > 0 && (
+        <details className="draft-item__sources">
+          <summary>
+            <span>查看资料依据（</span>
+            <span>{item.sources.length}</span>
+            <span> 处）</span>
+          </summary>
+          {item.sources.map((source) => (
+            <blockquote key={source.evidenceId}>
+              <strong>{source.filename}{source.heading ? ` · ${source.heading}` : ''}</strong>
+              <span>{source.excerpt}</span>
+            </blockquote>
+          ))}
+        </details>
+      )}
 
       {item.status === 'editing' ? (
         <>
@@ -73,7 +138,7 @@ export function DraftItemCard({ item, onChange }: { item: DraftItem; onChange: (
                 <CheckCircle2 size={14} aria-hidden="true" /> 已确认
               </span>
             )}
-            {item.status === 'edited' && <span className="draft-item__note">已修改</span>}
+            {item.status === 'edited' && <span className="draft-item__confirmed">已修改并确认</span>}
             <button type="button" className="draft-item__action" onClick={() => onChange(deleteDraft(item))}>
               <Trash2 size={13} aria-hidden="true" /> 删除
             </button>
@@ -86,7 +151,7 @@ export function DraftItemCard({ item, onChange }: { item: DraftItem; onChange: (
                 className="draft-item__action draft-item__action--primary"
                 onClick={() => onChange(confirmDraft(item))}
               >
-                确认无误
+                确认内容属实
               </button>
             )}
           </footer>

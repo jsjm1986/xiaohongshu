@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
+import { evidenceIdForSection, indexKnowledgeSource, selectKnowledgeContext } from '@content-agent/agent-core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { createApplication } from '../src/app.js';
 import { DatabaseService } from '../src/database.service.js';
@@ -24,6 +25,7 @@ let cookie = '';
 let csrf = '';
 let projectId = '';
 let enrich: IntelligenceEnrichService;
+let intelligence: IntelligenceService;
 let principal: { userId: string; systemRole: string };
 
 const PASSWORD = 'Enrich-bootstrap-123!';
@@ -46,7 +48,7 @@ async function request(path: string, options: RequestInit = {}) {
 async function createGap(title: string, data: Record<string, unknown>) {
   const res = await request(`/api/projects/${projectId}/information-gaps`, {
     method: 'POST',
-    body: JSON.stringify({ title, ...data }),
+    body: JSON.stringify({ title, knowledgeAction: 'organize_existing', ...data }),
   });
   assert.equal(res.response.status, 201, JSON.stringify(res.body));
   return res.body.id as string;
@@ -68,10 +70,10 @@ async function createAnalyzerFactGap(title: string, data: Record<string, unknown
   return id;
 }
 
-async function upload(filename: string, content: string) {
+async function upload(filename: string, content: string, category = '未分类') {
   const res = await request(`/api/projects/${projectId}/knowledge`, {
     method: 'POST',
-    body: JSON.stringify({ filename, content, category: '未分类', evidenceStatus: '已知事实' }),
+    body: JSON.stringify({ filename, content, category, evidenceStatus: '已知事实' }),
   });
   assert.equal(res.response.status, 201, JSON.stringify(res.body));
   return res.body;
@@ -112,7 +114,7 @@ before(async () => {
   projectId = project.body.id;
 
   enrich = app.get(IntelligenceEnrichService);
-  const intelligence = app.get(IntelligenceService);
+  intelligence = app.get(IntelligenceService);
   // 换掉模型层。保留任务生命周期不测:那部分由既有的 analysis-task 测试覆盖。
   (intelligence as unknown as Record<string, unknown>).runEnrichmentModel = async (
     _projectId: string,
@@ -137,11 +139,108 @@ test('没有任何缺口时拒绝起草', async () => {
   );
 });
 
+test('历史缺口缺少 knowledgeAction 时保守回落 none', async () => {
+  const gapId = await createGap('历史规划缺口', {
+    question: '这是选题问题吗?',
+    sourceStatus: 'unknown',
+    knowledgeAction: undefined,
+  });
+  await assert.rejects(
+    () => enrich.generateEnrichmentDraft(projectId, principal as never, [gapId]),
+    /指定的缺口不存在/,
+  );
+});
+
+test('ask_user 直接要求用户填写事实，不调用模型编答案', async () => {
+  const gapId = await createGap('真实成交价格', {
+    question: '本项目最终成交价格是多少?',
+    sourceStatus: 'unknown',
+    knowledgeAction: 'ask_user',
+    knowledgeReason: '现有资料没有最终合同价格，只有项目负责人能确认。',
+  });
+  capturedPrompts = [];
+  modelReply = { items: [{ gapId, content: '模型不应生成这段价格。', confidence: 'high' }] };
+
+  const result = await enrich.generateEnrichmentDraft(projectId, principal as never, [gapId]);
+
+  assert.equal(capturedPrompts.length, 0);
+  assert.equal(result.gaps.length, 1);
+  assert.equal(result.gaps[0].knowledgeAction, 'ask_user');
+  assert.equal(result.gaps[0].aiDraft, '');
+  assert.match(result.gaps[0].knowledgeReason, /项目负责人/);
+});
+
+test('分析引用的 evidence ID 优先进入提示词并返回来源摘录', async () => {
+  const content = '# 服务规则\n\n## 退款条件\n\n签约后七日内且服务尚未开始，可以申请全额退款。';
+  const file = await upload('退款规则.md', content);
+  const indexed = indexKnowledgeSource({
+    id: String(file.id),
+    projectId: 'enrichment',
+    path: '退款规则.md',
+    content,
+    metadata: {
+      title: '退款规则.md', kind: 'fact', evidenceStatus: 'user_supplied', keywords: [], scope: [], caveats: [],
+    },
+  });
+  const sections = selectKnowledgeContext({
+    documents: [indexed],
+    query: '',
+    budget: { maxInputTokens: 100_000_000, systemPromptTokens: 0, formulaPromptTokens: 0, outputReserveTokens: 0 },
+  }).sections.filter((section) => section.documentId !== 'generated');
+  const source = sections.find((section) => section.content.includes('七日内'))!;
+  const evidenceId = evidenceIdForSection(source);
+  const gapId = await createAnalyzerFactGap('退费约束整理', {
+    question: '把已确认的合同解除规则整理清楚。',
+    sourceStatus: 'supplied_fact',
+    knowledgeAction: 'organize_existing',
+    evidenceIds: [evidenceId],
+  });
+  capturedPrompts = [];
+  modelReply = {
+    items: [{ gapId, content: '签约后七日内且服务尚未开始时，可以申请全额退款。', confidence: 'high' }],
+  };
+
+  const result = await enrich.generateEnrichmentDraft(projectId, principal as never, [gapId]);
+
+  assert.match(capturedPrompts[0].prompt, /已引用证据：退款规则\.md/);
+  assert.match(capturedPrompts[0].prompt, /签约后七日内/);
+  assert.equal(result.gaps[0].sources[0].evidenceId, evidenceId);
+  assert.equal(result.gaps[0].sources[0].filename, '退款规则.md');
+  assert.match(result.gaps[0].sources[0].excerpt, /全额退款/);
+});
+
+test('没有 evidence ID 时把关键词命中的真实分节作为来源返回', async () => {
+  await upload(
+    '咨询抵扣规则.md',
+    '# 咨询规则\n\n## 诊断与抵扣\n\n视频诊断为 60 分钟，费用 199 元；七日内签约可抵扣基础服务费。',
+  );
+  const gapId = await createGap('整理视频诊断与抵扣规则', {
+    question: '把视频诊断时长、费用和签约抵扣条件整理清楚。',
+    sourceStatus: 'unknown',
+    knowledgeAction: 'organize_existing',
+  });
+  modelReply = {
+    items: [{
+      gapId,
+      content: '视频诊断为 60 分钟，费用 199 元；七日内签约可抵扣基础服务费。',
+      confidence: 'high',
+    }],
+  };
+
+  const result = await enrich.generateEnrichmentDraft(projectId, principal as never, [gapId]);
+
+  assert.ok(result.gaps[0].sources.length > 0, '关键词检索喂给模型的资料也必须对用户可见');
+  assert.equal(result.gaps[0].sources[0].filename, '咨询抵扣规则.md');
+  assert.match(result.gaps[0].sources[0].heading, /诊断与抵扣/);
+  assert.match(result.gaps[0].sources[0].excerpt, /60 分钟/);
+});
+
 test('只挑答案为空或来源是推断/假设/未知的缺口', async () => {
   const done = await createAnalyzerFactGap('已有答案的缺口', {
     question: '工期多久？',
     answer: '常规两居 45 天。',
     sourceStatus: 'supplied_fact',
+    knowledgeAction: 'none',
   });
   const unknown = await createGap('价格区间', { question: '整装报价多少？', sourceStatus: 'unknown' });
   const inference = await createGap('主材品牌', {
@@ -216,16 +315,38 @@ test('把握程度缺失或是垃圾值时保守取 low', async () => {
   }
 });
 
-test('模型产物全被丢弃时报错,并指向补充原始资料', async () => {
-  await createGap('无法生成', { question: '?', sourceStatus: 'unknown' });
+test('模型产物全被丢弃时报错并允许重试或直接编辑', async () => {
+  const gapId = await createGap('无法生成', { question: '?', sourceStatus: 'unknown' });
   modelReply = { items: [{ gapId: 'nope', content: 'x' }] };
   await assert.rejects(
-    () => enrich.generateEnrichmentDraft(projectId, principal as never),
-    /先补充一些原始资料/,
+    () => enrich.generateEnrichmentDraft(projectId, principal as never, [gapId]),
+    /没能基于现有资料整理出可用内容/,
   );
 
   modelReply = {};
-  await assert.rejects(() => enrich.generateEnrichmentDraft(projectId, principal as never), /原始资料/);
+  await assert.rejects(
+    () => enrich.generateEnrichmentDraft(projectId, principal as never, [gapId]),
+    /重试或直接编辑知识库/,
+  );
+});
+
+test('模型起草期间知识版本变化时不返回过期草稿', async () => {
+  const gapId = await createGap('起草期间更新资料', { question: '最新资料是什么?', sourceStatus: 'unknown' });
+  const original = (intelligence as any).runEnrichmentModel;
+  (intelligence as any).runEnrichmentModel = async () => {
+    await upload('起草竞态.md', '模型运行期间上传的新版本资料。');
+    return {
+      items: [{ gapId, content: '## 旧草稿\n\n这是基于上传前资料生成的过期内容。', confidence: 'low' }],
+    };
+  };
+  try {
+    await assert.rejects(
+      () => enrich.generateEnrichmentDraft(projectId, principal as never, [gapId]),
+      /起草期间发生了变化/,
+    );
+  } finally {
+    (intelligence as any).runEnrichmentModel = original;
+  }
 });
 
 test('提示词只带入与缺口相关的资料段落', async () => {
@@ -263,9 +384,9 @@ test('指定 gapIds 时只起草那几条,不整批跑', async () => {
   assert.equal((prompt.match(/gapId=/g) || []).length, 2);
 });
 
-test('指定的 gapId 属于别的项目或已有答案时拒绝,且提示区分两种情况', async () => {
+test('指定的 gapId 不属于知识完善流程时拒绝', async () => {
   const answered = await createAnalyzerFactGap('已有答案的', {
-    question: 'x?', answer: '已经填好了。', sourceStatus: 'supplied_fact',
+    question: 'x?', answer: '已经填好了。', sourceStatus: 'supplied_fact', knowledgeAction: 'none',
   });
   await assert.rejects(
     () => enrich.generateEnrichmentDraft(projectId, principal as never, [answered]),
@@ -300,26 +421,95 @@ test('模型把同一个 gapId 返回两次时只保留第一条', async () => {
   assert.equal(dupes[0].confidence, 'high');
 });
 
-test('起草提示词禁止把「资料没写」写成「这项不存在」', async () => {
+test('起草提示词禁止编造，且丢弃模型返回的未决占位内容', async () => {
   /*
    * 冒烟测试(宠物医院)发现的真问题:原文完全没提线上问诊、微信支付、多宠折扣,
    * 草稿却写成「暂未开通线上咨询」「支付方式包括现金、微信、支付宝」
    * 「目前未针对多宠家庭提供折扣」——把信息缺失说成了事实上的否认。
    * 这等于替商家否认了它可能确实有的服务,和编造事实一样是凭空断言。
    */
-  const gapId = await createGap(projectId, '线上咨询', { question: '是否支持线上问诊?', sourceStatus: 'unknown' });
+  const gapId = await createGap('线上咨询', { question: '是否支持线上问诊?', sourceStatus: 'unknown' });
   capturedPrompts = [];
   modelReply = { items: [{ gapId, content: '## 线上咨询\n\n资料未提及,待确认。', confidence: 'low' }] };
-  await enrich.generateEnrichmentDraft(projectId, principal as never);
+  await assert.rejects(
+    () => enrich.generateEnrichmentDraft(projectId, principal as never, [gapId]),
+    /没能基于现有资料整理出可用内容/,
+  );
 
   const prompt = capturedPrompts.at(-1)!.prompt;
-  assert.match(prompt, /"资料里没写"不等于"这项不存在"|资料里没写.{0,4}不等于.{0,4}这项不存在/);
-  assert.match(prompt, /暂未开通/, '要明确点出这类禁用说法');
-  assert.match(prompt, /资料未提及/, '要给出正确的替代写法');
+  assert.match(prompt, /不允许合理推断、行业常识或假设/);
+  assert.match(prompt, /不要输出「待确认」「资料未提及」/);
+});
+
+test('起草不把 reference-corpus 对标样本当作项目事实资料', async () => {
+  const gapId = await createGap('参考语料隔离', {
+    question: '项目承诺是什么?',
+    sourceStatus: 'unknown',
+  });
+  await upload('竞品样本.md', '竞品承诺百分百成功，这是风格样本，不是本项目事实。', 'reference-corpus');
+  capturedPrompts = [];
+  modelReply = {
+    items: [{ gapId, content: '## 项目承诺\n\n本项目仅提供书面咨询服务。', confidence: 'low' }],
+  };
+
+  await enrich.generateEnrichmentDraft(projectId, principal as never, [gapId]);
+
+  assert.doesNotMatch(capturedPrompts.at(-1)!.prompt, /竞品承诺百分百成功/);
 });
 
 test('起草任务用 enrich: 前缀记账,不污染分析进度', async () => {
   // 走真实的 runEnrichmentModel 会打模型,这里只验前缀常量与前端过滤的契约一致。
   const { ENRICH_FINGERPRINT_PREFIX } = await import('../src/intelligence.service.js');
   assert.equal(ENRICH_FINGERPRINT_PREFIX, 'enrich:');
+});
+
+test('多轮分析后只起草最新批次和人工缺口,旧批次留库但不参与当前流程', async () => {
+  const db = app.get(DatabaseService);
+  const userId = principal.userId;
+  const now = new Date().toISOString();
+  const oldTask = 'analysis-old';
+  const newTask = 'analysis-new';
+  const oldResult = 'intelligence-old';
+  const newResult = 'intelligence-new';
+  for (const [taskId, resultId, version] of [[oldTask, oldResult, 1], [newTask, newResult, 2]] as const) {
+    db.prepare(
+      `INSERT INTO analysis_tasks
+       (id, project_id, kind, target_id, status, source_fingerprint, attempt_count, result_id,
+        created_by, created_at, updated_at, completed_at)
+       VALUES (?, ?, 'project', NULL, 'completed', ?, 1, ?, ?, ?, ?, ?)`,
+    ).run(taskId, projectId, `fp-${version}`, resultId, userId, now, now, now);
+    db.prepare(
+      `INSERT INTO project_intelligence
+       (id, project_id, version, status, source_fingerprint, map_json, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, 'draft', ?, '{}', ?, ?, ?)`,
+    ).run(resultId, projectId, version, `fp-${version}`, userId, now, now);
+  }
+  const insertGap = (id: string, source: string | null, title: string) => db.prepare(
+    `INSERT INTO information_gaps
+     (id, project_id, title, priority, status, source_analysis_id, data_json, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, 50, 'draft', ?, '{"sourceStatus":"unknown","knowledgeAction":"organize_existing"}', ?, ?, ?)`,
+  ).run(id, projectId, title, source, userId, now, now);
+  insertGap('old-batch-gap', oldTask, '旧批次不应出现');
+  insertGap('new-batch-gap', newTask, '最新批次应出现');
+  insertGap('manual-gap', null, '人工缺口应保留');
+
+  capturedPrompts = [];
+  modelReply = {
+    items: [
+      { gapId: 'old-batch-gap', content: '## 旧\n\n这条不应被接受。', confidence: 'low' },
+      { gapId: 'new-batch-gap', content: '## 新\n\n最新批次补充内容。', confidence: 'low' },
+      { gapId: 'manual-gap', content: '## 人工\n\n人工缺口补充内容。', confidence: 'low' },
+    ],
+  };
+  const result = await enrich.generateEnrichmentDraft(projectId, principal as never);
+  assert.deepEqual(
+    result.gaps.filter((gap) => ['old-batch-gap', 'new-batch-gap', 'manual-gap'].includes(gap.gapId)).map((gap) => gap.gapId).sort(),
+    ['manual-gap', 'new-batch-gap'],
+  );
+  assert.doesNotMatch(capturedPrompts.at(-1)!.prompt, /旧批次不应出现/);
+  assert.equal(
+    Number((db.prepare("SELECT COUNT(*) AS count FROM information_gaps WHERE id='old-batch-gap'").get() as { count: number }).count),
+    1,
+    '历史行必须保留用于审计',
+  );
 });

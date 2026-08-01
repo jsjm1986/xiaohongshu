@@ -1095,6 +1095,19 @@ export interface ProjectIntelligence {
   prohibitedClaims: string[];
   dynamicUnknowns: string[];
   evidenceIds: string[];
+  /** Optional for historical analyses created before mechanical evidence validation. */
+  evidenceValidationIssues?: Array<{
+    path: string;
+    statement: string;
+    reason: "missing_ledger" | "invalid_source_status" | "unknown_evidence" | "unsupported_statement";
+    evidenceIds?: string[];
+  }>;
+  /** File-level disclosure coverage captured for the analysis snapshot. */
+  knowledgeCoverage?: Array<{
+    documentId: string;
+    filename: string;
+    status: "fully_disclosed" | "partially_disclosed" | "omitted_by_budget" | "truncated" | "unreadable";
+  }>;
 }
 
 export const PROJECT_BLUEPRINT_MODULE_KEYS = [
@@ -1246,6 +1259,30 @@ export interface InformationGap {
    * - inference / hypothesis / unknown 仍属待补充
    */
   sourceStatus?: "supplied_fact" | "user_supplied" | "inference" | "hypothesis" | "unknown";
+  /**
+   * Immutable approval metadata for an owner-asserted answer. Merely setting
+   * sourceStatus is insufficient: formal evidence is created only when the API
+   * freezes the approving principal and timestamp into the generation snapshot.
+   */
+  humanConfirmation?: {
+    confirmedBy: string;
+    confirmedAt: string;
+  };
+  /** Whether this planning gap should also become project Markdown knowledge. */
+  knowledgeAction?: "organize_existing" | "ask_user" | "none";
+  knowledgeReason?: string;
+  knowledgeFindingStatus?:
+    | "supported"
+    | "not_found_after_full_scan"
+    | "not_assessed_due_to_coverage"
+    | "conflicting"
+    | "stale_reference";
+  evidenceValidationIssues?: Array<{
+    path: string;
+    statement: string;
+    reason: "missing_ledger" | "invalid_source_status" | "unknown_evidence" | "unsupported_statement";
+    evidenceIds?: string[];
+  }>;
   required: boolean;
   preferredChannels?: ContentChannel[];
 }

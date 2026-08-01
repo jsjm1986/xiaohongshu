@@ -54,7 +54,7 @@ test('中文 projectId 也被转义', async () => {
 });
 
 test('merge 的 body 是传入对象的 JSON', async () => {
-  const calls = stubFetch(200, { preview: 'x', targetFile: 'INDEX.md', isNewFile: false });
+  const calls = stubFetch(200, { preview: 'x', targetFile: 'INDEX.md', baseFileId: 'f1', isNewFile: false });
   const body = { items: [{ gapId: 'g1', status: 'edited' as const, content: '正文' }], targetFile: 'INDEX.md' };
   await api.intelligence.enrich.merge('p1', body);
   assert.deepEqual(JSON.parse(String(calls[0].init.body)), body);
@@ -63,7 +63,7 @@ test('merge 的 body 是传入对象的 JSON', async () => {
 
 test('save 走 normalizeKnowledge,形状与 knowledge.list 一致', async () => {
   stubFetch(200, { id: 'f1', projectId: 'p1', filename: 'INDEX.md', version: 2, bytes: 120, category: '未分类', evidenceStatus: '已知事实' });
-  const saved = await api.intelligence.enrich.save('p1', { content: '# 正文', targetFile: 'INDEX.md' });
+  const saved = await api.intelligence.enrich.save('p1', { content: '# 正文', targetFile: 'INDEX.md', baseFileId: 'f0' });
   // normalizeKnowledge 把 filename 映射成 name;调用方按 KnowledgeFile 用它
   assert.equal(saved.name, 'INDEX.md');
   assert.equal(saved.id, 'f1');
@@ -85,7 +85,7 @@ test('后端 4xx 抛 ApiError 并透出后端原文', async () => {
 });
 
 test('gapStats: 空数组全为 0', () => {
-  assert.deepEqual(gapStats([]), { total: 0, supplied: 0, inferred: 0, unknown: 0 });
+  assert.deepEqual(gapStats([]), { total: 0, supplied: 0, inferred: 0, unknown: 0, organize: 0, askUser: 0 });
 });
 
 test('gapStats: 有答案且来源是事实 → supplied', () => {
@@ -129,6 +129,11 @@ test('gapStats: 三档之和恒等于 total', () => {
   assert.equal(stats.supplied + stats.inferred + stats.unknown, stats.total);
 });
 
-test('pendingCount = 未知 + 推断', () => {
-  assert.equal(pendingCount({ total: 5, supplied: 2, inferred: 1, unknown: 2 }), 3);
+test('pendingCount 只统计明确的知识完善动作', () => {
+  assert.equal(pendingCount({ total: 5, supplied: 2, inferred: 1, unknown: 2, organize: 1, askUser: 1 }), 2);
+  assert.equal(pendingCount(gapStats([
+    gap({ id: 'a', knowledgeAction: 'organize_existing' }),
+    gap({ id: 'b', knowledgeAction: 'ask_user' }),
+    gap({ id: 'c', sourceStatus: 'unknown', knowledgeAction: 'none' }),
+  ])), 2, '规划类 unknown 缺口不应进入知识完善');
 });

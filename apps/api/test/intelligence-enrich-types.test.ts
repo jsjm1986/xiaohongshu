@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { BadRequestException } from '@nestjs/common';
 import {
-  countHedges,
   parseDraftRequest,
   MAX_MERGE_ITEMS,
   MAX_TOTAL_CONTENT_CHARS,
@@ -121,31 +120,41 @@ describe('parseMergeRequest', () => {
 
 describe('parseSaveRequest', () => {
   it('接受有效请求', () => {
-    const parsed = parseSaveRequest({ content: '# 标题', targetFile: '补充资料.md' });
+    const parsed = parseSaveRequest({ content: '# 标题', targetFile: '补充资料.md', baseFileId: 'file-v1' });
     assert.equal(parsed.targetFile, '补充资料.md');
     assert.equal(parsed.content, '# 标题');
+    assert.equal(parsed.baseFileId, 'file-v1');
+  });
+
+  it('新文件用 null 作为预览基线', () => {
+    assert.equal(parseSaveRequest({ content: 'x', targetFile: 'a.md', baseFileId: null }).baseFileId, null);
   });
 
   it('targetFile 必填', () => {
-    assert.throws(() => parseSaveRequest({ content: 'x' }), BadRequestException);
+    assert.throws(() => parseSaveRequest({ content: 'x', baseFileId: null }), BadRequestException);
   });
 
   it('content 必填且不能是空串', () => {
-    assert.throws(() => parseSaveRequest({ targetFile: 'a.md' }), BadRequestException);
-    assert.throws(() => parseSaveRequest({ content: '   ', targetFile: 'a.md' }), BadRequestException);
+    assert.throws(() => parseSaveRequest({ targetFile: 'a.md', baseFileId: null }), BadRequestException);
+    assert.throws(() => parseSaveRequest({ content: '   ', targetFile: 'a.md', baseFileId: null }), BadRequestException);
+  });
+
+  it('baseFileId 必填且只能是字符串或 null', () => {
+    assert.throws(() => parseSaveRequest({ content: 'x', targetFile: 'a.md' }), BadRequestException);
+    assert.throws(() => parseSaveRequest({ content: 'x', targetFile: 'a.md', baseFileId: 1 }), BadRequestException);
   });
 
   it('按字节而非字符判断 2 MiB 上限', () => {
     // 中文一字三字节:700_000 字符 = 2.1 MB > 2 MiB,只看字符数会漏过
     assert.throws(
-      () => parseSaveRequest({ content: '中'.repeat(700_000), targetFile: 'a.md' }),
+      () => parseSaveRequest({ content: '中'.repeat(700_000), targetFile: 'a.md', baseFileId: null }),
       BadRequestException,
     );
   });
 
   it('拒绝路径穿越的 targetFile', () => {
     assert.throws(
-      () => parseSaveRequest({ content: 'x', targetFile: '../../evil.md' }),
+      () => parseSaveRequest({ content: 'x', targetFile: '../../evil.md', baseFileId: null }),
       BadRequestException,
     );
   });
@@ -157,29 +166,6 @@ describe('isEnrichConfidence', () => {
     for (const value of ['LOW', 'unknown', '', null, undefined, 1, {}]) {
       assert.equal(isEnrichConfidence(value), false);
     }
-  });
-});
-
-describe('countHedges', () => {
-  it('数出常见的不确定标记', () => {
-    assert.ok(countHedges('待确认:主材是否达到 E1 级?') >= 3);
-    assert.equal(countHedges('主材达到 E1 级。'), 0);
-  });
-
-  it('重复出现要累计,不是去重', () => {
-    assert.equal(countHedges('待确认'), 1);
-    assert.equal(countHedges('待确认。待确认。待确认。'), 3);
-  });
-
-  it('实测那次退化能被检出:限定词被改写成断言后计数下降', () => {
-    // 这两段取自真实的一次合并前后(装修项目,主材环保等级)
-    const before = '**待确认**：建议明确公司合作的主材品牌是否达到国家环保标准（如E1级、ENF级）。';
-    const after = '公司合作的主材品牌达到国家环保标准（如E1级、ENF级）。';
-    assert.ok(countHedges(before) > countHedges(after), '退化必须表现为计数下降');
-  });
-
-  it('空串为 0', () => {
-    assert.equal(countHedges(''), 0);
   });
 });
 

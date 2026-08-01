@@ -99,14 +99,64 @@ import type {
 } from "./types.js";
 
 const TASK_PROJECT_EVIDENCE_ID = "evidence_task_project";
-const PLANNING_CONTEXT_EVIDENCE_ID = "evidence_approved_planning_context";
-/**
- * 人工背书。人在缺口编辑器填了答案并确认(sourceStatus=user_supplied)时给出。
- *
- * 与资料支撑同等有效,但保持独立 id——证据台账里要能区分「资料背书」与「人工背书」,
- * 否则以后审「哪些结论是人说的」就查不出来。
- */
-const HUMAN_APPROVED_EVIDENCE_ID = "evidence_human_approved";
+const LEGACY_PLANNING_CONTEXT_EVIDENCE_PATH = "planning.approved-context";
+
+type HumanApprovedField = "answer" | "framework";
+
+function humanApprovedEvidenceId(
+  projectId: string,
+  gap: InformationGap,
+  field: HumanApprovedField,
+  content: string,
+): string | undefined {
+  const confirmation = gap.humanConfirmation;
+  if (gap.sourceStatus !== "user_supplied" || !confirmation?.confirmedBy.trim() || !confirmation.confirmedAt.trim()) return undefined;
+  const identity = JSON.stringify({
+    projectId,
+    gapId: gap.id,
+    field,
+    content,
+    boundary: gap.boundary ?? "",
+    confirmedBy: confirmation.confirmedBy,
+    confirmedAt: confirmation.confirmedAt,
+  });
+  return `evidence_human_${createHash("sha256").update(identity, "utf8").digest("hex").slice(0, 24)}`;
+}
+
+function humanApprovedEvidenceReferences(
+  projectId: string,
+  planningContext?: GenerationInput["planningContext"],
+): EvidenceReference[] {
+  return (planningContext?.informationGaps ?? []).flatMap((gap): EvidenceReference[] => {
+    const confirmation = gap.humanConfirmation;
+    if (gap.sourceStatus !== "user_supplied" || !confirmation?.confirmedBy.trim() || !confirmation.confirmedAt.trim()) return [];
+    return (["answer", "framework"] as const).flatMap((field): EvidenceReference[] => {
+      const quote = gap[field]?.trim();
+      if (!quote) return [];
+      const id = humanApprovedEvidenceId(projectId, gap, field, quote);
+      if (!id) return [];
+      const checksum = createHash("sha256").update(quote, "utf8").digest("hex");
+      return [{
+        id,
+        documentId: `human-confirmation:${gap.id}:${field}`,
+        path: `planning.human-confirmation/${gap.id}/${field}`,
+        section: `${field} confirmed by project owner`,
+        quote,
+        documentChecksum: checksum,
+        documentVersion: confirmation.confirmedAt,
+        sectionChecksum: checksum,
+        kind: "fact",
+        evidenceStatus: "user_supplied",
+        scope: [`gap:${gap.id}`, "project-owner-assertion"],
+        caveats: [
+          `Confirmed by ${confirmation.confirmedBy} at ${confirmation.confirmedAt}.`,
+          "This records a project-owner assertion; it is not independent external verification.",
+          ...(gap.boundary?.trim() ? [`Boundary: ${gap.boundary.trim()}`] : []),
+        ],
+      }];
+    });
+  });
+}
 
 function imageAnalysisEvidenceId(analysis: ImageAssetAnalysis): string {
   const observed = JSON.stringify({
@@ -392,33 +442,14 @@ function generationEvidenceReferences(
   planningContext?: GenerationInput["planningContext"],
   approvedImageAnalyses: ImageAssetAnalysis[] = planningContext?.imageAnalyses ?? [],
 ): EvidenceReference[] {
-  const planningQuote = planningContext ? JSON.stringify({
-    projectIntelligence: planningContext.projectIntelligence,
-    informationGaps: planningContext.informationGaps,
-    opportunities: planningContext.opportunities,
-    expressionStrategies: planningContext.expressionStrategies,
-  }) : undefined;
-  const planningChecksum = planningQuote
-    ? createHash("sha256").update(planningQuote, "utf8").digest("hex")
-    : undefined;
-  const planningReference: EvidenceReference[] = planningContext && planningQuote && planningChecksum ? [{
-    id: PLANNING_CONTEXT_EVIDENCE_ID,
-    documentId: `planning:${config.project.id}`,
-    path: "planning.approved-context",
-    section: "approved structured planning resources",
-    quote: planningQuote,
-    documentChecksum: planningChecksum,
-    documentVersion: "approved-planning-v1",
-    sectionChecksum: planningChecksum,
-    kind: "fact",
-    evidenceStatus: "user_supplied",
-    scope: ["current-generation-planning-context"],
-    caveats: ["This reference records an approved structured input. Its upstream source status and independent verification still govern each claim."],
-  }] : [];
+  // Planning resources remain model-visible drafting inputs, but are not facts.
+  // Only explicit task fields, disclosed knowledge/image observations, and
+  // individually frozen owner confirmations enter the factual evidence pool.
+  const humanReferences = humanApprovedEvidenceReferences(config.project.id, planningContext);
   const imageReferences = approvedImageAnalyses
     .map(imageAnalysisEvidenceReference)
     .filter((reference): reference is EvidenceReference => Boolean(reference));
-  return [taskProjectEvidence(config), ...planningReference, ...imageReferences, ...createSectionEvidenceReferences(documents, context)];
+  return [taskProjectEvidence(config), ...humanReferences, ...imageReferences, ...createSectionEvidenceReferences(documents, context)];
 }
 
 /**
@@ -531,19 +562,6 @@ function taskEvidenceSupports(config: ResolvedGenerationConfig, statements: Arra
   });
 }
 
-function planningEvidenceSupports(input: GenerationInput, statements: Array<string | undefined>): boolean {
-  if (!input.planningContext) return false;
-  const source = JSON.stringify({
-    projectIntelligence: input.planningContext.projectIntelligence,
-    informationGaps: input.planningContext.informationGaps,
-    opportunities: input.planningContext.opportunities,
-  }).normalize("NFKC").replace(/\s+/gu, "");
-  return statements.some((statement) => {
-    const normalized = statement?.trim().normalize("NFKC").replace(/\s+/gu, "") ?? "";
-    return normalized.length >= 2 && source.includes(normalized);
-  });
-}
-
 interface ResolvedGenerationPlanning {
   opportunity: TopicOpportunity;
   opportunitySelectionAudit: OpportunitySelectionAudit;
@@ -558,16 +576,16 @@ function bindGapEvidence(
   input: GenerationInput,
   context: KnowledgeContextSelection,
 ): InformationGap {
-  const evidenceFor = (statement: string | undefined): string[] => {
+  const evidenceFor = (statement: string | undefined, field: HumanApprovedField): string[] => {
     if (!statement?.trim()) return [];
     const mapped = findSupportingSectionEvidenceIds([statement], context);
     if (taskEvidenceSupports(input.config, [statement])) mapped.push(TASK_PROJECT_EVIDENCE_ID);
-    if (planningEvidenceSupports(input, [statement])) mapped.push(PLANNING_CONTEXT_EVIDENCE_ID);
-    if (gap.sourceStatus === "user_supplied") mapped.push(HUMAN_APPROVED_EVIDENCE_ID);
+    const humanEvidenceId = humanApprovedEvidenceId(input.config.project.id, gap, field, statement.trim());
+    if (humanEvidenceId) mapped.push(humanEvidenceId);
     return [...new Set(mapped)];
   };
-  const answerEvidenceIds = evidenceFor(gap.answer);
-  const frameworkEvidenceIds = evidenceFor(gap.framework);
+  const answerEvidenceIds = evidenceFor(gap.answer, "answer");
+  const frameworkEvidenceIds = evidenceFor(gap.framework, "framework");
   const answer = gap.answer && answerEvidenceIds.length ? gap.answer : undefined;
   const framework = gap.framework && frameworkEvidenceIds.length ? gap.framework : undefined;
   const evidenceIds = [...new Set([
@@ -2597,11 +2615,12 @@ export class ContentGenerationAgent implements GenerationEngine {
     const context = buildContext(config, input.formulaVersion, input.knowledge, this.systemPromptTokenEstimate);
     const ledger = buildKnowledgeLedger(input.claims ?? [], input.package.unknowns);
     const refreshedEvidence = generationEvidenceReferences(config, input.knowledge, context, undefined, input.imageAnalyses ?? []);
+    const inheritedEvidence = input.package.evidence.filter((reference) => reference.path !== LEGACY_PLANNING_CONTEXT_EVIDENCE_PATH);
     const availableEvidence = [...new Map(
-      [...input.package.evidence, ...refreshedEvidence].map((reference) => [reference.id, reference]),
+      [...inheritedEvidence, ...refreshedEvidence].map((reference) => [reference.id, reference]),
     ).values()];
     const evidenceSources = {
-      ...Object.fromEntries(input.package.evidence.flatMap((reference) => {
+      ...Object.fromEntries(inheritedEvidence.flatMap((reference) => {
         const persisted = reference.quotedSpans?.length ? reference.quotedSpans.join("\n") : reference.quote;
         return persisted ? [[reference.id, persisted]] : [];
       })),

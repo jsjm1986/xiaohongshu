@@ -1,6 +1,6 @@
 import type { InformationGap } from '../types';
 
-/** AI 对自己这条推断的把握程度。low 要在 UI 上显著标出。 */
+/** AI 整理现有资料时对证据明确程度的自评。 */
 export type EnrichConfidence = 'low' | 'medium' | 'high';
 
 /** 一条草稿在用户手里的处置状态。editing 是纯 UI 态,不会发给后端。 */
@@ -16,6 +16,9 @@ export interface EnrichDraft {
   priority: number;
   aiDraft: string;
   confidence: EnrichConfidence;
+  knowledgeAction: 'organize_existing' | 'ask_user';
+  knowledgeReason: string;
+  sources: Array<{ evidenceId: string; filename: string; heading: string; excerpt: string }>;
 }
 
 /** 前端在 EnrichDraft 上叠加的编辑态。 */
@@ -49,38 +52,40 @@ export interface EnrichMergeRequest {
 export interface EnrichMergeResponse {
   preview: string;
   targetFile: string;
+  /** 合并时读取的目标版本；null 表示当时文件不存在。保存时用于并发校验。 */
+  baseFileId: string | null;
   isNewFile: boolean;
-  /** 合并吃掉了多少条不确定标记。>0 时提醒用户重点核对,不阻断保存。 */
+  /** 兼容旧响应的保留字段；确定性合并下恒为 0。 */
   hedgeLossCount: number;
+  appendedCount: number;
 }
 
 export interface EnrichSaveRequest {
   content: string;
   targetFile: string;
+  baseFileId: string | null;
 }
 
-/** 缺口的三档统计。入口按钮用它决定要不要提示、提示什么。 */
+/** 缺口统计。入口只使用分析器明确给出的知识完善动作。 */
 export interface GapStats {
   total: number;
   supplied: number;
   inferred: number;
   unknown: number;
+  organize: number;
+  askUser: number;
 }
 
-/**
- * 缺口的三档统计。
- *
- * 判据必须和后端 pendingGaps 一致(答案为空,或 sourceStatus 属于
- * unknown/inference/hypothesis),否则按钮上写「6 项」点进去出来 4 条。
- *
- * hypothesis 归到 inferred 而不是单开一档:对用户来说「推断」和「假设」是同一件
- * 事——没有资料支撑、需要你确认。分成两档只是增加认知负担。
- */
+/** 三档来源统计用于诊断展示；知识完善入口另按 knowledgeAction 统计。 */
 export function gapStats(gaps: InformationGap[]): GapStats {
   let supplied = 0;
   let inferred = 0;
   let unknown = 0;
+  let organize = 0;
+  let askUser = 0;
   for (const gap of gaps) {
+    if (gap.knowledgeAction === 'organize_existing') organize += 1;
+    if (gap.knowledgeAction === 'ask_user') askUser += 1;
     const answered = Boolean(gap.answer?.trim());
     const status = gap.sourceStatus;
     // 顺序要紧:没有答案的一律算空白档,即使 sourceStatus 写着 supplied_fact。
@@ -89,12 +94,12 @@ export function gapStats(gaps: InformationGap[]): GapStats {
     else if (status === 'inference' || status === 'hypothesis') inferred += 1;
     else supplied += 1;
   }
-  return { total: gaps.length, supplied, inferred, unknown };
+  return { total: gaps.length, supplied, inferred, unknown, organize, askUser };
 }
 
-/** 待补充 = 未知 + 推断。入口按钮上的数字。 */
+/** 待完善 = 可整理的现有事实 + 必须由用户回答的项目事实。 */
 export function pendingCount(stats: GapStats): number {
-  return stats.unknown + stats.inferred;
+  return stats.organize + stats.askUser;
 }
 
 /**
@@ -104,8 +109,9 @@ export function pendingCount(stats: GapStats): number {
  * 「(11 项)」。同一个按钮在不同页面长得不一样,用户会怀疑是两个功能。
  * 全角是中文排版里括号的正常写法,也是本仓界面文案里的多数写法,所以统一取全角。
  */
-export function enrichButtonLabel(pending: number): string {
-  return `AI 帮我补充（${pending} 项）`;
+export function enrichButtonLabel(pending: number, stats?: Pick<GapStats, 'organize' | 'askUser'>): string {
+  if (stats && pending > 0) return `完善知识（整理 ${stats.organize} · 回答 ${stats.askUser}）`;
+  return `完善知识（${pending} 项）`;
 }
 
 /**
@@ -135,12 +141,11 @@ export function draftShortfallNote(result: {
 /**
  * 补充保存成功后的提示。
  *
- * 保存本身不关闭缺口——存进去的是模型推测(证据类型「猜想」),没有人背书过。
- * 但它不再是死路:认可的内容填进缺口答案并选「我确认过」,那一刻缺口才关闭,
- * 且生成端会给它人工背书证据。这句话要把这条路说出来。
+ * 用户已在弹窗中逐条确认或修改，保存后的版本属于人工确认的已知事实。
+ * 资料变化会让现有分析失效，所以提示下一步重新分析，让知识地图和缺口同步更新。
  */
 export function enrichSavedHint(): string {
-  return '已保存为新版本。缺口不会因此关闭——把你认可的内容填进缺口答案并选「我确认过」,才算补上了。';
+  return '已按人工确认保存为「已知事实」。请重新分析知识库，更新知识地图和信息缺口。';
 }
 
 /**
@@ -150,7 +155,21 @@ export function enrichSavedHint(): string {
  * 快捷版传的是 knowledge.list 原样返回的行——后端 SQL 不按 filename 去重,
  * 同名文件每个版本一行。不去重的话快捷版会出现重复选项和重复的 React key。
  * 历史版本不是可选的保存目标:保存总是产生新版本,选"哪一份"只看文件名。
+ * reference-corpus 是对标风格样本,不能承载项目事实补全；按同名文件的最新版判断，
+ * 避免旧版本的普通分类把已改成参考语料的最新版重新放回选项。
  */
-export function enrichTargetOptions(files: ReadonlyArray<{ name: string }>): string[] {
-  return [...new Set(files.map((file) => file.name).filter((name) => name.trim()))];
+export function enrichTargetOptions(
+  files: ReadonlyArray<{ name: string; category?: string; version?: number }>,
+): string[] {
+  const latest = new Map<string, { category?: string; version: number }>();
+  for (const file of files) {
+    const name = file.name.trim();
+    if (!name) continue;
+    const version = Number.isFinite(file.version) ? Number(file.version) : 1;
+    const previous = latest.get(name);
+    if (!previous || version >= previous.version) latest.set(name, { category: file.category, version });
+  }
+  return [...latest]
+    .filter(([, file]) => file.category !== 'reference-corpus')
+    .map(([name]) => name);
 }

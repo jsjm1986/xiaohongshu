@@ -7,6 +7,7 @@ import { after, before, test } from 'node:test';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { createApplication } from '../src/app.js';
 import { DatabaseService } from '../src/database.service.js';
+import { IntelligenceService } from '../src/intelligence.service.js';
 
 /*
  * 两道收紧,都是写入侧的门禁:
@@ -124,6 +125,22 @@ test('draft 的分析仍然可以确认', async () => {
     body: JSON.stringify({}),
   });
   assert.equal(result.status, 201, JSON.stringify(result.body));
+});
+
+test('资料变动会让待确认分析失效，不能事后批准旧草稿', async () => {
+  const id = seedIntelligence('draft');
+  const database = app.get(DatabaseService);
+  app.get(IntelligenceService).markProjectStale(projectId);
+  assert.equal(
+    (database.prepare('SELECT status FROM project_intelligence WHERE id=?').get(id) as { status: string }).status,
+    'stale',
+  );
+  const result = await call(`/api/projects/${projectId}/intelligence/${id}/approve`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'approved' }),
+  });
+  assert.equal(result.status, 400, JSON.stringify(result.body));
+  assert.match(String(result.body.message), /重新分析/u);
 });
 
 test('stale 的缺口不受门禁影响,仍然可以确认', async () => {

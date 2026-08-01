@@ -423,6 +423,10 @@ const normalizeGap = (raw: JsonRecord): InformationGap => {
     sourceStatus: ["supplied_fact", "user_supplied", "inference", "hypothesis", "unknown"].includes(String(data.sourceStatus))
       ? (data.sourceStatus as InformationGap["sourceStatus"])
       : undefined,
+    knowledgeAction: ["organize_existing", "ask_user", "none"].includes(String(data.knowledgeAction))
+      ? (data.knowledgeAction as InformationGap["knowledgeAction"])
+      : "none",
+    knowledgeReason: typeof data.knowledgeReason === "string" ? data.knowledgeReason : undefined,
     createdAt: typeof raw.createdAt === "string" ? raw.createdAt : undefined,
     updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : undefined,
     status,

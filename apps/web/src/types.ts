@@ -85,8 +85,8 @@ export interface KnowledgeEvidenceDocument {
  *
  * - `evidence_backed` 答案能在上传资料里找到支撑
  * - `approved_only` 无资料支撑,依据是人工填写并确认;生成会采用,但它不是资料里的事实
- * - `evidence_stale` 分析器给过出处但引用已失效,生成仍会采用、结论无法复核
- * - `will_be_dropped` 无资料支撑且格式破坏了自证,生成会静默丢弃
+ * - `evidence_stale` 分析器给过出处但引用已失效,必须重新分析或恢复资料
+ * - `will_be_dropped` 无资料支撑且没有有效的负责人审批记录,生成会丢弃
  * - `blank` 没有答案
  */
 export type KnowledgePreflightTier =
@@ -1231,6 +1231,8 @@ export interface InformationGap {
   reviewRequired?: boolean;
   /** Evidence-strength label the model assigns to this gap's estimates. */
   sourceStatus?: "supplied_fact" | "user_supplied" | "inference" | "hypothesis" | "unknown";
+  knowledgeAction?: "organize_existing" | "ask_user" | "none";
+  knowledgeReason?: string;
   framework?: string;
   preferredChannels?: string[];
   audienceStages?: string[];

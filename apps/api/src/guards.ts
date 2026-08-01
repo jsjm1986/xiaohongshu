@@ -108,7 +108,7 @@ export class ReadOnlyAuthGuard implements CanActivate {
 }
 
 export interface PermissionRequirement {
-  permission: Permission;
+  permission: Permission | readonly Permission[];
   workspaceParam?: string;
   workspaceBody?: string;
   workspaceQuery?: string;
@@ -171,8 +171,14 @@ export class PermissionGuard implements CanActivate {
       .get(workspaceId);
     if (!workspace) throw new NotFoundException('工作区不存在');
     if (principal.systemRole === 'admin') return true;
-    if (!this.hasPermission(principal.userId, workspaceId, requirement.permission, projectId)) {
-      throw new ForbiddenException(`缺少权限：${requirement.permission}`);
+    const requiredPermissions = Array.isArray(requirement.permission)
+      ? requirement.permission
+      : [requirement.permission];
+    const missing = requiredPermissions.find(
+      (permission) => !this.hasPermission(principal.userId, workspaceId, permission, projectId),
+    );
+    if (missing) {
+      throw new ForbiddenException(`缺少权限：${missing}`);
     }
     return true;
   }

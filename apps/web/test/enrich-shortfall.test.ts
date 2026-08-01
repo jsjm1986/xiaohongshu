@@ -50,7 +50,8 @@ test('入口按钮文案三处共用一个函数', () => {
    * 原先三处各自拼字符串,括号还不一致:专业版全角「（1 项）」,
    * 快捷版和缺口池半角「(11 项)」。同一个按钮在不同页面长得不一样。
    */
-  assert.equal(enrichButtonLabel(3), 'AI 帮我补充（3 项）');
+  assert.equal(enrichButtonLabel(3), '完善知识（3 项）');
+  assert.equal(enrichButtonLabel(3, { organize: 2, askUser: 1 }), '完善知识（整理 2 · 回答 1）');
 
   const ENTRIES = [
     '../src/components/quick/ProjectKnowledgeTab.tsx',
@@ -78,20 +79,13 @@ test('弹窗把落差和读不出的文件都显示出来', () => {
 });
 
 /**
- * 保存后的提示要指向下一步。
- *
- * 旧文案只说「缺口要等你补上真实资料才会关闭」——诚实但是死路:用户不知道
- * 认可的草稿内容该往哪去。现在缺口编辑器能设「我确认过」,那才是关闭缺口的路径。
+ * 保存后的提示要准确表达人工确认后的证据性质和下一步。
  */
-test('保存提示指向缺口池的人工确认,不承诺缺口会自动关闭', () => {
+test('保存提示说明已知事实并指向重新分析', () => {
   const hint = enrichSavedHint();
-  assert.match(hint, /新版本/u);
-  assert.match(hint, /缺口/u);
-  // 这条是本任务的实质:必须点明下一步。少了它,旧文案(「缺口要等你补上真实
-  // 资料才会关闭」)也能满足上面三条断言——诚实但仍是死路,测试就成了装饰。
-  assert.match(hint, /我确认过/u);
-  // 不能暗示保存本身就关掉了缺口
-  assert.doesNotMatch(hint, /已(关闭|解决|完成)/u);
+  assert.match(hint, /人工确认/u);
+  assert.match(hint, /已知事实/u);
+  assert.match(hint, /重新分析/u);
 });
 
 test('可选目标按文件名去重:快捷版传进来的列表含历史版本', () => {
@@ -106,6 +100,18 @@ test('可选目标按文件名去重:快捷版传进来的列表含历史版本'
 
 test('空文件名不进选项:选中它会让保存目标变成空串', () => {
   assert.deepEqual(enrichTargetOptions([{ name: '  ' }, { name: 'A.md' }]), ['A.md']);
+});
+
+test('reference-corpus 不作为 AI 补全目标,同名文件按最新版分类判断', () => {
+  assert.deepEqual(
+    enrichTargetOptions([
+      { name: '对标.md', version: 1, category: '知识地图' },
+      { name: '对标.md', version: 2, category: 'reference-corpus' },
+      { name: '事实.md', version: 1, category: 'reference-corpus' },
+      { name: '事实.md', version: 2, category: '知识地图' },
+    ]),
+    ['事实.md'],
+  );
 });
 
 test('目标文件在合并前选定,不能只改保存目标', () => {

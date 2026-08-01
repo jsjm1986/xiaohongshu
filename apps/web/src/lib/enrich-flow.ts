@@ -18,16 +18,16 @@ export function effectiveContent(item: DraftItem): string {
 /**
  * 组装 merge 请求。
  *
- * 只发非 deleted 的条目——后端对每条 active 项都要求正文非空,把 deleted 一起发
- * 只是让后端再过滤一遍。pending(用户没动过)按 confirmed 发:用户点了
- * 「生成合并版」就是接受了它。
+ * 只发用户明确确认或修改过的条目。pending 不能因为点击「生成合并版」就被隐式
+ * 升级成事实；editing 也还没有完成修改。正常 UI 会由 canMerge 挡住这两种状态。
  */
 export function toMergeItems(items: DraftItem[]): EnrichMergeItem[] {
   return items
-    .filter((item) => item.status !== 'deleted')
+    .filter((item): item is DraftItem & { status: 'confirmed' | 'edited' } =>
+      item.status === 'confirmed' || item.status === 'edited')
     .map((item) => ({
       gapId: item.gapId,
-      status: item.status === 'edited' || item.status === 'editing' ? 'edited' : 'confirmed',
+      status: item.status,
       content: effectiveContent(item),
     }));
 }
@@ -37,10 +37,20 @@ export function hasUnsavedEdits(items: DraftItem[]): boolean {
   return items.some((item) => item.status === 'editing' || item.status === 'edited');
 }
 
-/** 至少留一条、且每条都有正文,才能合并。 */
+/** 至少留一条，且每条都已由用户确认/修改并有正文，才能合并为已知事实。 */
 export function canMerge(items: DraftItem[]): boolean {
   const active = items.filter((item) => item.status !== 'deleted');
-  return active.length > 0 && active.every((item) => effectiveContent(item).trim().length > 0);
+  return active.length > 0 && active.every(
+    (item) => (item.status === 'confirmed' || item.status === 'edited')
+      && isResolvedKnowledge(effectiveContent(item)),
+  );
+}
+
+const UNRESOLVED = /(?:待确认|资料未提及|尚未提供|信息缺失|不清楚|不知道|目前未知|暂不确定)/u;
+
+export function isResolvedKnowledge(content: string): boolean {
+  const text = content.trim();
+  return text.length >= 10 && !UNRESOLVED.test(text) && !/[?？]\s*$/u.test(text);
 }
 
 /** 替换一条(按 gapId),其余不动。 */
@@ -79,8 +89,8 @@ export function restoreDraft(item: DraftItem): DraftItem {
 
 const CONFIDENCE_LABELS: Record<EnrichConfidence, { text: string; tone: 'positive' | 'warning' | 'danger' }> = {
   high: { text: '资料中有明确依据', tone: 'positive' },
-  medium: { text: '基于资料推断', tone: 'warning' },
-  low: { text: '缺少依据,需你确认', tone: 'danger' },
+  medium: { text: '资料依据需重点核对', tone: 'warning' },
+  low: { text: '资料依据较弱,需核对', tone: 'danger' },
 };
 
 /**
