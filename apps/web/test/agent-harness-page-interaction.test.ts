@@ -77,3 +77,25 @@ test('硬校验失败禁止复制导出，运行进度对读屏可见', () => {
   assert.ok(source.includes('aria-valuenow={selected.progress}'));
   assert.ok(source.includes('role="alert"'));
 });
+
+test('hero 说明写明这个频道在测试中，但不暗示产出未经校验', () => {
+  /*
+   * 侧边栏那个「测试」徽标只有两个字,承载不了「测试中意味着什么」。说明必须落在
+   * hero 里:这个频道还在验证、写法与产出可能调整、旧运行不受影响。
+   *
+   * 同时不能说成「产出未经校验」—— canExportHarnessRun 要求每套候选都
+   * validation.valid 才放开导出(agent-harness-view.ts),硬校验一直生效。
+   * 把「在测试中」说成「结果不可信」会让用户白白弃用能用的产出。
+   */
+  const hero = source.slice(source.indexOf('<V2Hero'), source.indexOf('harness-boundary'));
+  assert.ok(hero.includes('测试'), 'hero 没有说明这个频道在测试中');
+  assert.match(hero, /调整|变化/u, 'hero 没说清测试中意味着什么会变');
+  /*
+   * 「校验仍然生效」这半句必须在场,不能只靠下面那条否定断言。
+   * 只写否定的话,把整句删掉也能过——而删掉之后用户读到的就只剩「还在测试中」,
+   * 那正是会让人误以为产出不可信的版本。
+   */
+  assert.match(hero, /校验/u, 'hero 没说明硬校验仍然生效');
+  // 也不许反过来明说产出未经校验
+  assert.doesNotMatch(hero, /未经校验|不可信|仅供参考,?\s*不可用/u);
+});

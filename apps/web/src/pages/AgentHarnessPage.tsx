@@ -771,7 +771,7 @@ export function AgentHarnessPage() {
     <V2Hero
       status={<>{currentProject?.name || '未选择项目'} · 独立实验频道</>}
       title="Agent 创作"
-      description="不读取八轮分析、缺口池、表达策略、选题机会或原编排计划。Agent 直接从原始项目证据和你明确选择的已批准图片观察出发，自主检索、构思、自评并提交三套完整发布参考包。"
+      description="这个频道还在测试中：流程和界面都可能调整，导出仍要过同一套硬校验。不读取八轮分析、缺口池、表达策略、选题机会或原编排计划。Agent 直接从原始项目证据和你明确选择的已批准图片观察出发，自主检索、构思、自评并提交三套完整发布参考包。"
       actions={<a className="v2-hero__link" href="/generate"><Sparkles size={15} />切换到结构化创作</a>}
     />
 
