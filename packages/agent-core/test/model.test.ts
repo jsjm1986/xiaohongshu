@@ -149,6 +149,25 @@ describe("OpenAI-compatible client", () => {
     await expect(promise).rejects.not.toThrow(/top-secret/u);
   });
 
+  it("aborts an in-flight provider request from the caller signal", async () => {
+    let observedSignal: AbortSignal | undefined;
+    const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      observedSignal = init?.signal ?? undefined;
+      return await new Promise<Response>((_resolve, reject) => {
+        const onAbort = () => reject(new DOMException("aborted", "AbortError"));
+        if (observedSignal?.aborted) onAbort();
+        else observedSignal?.addEventListener("abort", onAbort, { once: true });
+      });
+    });
+    const client = new OpenAICompatibleClient({ apiKey: "secret", model: "m", fetch, timeoutMs: 60_000 });
+    const controller = new AbortController();
+    const pending = client.generate({ messages, signal: controller.signal });
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    controller.abort(new Error("user cancelled"));
+    await expect(pending).rejects.toMatchObject({ name: "AbortError", message: "Model request cancelled." });
+    expect(observedSignal?.aborted).toBe(true);
+  });
+
   it("rejects provider responses that exceed the configured byte limit", async () => {
     const fetch = vi.fn(async () => new Response("123456"));
     const client = new OpenAICompatibleClient({

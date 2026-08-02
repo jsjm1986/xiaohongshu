@@ -18,6 +18,8 @@ COPY --from=build /app/apps/api/package.json ./apps/api/package.json
 COPY --from=build /app/apps/web/dist ./apps/web/dist
 COPY --from=build /app/packages/agent-core/dist ./packages/agent-core/dist
 COPY --from=build /app/packages/agent-core/package.json ./packages/agent-core/package.json
+COPY --from=build /app/packages/agent-harness-core/dist ./packages/agent-harness-core/dist
+COPY --from=build /app/packages/agent-harness-core/package.json ./packages/agent-harness-core/package.json
 VOLUME ["/data"]
 EXPOSE 8780
 CMD ["node", "apps/api/dist/main.js"]

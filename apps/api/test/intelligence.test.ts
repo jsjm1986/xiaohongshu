@@ -1508,6 +1508,8 @@ test('project analysis is cached and failed retries do not create intelligence f
       response.end(JSON.stringify({ error: { message: 'temporary failure' } }));
       return;
     }
+    const matches = [...lastRequestBody.matchAll(/TURN (\d)\/8/gu)];
+    const turn = Number(matches.at(-1)?.[1] ?? 0);
     const analysis = {
       blueprintModules: {
         knowledge_map: { entries: [] },
@@ -1562,8 +1564,20 @@ test('project analysis is cached and failed retries do not create intelligence f
         { title: '边界比结论更重要', topic: '边界比结论更重要', angle: '条件', gapKeys: ['boundary_gap'], audienceStage: 'comparing', entry: 'search', relevance: 0.85, importance: 0.75, proofability: 0.7, novelty: 0.55, decisionLeverage: 0.7, cognitiveCost: 0.3, risk: 0.2, evidenceIds: [], boundaries: [], tags: [], imageAssetIds: [], status: 'eligible' },
       ],
     };
+    const modules = analysis.blueprintModules;
+    const turnPayloads: Record<number, Record<string, unknown>> = {
+      1: { knowledge_map: modules.knowledge_map, domain_model: modules.domain_model },
+      2: { audience_model: modules.audience_model, scenario_model: modules.scenario_model },
+      3: { role_model: modules.role_model },
+      4: { claim_policy: modules.claim_policy, surface_language: modules.surface_language },
+      5: { intelligence: analysis.intelligence },
+      6: { informationGaps: analysis.informationGaps },
+      7: { expressionStrategies: analysis.expressionStrategies },
+      8: { topicOpportunities: analysis.topicOpportunities },
+    };
+    assert.ok(turnPayloads[turn], `unexpected analysis turn: ${turn}`);
     response.writeHead(200, { 'content-type': 'application/json' });
-    response.end(JSON.stringify({ output_text: JSON.stringify(analysis) }));
+    response.end(JSON.stringify({ output_text: JSON.stringify(turnPayloads[turn]) }));
   });
   await new Promise<void>((resolveListen) => modelServer.listen(0, '127.0.0.1', resolveListen));
   cleanup.push(() => new Promise<void>((resolveClose, rejectClose) => modelServer.close((error) => error ? rejectClose(error) : resolveClose())));
@@ -1574,6 +1588,9 @@ test('project analysis is cached and failed retries do not create intelligence f
     platformBaseUrl: `http://127.0.0.1:${address.port}/v1`,
     platformModel: 'analysis-test',
     platformTransport: 'responses',
+    // 本用例验证 3 次失败不落事实；重试可配置行为由 analysis-model-resilience 单独覆盖。
+    modelRetryAttempts: 3,
+    modelRetryBaseDelayMs: 0,
   });
   const project = await request('/api/projects', { method: 'POST', body: JSON.stringify({ name: 'Cache project' }) });
   const oldKnowledge = await request('/api/knowledge', {
@@ -1629,7 +1646,7 @@ test('project analysis is cached and failed retries do not create intelligence f
   }
   const second = await request(path, { method: 'POST', body: '{}' });
   assert.equal(second.body.cached, true);
-  assert.equal(calls, 3);
+  assert.equal(calls, 8);
   for (const module of first.body.blueprintModules) {
     const approvedModule = await request(
       `/api/projects/${project.body.id}/blueprint-modules/${module.id}/approve`,
@@ -1673,7 +1690,7 @@ test('project analysis is cached and failed retries do not create intelligence f
   assert.equal(stale.body.find((item: any) => item.id === first.body.intelligence.id).status, 'stale');
   const imageAware = await request(path, { method: 'POST', body: '{}' });
   assert.equal(imageAware.body.cached, false);
-  assert.equal(calls, 6);
+  assert.equal(calls, 16);
   assert.ok(lastRequestBody.includes(uploaded.body.id));
   const before = await request(`/api/projects/${project.body.id}/intelligence`);
   fail = true;
@@ -1682,7 +1699,7 @@ test('project analysis is cached and failed retries do not create intelligence f
   // 用户看不出发生了什么、要不要重试);分类见 analysis-failure-message.test.ts
   assert.equal(failed.response.status, 503);
   assert.match(String(failed.body.message), /模型服务暂时不可用/);
-  assert.equal(calls, 9);
+  assert.equal(calls, 19);
   const after = await request(`/api/projects/${project.body.id}/intelligence`);
   assert.equal(after.body.length, before.body.length);
   const tasks = await request(`/api/projects/${project.body.id}/intelligence/analysis-tasks`);

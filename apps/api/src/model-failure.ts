@@ -9,8 +9,23 @@ import { ModelProviderError } from '@content-agent/agent-core';
  * (两侧都不在模块求值期互相触碰),但方向是错的,而且下一个在本模块顶层求值的常量
  * 就会踩到。intelligence.service 原地重新导出这个名字,所以外部 import 点一个都不用改。
  */
+export interface AnalysisGatewayDiagnostics {
+  finishReason?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  reasoningTokens?: number;
+  elapsedMs?: number;
+  timedOut?: boolean;
+  cacheHitTokens?: number;
+  cacheMissTokens?: number;
+}
+
 export class AnalysisGatewayError extends Error {
-  constructor(message: string, readonly status?: number) {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly diagnostics: AnalysisGatewayDiagnostics = {},
+  ) {
     super(message);
   }
 }
@@ -36,23 +51,39 @@ export type ModelFailureKind = 'unavailable' | 'credentials' | 'incomplete' | 'o
  * 鸭子类型会把它判成「凭据异常」并对用户说凭据坏了。加第三个 provider 错误类时
  * 在这里加一行即可。
  */
-function modelGatewayStatus(error: unknown): { gateway: boolean; status?: number; message: string } {
-  if (error instanceof AnalysisGatewayError || error instanceof ModelProviderError) {
+function modelGatewayStatus(error: unknown): {
+  gateway: boolean;
+  status?: number;
+  message: string;
+  finishReason?: string;
+} {
+  if (error instanceof AnalysisGatewayError) {
+    return {
+      gateway: true,
+      status: error.status,
+      message: error.message,
+      finishReason: error.diagnostics.finishReason,
+    };
+  }
+  if (error instanceof ModelProviderError) {
     return { gateway: true, status: error.status, message: error.message };
   }
   return { gateway: false, message: error instanceof Error ? error.message : String(error) };
 }
 
 export function classifyModelFailure(error: unknown): ModelFailureKind {
-  const { gateway, status, message } = modelGatewayStatus(error);
+  const { gateway, status, message, finishReason } = modelGatewayStatus(error);
   if (!gateway) return 'other';
+  // 明确的输出截断不是服务不可用。即使供应商没有给 HTTP 状态，也应告诉用户
+  // 「结果不完整」；否则 reasoning 模型耗尽输出预算会被误报成网络故障。
+  if (finishReason === 'length' || finishReason === 'max_output_tokens') return 'incomplete';
   // 5xx / 429 / 网络层无响应(status undefined:超时、连接失败、响应体读不出来):
   // 不是用户的问题,重试即可。判据顺序保持原样——把契约不符提到前面会改掉分析路径
   // 既有的分类结果(500 + 坏 JSON 现在是 unavailable),那不在本次范围。
   if (status === undefined || status === 429 || status >= 500) return 'unavailable';
   if (status === 401 || status === 403) return 'credentials';
   // 模型返回了但内容不合契约:采样波动,重试一次多半能好
-  if (/omitted required|invalid JSON|empty planning resources|not a JSON object|non-JSON response|did not contain output text|size limit|structural complexity|nesting-depth/i.test(message)) {
+  if (/omitted required|invalid JSON|empty (?:planning resources|expression strategies|topic opportunities)|not (?:a |one )?complete valid JSON object|not a JSON object|non-JSON response|did not contain output text|incomplete output|output was truncated|finish_reason=length|size limit|structural complexity|nesting-depth/i.test(message)) {
     return 'incomplete';
   }
   return 'other';

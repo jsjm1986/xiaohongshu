@@ -399,3 +399,22 @@ test('清除 BYOK 密钥回到平台模式且冲突请求不清除现有密钥',
   assert.equal(row.provider_mode, 'platform');
   assert.equal(row.encrypted_api_key, null);
 });
+
+
+test('provider 执行合同指纹不受额度消费和退还影响，但模型配置变化会改变', async () => {
+  const db = app.get(DatabaseService);
+  const workspace = db.prepare('SELECT id FROM workspaces LIMIT 1').get() as { id: string };
+  db.prepare(
+    "UPDATE workspace_settings SET provider_mode='platform', model='fingerprint-model-a', monthly_quota=100, quota_used=0 WHERE workspace_id=?",
+  ).run(workspace.id);
+  const settings = app.get(SettingsService);
+  const before = settings.provider(workspace.id).configVersion;
+  settings.consumePlatformQuota(workspace.id);
+  const afterConsume = settings.provider(workspace.id).configVersion;
+  settings.refundPlatformQuota(workspace.id);
+  const afterRefund = settings.provider(workspace.id).configVersion;
+  assert.equal(afterConsume, before, '额度计数不能伪装成 provider 配置漂移');
+  assert.equal(afterRefund, before, '额度退还不能伪装成 provider 配置漂移');
+  db.prepare("UPDATE workspace_settings SET model='fingerprint-model-b' WHERE workspace_id=?").run(workspace.id);
+  assert.notEqual(settings.provider(workspace.id).configVersion, before, '执行模型变化必须改变合同指纹');
+});

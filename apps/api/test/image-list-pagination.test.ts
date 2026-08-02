@@ -132,6 +132,27 @@ test('image analysis history has pagination and detail does not hide a full hist
   assert.equal(Object.hasOwn(detail.body, 'analyses'), false);
 });
 
+test('approved observation filter pages eligible assets and returns the approved version', async () => {
+  const result = await request(
+    '/api/projects/' + projectId + '/image-assets?limit=1&offset=0&observationStatus=approved',
+  );
+  assert.equal(result.response.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.total, 1);
+  assert.equal(result.body.items.length, 1);
+  assert.equal(result.body.items[0].id, 'asset-2');
+  assert.equal(result.body.items[0].latestAnalysisId, 'analysis-v1');
+  assert.equal(result.body.items[0].analysisStatus, 'approved');
+  assert.equal(result.body.items[0].latestAnalysis.observationStatus, 'approved');
+  assert.deepEqual(result.body.items[0].latestAnalysis.observedFacts, ['旧观察']);
+});
+
+test('image list rejects unsupported observation status filters', async () => {
+  const result = await request(
+    '/api/projects/' + projectId + '/image-assets?observationStatus=draft',
+  );
+  assert.equal(result.response.status, 400, JSON.stringify(result.body));
+});
+
 test('image pagination rejects malformed or excessive values instead of coercing them', async () => {
   const queries = [
     'limit=0', 'limit=101', 'limit=1.5', 'limit=-1',

@@ -326,8 +326,16 @@ export class IntelligenceController {
     @Param('projectId') projectId: string,
     @Query('limit') rawLimit?: string,
     @Query('offset') rawOffset?: string,
+    @Query('observationStatus') rawObservationStatus?: string,
   ) {
-    return this.intelligence.listImages(projectId, parsePagination(rawLimit, rawOffset));
+    if (rawObservationStatus !== undefined && rawObservationStatus !== 'approved') {
+      throw new BadRequestException('observationStatus 只支持 approved');
+    }
+    return this.intelligence.listImages(
+      projectId,
+      parsePagination(rawLimit, rawOffset),
+      rawObservationStatus,
+    );
   }
 
   @Post('image-assets')

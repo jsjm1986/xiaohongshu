@@ -7,6 +7,7 @@ import { ToastProvider } from './components/Ui';
 const AppShell = lazy(() => import('./components/AppShell').then((module) => ({ default: module.AppShell })));
 const QuickShell = lazy(() => import('./components/quick/QuickShell').then((module) => ({ default: module.QuickShell })));
 const AuditPage = lazy(() => import('./pages/AuditPage').then((module) => ({ default: module.AuditPage })));
+const AgentHarnessPage = lazy(() => import('./pages/AgentHarnessPage').then((module) => ({ default: module.AgentHarnessPage })));
 const DashboardPage = lazy(() => import('./pages/DashboardPage').then((module) => ({ default: module.DashboardPage })));
 const FormulasPage = lazy(() => import('./pages/FormulasPage').then((module) => ({ default: module.FormulasPage })));
 const GenerationResultPage = lazy(() => import('./pages/GenerationResultPage').then((module) => ({ default: module.GenerationResultPage })));
@@ -50,6 +51,8 @@ export default function App() {
       <Route element={<ProtectedRoute expertOnly><AppShell /></ProtectedRoute>}>
         <Route index element={<DashboardPage />} />
         <Route path="generate" element={<GeneratorPage />} />
+        <Route path="agent-harness" element={<AgentHarnessPage />} />
+        <Route path="agent-harness/:id" element={<AgentHarnessPage />} />
         <Route path="projects" element={<ProjectsPage />} />
         <Route path="knowledge" element={<KnowledgePage />} />
         <Route path="formulas" element={<FormulasPage />} />

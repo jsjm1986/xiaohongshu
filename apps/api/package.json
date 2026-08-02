@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@content-agent/agent-core": "0.1.0",
+    "@content-agent/agent-harness-core": "0.1.0",
     "@nestjs/common": "^11.1.3",
     "@nestjs/core": "^11.1.3",
     "@nestjs/platform-express": "^11.1.3",

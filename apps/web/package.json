@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit --pretty false"
   },
   "dependencies": {
+    "@content-agent/agent-harness-core": "0.1.0",
     "lucide-react": "latest",
     "react": "latest",
     "react-dom": "latest",

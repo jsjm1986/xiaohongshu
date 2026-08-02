@@ -203,7 +203,7 @@ export function ProjectKnowledgeTab({ project, busy, setBusy, fail, onAnalyzed }
           )}
 
           {analyzing && (
-            <QuickTaskProgress text="三段模型串联运行:蓝图 → 缺口与策略 → 选题。完成前请勿离开或重复触发。" task={analysisTask} />
+            <QuickTaskProgress text="完整对话逐轮分析:蓝图 → 情报 → 缺口 → 策略 → 选题。完成前请勿重复触发。" task={analysisTask} />
           )}
 
           <Field label="知识文件">

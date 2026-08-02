@@ -12,6 +12,8 @@ export interface ModelGenerationRequest {
   temperature?: number;
   maxOutputTokens?: number;
   metadata?: Record<string, string | number | boolean>;
+  /** Cancels the provider request and any length-retry attempt. */
+  signal?: AbortSignal;
 }
 
 export interface ModelGenerationResponse {
@@ -248,7 +250,10 @@ export class OpenAICompatibleClient implements ModelProvider {
         ? this.responsesBody(model, effectiveRequest)
         : this.chatBody(model, effectiveRequest);
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+      const abortFromCaller = () => controller.abort(request.signal?.reason);
+      if (request.signal?.aborted) abortFromCaller();
+      else request.signal?.addEventListener("abort", abortFromCaller, { once: true });
+      const timeout = setTimeout(() => controller.abort(new Error(`Model request timed out after ${this.timeoutMs} ms.`)), this.timeoutMs);
       let response: Response;
       try {
         response = await this.fetchImpl(`${this.baseUrl}${endpoint}`, {
@@ -263,10 +268,16 @@ export class OpenAICompatibleClient implements ModelProvider {
         });
       } catch (error) {
         clearTimeout(timeout);
-        const message = error instanceof Error && error.name === "AbortError"
-          ? `Model request timed out after ${this.timeoutMs} ms.`
-          : `Model request failed: ${error instanceof Error ? error.message : String(error)}`;
-        throw new ModelProviderError(message);
+        request.signal?.removeEventListener("abort", abortFromCaller);
+        const cancelled = request.signal?.aborted === true;
+        const message = cancelled
+          ? "Model request cancelled."
+          : error instanceof Error && error.name === "AbortError"
+            ? `Model request timed out after ${this.timeoutMs} ms.`
+            : `Model request failed: ${error instanceof Error ? error.message : String(error)}`;
+        const wrapped = new ModelProviderError(message);
+        if (cancelled) wrapped.name = "AbortError";
+        throw wrapped;
       }
 
       const requestId = response.headers.get("x-request-id") ?? undefined;
@@ -277,6 +288,7 @@ export class OpenAICompatibleClient implements ModelProvider {
         throw new ModelProviderError("Model response exceeded the configured size limit or could not be read.", response.status, requestId);
       } finally {
         clearTimeout(timeout);
+        request.signal?.removeEventListener("abort", abortFromCaller);
       }
       let payload: unknown;
       try {

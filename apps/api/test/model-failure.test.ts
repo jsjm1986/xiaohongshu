@@ -39,11 +39,27 @@ test('401 / 403 算凭据异常,同样退额度', () => {
 });
 
 test('契约不符(JSON 坏、缺模块)算 incomplete,退额度', () => {
-  for (const message of ['invalid JSON at line 3', 'omitted required module', 'empty planning resources']) {
+  for (const message of [
+    'invalid JSON at line 3',
+    'omitted required module',
+    'empty planning resources',
+    'The analysis model output was not a complete valid JSON object',
+    'The analysis model output was truncated at 32000 max tokens (finish_reason=length)',
+  ]) {
     const kind = classifyModelFailure(gatewayError(message, 200));
     assert.equal(kind, 'incomplete', `${message} 应判 incomplete`);
     assert.equal(shouldRefundQuota(kind), true);
   }
+});
+
+test('finish_reason=length 明确归为结果不完整，不误报服务不可用', () => {
+  const error = new AnalysisGatewayError(
+    'output truncated',
+    undefined,
+    { finishReason: 'length', completionTokens: 32_000, reasoningTokens: 31_000 },
+  );
+  assert.equal(classifyModelFailure(error), 'incomplete');
+  assert.match(modelFailureMessage(classifyModelFailure(error), '分析', error.message), /结果不完整/u);
 });
 
 test('非网关错误算 other,不退额度', () => {

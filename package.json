@@ -8,11 +8,11 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @content-agent/agent-core && npm run build -w @content-agent/web && npm run build -w @content-agent/api",
+    "build": "npm run build -w @content-agent/agent-core && npm run build -w @content-agent/agent-harness-core && npm run build -w @content-agent/web && npm run build -w @content-agent/api",
     "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev -w @content-agent/api\" \"npm run dev -w @content-agent/web\"",
     "start": "npm run start -w @content-agent/api",
-    "test": "npm run test -w @content-agent/agent-core && npm run test -w @content-agent/web && npm run test -w @content-agent/api",
-    "typecheck": "npm run typecheck -w @content-agent/agent-core && npm run typecheck -w @content-agent/web && npm run typecheck -w @content-agent/api",
+    "test": "npm run test -w @content-agent/agent-core && npm run test -w @content-agent/agent-harness-core && npm run test -w @content-agent/web && npm run test -w @content-agent/api",
+    "typecheck": "npm run typecheck -w @content-agent/agent-core && npm run typecheck -w @content-agent/agent-harness-core && npm run typecheck -w @content-agent/web && npm run typecheck -w @content-agent/api",
     "import:legacy": "tsx scripts/import-legacy.ts",
     "analyze:style": "tsx scripts/analyze-style-corpus.ts"
   },

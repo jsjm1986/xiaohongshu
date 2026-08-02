@@ -1,136 +1,99 @@
-// Feature: content-methodology-self-consistency — 三阶段装配单测（示例/单元测试，非属性测试）
-//
-// 覆盖设计 "Testing Strategy · 示例/边界测试 · 三阶段装配（需求 6.1–6.5）"：
-// 用一个「mock provider」（受控 mock 模型 HTTP 服务，platform provider 指向它）按阶段返回构造好的
-// 结构化输出，并记录三阶段的实际调用顺序与入参（请求体），据此断言 analyzeProject 的三阶段串联装配：
-//   1. 顺序固定为 蓝图 → 规划资源 → 选题，不跳阶段（需求 6.1）；
-//   2. 阶段 2 入参包含阶段 1 的结构化蓝图输出（提示含 APPROVED_STAGE_1_BLUEPRINT 及蓝图摘要内容）（需求 6.2）；
-//   3. 阶段 3 入参包含阶段 2 的结构化输出（提示含 APPROVED_STAGE_2_GAP_CATALOG + APPROVED_STAGE_2_EXPRESSION_STRATEGIES
-//      及其摘要内容）（需求 6.3）；
-//   4. 各阶段产物落库为 status='draft' 且需独立审批（无隐式级联审批）（需求 6.4）；
-//   5. 下游依赖的输出 schema 字段齐全（blueprintModules 七键 / gap / strategy / opportunity 形状，
-//      且 opportunity 通过 gapIds 引用阶段 2 落库的缺口）（需求 6.5）。
-//
-// 阶段身份由请求体中的 PROJECT_ANALYSIS_STAGE: N/3 标记判定（复用 analysis-stage-failfast.property.test.ts
-// 与 intelligence.test.ts 的 startApp / mock provider 用法）。为验证「串联入参确实来自上一阶段的结构化输出」，
-// 各阶段的 mock 输出注入独特标记（如 STAGE1_PROJECT_NOUN / stage2_gap_key / STAGE2_STRATEGY_NAME），
-// 再断言这些标记出现在下一阶段的请求体中。
-
+// Feature: content-methodology-self-consistency — 八轮连续对话装配测试
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import type { AddressInfo } from 'node:net';
 import { createApplication } from '../src/app.js';
 import { DatabaseService } from '../src/database.service.js';
 import { IntelligenceService } from '../src/intelligence.service.js';
 import type { SessionPrincipal } from '../src/models.js';
 
-// 项目创作蓝图七模块键（与 agent-core PROJECT_BLUEPRINT_MODULE_KEYS 一致；此处内联以保持测试自洽）。
 const BLUEPRINT_MODULE_KEYS = [
-  'knowledge_map',
-  'domain_model',
-  'audience_model',
-  'scenario_model',
-  'role_model',
-  'claim_policy',
-  'surface_language',
+  'knowledge_map', 'domain_model', 'audience_model', 'scenario_model',
+  'role_model', 'claim_policy', 'surface_language',
 ] as const;
 
-// 阶段 1 蓝图：七模块全部以 record 形式存在（通过阶段 1 后的完整性校验），并在 domain_model / intelligence
-// 注入独特标记，供断言「阶段 2 提示确实携带了阶段 1 的结构化蓝图摘要」。
-function stage1BlueprintPayload(): Record<string, unknown> {
-  return {
-    blueprintModules: {
-      knowledge_map: { entries: [] },
-      domain_model: {
-        projectNoun: 'STAGE1_PROJECT_NOUN', industry: 'STAGE1_INDUSTRY', domain: 'STAGE1_DOMAIN',
-        objects: ['项目'], actions: ['比较'], concepts: ['适用边界'],
-        decisionTasks: ['STAGE1_DECISION_TASK'], vocabulary: ['适用边界'],
-      },
-      audience_model: {
-        states: [{
-          id: 'collector', label: '信息收集者', stages: ['collecting'], goals: ['补全依据'], hesitationReasons: [],
-          source: { status: 'supplied_fact', evidenceIds: ['invented-evidence-id'] },
-        }],
-      },
-      scenario_model: {
-        families: [{ id: 'compare', label: '课程比较', prototype: 'option_comparison' }],
-      },
-      role_model: { hostVoiceTraits: [], hostSpeechMarkers: [], roles: [] },
-      claim_policy: { rules: [], prohibitedClaims: [], dynamicInformation: [], unknownHandling: [] },
-      surface_language: {
-        registerDescription: '自然、具体', preferredTerms: [], optionalColloquialisms: [],
-        prohibitedCliches: [], antiCopyRules: [],
-      },
+const TURN_OUTPUTS: Record<number, Record<string, unknown>> = {
+  1: {
+    knowledge_map: { entries: [] },
+    domain_model: {
+      projectNoun: 'TURN1_PROJECT_NOUN', industry: 'TURN1_INDUSTRY', domain: 'TURN1_DOMAIN',
+      objects: ['项目'], actions: ['比较'], concepts: ['适用边界'],
+      decisionTasks: ['TURN1_DECISION_TASK'], vocabulary: ['适用边界'],
     },
-    intelligence: {
-      industry: 'STAGE1_INDUSTRY', domain: 'STAGE1_DOMAIN', projectSummary: 'STAGE1_PROJECT_SUMMARY',
-      verifiedFacts: ['模型声称已经核验但没有台账的事实'], differentiators: [], audienceStates: ['collecting'], hardBoundaries: [],
-      prohibitedClaims: [], dynamicUnknowns: [], evidenceIds: [], evidenceLedger: [],
+  },
+  2: {
+    audience_model: { states: [{
+      id: 'collector', label: '信息收集者', stages: ['collecting'], goals: ['补全依据'], hesitationReasons: [],
+      source: { status: 'supplied_fact', evidenceIds: ['invented-evidence-id'] },
+    }] },
+    scenario_model: { families: [{
+      id: 'compare', label: '课程比较', prototype: 'option_comparison',
+      prohibitedUnsupportedHistories: ['我亲自做过'], source: { status: 'hypothesis', evidenceIds: [] },
+    }] },
+  },
+  3: { role_model: { serviceModel: 'one_time', hostVoiceTraits: [], hostSpeechMarkers: [], roles: [] } },
+  4: {
+    claim_policy: { rules: [], prohibitedClaims: [], dynamicInformation: [], unknownHandling: [] },
+    surface_language: {
+      registerDescription: '自然、具体', preferredTerms: [], optionalColloquialisms: [],
+      prohibitedCliches: [], antiCopyRules: [],
     },
-  };
+  },
+  5: { intelligence: {
+    industry: 'TURN1_INDUSTRY', domain: 'TURN1_DOMAIN', projectSummary: 'TURN5_PROJECT_SUMMARY',
+    verifiedFacts: ['模型声称已经核验但没有台账的事实'], differentiators: [], audienceStates: ['collecting'],
+    hardBoundaries: [], prohibitedClaims: [], dynamicUnknowns: [], evidenceIds: [], evidenceLedger: [],
+  } },
+  6: { informationGaps: [{
+    key: 'turn6_gap_key', title: 'TURN6_GAP_TITLE', question: 'TURN6_GAP_QUESTION', priority: 80,
+    label: 'TURN6_GAP_TITLE', category: 'decision', audienceStages: ['collecting'], importance: 0.6,
+    decisionLeverage: 0.6, proofability: 0.4, evidenceIds: [], required: true,
+  }] },
+  7: { expressionStrategies: [{
+    name: 'TURN7_STRATEGY_NAME', label: 'TURN7_STRATEGY_NAME', prototype: 'option_comparison',
+    description: 'TURN7_STRATEGY_DESC', openingMode: 'reader_question',
+    narrativeMode: 'question_framework_boundary', bodyRole: 'minimum_sufficient_information',
+    imageRole: 'other', commentMode: 'gap_completion', voice: '克制', sequence: [], targetChannels: ['N.body'],
+  }] },
+  8: { topicOpportunities: [{
+    title: 'TURN8_OPP_TITLE', topic: 'TURN8_OPP_TOPIC', angle: 'TURN8_ANGLE', rationale: '核验适用边界',
+    gapKeys: ['turn6_gap_key'], audienceStage: 'collecting', entry: 'search', relevance: 0.9,
+    importance: 0.8, proofability: 0.6, novelty: 0.5, decisionLeverage: 0.8,
+    cognitiveCost: 0.3, risk: 0.2, evidenceIds: [], boundaries: [], tags: [], imageAssetIds: [], status: 'eligible',
+  }] },
+};
+
+function lastTurn(rawBody: string): number {
+  const matches = [...rawBody.matchAll(/TURN (\d)\/8/gu)];
+  return Number(matches.at(-1)?.[1] ?? 0);
 }
 
-// 阶段 2 规划资源：非空 informationGaps + expressionStrategies，注入独特标记（缺口键 / 问题 / 策略名），
-// 供断言「阶段 3 提示确实携带了阶段 2 的结构化 gapCatalog + expressionStrategies 摘要」。
-function stage2PlanningPayload(): Record<string, unknown> {
-  return {
-    informationGaps: [{
-      key: 'stage2_gap_key', title: 'STAGE2_GAP_TITLE', question: 'STAGE2_GAP_QUESTION',
-      priority: 80, label: 'STAGE2_GAP_TITLE', category: 'decision', audienceStages: ['collecting'],
-      importance: 0.6, decisionLeverage: 0.6, proofability: 0.4, evidenceIds: [], required: true,
-    }],
-    expressionStrategies: [{
-      name: 'STAGE2_STRATEGY_NAME', label: 'STAGE2_STRATEGY_NAME', prototype: 'option_comparison',
-      description: 'STAGE2_STRATEGY_DESC', openingMode: 'reader_question',
-      narrativeMode: 'question_framework_boundary', bodyRole: 'minimum_sufficient_information',
-      imageRole: 'other', commentMode: 'gap_completion', voice: '克制', sequence: [], targetChannels: ['N.body'],
-    }],
-  };
-}
-
-// 阶段 3 选题：通过 gapKeys 引用阶段 2 的缺口键，落库后其 gapIds 应解析为阶段 2 缺口的存储 id。
-function stage3OpportunityPayload(): Record<string, unknown> {
-  return {
-    topicOpportunities: [{
-      title: 'STAGE3_OPP_TITLE', topic: 'STAGE3_OPP_TOPIC', angle: 'STAGE3_ANGLE',
-      rationale: '核验适用边界', gapKeys: ['stage2_gap_key'], audienceStage: 'collecting', entry: 'search',
-      relevance: 0.9, importance: 0.8, proofability: 0.6, novelty: 0.5, decisionLeverage: 0.8,
-      cognitiveCost: 0.3, risk: 0.2, evidenceIds: [], boundaries: [], tags: [], imageAssetIds: [], status: 'eligible',
-    }],
-  };
-}
-
-function stageOf(rawBody: string): string {
-  if (rawBody.includes('PROJECT_ANALYSIS_STAGE: 1/3')) return 'blueprint';
-  if (rawBody.includes('PROJECT_ANALYSIS_STAGE: 2/3')) return 'planning';
-  if (rawBody.includes('PROJECT_ANALYSIS_STAGE: 3/3')) return 'opportunity';
-  return 'unknown';
-}
-
-function responseForStage(stage: string): Record<string, unknown> {
-  if (stage === 'blueprint') return stage1BlueprintPayload();
-  if (stage === 'planning') return stage2PlanningPayload();
-  if (stage === 'opportunity') return stage3OpportunityPayload();
-  return {};
+function assistantText(turn: number): string {
+  return JSON.stringify({ ...TURN_OUTPUTS[turn], marker: `TURN_${turn}_OUTPUT` });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-// 复刻 intelligence.test.ts / analysis-stage-failfast.property.test.ts 的 startApp（登录 + 改密）。
-async function startApp(options: Record<string, unknown>) {
-  const dataDir = await mkdtemp(join(tmpdir(), 'content-agent-chaining-'));
+async function startApp(modelServer: Server) {
+  const dataDir = await mkdtemp(join(tmpdir(), 'content-agent-eight-turn-assembly-'));
+  await new Promise<void>((resolve, reject) => {
+    modelServer.once('error', reject);
+    modelServer.listen(0, '127.0.0.1', resolve);
+  });
+  const port = (modelServer.address() as AddressInfo).port;
   const app = await createApplication({
     dataDir,
-    adminUsername: 'admin',
-    adminPassword: 'Admin-bootstrap-123!',
-    masterEncryptionKey: 'chaining-test-encryption-key',
-    logger: false,
-    ...options,
+    adminUsername: 'admin', adminPassword: 'Admin-bootstrap-123!',
+    masterEncryptionKey: 'eight-turn-assembly-key', logger: false,
+    platformApiKey: 'test-key', platformBaseUrl: `http://127.0.0.1:${port}/v1`,
+    platformModel: 'analysis-test', platformTransport: 'responses',
+    modelRetryAttempts: 1, modelRetryBaseDelayMs: 0,
   });
   await app.listen(0, '127.0.0.1');
   const baseUrl = await app.getUrl();
@@ -148,193 +111,197 @@ async function startApp(options: Record<string, unknown>) {
     return { response, body };
   };
   const login = await request('/api/auth/login', {
-    method: 'POST',
-    body: JSON.stringify({ username: 'admin', password: 'Admin-bootstrap-123!' }),
+    method: 'POST', body: JSON.stringify({ username: 'admin', password: 'Admin-bootstrap-123!' }),
   });
   cookie = login.response.headers.get('set-cookie')!.split(';', 1)[0]!;
   csrf = login.body.csrfToken;
   await request('/api/auth/change-password', {
-    method: 'POST',
-    body: JSON.stringify({ currentPassword: 'Admin-bootstrap-123!', newPassword: 'Admin-updated-456!' }),
+    method: 'POST', body: JSON.stringify({ currentPassword: 'Admin-bootstrap-123!', newPassword: 'Admin-updated-456!' }),
   });
   return { app, dataDir, request, user: login.body.user };
 }
 
-test('three-stage project analysis assembles in fixed order, chains each stage output into the next, and persists drafts with complete schema', async () => {
-  // 受控 mock 模型服务：按阶段返回构造好的结构化输出，并按调用顺序记录 { stage, body }。
-  const calls: Array<{ stage: string; body: string }> = [];
-  const modelServer: Server = createServer(async (req, res) => {
+test('eight-turn project analysis replays accepted JSON in order and persists independently reviewable drafts', async () => {
+  const calls: Array<{ turn: number; body: Record<string, any>; raw: string }> = [];
+  const modelServer = createServer(async (req, res) => {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
-    const rawBody = Buffer.concat(chunks).toString('utf8');
-    const stage = stageOf(rawBody);
-    calls.push({ stage, body: rawBody });
+    const raw = Buffer.concat(chunks).toString('utf8');
+    const body = JSON.parse(raw) as Record<string, any>;
+    const turn = lastTurn(raw);
+    calls.push({ turn, body, raw });
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ output_text: JSON.stringify(responseForStage(stage)) }));
+    res.end(JSON.stringify({ output_text: assistantText(turn) }));
   });
-  await new Promise<void>((resolveListen) => modelServer.listen(0, '127.0.0.1', resolveListen));
-  const address = modelServer.address();
-  assert.ok(address && typeof address === 'object');
-
-  const { app, dataDir, request, user } = await startApp({
-    platformApiKey: 'test-key',
-    platformBaseUrl: `http://127.0.0.1:${address.port}/v1`,
-    platformModel: 'analysis-test',
-    platformTransport: 'responses',
-  });
-
+  const { app, dataDir, request, user } = await startApp(modelServer);
   try {
     const project = await request('/api/projects', {
-      method: 'POST',
-      body: JSON.stringify({ name: 'Stage chaining assembly project' }),
+      method: 'POST', body: JSON.stringify({ name: 'Eight-turn assembly project' }),
     });
     assert.equal(project.response.status, 201, JSON.stringify(project.body));
     const projectId = String(project.body.id);
-
-    const service = app.get(IntelligenceService);
     const principal: SessionPrincipal = {
       kind: 'session', userId: user.id, username: 'admin', systemRole: 'admin', userKind: 'research',
       mustChangePassword: false, tokenHash: '', csrfHash: '',
     };
+    const result = await app.get(IntelligenceService).analyzeProject(projectId, principal, true);
+    assert.match(String((result.task as Record<string, unknown>).sourceFingerprint), /:project-conversation-v3$/u);
 
-    // force=true 绕过 analyzeProject 级缓存，真正跑一次三阶段串联。
-    const result = await service.analyzeProject(projectId, principal, true);
+    assert.deepEqual(calls.map((call) => call.turn), [1, 2, 3, 4, 5, 6, 7, 8]);
+    for (const call of calls) {
+      const messages = call.body.input as Array<{ role: string; content: unknown }>;
+      assert.equal(messages.length, call.turn * 2 - 1);
+      assert.deepEqual(messages.map((message) => message.role),
+        Array.from({ length: call.turn * 2 - 1 }, (_, index) => index % 2 === 0 ? 'user' : 'assistant'));
+      for (let previous = 1; previous < call.turn; previous += 1) {
+        assert.equal(messages[(previous - 1) * 2 + 1]!.content, assistantText(previous));
+      }
+    }
+    const turnPrompt = (turn: number): string => {
+      const call = calls[turn - 1]!;
+      const messages = call.body.input as Array<{ role: string; content: unknown }>;
+      const message = messages.at(-1)!;
+      assert.equal(message.role, 'user', `turn ${turn} must end with the current user prompt`);
+      assert.equal(typeof message.content, 'string', `turn ${turn} prompt must be plain text`);
+      return message.content as string;
+    };
+    const requirePromptContracts = (turn: number, contracts: RegExp[]): void => {
+      const prompt = turnPrompt(turn);
+      for (const contract of contracts) {
+        assert.match(prompt, contract, `turn ${turn} lost prompt contract ${contract}`);
+      }
+    };
 
-    // —— 需求 6.1：顺序固定为 蓝图 → 规划资源 → 选题，且不跳阶段（恰三次调用、次序固定）。——
-    assert.deepEqual(
-      calls.map((call) => call.stage),
-      ['blueprint', 'planning', 'opportunity'],
-      `三阶段调用顺序必须固定且不跳阶段；实际=${calls.map((call) => call.stage).join(',')}`,
-    );
+    // Each contract is checked only against that turn's newest user message. The full-history
+    // transport cannot make these assertions pass by carrying a keyword from an earlier turn.
+    requirePromptContracts(1, [
+      /PROJECT_ANALYSIS_CONVERSATION_V3 TURN 1\/8/u,
+      /Do not assume a medical, local-service, SaaS/u,
+      /Reference-corpus material may guide style only/u,
+      /Never invent an evidence id/u,
+      /completion claims, repeat-contact language/u,
+    ]);
+    requirePromptContracts(2, [
+      /conditional decision states, never population distributions/u,
+      /prohibitedUnsupportedHistories must be filled/u,
+      /derive project-specific completion forms/iu,
+      /亲测, 亲身经历 and 朋友做过/u,
+      /one_time means one decision\/engagement/u,
+      /老用户\/回购\/复购\/续做\/第二次做/u,
+    ]);
+    requirePromptContracts(3, [
+      /REPEAT CONTACT over time/u,
+      /scheduled return visits is recurring, not one_time/u,
+      /each at least 3 utteranceModes/u,
+      /老客复购 is allowed only when serviceModel is recurring or mixed/u,
+      /accountable=true roles must be EXACTLY 2/u,
+      /host_account, assistant_account, role_IP, role_01 or host/u,
+      /price\/location\/schedule\/contact questions to the assistant/u,
+      /every price, number, credential, schedule or promise needs supplied evidence/u,
+      /route to human staff instead of improvising/u,
+    ]);
+    requirePromptContracts(4, [
+      /approved observations support only what is visibly observed/u,
+      /Dynamic information must be verified at use time/u,
+      /Cross-check every historical_action rule/u,
+      /must never authorize a price, number, credential, schedule, promise/u,
+      /Slang and colloquialisms are optional, never mandatory/u,
+      /reference-corpus wording into project facts/u,
+    ]);
+    requirePromptContracts(5, [
+      /preserving the stricter boundary/u,
+      /verifiedFacts must each have a matching evidenceLedger statement/u,
+      /Differentiators also require project evidence/u,
+      /Cross-check serviceModel, scenario prohibitedUnsupportedHistories/u,
+      /unresolved conflicts and time-sensitive facts/u,
+    ]);
+    requirePromptContracts(6, [
+      /Independently enumerate real domain decision tasks, recurring questions/u,
+      /do not limit discovery to what the knowledge files already answer/u,
+      /ONLY citable evidence handles/u,
+      /retaining qualifiers such as 以当期确认为准\/源资料称/u,
+      /Prefer a supplied standard-answer or FAQ passage/u,
+      /knowledgeAction is independent from content planning/u,
+      /Do not treat every information gap as a knowledge-document defect/u,
+      /proofability<=0\.3 without verifiable support/u,
+    ]);
+    requirePromptContracts(7, [
+      /Produce exactly 8 materially different strategies/u,
+      /not cosmetic renamings/u,
+      /preserve factual qualifiers/u,
+      /never turn a simulated role\/history into testimony/u,
+    ]);
+    requirePromptContracts(8, [
+      /exact Turn 6 information-gap keys/u,
+      /at least one Turn 7 strategy prototype and its target channels/u,
+      /Do not copy one generic gap set to every topic/u,
+      /All seven are mandatory 0\.\.1 uncalibrated non-causal/u,
+      /Set status="blocked" only for genuinely unsafe or prohibited topics/u,
+      /Keep unsafe, unprovable or uncertain opportunities visible/u,
+      /approvedImageObservations/u,
+      /(?:not|never).*proof of a non-visible project claim/u,
+    ]);
+    assert.match(calls[7]!.raw, /TURN6_GAP_QUESTION/u);
+    assert.match(calls[7]!.raw, /TURN7_STRATEGY_NAME/u);
 
-    const stage1Body = calls.find((call) => call.stage === 'blueprint')!.body;
-    const stage2Body = calls.find((call) => call.stage === 'planning')!.body;
-    const stage3Body = calls.find((call) => call.stage === 'opportunity')!.body;
-
-    // 链首（阶段 1）不携带任何上一阶段的结构化输入标记（串联从蓝图开始）。
-    assert.equal(stage1Body.includes('APPROVED_STAGE_1_BLUEPRINT'), false);
-    assert.equal(stage1Body.includes('APPROVED_STAGE_2_GAP_CATALOG'), false);
-
-    // 双号运营的两条硬约束必须以独立段落出现在阶段 1 提示里。此前它们埋在
-    // role_model 的长段落中间，产出的 role_model 半数以上只给 0 或 1 个
-    // accountable 身份、replyDisplayRoles 写内部 id；合回长段落即回归。
-    assert.match(stage1Body, /TWO HARD REQUIREMENTS on roles/);
-    assert.ok(stage1Body.includes('must be EXACTLY 2'), '阶段 1 提示应显式要求 accountable 身份恰好 2 个');
-    assert.ok(stage1Body.includes('host_account'), '阶段 1 提示应点名禁止把内部 id 写进 replyDisplayRoles');
-    assert.ok(stage1Body.includes('Copy the displayRole text verbatim'), '阶段 1 提示应要求逐字复制 displayRole');
-
-    // —— 需求 6.2：阶段 2 入参包含阶段 1 的结构化蓝图输出（标记 + 蓝图摘要内容）。——
-    assert.match(stage2Body, /APPROVED_STAGE_1_BLUEPRINT/);
-    assert.ok(stage2Body.includes('STAGE1_PROJECT_NOUN'), '阶段 2 提示应含阶段 1 蓝图的 domain_model.projectNoun');
-    assert.ok(stage2Body.includes('STAGE1_PROJECT_SUMMARY'), '阶段 2 提示应含阶段 1 的 intelligence.projectSummary');
-    assert.ok(stage2Body.includes('STAGE1_DECISION_TASK'), '阶段 2 提示应含阶段 1 的 domain_model.decisionTasks');
-
-    // —— 需求 6.3：阶段 3 入参包含阶段 2 的结构化输出（gapCatalog + expressionStrategies 摘要）。——
-    assert.match(stage3Body, /APPROVED_STAGE_2_GAP_CATALOG/);
-    assert.match(stage3Body, /APPROVED_STAGE_2_EXPRESSION_STRATEGIES/);
-    assert.ok(stage3Body.includes('stage2_gap_key'), '阶段 3 提示应含阶段 2 缺口目录的缺口键');
-    assert.ok(stage3Body.includes('STAGE2_GAP_QUESTION'), '阶段 3 提示应含阶段 2 缺口的问题');
-    assert.ok(stage3Body.includes('STAGE2_STRATEGY_NAME'), '阶段 3 提示应含阶段 2 的表达策略名');
-
-    // —— 需求 6.4：各阶段产物以 status='draft' 落库且需独立审批（无隐式级联审批）。——
     const database = app.get(DatabaseService);
     const statusesOf = (table: string): string[] =>
-      (database.prepare(`SELECT status FROM ${table} WHERE project_id=?`).all(projectId) as unknown as Array<{ status: string }>)
+      (database.prepare(`SELECT status FROM ${table} WHERE project_id=?`).all(projectId) as Array<{ status: string }>)
         .map((row) => row.status);
-    const intelligenceStatuses = statusesOf('project_intelligence');
-    const blueprintStatuses = statusesOf('project_blueprint_modules');
-    const gapStatuses = statusesOf('information_gaps');
-    const strategyStatuses = statusesOf('expression_strategies');
-    const opportunityStatuses = statusesOf('topic_opportunities');
-    assert.deepEqual(intelligenceStatuses, ['draft'], '阶段 1 情报应恰有一条且落库为 draft');
-    assert.equal(blueprintStatuses.length, 7, '阶段 1 应落库七个蓝图模块');
-    assert.ok(blueprintStatuses.every((status) => status === 'draft'), '七个蓝图模块均应为 draft');
-    assert.ok(gapStatuses.length >= 1 && gapStatuses.every((status) => status === 'draft'), '阶段 2 缺口应落库为 draft');
-    assert.ok(strategyStatuses.length >= 1 && strategyStatuses.every((status) => status === 'draft'), '阶段 2 策略应落库为 draft');
-    assert.ok(opportunityStatuses.length >= 1 && opportunityStatuses.every((status) => status === 'draft'), '阶段 3 选题应落库为 draft');
-    // 需独立审批：分析后任一产物都不得被自动/级联判为 approved。
-    const allStatuses = [...intelligenceStatuses, ...blueprintStatuses, ...gapStatuses, ...strategyStatuses, ...opportunityStatuses];
-    assert.ok(allStatuses.every((status) => status !== 'approved'), '任一阶段产物都不得在分析时被自动审批');
+    const allStatuses = [
+      ...statusesOf('project_intelligence'), ...statusesOf('project_blueprint_modules'),
+      ...statusesOf('information_gaps'), ...statusesOf('expression_strategies'),
+      ...statusesOf('topic_opportunities'),
+    ];
+    assert.equal(statusesOf('project_blueprint_modules').length, 7);
+    assert.ok(allStatuses.length > 0 && allStatuses.every((status) => status === 'draft'));
 
-    // —— 需求 6.5：下游依赖的输出 schema 字段齐全。——
-    // blueprintModules 七键齐全，且每个模块的 data 为非空对象。
     const blueprintModules = result.blueprintModules as Array<Record<string, unknown>>;
-    assert.equal(blueprintModules.length, 7);
-    assert.deepEqual(
-      blueprintModules.map((module) => String(module.moduleKey)).sort(),
-      [...BLUEPRINT_MODULE_KEYS].sort(),
-    );
-    assert.ok(
-      blueprintModules.every((module) => isRecord(module.data) && Object.keys(module.data).length > 0),
-      '每个蓝图模块都应有非空的结构化 data',
-    );
+    assert.deepEqual(blueprintModules.map((module) => String(module.moduleKey)).sort(), [...BLUEPRINT_MODULE_KEYS].sort());
+    assert.ok(blueprintModules.every((module) => isRecord(module.data) && Object.keys(module.data).length > 0));
 
-    // P1 证据核验：模型声称 verified 的事实没有台账时不得落入 verifiedFacts；蓝图伪
-    // supplied_fact 自动降为 inference，并将问题留在分析结果供审批界面展示。
     const normalizedIntelligence = result.intelligence as Record<string, unknown>;
     assert.deepEqual(normalizedIntelligence.verifiedFacts, []);
     const validationIssues = normalizedIntelligence.evidenceValidationIssues as Array<Record<string, unknown>>;
     assert.ok(validationIssues.some((issue) => issue.reason === 'missing_ledger'));
     assert.ok(validationIssues.some((issue) => issue.reason === 'unknown_evidence'));
-    assert.ok(Array.isArray(normalizedIntelligence.knowledgeCoverage));
     const audienceModule = blueprintModules.find((module) => module.moduleKey === 'audience_model')!;
     const audienceState = ((audienceModule.data as any).states as any[])[0];
     assert.equal(audienceState.source.status, 'inference');
     assert.deepEqual(audienceState.source.evidenceIds, []);
 
-    // gap 形状：id / title / question 齐全，且两轴字段（度量 + metricStatus/unknownMetrics）存在。
     const gaps = result.informationGaps as Array<Record<string, unknown>>;
-    assert.ok(gaps.length >= 1);
-    const gap = gaps.find((item) => String(item.title) === 'STAGE2_GAP_TITLE') ?? gaps[0]!;
-    assert.ok(typeof gap.id === 'string' && gap.id, 'gap 应有 id');
-    assert.equal(gap.question, 'STAGE2_GAP_QUESTION');
-    for (const key of ['importance', 'decisionLeverage', 'proofability', 'metricStatus', 'unknownMetrics']) {
-      assert.ok(key in gap, `gap schema 应含字段 ${key}`);
-    }
+    const gap = gaps.find((item) => item.title === 'TURN6_GAP_TITLE')!;
+    assert.ok(gap.id);
+    assert.equal(gap.question, 'TURN6_GAP_QUESTION');
+    for (const key of ['importance', 'decisionLeverage', 'proofability', 'metricStatus', 'unknownMetrics']) assert.ok(key in gap);
 
-    // strategy 形状：id / name / 表达策略要件字段齐全。
     const strategies = result.expressionStrategies as Array<Record<string, unknown>>;
-    assert.ok(strategies.length >= 1);
-    const strategy = strategies.find((item) => String(item.name) === 'STAGE2_STRATEGY_NAME') ?? strategies[0]!;
-    assert.ok(typeof strategy.id === 'string' && strategy.id, 'strategy 应有 id');
-    assert.equal(strategy.name, 'STAGE2_STRATEGY_NAME');
-    for (const key of ['openingMode', 'narrativeMode', 'bodyRole', 'commentMode', 'targetChannels']) {
-      assert.ok(key in strategy, `strategy schema 应含字段 ${key}`);
-    }
+    const strategy = strategies.find((item) => item.name === 'TURN7_STRATEGY_NAME')!;
+    assert.ok(strategy.id);
+    for (const key of ['openingMode', 'narrativeMode', 'bodyRole', 'commentMode', 'targetChannels']) assert.ok(key in strategy);
 
-    // opportunity 形状：id / topic / gapIds / eligibilityStatus 齐全，且 gapIds 解析为阶段 2 落库缺口的 id
-    // （证明下游 schema 链接：选题 → 缺口 端到端连通）。
     const opportunities = result.topicOpportunities as Array<Record<string, unknown>>;
-    assert.ok(opportunities.length >= 1);
-    const opportunity = opportunities.find((item) => String(item.title) === 'STAGE3_OPP_TITLE') ?? opportunities[0]!;
-    assert.ok(typeof opportunity.id === 'string' && opportunity.id, 'opportunity 应有 id');
-    for (const key of ['topic', 'gapIds', 'eligibilityStatus']) {
-      assert.ok(key in opportunity, `opportunity schema 应含字段 ${key}`);
-    }
-    assert.ok(Array.isArray(opportunity.gapIds) && (opportunity.gapIds as unknown[]).length >= 1, 'opportunity 应引用至少一个缺口');
-    assert.equal((opportunity.gapIds as string[])[0], gap.id, 'opportunity.gapIds 应解析为阶段 2 落库缺口的存储 id');
+    const opportunity = opportunities.find((item) => item.title === 'TURN8_OPP_TITLE')!;
+    assert.ok(opportunity.id);
+    assert.ok(Array.isArray(opportunity.gapIds));
+    assert.equal((opportunity.gapIds as string[])[0], gap.id);
+    assert.equal(opportunity.eligibilityStatus, 'eligible');
 
-    // 人工编辑路径不能享受分析器的自动降级：用户明确保留 supplied_fact 但给出无效
-    // evidenceId 时，审批必须返回可操作的 400，而不是把结构批准误当成事实批准。
     const edited = await request(`/api/projects/${projectId}/blueprint-modules/${audienceModule.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ data: {
-        states: [{
-          id: 'collector', label: '全国用户都偏爱低价', stages: ['collecting'], goals: ['低价'],
-          source: { status: 'supplied_fact', evidenceIds: ['still-invented'] },
-        }],
-      } }),
+      method: 'PATCH', body: JSON.stringify({ data: { states: [{
+        id: 'collector', label: '全国用户都偏爱低价', stages: ['collecting'], goals: ['低价'],
+        source: { status: 'supplied_fact', evidenceIds: ['still-invented'] },
+      }] } }),
     });
-    assert.equal(edited.response.status, 200, JSON.stringify(edited.body));
-    const rejectedApproval = await request(`/api/projects/${projectId}/blueprint-modules/${edited.body.id}/approve`, {
+    const rejected = await request(`/api/projects/${projectId}/blueprint-modules/${edited.body.id}/approve`, {
       method: 'POST', body: JSON.stringify({ status: 'approved' }),
     });
-    assert.equal(rejectedApproval.response.status, 400, JSON.stringify(rejectedApproval.body));
-    assert.match(String(rejectedApproval.body.message), /缺少当前有效证据/u);
+    assert.equal(rejected.response.status, 400);
+    assert.match(String(rejected.body.message), /缺少当前有效证据/u);
   } finally {
     await app.close();
     await rm(dataDir, { recursive: true, force: true });
-    await new Promise<void>((resolveClose, rejectClose) =>
-      modelServer.close((closeError) => (closeError ? rejectClose(closeError) : resolveClose())));
+    await new Promise<void>((resolve) => modelServer.close(() => resolve()));
   }
 });

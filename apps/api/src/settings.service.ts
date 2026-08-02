@@ -34,6 +34,8 @@ export interface ResolvedProviderSettings {
   transport: 'responses' | 'chat_completions';
   apiKey: string;
   temperature: number;
+  /** Immutable settings row version used to detect queue-time configuration drift. */
+  configVersion: string;
 }
 
 @Injectable()
@@ -190,6 +192,16 @@ export class SettingsService {
       transport: byok ? row.transport : this.options.platformTransport,
       apiKey: byok ? (row.encrypted_api_key ? this.decrypt(row.encrypted_api_key) : '') : this.options.platformApiKey,
       temperature: row.default_temperature,
+      // quota_used updates also touch updated_at, so timestamps cannot identify the
+      // provider contract. Hash only execution-affecting values (including a hash of
+      // the effective secret) so quota accounting never creates false config drift.
+      configVersion: createHash('sha256').update(JSON.stringify({
+        mode: row.provider_mode, provider: row.provider, model: row.model || this.options.platformModel,
+        baseUrl: byok ? row.base_url : this.options.platformBaseUrl,
+        transport: byok ? row.transport : this.options.platformTransport,
+        temperature: row.default_temperature,
+        keyDigest: createHash('sha256').update(byok ? (row.encrypted_api_key ?? '') : this.options.platformApiKey).digest('hex'),
+      })).digest('hex'),
     };
   }
 
