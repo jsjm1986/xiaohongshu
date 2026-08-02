@@ -260,10 +260,13 @@ function SettingSourceBadge({ source }: { source: SimpleSettingSource }) {
 
 function TaskProgressRow({ text, task }: { text: string; task: AnalysisTask | null }) {
   const active = task !== null && (task.status === "running" || task.status === "queued");
+  const detail = active && task.currentTurn && task.totalTurns
+    ? `第 ${task.currentTurn}/${task.totalTurns} 轮 · ${task.turnLabel || "项目分析"} · 第 ${task.turnAttemptCount || 1} 次尝试`
+    : active ? `后台进行中 · 第 ${task.attemptCount} 次尝试` : "后台进行中";
   return <div className="task-progress" role="status">
     <RefreshCw size={15} className="spin" />
     <span>{text}</span>
-    <small>{active ? `后台进行中 · 第 ${task.attemptCount} 次尝试` : "后台进行中"}</small>
+    <small>{detail}</small>
     <i className="task-progress__track"><b /></i>
   </div>;
 }
@@ -1130,7 +1133,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
         <Field label="当前项目"><select value={projectId} onChange={(event) => onProject(event.target.value)}>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></Field>
         <div className="intelligence-status"><BrainCircuit size={22} /><div><strong>{intelligence?.entity || "等待识别项目核心名词"}</strong><p>{intelligence?.industry || "分析后形成行业概念树、决策任务和信息缺口池。"}</p>{!analysisReady && staleReasons.length ? <small>需要更新：{staleReasons.join("；")}</small> : null}{intelligence?.status === "draft" ? <small>AI 生成的是待审核规划，不会自动升级为项目事实。</small> : null}{analysisReady ? <small className="intelligence-ready-note">{blueprintModules.length}/{Object.keys(blueprintModuleMeta).length} 创作模型已确认</small> : null}</div><div className="panel-actions">{isAnalyzed && !analysisReady && <Button loading={approving} icon={<Check size={15} />} onClick={approvePlanningResources}>逐项确认本批模型</Button>}{analysisReady && <Button variant="ghost" icon={<ChevronDown size={15} className={modulesExpanded ? "flip" : ""} />} onClick={() => setModulesExpanded((value) => !value)}>{modulesExpanded ? "收起模型" : "查看模型"}</Button>}<Button variant={isAnalyzed ? "ghost" : "primary"} loading={analyzing || intelligence?.status === "analyzing"} icon={<RefreshCw size={15} />} onClick={requestAnalyze}>{isAnalyzed ? "重新分析" : "分析项目"}</Button></div></div>
         {analysisReady && staleReasons.length > 0 && <div className="intelligence-stale-note"><TriangleAlert size={15} /><span>知识库或公式有更新：{staleReasons.join("；")}。建议重新分析后再正式生成。</span><button type="button" onClick={requestAnalyze}>重新分析</button></div>}
-        {(analyzing || (!refreshing && latestTask && (latestTask.status === "running" || latestTask.status === "queued"))) && <TaskProgressRow text={analyzing ? "三段模型串联运行：蓝图 → 缺口与策略 → 选题" : "后台分析进行中，完成前请勿离开或重复触发"} task={latestTask} />}
+        {(analyzing || (!refreshing && latestTask && (latestTask.status === "running" || latestTask.status === "queued"))) && <TaskProgressRow text={analyzing ? "完整对话逐轮分析：蓝图 → 情报 → 缺口 → 策略 → 选题" : "后台分析进行中，完成前请勿离开或重复触发"} task={latestTask} />}
         {latestTask && latestTask.status === "failed" && <div className="blueprint-missing"><TriangleAlert size={16} /><span>后台分析失败（已尝试 {latestTask.attemptCount} 次）：{latestTask.error || "未知错误"}。请重新分析，或检查项目知识后再试。</span></div>}
         {showCardWall ? <>
           <p className="blueprint-grid-note">这些模型的内容会作为项目参数进入生成；静态提示词不会替你补行业角色和场景。</p>
@@ -1285,12 +1288,12 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
       </ul>
     </Modal>
 
-    <Modal open={reanalyzeOpen} onClose={() => setReanalyzeOpen(false)} title="重新分析项目？" description="将基于当前项目知识重新运行三段模型，生成一批新的草稿版内容地图；不会删除任何已确认的历史版本。" footer={<><Button variant="ghost" onClick={() => setReanalyzeOpen(false)}>取消</Button><Button icon={<RefreshCw size={15} />} onClick={() => { setReanalyzeOpen(false); void analyzeProject(); }}>确认重新分析</Button></>}>
+    <Modal open={reanalyzeOpen} onClose={() => setReanalyzeOpen(false)} title="重新分析项目？" description="将基于当前项目知识运行完整对话的多轮分析，生成一批新的草稿版内容地图；不会删除任何已确认的历史版本。" footer={<><Button variant="ghost" onClick={() => setReanalyzeOpen(false)}>取消</Button><Button icon={<RefreshCw size={15} />} onClick={() => { setReanalyzeOpen(false); void analyzeProject(); }}>确认重新分析</Button></>}>
       <div className="reanalyze-impact">
         <div><Layers3 size={16} /><span><strong>创作模型</strong><p>生成 v+1 草稿；当前已确认的 {blueprintModules.length || 7} 个模型转为「待确认」，重新逐项确认前，正式生成保持锁定。</p></span></div>
         <div><Sparkles size={16} /><span><strong>缺口 / 策略 / 选题</strong><p>追加一批新草稿；已收藏、已归档和手动新增的条目全部保留。</p></span></div>
         <div><Target size={16} /><span><strong>当前选题</strong><p>已选择的选题卡会被取消，需要重新选择。</p></span></div>
-        <div><Info size={16} /><span><strong>成本</strong><p>三段模型串联运行，约几十秒，消耗一次模型调用。</p></span></div>
+        <div><Info size={16} /><span><strong>成本</strong><p>完整对话分 8 轮运行，耗时取决于模型；按一次项目分析计费。</p></span></div>
       </div>
       {staleReasons.length > 0 && <p className="reanalyze-stale">建议原因：{staleReasons.join("；")}</p>}
     </Modal>

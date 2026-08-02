@@ -121,12 +121,41 @@ export function Modal({ open, title, description, children, onClose, footer, siz
   useEffect(() => {
     if (!open) return;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusableSelector = [
+      'button:not([disabled])', 'a[href]', 'input:not([disabled])',
+      'select:not([disabled])', 'textarea:not([disabled])',
+      '[tabindex]:not([tabindex="-1"])',
+    ].join(',');
+    const focusable = () => Array.from(
+      dialogRef.current?.querySelectorAll<HTMLElement>(focusableSelector) ?? [],
+    ).filter((element) => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
     const handleKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') closeRef.current();
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeRef.current();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const elements = focusable();
+      if (!elements.length) {
+        event.preventDefault();
+        dialogRef.current?.focus();
+        return;
+      }
+      const first = elements[0]!;
+      const last = elements[elements.length - 1]!;
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialogRef.current)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     document.addEventListener('keydown', handleKey);
-    dialogRef.current?.focus();
+    const frame = window.requestAnimationFrame(() => (focusable()[0] ?? dialogRef.current)?.focus());
     return () => {
+      window.cancelAnimationFrame(frame);
       document.removeEventListener('keydown', handleKey);
       previous?.focus();
     };
@@ -135,9 +164,9 @@ export function Modal({ open, title, description, children, onClose, footer, siz
   if (!open) return null;
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section ref={dialogRef} tabIndex={-1} className={size === "wide" ? "modal modal--wide" : "modal"} role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <section ref={dialogRef} tabIndex={-1} className={size === "wide" ? "modal modal--wide" : "modal"} role="dialog" aria-modal="true" aria-labelledby="modal-title" aria-describedby={description ? "modal-description" : undefined}>
         <header className="modal__header">
-          <div><h2 id="modal-title">{title}</h2>{description && <p>{description}</p>}</div>
+          <div><h2 id="modal-title">{title}</h2>{description && <p id="modal-description">{description}</p>}</div>
           <button type="button" className="icon-button" onClick={onClose} aria-label="关闭"><X size={20} /></button>
         </header>
         <div className="modal__body">{children}</div>

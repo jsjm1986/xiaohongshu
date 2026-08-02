@@ -80,34 +80,32 @@ after(async () => {
   if (dataDir) await rm(dataDir, { recursive: true, force: true });
 });
 
+function conversationResult(summary: string, gapKey: string, gapTitle: string): Record<string, unknown> {
+  return {
+    intelligence: { projectSummary: summary, verifiedFacts: [], evidenceIds: [], knowledgeCoverage: [] },
+    blueprintModules: {
+      knowledge_map: {}, domain_model: {}, audience_model: {}, scenario_model: {},
+      role_model: {}, claim_policy: {}, surface_language: {},
+    },
+    gaps: [{
+      key: gapKey, title: gapTitle, question: gapTitle, sourceStatus: 'unknown',
+      importance: 0.5, decisionLeverage: 0.5, proofability: 0.3,
+    }],
+    strategies: [], opportunities: [], evidenceValidationIssueCount: 0,
+  };
+}
+
 test('分析期间知识版本变化时，旧快照不能落库', async () => {
   const intelligence = app.get(IntelligenceService);
-  const original = (intelligence as any).analyzeWithCurrentModel;
-  let releaseFirstStage!: () => void;
-  let firstStageStarted!: () => void;
-  const started = new Promise<void>((resolve) => { firstStageStarted = resolve; });
-  const release = new Promise<void>((resolve) => { releaseFirstStage = resolve; });
-  let stage = 0;
-  (intelligence as any).analyzeWithCurrentModel = async () => {
-    stage += 1;
-    if (stage === 1) {
-      firstStageStarted();
-      await release;
-      return {
-        intelligence: { projectSummary: '基于旧资料的分析' },
-        blueprintModules: {
-          knowledge_map: {}, domain_model: {}, audience_model: {}, scenario_model: {},
-          role_model: {}, claim_policy: {}, surface_language: {},
-        },
-      };
-    }
-    if (stage === 2) {
-      return {
-        informationGaps: [{ key: 'old-gap', title: '旧资料缺口', sourceStatus: 'unknown' }],
-        expressionStrategies: [],
-      };
-    }
-    return { topicOpportunities: [] };
+  const original = (intelligence as any).analyzeProjectConversation;
+  let releaseConversation!: () => void;
+  let conversationStarted!: () => void;
+  const started = new Promise<void>((resolve) => { conversationStarted = resolve; });
+  const release = new Promise<void>((resolve) => { releaseConversation = resolve; });
+  (intelligence as any).analyzeProjectConversation = async () => {
+    conversationStarted();
+    await release;
+    return conversationResult('基于旧资料的分析', 'old-gap', '旧资料缺口');
   };
 
   try {
@@ -120,7 +118,7 @@ test('分析期间知识版本变化时，旧快照不能落库', async () => {
       evidenceStatus: '已知事实',
       principal,
     });
-    releaseFirstStage();
+    releaseConversation();
 
     await assert.rejects(running, /资料在分析期间发生了变化|重新分析/);
     const db = app.get(DatabaseService);
@@ -139,7 +137,7 @@ test('分析期间知识版本变化时，旧快照不能落库', async () => {
     ).get(projectId) as { status: string };
     assert.equal(task.status, 'failed');
   } finally {
-    (intelligence as any).analyzeWithCurrentModel = original;
+    (intelligence as any).analyzeProjectConversation = original;
   }
 });
 
@@ -176,27 +174,9 @@ test('新分析淘汰旧分析批次，但保留人工创建并批准的缺口',
   ).run(projectId, principal.userId, now, now, principal.userId, now);
 
   const intelligence = app.get(IntelligenceService);
-  const original = (intelligence as any).analyzeWithCurrentModel;
-  let stage = 0;
-  (intelligence as any).analyzeWithCurrentModel = async () => {
-    stage += 1;
-    if (stage === 1) {
-      return {
-        intelligence: { projectSummary: '新分析' },
-        blueprintModules: {
-          knowledge_map: {}, domain_model: {}, audience_model: {}, scenario_model: {},
-          role_model: {}, claim_policy: {}, surface_language: {},
-        },
-      };
-    }
-    if (stage === 2) {
-      return {
-        informationGaps: [{ key: 'new-gap', title: '新分析缺口', sourceStatus: 'unknown' }],
-        expressionStrategies: [],
-      };
-    }
-    return { topicOpportunities: [] };
-  };
+  const original = (intelligence as any).analyzeProjectConversation;
+  (intelligence as any).analyzeProjectConversation = async () =>
+    conversationResult('新分析', 'new-gap', '新分析缺口');
 
   try {
     const result = await intelligence.analyzeProject(projectId, principal, true);
@@ -219,7 +199,7 @@ test('新分析淘汰旧分析批次，但保留人工创建并批准的缺口',
     assert.ok(currentIds.some((id) => !['old-analysis-gap', 'manual-approved-gap'].includes(id)));
     assert.equal(currentIds.includes('old-analysis-gap'), false);
   } finally {
-    (intelligence as any).analyzeWithCurrentModel = original;
+    (intelligence as any).analyzeProjectConversation = original;
   }
 });
 

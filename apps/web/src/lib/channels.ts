@@ -1,5 +1,6 @@
 import {
   BookOpenText,
+  Bot,
   Boxes,
   FileClock,
   FlaskConical,
@@ -37,6 +38,7 @@ export interface Channel extends GroupableNavItem {
 export const CHANNELS: readonly Channel[] = [
   { to: '/', label: '概览', icon: LayoutDashboard, group: 'workspace', end: true },
   { to: '/generate', label: '内容生成', icon: Sparkles, group: 'workspace' },
+  { to: '/agent-harness', label: 'Agent 创作', icon: Bot, group: 'workspace' },
   // 生成历史是工作台的产出物——「我做过什么」,和概览、内容生成同一组。
   { to: '/history', label: '生成历史', icon: FileClock, group: 'workspace' },
   { to: '/projects', label: '项目管理', icon: Boxes, group: 'assets' },

@@ -129,9 +129,10 @@ function imageAnalysisPayload(): Record<string, unknown> {
 }
 
 function stageOf(rawBody: string): string {
-  if (rawBody.includes('PROJECT_ANALYSIS_STAGE: 1/3')) return 'blueprint';
-  if (rawBody.includes('PROJECT_ANALYSIS_STAGE: 2/3')) return 'planning';
-  if (rawBody.includes('PROJECT_ANALYSIS_STAGE: 3/3')) return 'opportunity';
+  const turns = [...rawBody.matchAll(/TURN (\d)\/8/gu)];
+  const turn = turns.at(-1)?.[1];
+  if (turn) return `turn-${turn}`;
+  if (rawBody.includes('TOPIC_REFRESH_ANALYSIS_V1')) return 'opportunity';
   if (rawBody.includes('Analyze this project image')) return 'image';
   return 'enrichment';
 }
@@ -141,9 +142,17 @@ function modelSuccess(payload: Record<string, unknown>): MockReply {
 }
 
 function projectStageReply(stage: string): MockReply {
-  if (stage === 'blueprint') return modelSuccess(stage1BlueprintPayload());
-  if (stage === 'planning') return modelSuccess(stage2PlanningPayload());
-  if (stage === 'opportunity') return modelSuccess(stage3OpportunityPayload());
+  const blueprint = stage1BlueprintPayload();
+  const modules = blueprint.blueprintModules as Record<string, unknown>;
+  const planning = stage2PlanningPayload();
+  if (stage === 'turn-1') return modelSuccess({ knowledge_map: modules.knowledge_map, domain_model: modules.domain_model });
+  if (stage === 'turn-2') return modelSuccess({ audience_model: modules.audience_model, scenario_model: modules.scenario_model });
+  if (stage === 'turn-3') return modelSuccess({ role_model: modules.role_model });
+  if (stage === 'turn-4') return modelSuccess({ claim_policy: modules.claim_policy, surface_language: modules.surface_language });
+  if (stage === 'turn-5') return modelSuccess({ intelligence: blueprint.intelligence });
+  if (stage === 'turn-6') return modelSuccess({ informationGaps: planning.informationGaps });
+  if (stage === 'turn-7') return modelSuccess({ expressionStrategies: planning.expressionStrategies });
+  if (stage === 'turn-8') return modelSuccess(stage3OpportunityPayload());
   return modelSuccess({});
 }
 
@@ -521,10 +530,10 @@ test('模型成功返回后任务易主时，旧实例不能把它标为 complet
   assert.equal(quotaUsed(), 0, '模型虽返回成功，但旧执行者失去租约时本次调用必须退款');
 });
 
-test('项目三阶段分析在最终模型返回前易主时，全部阶段产物随终态 CAS 一起回滚', async () => {
+test('项目八轮分析在最终模型返回前易主时，全部阶段产物随终态 CAS 一起回滚', async () => {
   let takenTaskId = '';
   modelResponder = ({ stage }) => {
-    if (stage === 'opportunity') {
+    if (stage === 'turn-8') {
       const taken = takeOverRunningTask();
       takenTaskId = taken.id;
     }
@@ -533,7 +542,7 @@ test('项目三阶段分析在最终模型返回前易主时，全部阶段产�
 
   const error = await rejectionOf(service().analyzeProject(projectId, principal, true));
 
-  assert.deepEqual(modelCalls.map((call) => call.stage), ['blueprint', 'planning', 'opportunity']);
+  assert.deepEqual(modelCalls.map((call) => call.stage), ['turn-1', 'turn-2', 'turn-3', 'turn-4', 'turn-5', 'turn-6', 'turn-7', 'turn-8']);
   assertSafeClaimLost(error);
   for (const table of [
     'project_intelligence',
@@ -549,8 +558,8 @@ test('项目三阶段分析在最终模型返回前易主时，全部阶段产�
   assert.equal(current.claimed_by, OTHER_INSTANCE_ID);
   assert.equal(current.error, TAKEOVER_MARKER);
   assert.equal(current.result_id, null);
-  assert.equal(current.quota_consumed_count, 2, '前两阶段成功消费保留，失去租约的第三阶段退款');
-  assert.equal(quotaUsed(), 2);
+  assert.equal(current.quota_consumed_count, 1, '八个内部轮次共享一次产品额度，易主后余额由新持有者结算');
+  assert.equal(quotaUsed(), 1);
 });
 
 test('图片分析在模型返回前易主时，分析版本插入回滚且新持有者状态不被覆盖', async () => {
@@ -614,10 +623,10 @@ test('项目分析正常成功时七类产物落库，任务终态释放归属',
   assert.equal(completed.claimed_by, null);
   assert.equal(completed.heartbeat_at, null);
   assert.equal(completed.quota_consumed_count, 0);
-  assert.equal(quotaUsed(), 3, '三阶段均成功时保留三次真实模型消费');
+  assert.equal(quotaUsed(), 1, '八个内部轮次共享一次项目分析产品额度');
 });
 
-test('项目分析审计失败时全部产物回滚，失败终态退还三阶段额度', async () => {
+test('项目分析审计失败时全部产物回滚，失败终态退还单次产品额度', async () => {
   modelResponder = ({ stage }) => projectStageReply(stage);
 
   await withAuditFailure(
@@ -625,7 +634,7 @@ test('项目分析审计失败时全部产物回滚，失败终态退还三阶�
     () => service().analyzeProject(projectId, principal, true),
   );
 
-  assert.deepEqual(modelCalls.map((call) => call.stage), ['blueprint', 'planning', 'opportunity']);
+  assert.deepEqual(modelCalls.map((call) => call.stage), ['turn-1', 'turn-2', 'turn-3', 'turn-4', 'turn-5', 'turn-6', 'turn-7', 'turn-8']);
   for (const table of [
     'project_intelligence',
     'project_blueprint_modules',
@@ -642,7 +651,7 @@ test('项目分析审计失败时全部产物回滚，失败终态退还三阶�
   assert.equal(failed.heartbeat_at, null);
   assert.equal(failed.quota_consumed_count, 0);
   assert.ok(failed.completed_at);
-  assert.equal(quotaUsed(), 0, '最终审计失败时必须退还三次模型调用额度');
+  assert.equal(quotaUsed(), 0, '最终审计失败时必须退还本次项目分析额度');
 });
 
 test('专题刷新审计失败时批次和选题回滚并退还额度', async () => {

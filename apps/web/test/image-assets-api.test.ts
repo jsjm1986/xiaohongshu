@@ -47,3 +47,17 @@ test('image list uses one paginated request and consumes the embedded latest ana
   assert.equal(result.items[0]?.approved, true);
   assert.deepEqual(result.items[0]?.analysis?.visibleFacts, ['可见事实']);
 });
+
+test('image list can request only assets with an approved observation', async () => {
+  const calls: string[] = [];
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    calls.push(String(url));
+    return new Response(JSON.stringify({ items: [], total: 0, limit: 12, offset: 0 }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  await api.imageAssets.list('project', { limit: 12, observationStatus: 'approved' });
+  assert.deepEqual(calls, ['/api/projects/project/image-assets?limit=12&offset=0&observationStatus=approved']);
+});

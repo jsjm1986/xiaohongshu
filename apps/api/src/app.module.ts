@@ -1,5 +1,7 @@
 import { DynamicModule, Module } from '@nestjs/common';
 import { AdminController } from './admin.controller.js';
+import { AgentHarnessController } from './agent-harness.controller.js';
+import { AgentHarnessService } from './agent-harness.service.js';
 import { AppController } from './placeholder.controller.js';
 import { AuditService } from './audit.service.js';
 import { AuditController } from './audit.controller.js';
@@ -53,6 +55,7 @@ export class AppModule {
         RegistrationController,
         AuditController,
         AdminController,
+        AgentHarnessController,
         WorkspaceController,
         ProjectController,
         IntelligenceController,
@@ -72,6 +75,7 @@ export class AppModule {
         DatabaseService,
         AuthService,
         AuditService,
+        AgentHarnessService,
         ResourceService,
         IntelligenceService,
         IntelligenceEnrichService,
@@ -95,6 +99,7 @@ export class AppModule {
         DatabaseService,
         AuthService,
         AuditService,
+        AgentHarnessService,
         ResourceService,
         IntelligenceService,
         IntelligenceEnrichService,

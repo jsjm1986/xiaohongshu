@@ -8,7 +8,9 @@ export function QuickTaskProgress({ text, task }: { text: string; task: Analysis
     <div className={`qc-progress${failed ? ' qc-progress--failed' : ''}`} role="status">
       {!failed && <RefreshCw size={15} className="spin" />}
       <span>{failed ? (task?.error || '分析失败,请重试') : text}</span>
-      {!failed && <small>{active ? `后台进行中 · 第 ${task.attemptCount} 次尝试` : '后台进行中'}</small>}
+      {!failed && <small>{active && task.currentTurn && task.totalTurns
+        ? `第 ${task.currentTurn}/${task.totalTurns} 轮 · ${task.turnLabel || '项目分析'} · 第 ${task.turnAttemptCount || 1} 次尝试`
+        : active ? `后台进行中 · 第 ${task.attemptCount} 次尝试` : '后台进行中'}</small>}
       {!failed && <i className="qc-progress__track"><b /></i>}
     </div>
   );

@@ -7,6 +7,7 @@ import {
   HttpException,
   Inject,
   Injectable,
+  Logger,
   InternalServerErrorException,
   NotFoundException,
   type OnModuleDestroy,
@@ -32,6 +33,7 @@ import {
   type KnowledgeKind,
   type OpportunityRankInputSourceKind,
   type OpportunitySelectionAudit,
+  type PromptMessage,
   type PlanningContext,
   type PlanningOptions,
   type ProjectBlueprintModuleKey,
@@ -92,6 +94,85 @@ const OPPORTUNITY_METRIC_FIELDS = [
 ] as const;
 
 type ApprovalStatus = 'draft' | 'approved' | 'rejected' | 'stale';
+interface AnalysisModelResult {
+  parsed: Record<string, unknown>;
+  output: string;
+}
+
+interface AnalysisTurnRow {
+  id: string;
+  task_id: string;
+  turn_index: number;
+  turn_key: string;
+  label: string;
+  status: 'running' | 'completed' | 'failed';
+  attempt_count: number;
+  user_message: string;
+  assistant_message: string | null;
+  output_json: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+type AnalysisStage =
+  | 'project-blueprint'
+  | 'project-conversation'
+  | 'planning-resources'
+  | 'topic-opportunities'
+  | 'topic-refresh'
+  | 'image-analysis'
+  | 'knowledge-enrichment-draft'
+  | 'knowledge-enrichment-merge'
+  | 'unspecified';
+
+interface AnalysisCallContext {
+  taskId: string;
+  stage: AnalysisStage;
+  attempt: number;
+  turnIndex?: number;
+  turnKey?: string;
+}
+
+interface ProjectAnalysisConversationResult {
+  intelligence: Record<string, unknown>;
+  blueprintModules: Record<string, unknown>;
+  gaps: Record<string, unknown>[];
+  strategies: Record<string, unknown>[];
+  opportunities: Record<string, unknown>[];
+  evidenceValidationIssueCount: number;
+}
+
+interface ProjectAnalysisSource {
+  fingerprint: string;
+  sourceJson: string;
+  revision: string;
+  evidence: AnalysisEvidenceEntry[];
+  coverage: Array<Record<string, unknown>>;
+}
+
+const PROJECT_ANALYSIS_TURN_TOTAL = 8;
+const PROJECT_ANALYSIS_TURN_LABELS = [
+  '知识地图与领域模型',
+  '受众与场景',
+  '角色模型',
+  '声明边界与表层语言',
+  '项目情报汇总',
+  '信息缺口',
+  '表达策略',
+  '选题机会',
+] as const;
+const PROJECT_ANALYSIS_TURN_KEYS = [
+  'knowledge-domain',
+  'audience-scenario',
+  'roles',
+  'claims-language',
+  'intelligence',
+  'information-gaps',
+  'expression-strategies',
+  'topic-opportunities',
+] as const;
+const PROJECT_ANALYSIS_PROTOCOL = 'project-conversation-v3';
 
 interface OpportunityDependencyRevision {
   id: string;
@@ -204,7 +285,7 @@ export function analysisFailureException(error: unknown): HttpException {
   /*
    * 技术原文挂在 cause 上,不进用户可见文本。
    *
-   * 用户要的是「怎么办」,而排查(以及三阶段 fail-fast 的契约测试)要的是「缺了哪个
+   * 用户要的是「怎么办」,而排查(以及多轮 fail-fast 的契约测试)要的是「缺了哪个
    * 模块」「JSON 坏在哪」。两者都要,所以分层:message 给人看,cause 留原始错误。
    */
   const withCause = <T extends HttpException>(exception: T): T => {
@@ -218,6 +299,7 @@ export function analysisFailureException(error: unknown): HttpException {
 
 @Injectable()
 export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(IntelligenceService.name);
   private analysisTail: Promise<void> = Promise.resolve();
   /** 在跑分析的心跳定时器,按 taskId 索引;任务收尾时清掉。 */
   private readonly taskHeartbeats = new Map<string, NodeJS.Timeout>();
@@ -996,16 +1078,34 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     return this.getImage(input.projectId, id);
   }
 
-  listImages(projectId: string, pagination: Pagination): {
+  listImages(projectId: string, pagination: Pagination, observationStatus?: string): {
     items: Record<string, unknown>[];
     total: number;
     limit: number;
     offset: number;
   } {
     this.resources.projectRow(projectId);
+    const approvedOnly = observationStatus === 'approved';
+    const approvedClause = approvedOnly
+      ? ` AND EXISTS (
+          SELECT 1 FROM image_analysis_versions approved
+          WHERE approved.image_asset_id=image_assets.id
+            AND approved.project_id=image_assets.project_id
+            AND approved.status='approved' AND approved.deleted_at IS NULL
+        )`
+      : '';
     const total = Number((this.database.prepare(
-      'SELECT COUNT(*) AS value FROM image_assets WHERE project_id=? AND deleted_at IS NULL',
+      `SELECT COUNT(*) AS value FROM image_assets
+       WHERE project_id=? AND deleted_at IS NULL${approvedClause}`,
     ).get(projectId) as { value: number }).value);
+    const selectedStatusClause = approvedOnly ? " AND selected.status='approved'" : '';
+    const assetApprovedClause = approvedOnly
+      ? ` AND EXISTS (
+          SELECT 1 FROM image_analysis_versions approved
+          WHERE approved.image_asset_id=a.id AND approved.project_id=a.project_id
+            AND approved.status='approved' AND approved.deleted_at IS NULL
+        )`
+      : '';
     const rows = this.database.prepare(
         `SELECT a.*,
           v.id AS latest_analysis_id,
@@ -1022,9 +1122,11 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
          LEFT JOIN image_analysis_versions v ON v.id=(
            SELECT selected.id FROM image_analysis_versions selected
            WHERE selected.image_asset_id=a.id AND selected.deleted_at IS NULL
+             ${selectedStatusClause}
            ORDER BY selected.version DESC LIMIT 1
          )
          WHERE a.project_id=? AND a.deleted_at IS NULL
+           ${assetApprovedClause}
          ORDER BY a.created_at DESC, a.id DESC LIMIT ? OFFSET ?`,
     ).all(projectId, pagination.limit, pagination.offset) as unknown as Record<string, unknown>[];
     const items = rows.map((row) => {
@@ -1168,8 +1270,9 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   async analyzeProject(projectId: string, principal: SessionPrincipal, force = false): Promise<Record<string, unknown>> {
     const project = this.resources.projectRow(projectId);
     const source = await this.projectAnalysisSource(project);
+    const taskFingerprint = `${source.fingerprint}:${PROJECT_ANALYSIS_PROTOCOL}`;
     if (!force) {
-      const cached = this.cachedTask(projectId, 'project', null, source.fingerprint);
+      const cached = this.cachedTask(projectId, 'project', null, taskFingerprint);
       if (cached?.result_id) {
         const cachedResult = this.database.prepare(
           `SELECT status FROM project_intelligence
@@ -1180,54 +1283,18 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
         }
       }
     }
-    const task = this.createTask(projectId, 'project', null, source.fingerprint, principal);
+    const task = this.createTask(projectId, 'project', null, taskFingerprint, principal);
+    this.restoreCompletedConversationTurns(task.id, projectId, taskFingerprint);
     try {
-      // Stage 1/3: project creative blueprint.
-      const blueprintPayload = await this.analyzeWithCurrentModel(
-        project, principal, projectBlueprintAnalysisPrompt(source.sourceJson), [], task.id,
-      );
-      // Extract stage 1 structured output so stage 2 can build on it (data-flow chaining, 需求 6.2).
-      const rawIntelligence = isRecord(blueprintPayload.intelligence) ? blueprintPayload.intelligence : blueprintPayload;
-      const rawBlueprintModules = isRecord(blueprintPayload.blueprintModules) ? blueprintPayload.blueprintModules : {};
-      // Fail-fast (需求 6.6): validate blueprint completeness right after stage 1 and BEFORE stage 2 begins.
-      // A missing module terminates the analysis so stage 2 never runs on an empty/incomplete blueprint.
-      const missingBlueprintModules = PROJECT_BLUEPRINT_MODULE_KEYS.filter((key) => !isRecord(rawBlueprintModules[key]));
-      if (missingBlueprintModules.length) {
-        throw new AnalysisGatewayError(
-          `The analysis model omitted required project blueprint modules: ${missingBlueprintModules.join(', ')}.`,
-        );
-      }
-      const validatedStage1 = validateAnalysisEvidence({
-        intelligence: rawIntelligence,
-        blueprintModules: rawBlueprintModules,
-        evidence: source.evidence,
-      });
-      const intelligence = validatedStage1.intelligence;
-      intelligence.knowledgeCoverage = source.coverage;
-      const blueprintModules = validatedStage1.blueprintModules;
-      // Stage 2/3: planning resources, grounded on the stage 1 blueprint.
-      const planningPayload = await this.analyzeWithCurrentModel(
-        project, principal, projectPlanningResourcesPrompt(source.sourceJson, { intelligence, blueprintModules }), [], task.id,
-      );
-      const planningGaps = recordArray(planningPayload.informationGaps).map((gap) => this.validateAnalyzedGapEvidence(gap, source.evidence, source.coverage));
-      const strategies = recordArray(planningPayload.expressionStrategies);
-      // Fail-fast (需求 6.6): planning resources (informationGaps) are stage 3's required input.
-      // If empty, terminate before stage 3 rather than feeding an empty gap catalog forward.
-      if (!planningGaps.length) {
-        throw new AnalysisGatewayError(
-          'The analysis model produced empty planning resources: informationGaps 为空; cannot proceed to the topic opportunity stage.',
-        );
-      }
-      // Stage 3/3: topic opportunities, grounded on the stage 2 gap catalog + expression strategies (需求 6.3).
-      const opportunityPayload = await this.analyzeWithCurrentModel(
-        project,
-        principal,
-        projectOpportunityAnalysisPrompt(source.sourceJson, planningGaps, strategies),
-        [],
-        task.id,
-      );
-      const gaps = planningGaps;
-      const opportunities = recordArray(opportunityPayload.topicOpportunities);
+      const conversation = await this.analyzeProjectConversation(project, principal, source, task.id, true);
+      const {
+        intelligence,
+        blueprintModules,
+        gaps,
+        strategies,
+        opportunities,
+        evidenceValidationIssueCount,
+      } = conversation;
       const resultId = randomUUID();
       const now = nowIso();
       // Normalize domain_model schema: objects/actions/concepts must be string[], not {id, label, description}[].
@@ -1241,10 +1308,10 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
           }
         }
       }
-      // 审批检查点/schema 保留（需求 6.4/6.5）：三阶段串联（6.1）与 fail-fast（6.2）仅改变各阶段的提示输入上下文，
-      // 不改变落库与审批。各阶段产物（intelligence / blueprintModules 七键 / gap / strategy / opportunity）
+      // 审批检查点/schema 保留：八轮对话与 fail-fast 只改变分析编排和提示上下文，
+      // 不改变落库与审批。各轮产物（intelligence / blueprintModules 七键 / gap / strategy / opportunity）
       // 仍以 status='draft' 独立落库，各自经 approve* 独立审批（无隐式级联）；下游依赖的输出 schema 不变；
-      // 各阶段的 retryAnalysis 重试与 analyzeProject 级 cachedTask 缓存均保持不变。
+      // 每轮重试、断点恢复与 analyzeProject 级 cachedTask 缓存不改变审批边界。
       return this.database.transaction(() => {
         const currentProject = this.resources.projectRow(projectId);
         this.assertOwnedTask(task.id, projectId, 'project', null);
@@ -1286,11 +1353,11 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
         this.record(currentProject, principal, 'intelligence.analyze', 'analysis_task', task.id, {
           projectId,
           cached: false,
-          analysisStages: 3,
+          analysisStages: PROJECT_ANALYSIS_TURN_TOTAL,
           gapCount: gaps.length,
           strategyCount: strategies.length,
           opportunityCount: opportunities.length,
-          evidenceValidationIssueCount: validatedStage1.issues.length,
+          evidenceValidationIssueCount,
         });
         return this.projectAnalysisResult(this.taskRow(task.id), false);
       });
@@ -1321,9 +1388,10 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       const opportunityPayload = await this.analyzeWithCurrentModel(
         project,
         principal,
-        projectOpportunityAnalysisPrompt(source.sourceJson, gaps, [], { userGuidance, existingTitles }),
+        topicRefreshAnalysisPrompt(source.sourceJson, gaps, { userGuidance, existingTitles }),
         [],
         task.id,
+        'topic-refresh',
         DIVERSITY_TEMPERATURE,
       );
       const opportunities = recordArray(opportunityPayload.topicOpportunities);
@@ -1390,6 +1458,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
         'Analyze this project image and return only JSON with observedFacts, inferredSignals, unknowns, visibleText, roles (only cover, evidence, scene, diagram, before_after or other), quality {clarity,relevance,textLegibility}, safetyFlags, evidenceIds, source="uploaded" and altText. clarity, relevance and textLegibility are MANDATORY: emit a 0..1 number for each and NEVER null (they are uncalibrated review heuristics; give a conservative estimate when unsure, e.g. textLegibility <= 0.2 when the image has no legible text). Only observedFacts may describe directly visible evidence. Put interpretations in inferredSignals and uncertainty in unknowns; never invent project facts.',
         [`data:${asset.media_type};base64,${buffer.toString('base64')}`],
         task.id,
+        'image-analysis',
       );
       const id = randomUUID();
       const now = nowIso();
@@ -1441,7 +1510,9 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     const fingerprint = `${ENRICH_FINGERPRINT_PREFIX}${purpose}:${randomUUID()}`;
     const task = this.createTask(projectId, 'project', null, fingerprint, principal);
     try {
-      const payload = await this.analyzeWithCurrentModel(project, principal, prompt, [], task.id);
+      const payload = await this.analyzeWithCurrentModel(
+        project, principal, prompt, [], task.id, `knowledge-enrichment-${purpose}`,
+      );
       // result_id 为 null:补充不产生 project_intelligence 之类的结果行。
       // cachedTask 要求 result_id 非空,所以这些任务天然不会被当成缓存命中。
       return this.database.transaction(() => {
@@ -1910,7 +1981,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     return 'user_supplied';
   }
 
-  private async projectAnalysisSource(project: Record<string, unknown>): Promise<{ fingerprint: string; sourceJson: string; revision: string; evidence: AnalysisEvidenceEntry[]; coverage: Array<Record<string, unknown>> }> {
+  private async projectAnalysisSource(project: Record<string, unknown>): Promise<ProjectAnalysisSource> {
     const currentProject = this.resources.projectRow(String(project.id));
     const revisionBefore = this.projectAnalysisRevision(String(currentProject.id));
     const knowledgeRows = this.database.prepare(
@@ -2073,7 +2144,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     const sourceJson = JSON.stringify(source);
     // Stage 1 has the largest fixed instruction block. Validate it here so a
     // prompt-limit failure occurs before an analysis task or quota entry exists.
-    this.assertAnalysisPromptBudget(projectBlueprintAnalysisPrompt(sourceJson), '项目分析');
+    this.assertAnalysisPromptBudget(projectConversationFirstPrompt(sourceJson), '项目分析');
     const revision = this.projectAnalysisRevision(String(currentProject.id));
     if (revision !== revisionBefore) {
       throw new ConflictException('项目资料在读取期间发生了变化，请重新开始分析。');
@@ -2216,12 +2287,347 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  private restoreCompletedConversationTurns(taskId: string, projectId: string, fingerprint: string): void {
+    const prior = this.database.prepare(
+      `SELECT id FROM analysis_tasks
+        WHERE project_id=? AND kind='project' AND target_id IS NULL
+          AND source_fingerprint=? AND status='failed' AND id<>? AND deleted_at IS NULL
+        ORDER BY completed_at DESC, created_at DESC LIMIT 1`,
+    ).get(projectId, fingerprint, taskId) as { id: string } | undefined;
+    if (!prior) return;
+    const rows = this.database.prepare(
+      `SELECT * FROM analysis_task_turns
+        WHERE task_id=? AND status='completed'
+        ORDER BY turn_index`,
+    ).all(prior.id) as unknown as AnalysisTurnRow[];
+    const resumable: AnalysisTurnRow[] = [];
+    for (let index = 0; index < PROJECT_ANALYSIS_TURN_TOTAL; index += 1) {
+      const row = rows[index];
+      if (!row || Number(row.turn_index) !== index + 1
+        || row.turn_key !== PROJECT_ANALYSIS_TURN_KEYS[index]
+        || !row.assistant_message || !row.output_json) break;
+      try {
+        const parsed = JSON.parse(row.output_json);
+        if (!isRecord(parsed)) break;
+      } catch { break; }
+      resumable.push(row);
+    }
+    if (!resumable.length) return;
+    const now = nowIso();
+    this.database.transaction(() => {
+      const owned = this.database.prepare(
+        `SELECT 1 FROM analysis_tasks
+          WHERE id=? AND project_id=? AND status='running' AND claimed_by=? AND deleted_at IS NULL`,
+      ).get(taskId, projectId, this.options.instanceId);
+      if (!owned) throw new AnalysisClaimLostError();
+      const insert = this.database.prepare(
+        `INSERT INTO analysis_task_turns
+         (id, task_id, turn_index, turn_key, label, status, attempt_count, user_message,
+          assistant_message, output_json, error, created_at, updated_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, NULL, ?, ?, ?)`,
+      );
+      for (const row of resumable) {
+        insert.run(
+          randomUUID(), taskId, row.turn_index, row.turn_key, row.label, row.attempt_count,
+          row.user_message, row.assistant_message, row.output_json, now, now, now,
+        );
+      }
+    });
+    this.logAnalysisDiagnostic('analysis_conversation_resumed', {
+      taskId, resumedThroughTurn: resumable.length, totalTurns: PROJECT_ANALYSIS_TURN_TOTAL,
+    });
+  }
+
+  private assertAnalysisMessagesBudget(messages: PromptMessage[], operation = '项目分析对话'): void {
+    const estimatedTokens = estimateTokens(messages.map((message) =>
+      typeof message.content === 'string'
+        ? `${message.role}\n${message.content}`
+        : `${message.role}\n${message.content.map((part) => part.type === 'text' ? part.text : '[image]').join('\n')}`,
+    ).join('\n'));
+    if (estimatedTokens <= this.options.knowledgeContextTokens) return;
+    throw new PayloadTooLargeException({
+      message: `${operation}上下文超过模型输入上限，请缩小知识范围后重试`,
+      code: 'ANALYSIS_CONVERSATION_LIMIT',
+      usage: { estimatedTokens },
+      limits: { maxInputTokens: this.options.knowledgeContextTokens },
+    });
+  }
+
+  private prepareProjectConversation(
+    project: Record<string, unknown>,
+    principal: SessionPrincipal,
+    taskId: string,
+  ): { settings: ResolvedProviderSettings; platform: boolean } {
+    const workspaceId = String(project.workspace_id);
+    const projectId = String(project.id);
+    return this.database.transaction(() => {
+      const owned = this.database.prepare(
+        `UPDATE analysis_tasks SET updated_at=?
+          WHERE id=? AND project_id=? AND status='running' AND claimed_by=? AND deleted_at IS NULL
+            AND EXISTS (
+              SELECT 1 FROM projects p JOIN workspaces w ON w.id=p.workspace_id
+               WHERE p.id=analysis_tasks.project_id AND p.workspace_id=?
+                 AND p.deleted_at IS NULL AND w.deleted_at IS NULL
+            )`,
+      ).run(nowIso(), taskId, projectId, this.options.instanceId, workspaceId);
+      if (owned.changes !== 1) throw new AnalysisClaimLostError();
+      const settings = this.settings.provider(workspaceId, principal.userId);
+      if (!settings.apiKey) throw new BadRequestException('Configure a model API key before running analysis.');
+      const platform = settings.mode === 'platform';
+      if (platform) {
+        // 一次项目分析是一个产品动作。八个内部 turn 共享这一笔额度。
+        this.settings.consumePlatformQuota(workspaceId);
+        const recorded = this.database.prepare(
+          `UPDATE analysis_tasks SET quota_consumed_count=quota_consumed_count+1, updated_at=?
+            WHERE id=? AND project_id=? AND status='running' AND claimed_by=? AND deleted_at IS NULL`,
+        ).run(nowIso(), taskId, projectId, this.options.instanceId);
+        if (recorded.changes !== 1) throw new AnalysisClaimLostError();
+      }
+      return { settings, platform };
+    });
+  }
+
+  private beginAnalysisTurn(taskId: string, turnIndex: number, turnKey: string, label: string, userMessage: string): AnalysisTurnRow {
+    const now = nowIso();
+    return this.database.transaction(() => {
+      const owned = this.database.prepare(
+        `SELECT 1 FROM analysis_tasks
+          WHERE id=? AND status='running' AND claimed_by=? AND deleted_at IS NULL`,
+      ).get(taskId, this.options.instanceId);
+      if (!owned) throw new AnalysisClaimLostError();
+      this.database.prepare(
+        `INSERT INTO analysis_task_turns
+         (id, task_id, turn_index, turn_key, label, status, attempt_count, user_message, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'running', 0, ?, ?, ?)
+         ON CONFLICT(task_id, turn_index) DO UPDATE SET
+           turn_key=excluded.turn_key, label=excluded.label, status='running', attempt_count=0,
+           user_message=excluded.user_message, assistant_message=NULL, output_json=NULL,
+           error=NULL, updated_at=excluded.updated_at, completed_at=NULL`,
+      ).run(randomUUID(), taskId, turnIndex, turnKey, label, userMessage, now, now);
+      return this.database.prepare(
+        'SELECT * FROM analysis_task_turns WHERE task_id=? AND turn_index=?',
+      ).get(taskId, turnIndex) as unknown as AnalysisTurnRow;
+    });
+  }
+
+  private completeAnalysisTurn(row: AnalysisTurnRow, result: AnalysisModelResult): void {
+    const now = nowIso();
+    const updated = this.database.prepare(
+      `UPDATE analysis_task_turns
+          SET status='completed', assistant_message=?, output_json=?, error=NULL,
+              completed_at=?, updated_at=?
+        WHERE id=? AND task_id=? AND status='running'
+          AND EXISTS (
+            SELECT 1 FROM analysis_tasks t
+             WHERE t.id=analysis_task_turns.task_id AND t.status='running'
+               AND t.claimed_by=? AND t.deleted_at IS NULL
+          )`,
+    ).run(result.output, JSON.stringify(result.parsed), now, now, row.id, row.task_id, this.options.instanceId);
+    if (updated.changes !== 1) throw new AnalysisClaimLostError();
+  }
+
+  private failAnalysisTurn(row: AnalysisTurnRow, error: unknown): void {
+    const now = nowIso();
+    const kind = classifyModelFailure(error);
+    const safeError = modelFailureMessage(kind, '当前轮分析', error instanceof Error ? error.message : String(error));
+    this.database.prepare(
+      `UPDATE analysis_task_turns SET status='failed', error=?, completed_at=?, updated_at=?
+        WHERE id=? AND task_id=? AND status='running'`,
+    ).run(safeError.slice(0, 1_000), now, now, row.id, row.task_id);
+  }
+
+  private async runProjectConversationTurn(
+    settings: ResolvedProviderSettings,
+    taskId: string,
+    turnIndex: number,
+    turnKey: string,
+    userMessage: string,
+    history: PromptMessage[],
+    validate: (payload: Record<string, unknown>) => void,
+  ): Promise<AnalysisModelResult> {
+    const label = PROJECT_ANALYSIS_TURN_LABELS[turnIndex - 1] ?? turnKey;
+    const row = this.beginAnalysisTurn(taskId, turnIndex, turnKey, label, userMessage);
+    const messages: PromptMessage[] = [...history, { role: 'user', content: userMessage }];
+    this.assertAnalysisMessagesBudget(messages);
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= this.options.modelRetryAttempts; attempt += 1) {
+      const now = nowIso();
+      const attemptClaimed = this.database.transaction(() => {
+        const claimed = this.database.prepare(
+          `UPDATE analysis_tasks SET attempt_count=?, updated_at=?
+            WHERE id=? AND status='running' AND claimed_by=? AND deleted_at IS NULL`,
+        ).run(attempt, now, taskId, this.options.instanceId);
+        if (claimed.changes !== 1) return false;
+        const turnClaimed = this.database.prepare(
+          `UPDATE analysis_task_turns SET attempt_count=?, updated_at=?
+            WHERE id=? AND task_id=? AND status='running'`,
+        ).run(attempt, now, row.id, taskId);
+        return turnClaimed.changes === 1;
+      });
+      if (!attemptClaimed) throw new AnalysisClaimLostError();
+      try {
+        const result = await this.callAnalysisMessages(settings, messages, 0.2, {
+          taskId,
+          stage: 'project-conversation',
+          attempt,
+          turnIndex,
+          turnKey,
+        });
+        validate(result.parsed);
+        this.assertAnalysisTaskLease(taskId);
+        this.completeAnalysisTurn(row, result);
+        return result;
+      } catch (error) {
+        if (error instanceof AnalysisClaimLostError || error instanceof HttpException) throw error;
+        lastError = error;
+        const failureKind = classifyModelFailure(error);
+        const retryable = failureKind === 'unavailable' || failureKind === 'incomplete';
+        if (!retryable || attempt >= this.options.modelRetryAttempts) break;
+        const delayMs = this.options.modelRetryBaseDelayMs * 2 ** (attempt - 1);
+        this.logAnalysisDiagnostic('analysis_turn_retry_scheduled', {
+          taskId, turnIndex, turnKey, attempt, maxAttempts: this.options.modelRetryAttempts,
+          delayMs, failureKind,
+        }, true);
+        if (delayMs > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
+      }
+    }
+    this.failAnalysisTurn(row, lastError);
+    throw lastError;
+  }
+
+  private async analyzeProjectConversation(
+    project: Record<string, unknown>,
+    principal: SessionPrincipal,
+    source: ProjectAnalysisSource,
+    taskId: string,
+    persistTurns: boolean,
+  ): Promise<ProjectAnalysisConversationResult> {
+    void persistTurns; // Turns are always persisted; retained as a stable test seam.
+    const prepared = this.prepareProjectConversation(project, principal, taskId);
+    const history: PromptMessage[] = [];
+    const restoredRows = new Map((this.database.prepare(
+      `SELECT * FROM analysis_task_turns
+        WHERE task_id=? AND status='completed'
+        ORDER BY turn_index`,
+    ).all(taskId) as unknown as AnalysisTurnRow[]).map((row) => [Number(row.turn_index), row]));
+
+    const run = async (
+      turnIndex: number,
+      turnKey: string,
+      prompt: string,
+      validate: (payload: Record<string, unknown>) => void,
+    ): Promise<Record<string, unknown>> => {
+      const restored = restoredRows.get(turnIndex);
+      if (restored && restored.turn_key === turnKey && restored.user_message === prompt
+        && restored.assistant_message && restored.output_json) {
+        try {
+          const parsed: unknown = JSON.parse(restored.output_json);
+          if (!isRecord(parsed)) throw new Error('Restored turn output is not an object.');
+          validate(parsed);
+          history.push(
+            { role: 'user', content: restored.user_message },
+            { role: 'assistant', content: restored.assistant_message },
+          );
+          this.logAnalysisDiagnostic('analysis_turn_reused', { taskId, turnIndex, turnKey });
+          return parsed;
+        } catch {
+          // A protocol/schema change must invalidate this turn and every dependent turn,
+          // while preserving earlier validated turns and their exact cacheable prefix.
+          this.database.prepare(
+            'DELETE FROM analysis_task_turns WHERE task_id=? AND turn_index>=?',
+          ).run(taskId, turnIndex);
+          for (const index of [...restoredRows.keys()]) {
+            if (index >= turnIndex) restoredRows.delete(index);
+          }
+        }
+      } else if (restored) {
+        this.database.prepare(
+          'DELETE FROM analysis_task_turns WHERE task_id=? AND turn_index>=?',
+        ).run(taskId, turnIndex);
+        for (const index of [...restoredRows.keys()]) {
+          if (index >= turnIndex) restoredRows.delete(index);
+        }
+      }
+
+      const result = await this.runProjectConversationTurn(
+        prepared.settings, taskId, turnIndex, turnKey, prompt, history, validate,
+      );
+      history.push({ role: 'user', content: prompt }, { role: 'assistant', content: result.output });
+      return result.parsed;
+    };
+
+    const execution = this.analysisTail.then(async () => {
+      const turn1 = await run(1, 'knowledge-domain', projectConversationFirstPrompt(source.sourceJson), (payload) => {
+        requireAnalysisRecords(payload, ['knowledge_map', 'domain_model'], 'knowledge/domain');
+      });
+      const turn2 = await run(2, 'audience-scenario', projectConversationTurnPrompt('audience-scenario'), (payload) => {
+        requireAnalysisRecords(payload, ['audience_model', 'scenario_model'], 'audience/scenario');
+      });
+      const turn3 = await run(3, 'roles', projectConversationTurnPrompt('roles'), (payload) => {
+        requireAnalysisRecords(payload, ['role_model'], 'roles');
+      });
+      const turn4 = await run(4, 'claims-language', projectConversationTurnPrompt('claims-language'), (payload) => {
+        requireAnalysisRecords(payload, ['claim_policy', 'surface_language'], 'claims/language');
+      });
+      const blueprintModules = {
+        knowledge_map: turn1.knowledge_map,
+        domain_model: turn1.domain_model,
+        audience_model: turn2.audience_model,
+        scenario_model: turn2.scenario_model,
+        role_model: turn3.role_model,
+        claim_policy: turn4.claim_policy,
+        surface_language: turn4.surface_language,
+      } as Record<string, unknown>;
+      const turn5 = await run(5, 'intelligence', projectConversationTurnPrompt('intelligence'), (payload) => {
+        requireAnalysisRecords(payload, ['intelligence'], 'intelligence');
+      });
+      const validated = validateAnalysisEvidence({
+        intelligence: turn5.intelligence as Record<string, unknown>,
+        blueprintModules,
+        evidence: source.evidence,
+      });
+      const intelligence = validated.intelligence;
+      intelligence.knowledgeCoverage = source.coverage;
+      const normalizedBlueprint = validated.blueprintModules;
+      const turn6 = await run(6, 'information-gaps', projectConversationTurnPrompt('information-gaps'), (payload) => {
+        if (!recordArray(payload.informationGaps).length) {
+          throw new AnalysisGatewayError('The analysis model produced empty planning resources: informationGaps 为空.', 200);
+        }
+      });
+      const gaps = recordArray(turn6.informationGaps)
+        .map((gap) => this.validateAnalyzedGapEvidence(gap, source.evidence, source.coverage));
+      const turn7 = await run(7, 'expression-strategies', projectConversationTurnPrompt('expression-strategies'), (payload) => {
+        if (!recordArray(payload.expressionStrategies).length) {
+          throw new AnalysisGatewayError('The analysis model produced empty expression strategies.', 200);
+        }
+      });
+      const strategies = recordArray(turn7.expressionStrategies);
+      const turn8 = await run(8, 'topic-opportunities', projectConversationTurnPrompt('topic-opportunities'), (payload) => {
+        if (!recordArray(payload.topicOpportunities).length) {
+          throw new AnalysisGatewayError('The analysis model produced empty topic opportunities.', 200);
+        }
+      });
+      const opportunities = recordArray(turn8.topicOpportunities);
+      return {
+        intelligence,
+        blueprintModules: normalizedBlueprint,
+        gaps,
+        strategies,
+        opportunities,
+        evidenceValidationIssueCount: validated.issues.length,
+      };
+    });
+    this.analysisTail = execution.then(() => undefined, () => undefined);
+    return execution;
+  }
+
   private async analyzeWithCurrentModel(
     project: Record<string, unknown>,
     principal: SessionPrincipal,
     prompt: string,
     imageDataUrls: string[],
     taskId: string,
+    stage: AnalysisStage,
     temperature = 0.2,
   ): Promise<Record<string, unknown>> {
     this.assertAnalysisPromptBudget(prompt);
@@ -2259,7 +2665,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       return { settings, platform };
     });
     const result = this.analysisTail
-      .then(() => this.retryAnalysis(prepared.settings, prompt, imageDataUrls, taskId, temperature))
+      .then(() => this.retryAnalysis(prepared.settings, prompt, imageDataUrls, taskId, stage, temperature))
       .catch((error: unknown) => {
         /*
          * 分析彻底失败要退还额度。
@@ -2276,9 +2682,17 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     return result;
   }
 
-  private async retryAnalysis(settings: ResolvedProviderSettings, prompt: string, images: string[], taskId: string, temperature = 0.2): Promise<Record<string, unknown>> {
+  private async retryAnalysis(
+    settings: ResolvedProviderSettings,
+    prompt: string,
+    images: string[],
+    taskId: string,
+    stage: AnalysisStage,
+    temperature = 0.2,
+  ): Promise<Record<string, unknown>> {
     let lastError: unknown;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    const maxAttempts = this.options.modelRetryAttempts;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const claimed = this.database.prepare(
         `UPDATE analysis_tasks SET attempt_count=?, updated_at=?
           WHERE id=? AND status='running' AND claimed_by=? AND deleted_at IS NULL
@@ -2294,15 +2708,35 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
         throw new AnalysisClaimLostError();
       }
       try {
-        const payload = await this.callAnalysisModel(settings, prompt, images, temperature);
+        const payload = await this.callAnalysisModel(settings, prompt, images, temperature, {
+          taskId,
+          stage,
+          attempt: attempt + 1,
+        });
         this.assertAnalysisTaskLease(taskId);
         return payload;
       } catch (error) {
         if (error instanceof AnalysisClaimLostError) throw error;
         lastError = error;
         const status = error instanceof AnalysisGatewayError ? error.status : undefined;
-        if (status !== undefined && status !== 429 && status < 500) throw error;
-        if (attempt < 2) await new Promise((resolveDelay) => setTimeout(resolveDelay, 300 * 2 ** attempt));
+        const failureKind = classifyModelFailure(error);
+        // 5xx/429/网络失败与 200 但输出截断、JSON 不完整都值得重试；
+        // 凭据错误和业务校验错误重试不会自愈，应立即返回。
+        const retryable = failureKind === 'unavailable' || failureKind === 'incomplete';
+        if (!retryable) throw error;
+        if (attempt < maxAttempts - 1) {
+          const delayMs = this.options.modelRetryBaseDelayMs * 2 ** attempt;
+          this.logAnalysisDiagnostic('analysis_retry_scheduled', {
+            taskId,
+            stage,
+            attempt: attempt + 1,
+            maxAttempts,
+            delayMs,
+            status: status ?? null,
+            failureKind,
+          }, true);
+          if (delayMs > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
+        }
       }
     }
     throw lastError;
@@ -2339,68 +2773,206 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private async callAnalysisModel(settings: ResolvedProviderSettings, prompt: string, images: string[], temperature = 0.2): Promise<Record<string, unknown>> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 180_000);
+  private async callAnalysisModel(
+    settings: ResolvedProviderSettings,
+    prompt: string,
+    images: string[],
+    temperature = 0.2,
+    context: AnalysisCallContext = { taskId: 'direct', stage: 'unspecified', attempt: 1 },
+  ): Promise<Record<string, unknown>> {
+    const content: PromptMessage['content'] = images.length
+      ? [
+          { type: 'text', text: prompt },
+          ...images.map((image) => ({ type: 'image_url' as const, image_url: { url: image } })),
+        ]
+      : prompt;
+    const result = await this.callAnalysisMessages(
+      settings,
+      [{ role: 'user', content }],
+      temperature,
+      context,
+    );
+    return result.parsed;
+  }
+
+  private async callAnalysisMessages(
+    settings: ResolvedProviderSettings,
+    messages: PromptMessage[],
+    temperature = 0.2,
+    context: AnalysisCallContext = { taskId: 'direct', stage: 'unspecified', attempt: 1 },
+  ): Promise<AnalysisModelResult> {
     const baseUrl = normalizeOpenAIBaseUrl(settings.baseUrl);
     const endpoint = settings.transport === 'responses' ? '/responses' : '/chat/completions';
-    const imageParts = images.map((image) => settings.transport === 'responses'
-      ? { type: 'input_image', image_url: image }
-      : { type: 'image_url', image_url: { url: image } });
-    const body = settings.transport === 'responses'
-      ? {
-          model: settings.model,
-          input: [{ role: 'user', content: [{ type: 'input_text', text: prompt }, ...imageParts] }],
-          text: { format: { type: 'json_object' } },
-          temperature,
-          max_output_tokens: 16_000,
+    const fetchImpl = settings.mode === 'byok'
+      ? createSafeModelFetch({
+          allowHttp: this.options.byokAllowHttp,
+          allowPrivateNetwork: this.options.byokAllowPrivateNetwork,
+        })
+      : globalThis.fetch;
+    const timeoutMs = Math.max(10_000, Math.min(300_000, this.options.modelRequestTimeoutMs));
+
+    for (const maxOutputTokens of [16_000, 32_000]) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      const startedAt = Date.now();
+      const body = settings.transport === 'responses'
+        ? {
+            model: settings.model,
+            input: messages.map((message) => ({
+              role: message.role,
+              content: analysisResponsesContent(message),
+            })),
+            text: { format: { type: 'json_object' } },
+            temperature,
+            max_output_tokens: maxOutputTokens,
+          }
+        : {
+            model: settings.model,
+            messages: messages.map((message) => ({
+              role: message.role,
+              content: analysisChatContent(message.content),
+            })),
+            response_format: { type: 'json_object' },
+            temperature,
+            max_tokens: maxOutputTokens,
+          };
+      let response: Response;
+      try {
+        response = await fetchImpl(`${baseUrl}${endpoint}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${settings.apiKey}` },
+          body: asciiJson(body),
+          signal: controller.signal,
+        });
+      } catch (error) {
+        const timedOut = error instanceof Error && error.name === 'AbortError';
+        const diagnostics = { elapsedMs: Date.now() - startedAt, timedOut };
+        this.logAnalysisDiagnostic('analysis_model_request', {
+          ...context,
+          maxOutputTokens,
+          elapsedMs: diagnostics.elapsedMs,
+          timedOut,
+          status: null,
+          outcome: 'transport_error',
+        }, true);
+        throw new AnalysisGatewayError(
+          timedOut ? `The analysis model request timed out after ${timeoutMs} ms.` : 'The analysis model request failed.',
+          undefined,
+          diagnostics,
+        );
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      let text: string;
+      try {
+        text = await readBoundedModelResponseText(response);
+      } catch {
+        const elapsedMs = Date.now() - startedAt;
+        this.logAnalysisDiagnostic('analysis_model_request', {
+          ...context, maxOutputTokens, status: response.status, elapsedMs, outcome: 'response_too_large',
+        }, true);
+        throw new AnalysisGatewayError('The analysis model response exceeded the safe size limit.', response.status, { elapsedMs });
+      }
+      let payload: unknown;
+      try {
+        payload = text ? JSON.parse(text) : {};
+      } catch {
+        const elapsedMs = Date.now() - startedAt;
+        this.logAnalysisDiagnostic('analysis_model_request', {
+          ...context, maxOutputTokens, status: response.status, elapsedMs, outcome: 'invalid_gateway_json',
+        }, true);
+        throw new AnalysisGatewayError('The analysis model returned invalid JSON.', response.status, { elapsedMs });
+      }
+      try {
+        assertModelJsonComplexity(payload);
+      } catch {
+        const elapsedMs = Date.now() - startedAt;
+        this.logAnalysisDiagnostic('analysis_model_request', {
+          ...context, maxOutputTokens, status: response.status, elapsedMs, outcome: 'response_too_complex',
+        }, true);
+        throw new AnalysisGatewayError('The analysis model response exceeded structural complexity limits.', response.status, { elapsedMs });
+      }
+      const responseMeta = analysisResponseMeta(payload);
+      const diagnostics = { ...responseMeta, elapsedMs: Date.now() - startedAt };
+      this.logAnalysisDiagnostic('analysis_model_request', {
+        ...context,
+        maxOutputTokens,
+        status: response.status,
+        elapsedMs: diagnostics.elapsedMs,
+        finishReason: diagnostics.finishReason ?? null,
+        promptTokens: diagnostics.promptTokens ?? null,
+        completionTokens: diagnostics.completionTokens ?? null,
+        reasoningTokens: diagnostics.reasoningTokens ?? null,
+        cacheHitTokens: diagnostics.cacheHitTokens ?? null,
+        cacheMissTokens: diagnostics.cacheMissTokens ?? null,
+        outcome: response.ok ? 'response' : 'http_error',
+      }, !response.ok || diagnostics.finishReason === 'length');
+      if (!response.ok) {
+        throw new AnalysisGatewayError(`The analysis model returned HTTP ${response.status}.`, response.status, diagnostics);
+      }
+      if (diagnostics.finishReason === 'length') {
+        if (maxOutputTokens < 32_000) {
+          this.logAnalysisDiagnostic('analysis_output_budget_expanded', {
+            ...context,
+            fromTokens: maxOutputTokens,
+            toTokens: 32_000,
+          }, true);
+          continue;
         }
-      : {
-          model: settings.model,
-          messages: [{ role: 'user', content: [{ type: 'text', text: prompt }, ...imageParts] }],
-          response_format: { type: 'json_object' },
-          temperature,
-          max_tokens: 16_000,
-        };
-    let response: Response;
-    try {
-      const fetchImpl = settings.mode === 'byok'
-        ? createSafeModelFetch({
-            allowHttp: this.options.byokAllowHttp,
-            allowPrivateNetwork: this.options.byokAllowPrivateNetwork,
-          })
-        : globalThis.fetch;
-      response = await fetchImpl(`${baseUrl}${endpoint}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${settings.apiKey}` },
-        body: asciiJson(body),
-        signal: controller.signal,
-      });
-    } catch (error) {
-      throw new AnalysisGatewayError(error instanceof Error ? error.message : String(error));
-    } finally {
-      clearTimeout(timeout);
+        throw new AnalysisGatewayError(
+          'The analysis model output was truncated at 32000 max tokens (finish_reason=length).',
+          response.status,
+          diagnostics,
+        );
+      }
+      let output: string;
+      try {
+        output = modelText(payload);
+      } catch (error) {
+        this.logAnalysisDiagnostic('analysis_model_request', {
+          ...context,
+          maxOutputTokens,
+          status: response.status,
+          elapsedMs: diagnostics.elapsedMs,
+          finishReason: diagnostics.finishReason ?? null,
+          outcome: 'missing_output_text',
+        }, true);
+        if (error instanceof AnalysisGatewayError) {
+          throw new AnalysisGatewayError(error.message, response.status, diagnostics);
+        }
+        throw error;
+      }
+      const parsed = parseModelJsonObject(output);
+      if (!parsed) {
+        this.logAnalysisDiagnostic('analysis_model_request', {
+          ...context,
+          maxOutputTokens,
+          status: response.status,
+          elapsedMs: diagnostics.elapsedMs,
+          finishReason: diagnostics.finishReason ?? null,
+          outcome: 'incomplete_output_json',
+        }, true);
+        throw new AnalysisGatewayError(
+          'The analysis model output was not a complete valid JSON object; retry the analysis or raise the provider output-token limit.',
+          response.status,
+          diagnostics,
+        );
+      }
+      return { parsed, output };
     }
-    let text: string;
-    try {
-      text = await readBoundedModelResponseText(response);
-    } catch {
-      throw new AnalysisGatewayError('The analysis model response exceeded the safe size limit.', response.status);
-    }
-    let payload: unknown;
-    try { payload = text ? JSON.parse(text) : {}; } catch { throw new AnalysisGatewayError('The analysis model returned invalid JSON.', response.status); }
-    try {
-      assertModelJsonComplexity(payload);
-    } catch {
-      throw new AnalysisGatewayError('The analysis model response exceeded structural complexity limits.', response.status);
-    }
-    if (!response.ok) throw new AnalysisGatewayError(`The analysis model returned HTTP ${response.status}.`, response.status);
-    const output = modelText(payload);
-    const parsed = parseModelJsonObject(output);
-    if (!parsed) {
-      throw new AnalysisGatewayError('The analysis model output was not a complete valid JSON object; retry the analysis or raise the provider output-token limit.');
-    }
-    return parsed;
+    throw new AnalysisGatewayError('The analysis model output was incomplete.');
+  }
+
+  private logAnalysisDiagnostic(
+    event: string,
+    fields: Record<string, unknown>,
+    warning = false,
+  ): void {
+    // 只记录排障元数据。禁止加入提示词、响应正文、端点、模型名或凭据。
+    const message = JSON.stringify({ event, ...fields });
+    if (warning) this.logger.warn(message);
+    else this.logger.log(message);
   }
 
   private projectAnalysisResult(task: AnalysisTaskRow, cached: boolean): Record<string, unknown> {
@@ -2502,7 +3074,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * 分析任务的心跳。分析是同步 inline 跑的,单次可能持续几分钟(实测知识库分析
-   * 三阶段串联),不续心跳的话另一个实例启动时会把它当成孤儿清掉。
+   * 八轮串联),不续心跳的话另一个实例启动时会把它当成孤儿清掉。
    */
   private startTaskHeartbeat(taskId: string): void {
     const timer = setInterval(() => {
@@ -3046,6 +3618,20 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   }
 
   private mapTask(row: AnalysisTaskRow): Record<string, unknown> {
+    const turn = this.database.prepare(
+      `SELECT turn_index, turn_key, label, status, attempt_count
+         FROM analysis_task_turns
+        WHERE task_id=?
+        ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'failed' THEN 1 ELSE 2 END,
+                 turn_index DESC
+        LIMIT 1`,
+    ).get(row.id) as {
+      turn_index: number;
+      turn_key: string;
+      label: string;
+      status: string;
+      attempt_count: number;
+    } | undefined;
     return {
       id: row.id,
       projectId: row.project_id,
@@ -3053,7 +3639,16 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       targetId: row.target_id,
       status: row.status,
       sourceFingerprint: row.source_fingerprint,
+      // 保留旧字段语义，非多轮任务与旧客户端继续可用。
       attemptCount: Number(row.attempt_count),
+      ...(turn ? {
+        currentTurn: Number(turn.turn_index),
+        totalTurns: PROJECT_ANALYSIS_TURN_TOTAL,
+        turnKey: turn.turn_key,
+        turnLabel: turn.label,
+        turnStatus: turn.status,
+        turnAttemptCount: Number(turn.attempt_count),
+      } : {}),
       resultId: row.result_id,
       error: row.error,
       createdAt: row.created_at,
@@ -3104,132 +3699,106 @@ function projectAnalysisSourcePrefix(sourceJson: string): string {
   ].join('\n\n');
 }
 
-// 阶段串联（需求 6.2）：阶段 1 蓝图作为阶段 2 输入上下文的载体。仅作为提示注入用途，不改变阶段输出 schema。
-interface BlueprintStageContext {
-  intelligence: Record<string, unknown>;
-  blueprintModules: Record<string, unknown>;
-}
-
-// 从一个可能为字符串或对象的列表中提取有界的字符串摘要，供阶段串联提示注入使用。
-function summarizeList(value: unknown, max: number, limit: number): string[] {
-  if (!Array.isArray(value)) return [];
-  const out: string[] = [];
-  for (const item of value) {
-    if (out.length >= limit) break;
-    if (typeof item === 'string') {
-      const text = item.trim().slice(0, max);
-      if (text) out.push(text);
-    } else if (isRecord(item)) {
-      const text = textFrom(item.label ?? item.title ?? item.name ?? item.id ?? item.task ?? item.statement, max);
-      if (text) out.push(text);
-    }
+function requireAnalysisRecords(
+  payload: Record<string, unknown>,
+  keys: string[],
+  turnLabel: string,
+): void {
+  const missing = keys.filter((key) => !isRecord(payload[key]));
+  if (missing.length) {
+    throw new AnalysisGatewayError(
+      `The analysis model omitted required ${turnLabel} records: ${missing.join(', ')}.`,
+      200,
+    );
   }
-  return out;
 }
 
-// 阶段串联（需求 6.2）：把阶段 1 结构化蓝图（intelligence 摘要 + 七个 blueprintModules 的结构化摘要）
-// 收敛为有界摘要，作为规划资源阶段（阶段 2）的输入上下文。仅用于提示注入，不改变任何阶段的输出 schema。
-function summarizeStage1Blueprint(context: BlueprintStageContext): Record<string, unknown> {
-  const { intelligence, blueprintModules } = context;
-  const moduleOf = (key: string): Record<string, unknown> => {
-    const value = blueprintModules[key];
-    return isRecord(value) ? value : {};
-  };
-  const domainModel = moduleOf('domain_model');
-  const audienceModel = moduleOf('audience_model');
-  const scenarioModel = moduleOf('scenario_model');
-  const claimPolicy = moduleOf('claim_policy');
-  return {
-    intelligence: {
-      industry: textFrom(intelligence.industry ?? domainModel.industry, 200),
-      domain: textFrom(intelligence.domain ?? domainModel.domain, 200),
-      projectSummary: textFrom(intelligence.projectSummary, 1_000),
-      differentiators: summarizeList(intelligence.differentiators, 300, 20),
-      hardBoundaries: summarizeList(intelligence.hardBoundaries, 300, 20),
-      prohibitedClaims: summarizeList(intelligence.prohibitedClaims, 300, 20),
-      dynamicUnknowns: summarizeList(intelligence.dynamicUnknowns, 300, 20),
-    },
-    domainModel: {
-      projectNoun: textFrom(domainModel.projectNoun, 200),
-      decisionTasks: summarizeList(domainModel.decisionTasks, 200, 30),
-      concepts: summarizeList(domainModel.concepts, 200, 30),
-      objects: summarizeList(domainModel.objects, 200, 30),
-      actions: summarizeList(domainModel.actions, 200, 30),
-    },
-    audienceStates: recordArray(audienceModel.states).slice(0, 20).map((state) => ({
-      id: textFrom(state.id, 200),
-      label: textFrom(state.label, 200),
-      stages: uniqueStrings(state.stages),
-      goals: summarizeList(state.goals, 200, 10),
-      hesitationReasons: summarizeList(state.hesitationReasons, 200, 10),
-    })),
-    scenarioFamilies: recordArray(scenarioModel.families).slice(0, 20).map((family) => ({
-      id: textFrom(family.id, 200),
-      label: textFrom(family.label, 200),
-      prototype: textFrom(family.prototype, 100),
-    })),
-    claimPolicy: {
-      prohibitedClaims: summarizeList(claimPolicy.prohibitedClaims, 300, 30),
-      dynamicInformation: summarizeList(claimPolicy.dynamicInformation, 300, 30),
-      rules: recordArray(claimPolicy.rules).slice(0, 20).map((rule) => ({
-        label: textFrom(rule.label ?? rule.id, 200),
-        claimType: textFrom(rule.claimType, 100),
-        handling: textFrom(rule.handling, 50),
-      })),
-    },
-  };
-}
-
-function projectBlueprintAnalysisPrompt(sourceJson: string): string {
+function projectConversationFirstPrompt(sourceJson: string): string {
   return [
     projectAnalysisSourcePrefix(sourceJson),
-    'PROJECT_ANALYSIS_STAGE: 1/3 PROJECT CREATIVE BLUEPRINT. Return only one complete valid JSON object. Do not return informationGaps, expressionStrategies or topicOpportunities in this stage.',
-    'Infer the project noun, industry and domain, then build a reusable project creative blueprint. Do not assume a medical, local-service, SaaS or any other industry unless the supplied source supports it.',
-    'For every material statement distinguish supplied_fact, approved_observation, inference, hypothesis and unknown. Reference examples are style-only and never project facts.',
-    'Return {"blueprintModules":{exactly seven modules below},"intelligence":{...}}.',
-    'knowledge_map={"entries":[{"id":"","sourceName":"","section":"","purpose":"project_fact|domain_note|dynamic_information|boundary|reference_style|unknown","factEligible":false,"source":{"status":"supplied_fact|approved_observation|inference|hypothesis|unknown","evidenceIds":[],"note":""}}]}. When an entry maps to a passage in a knowledge file, cite that passage\'s id from the file\'s `evidenceSections` in source.evidenceIds.',
-    'domain_model={"projectNoun":"","industry":"","domain":"","objects":[],"actions":[],"concepts":[],"decisionTasks":[],"vocabulary":[]}.',
-    'audience_model={"states":[{"id":"","label":"","stages":["discovering|collecting|comparing|hesitating|ready"],"goals":[],"constraints":[],"knowledgeState":"","hesitationReasons":[],"actionConditions":[],"source":{"status":"inference","evidenceIds":[]}}]}. These are conditional states, not population distributions.',
-    'scenario_model={"families":[{"id":"","label":"","prototype":"narrow_request|live_moment|expectation_reversal|process_log|outcome_observation|retrospective_update|relationship_moment|option_comparison","applicableStages":[],"hostIdentityCues":[],"lifeContexts":[],"timeAnchors":[],"settings":[],"triggers":[],"observableActions":[],"frictions":[],"emotionalAftertastes":[],"imageMoments":[],"prohibitedUnsupportedHistories":[],"source":{"status":"hypothesis","evidenceIds":[]}}]}. Produce materially different, project-derived scene families. prohibitedUnsupportedHistories must be filled, not left empty: list the concrete wordings a simulated reader or an accountable responder must never use to claim a project history the supplied source cannot support. Derive them from this project\'s service model and domain actions identified in domain_model. Identify repeat-engagement vocabulary (老用户 / 回购 / 复购 / 续做 / 第二次做 and project-specific equivalents from domain_model.actions and concepts) and judge by serviceModel: for one_time projects such wording structurally cannot occur, so prohibit it; for recurring or mixed projects it is an identity claim that needs evidence, so prohibit it unless the source supports it; where the project language treats it as an ordinary neutral phrase, leave it out instead of prohibiting it. Also include first-person completion and third-party word-of-mouth wordings specific to this project\'s actions (derive completion verbs from domain_model.actions — e.g. if actions include "装修", the completion form is "装修了/装修过" — plus 亲测 / 亲身经历 / 朋友做过 style endorsements when they would read as independent testimony here). Keep every entry a surface wording that could literally appear in copy, and keep it consistent with the claim_policy rule whose claimType is historical_action.',
-    'role_model={"serviceModel":"one_time|recurring|mixed","hostVoiceTraits":[],"hostSpeechMarkers":[],"roles":[{"id":"","displayRole":"","relationToHost":"","identityCues":[],"situationCues":[],"motives":[],"knowledgePosition":"","speechPatterns":[],"lexicalCues":[],"interactionHooks":[],"permittedContributions":[],"utteranceModes":["direct_question|shared_concern|experience_fragment|counterexample|social_reaction|detail_spotter|knowledge_translation|identity_route|service_answer"],"replyDisplayRoles":[],"targetChars":[4,30],"accountable":false,"source":{"status":"hypothesis","evidenceIds":[]}}]}. First judge the project service model from the supplied source and record it in serviceModel. Judge by whether the same customer has REPEAT CONTACT with the provider over time, not by whether they buy twice: one_time = the decision is made once and the engagement ends (a single visit, or one signed engagement that simply runs to completion with no ongoing return visits); recurring = the same customer keeps coming back over an extended period (multi-session courses, monthly follow-ups, maintenance or review phases, renewals) even when they signed only once and paid once; mixed = both patterns coexist. A long engagement with scheduled return visits is recurring, NOT one_time. Cross-check against domain_model.actions and concepts: if they contain follow-up, review, maintenance, retention or repeat-visit stages, serviceModel must not be one_time. Produce diverse social positions and accountable roles only where supported; never fabricate real users. Give at least 6 question-side roles covering the decision-stage (discovering/collecting/comparing/hesitating/ready) x social-position matrix (e.g. first-time researcher, cautious comparer, risk worrier, same-city action seeker, lurking follower, dissenting skeptic, pure-reaction empathizer; trim to what the project actually supports), each with at least 3 utteranceModes. Choose question-side marketing-flavored roles from this candidate pool, trimmed by serviceModel: 心动种草/拼单询价/同城行动/探店打卡/服务后回访/转介绍/围观共鸣 for every model, plus 老客复购 only when serviceModel is recurring or mixed. Produce exactly 2 accountable=true public identities for the two-account operation: (1) the publishing IP / host, its displayRole named as the organization IP in project language; (2) an open assistant, its displayRole named organization name + 助理, its utteranceModes centered on service_answer and identity_route, its permittedContributions distilled only from claims the claim_policy allows — every price, number or promise it may state must anchor to a knowledge entry, and when knowledge is missing it must route to human staff instead of improvising; both identities answer in public organization identities and never pose as ordinary users. hostVoiceTraits must match the publishing account\'s real identity (an amateur personal account gets an amateur voice, never an institutional tone). '
-    // 两条硬约束单独提出:埋在上面长段落里时,产出的 role_model 半数以上只给
-    // 0 或 1 个 accountable 身份,且 replyDisplayRoles 写内部 id(host_account /
-    // role_IP / role_01),生成阶段无法路由,答复展示名回落通用兜底名。
-    + 'TWO HARD REQUIREMENTS on roles, checked before the module is accepted — violating either makes the whole module unusable: '
-    + '(H1) The count of accountable=true roles must be EXACTLY 2 — no more, no fewer. Not 0, not 1. One is the organization IP / host, the other is the open assistant. If the supplied source only describes one public account, still emit both: infer the assistant from the organization name (organization name + 助理) and mark its source.status as "hypothesis". '
-    + '(H2) Every accountable=false role must have a non-empty replyDisplayRoles, and every string in it must EXACTLY equal the displayRole of one of the 2 accountable roles. Copy the displayRole text verbatim. Never put an internal id there (not "host_account", not "assistant_account", not "role_IP", not "role_01", not "host"), never put a role description, never invent a name that no accountable role uses. Route professional / knowledge questions to the IP\'s displayRole and price / location / schedule / contact questions to the assistant\'s displayRole. Accountable roles themselves keep replyDisplayRoles empty.',
-    'claim_policy={"rules":[{"id":"","label":"","claimType":"price|identity|credential|schedule|outcome|causality|suitability|location|historical_action|other","terms":[],"requiresEvidence":true,"allowedEvidenceStatuses":["supplied_fact"],"dynamic":false,"handling":"block|qualify|verify","source":{"status":"inference","evidenceIds":[]}}],"prohibitedClaims":[],"dynamicInformation":[],"unknownHandling":[]}.',
-    'surface_language={"registerDescription":"","preferredTerms":[],"optionalColloquialisms":[],"prohibitedCliches":[],"antiCopyRules":[]}. Observe project language without copying distinctive sample sentences and without making slang mandatory.',
-    'intelligence={"industry":"","domain":"","projectSummary":"","verifiedFacts":[],"differentiators":[],"audienceStates":[],"hardBoundaries":[],"prohibitedClaims":[],"dynamicUnknowns":[],"evidenceIds":[],"domainAtlas":{"decisionTasks":[],"concepts":[],"userStates":[],"questionFamilies":[]},"evidenceLedger":[{"statement":"","sourceStatus":"supplied_fact|inference|hypothesis|unknown","evidenceIds":[]}]}.',
+    'PROJECT_ANALYSIS_CONVERSATION_V3 TURN 1/8: KNOWLEDGE MAP AND DOMAIN MODEL.',
+    'This begins one continuous conversation. In later turns you will receive this exact conversation history. Treat every accepted assistant JSON as immutable working state: preserve it, build on it, and never silently contradict or relabel it.',
+    'Infer the project noun, industry and domain, then establish the reusable factual and conceptual foundation for the later creative blueprint. Do not assume a medical, local-service, SaaS or any other industry unless the supplied source supports that inference.',
+    'For every material statement distinguish supplied_fact, approved_observation, inference, hypothesis and unknown. Reference examples are style-only and never project facts. Broad domain concepts may be inferred, but project-specific facts, differentiators, evidence links, prohibitions and boundaries must come from supplied data.',
+    'Return ONLY one complete JSON object with exactly knowledge_map and domain_model. Do not emit later modules.',
+    'knowledge_map={"entries":[{"id":"","sourceName":"","section":"","purpose":"project_fact|domain_note|dynamic_information|boundary|reference_style|unknown","factEligible":false,"source":{"status":"supplied_fact|approved_observation|inference|hypothesis|unknown","evidenceIds":[],"note":""}}]}. When an entry maps to a knowledge passage, cite only that passage id from the source `evidenceSections` in source.evidenceIds. Never invent an evidence id. Reference-corpus material may guide style only and must have factEligible=false.',
+    'domain_model={"projectNoun":"","industry":"","domain":"","objects":[],"actions":[],"concepts":[],"decisionTasks":[],"vocabulary":[]}. Include domain actions and concepts needed later to identify completion claims, repeat-contact language, decision tasks, recurring questions and project-specific vocabulary.',
   ].join('\n\n');
 }
 
-function projectPlanningResourcesPrompt(sourceJson: string, blueprint?: BlueprintStageContext): string {
-  const sections = [
-    projectAnalysisSourcePrefix(sourceJson),
-    'PROJECT_ANALYSIS_STAGE: 2/3 INFORMATION GAPS AND EXPRESSION STRATEGIES. Return only one complete valid JSON object with informationGaps and expressionStrategies. Do not return blueprintModules, intelligence or topicOpportunities.',
+function projectConversationTurnPrompt(turnKey: string): string {
+  const common = [
+    'Continue the same PROJECT_ANALYSIS_CONVERSATION_V3. The full original source and every accepted assistant JSON are present earlier in this conversation.',
+    'Use earlier outputs as immutable working context. Do not re-derive from scratch, omit established evidence boundaries, silently contradict a prior module, promote inference to fact, or invent project facts.',
+    'Return ONLY one complete valid JSON object for this turn. Do not repeat prior modules.',
   ];
-  if (blueprint) {
-    // 阶段串联（需求 6.2）：把阶段 1 已产出的结构化蓝图作为规划资源阶段的输入上下文。
-    sections.push(`APPROVED_STAGE_1_BLUEPRINT=${JSON.stringify(summarizeStage1Blueprint(blueprint))}`);
-    sections.push('Build every information gap and expression strategy on the stage 1 blueprint above: reuse its decision tasks, audience states, domain concepts and scenario families, and stay within its claim policy, hard boundaries and prohibited claims. Do not contradict or re-derive the blueprint from scratch.');
-  }
-  sections.push(
-    'Independently enumerate real decision tasks, recurring questions and information gaps in this domain; do not limit discovery to what the knowledge files explicitly answer. Project answers and boundaries must still use only supplied evidence.',
-    'Knowledge entries in the shared source carry `evidenceSections` ([{evidenceId, heading}]) — these are the ONLY citable evidence handles. For EVERY gap the knowledge can answer even partially, you MUST fill `answer` (use the supplied wording and keep its qualifiers such as 以当期确认为准 / 源资料称), fill `boundary`, and cite the matching section ids in `evidenceIds`; set `sourceStatus` to "supplied_fact" for those. When the knowledge file itself offers a standard-answer or FAQ passage, prefer its wording. Leave `answer` empty and `evidenceIds` empty ONLY when nothing supplied supports an answer, and set `sourceStatus` to inference/hypothesis/unknown accordingly. Never invent evidence ids that are not listed in `evidenceSections`.',
-    'informationGaps item={"key":"stable_unique_key","title":"","description":"","priority":50,"label":"","question":"","category":"decision","audienceStages":["collecting"],"importance":0.5,"decisionLeverage":0.5,"proofability":0.3,"answer":"","framework":"","boundary":"","evidenceIds":[],"required":false,"preferredChannels":["N.body","Cref"],"sourceStatus":"supplied_fact|inference|hypothesis|unknown","knowledgeAction":"organize_existing|ask_user|none","knowledgeReason":""}.',
-    'knowledgeAction is independent from content planning. Use organize_existing only when supplied knowledge already contains project-specific facts that should be consolidated into clearer Markdown. Use ask_user only when a missing, ambiguous, or conflicting PROJECT-SPECIFIC fact would materially affect later generation and only the project owner can resolve it. Use none for audience questions, domain education, optional angles, and planning gaps that do not require a new project fact. Do not treat every information gap as a knowledge-document defect. knowledgeReason must briefly state why the selected action applies.',
-    'importance, decisionLeverage and proofability are MANDATORY review-priority heuristics: emit a 0..1 number for every gap and NEVER null. They are uncalibrated, non-causal ordering aids for human review, not facts, predictions or population measurements. When evidence is weak still give a conservative estimate (e.g. proofability <= 0.3 when no verifiable source supports an answer) and record the weakness by setting sourceStatus to inference or hypothesis. Do not lower the estimate to null; null blocks human approval.',
-    'expressionStrategies item={"name":"","description":"","label":"","prototype":"narrow_request|live_moment|expectation_reversal|process_log|outcome_observation|retrospective_update|relationship_moment|option_comparison","openingMode":"","narrativeMode":"","bodyRole":"","imageRole":"","commentMode":"","voice":"","sequence":[],"targetChannels":["H","N.imageBrief","N.title","N.body","Cref"]}.',
-    'Produce 12 to 18 diverse editable information gaps and exactly 8 materially different expression strategies. Keep unanswered gaps visible; do not fabricate project answers. Every gap key must be unique and stable within this response.',
-  );
-  return sections.join('\n\n');
+  const instructions: Record<string, string[]> = {
+    'audience-scenario': [
+      'TURN 2/8: AUDIENCE AND SCENARIO MODELS.',
+      'Return exactly {"audience_model":{...},"scenario_model":{...}}.',
+      'audience_model={"states":[{"id":"","label":"","stages":["discovering|collecting|comparing|hesitating|ready"],"goals":[],"constraints":[],"knowledgeState":"","hesitationReasons":[],"actionConditions":[],"source":{"status":"inference|hypothesis|supplied_fact|approved_observation|unknown","evidenceIds":[]}}]}. These are conditional decision states, never population distributions. Derive them from prior decisionTasks, concepts and supplied evidence; do not claim prevalence, conversion probability or demographic facts without evidence.',
+      'scenario_model={"families":[{"id":"","label":"","prototype":"narrow_request|live_moment|expectation_reversal|process_log|outcome_observation|retrospective_update|relationship_moment|option_comparison","applicableStages":[],"hostIdentityCues":[],"lifeContexts":[],"timeAnchors":[],"settings":[],"triggers":[],"observableActions":[],"frictions":[],"emotionalAftertastes":[],"imageMoments":[],"prohibitedUnsupportedHistories":[],"source":{"status":"hypothesis|inference|supplied_fact|approved_observation|unknown","evidenceIds":[]}}]}. Produce materially different, project-derived scene families; never fabricate a real customer, testimonial or project history.',
+      'prohibitedUnsupportedHistories must be filled, not left empty. List literal surface wordings that a simulated reader or accountable responder must not use to claim unsupported personal completion, third-party word-of-mouth, repeat purchase or project history. Derive project-specific completion forms from prior domain_model.actions (for example 装修 -> 装修了/装修过) and include applicable endorsements such as 亲测, 亲身经历 and 朋友做过.',
+      'Make a provisional service-model judgment from the supplied source plus domain_model.actions/concepts: one_time means one decision/engagement ending without ongoing return contact; recurring means the same customer returns over time for sessions, follow-ups, reviews, maintenance or renewal even if purchased or paid once; mixed means both coexist. For one_time projects, repeat-engagement wording such as 老用户/回购/复购/续做/第二次做 and project-specific equivalents is structurally unsupported. For recurring or mixed projects it remains an identity/history claim requiring evidence. If project language uses a phrase neutrally rather than as history, do not prohibit it. Turn 3 will finalize serviceModel and turn 4 must keep historical_action policy consistent with this list.',
+    ],
+    roles: [
+      'TURN 3/8: ROLE MODEL.',
+      'Return exactly {"role_model":{...}}.',
+      'role_model={"serviceModel":"one_time|recurring|mixed","hostVoiceTraits":[],"hostSpeechMarkers":[],"roles":[{"id":"","displayRole":"","relationToHost":"","identityCues":[],"situationCues":[],"motives":[],"knowledgePosition":"","speechPatterns":[],"lexicalCues":[],"interactionHooks":[],"permittedContributions":[],"utteranceModes":["direct_question|shared_concern|experience_fragment|counterexample|social_reaction|detail_spotter|knowledge_translation|identity_route|service_answer"],"replyDisplayRoles":[],"targetChars":[4,30],"accountable":false,"source":{"status":"hypothesis|inference|supplied_fact|unknown","evidenceIds":[]}}]}.',
+      'Finalize serviceModel by REPEAT CONTACT over time, not whether the customer buys or pays twice. one_time = one decision or signed engagement that runs to completion without ongoing return visits; recurring = multi-session courses, scheduled return visits, monthly follow-ups, maintenance, reviews or renewals, even after one purchase; mixed = both patterns coexist. A long engagement with scheduled return visits is recurring, not one_time. Cross-check domain_model.actions/concepts: follow-up, review, maintenance, retention or repeat-visit stages mean serviceModel must not be one_time. Keep it consistent with Turn 2 prohibitedUnsupportedHistories.',
+      'Produce diverse social positions only where supported and never fabricate real users. Give at least 6 materially different question-side roles spanning the discovering/collecting/comparing/hesitating/ready decision-stage x social-position matrix, trimmed to this project, and give each at least 3 utteranceModes. Candidate positions include first-time researcher, cautious comparer, risk worrier, same-city action seeker, lurking follower, dissenting skeptic and pure-reaction empathizer.',
+      'Choose applicable marketing-flavored question roles from 心动种草/拼单询价/同城行动/探店打卡/服务后回访/转介绍/围观共鸣. 老客复购 is allowed only when serviceModel is recurring or mixed. Any experience_fragment or historical statement remains simulated and must obey prohibitedUnsupportedHistories; it is never evidence of a real customer.',
+      'HARD REQUIREMENT H1: accountable=true roles must be EXACTLY 2, no more and no fewer: (1) the publishing organization IP/host, named in project language; (2) an open organization-name + 助理 identity. If only one public account is supplied, still infer the assistant and mark source.status="hypothesis". Both answer as public organization identities and never pose as ordinary users.',
+      'HARD REQUIREMENT H2: every accountable=false role must have non-empty replyDisplayRoles, and every value must copy one of those two accountable displayRole strings verbatim. Never put an internal id there, including host_account, assistant_account, role_IP, role_01 or host. Never use a role description or a name absent from accountable displayRole values. Accountable roles themselves keep replyDisplayRoles empty. Route professional/knowledge questions to the IP displayRole and price/location/schedule/contact questions to the assistant displayRole.',
+      'The assistant centers utteranceModes on service_answer and identity_route. Its permittedContributions must be conservative and grounded directly in prior knowledge_map: every price, number, credential, schedule or promise needs supplied evidence; when evidence is absent or dynamic, route to human staff instead of improvising. Turn 4 claim_policy may further restrict these permissions but must never loosen them. hostVoiceTraits must match the publishing account identity: an amateur personal account must not be given an institutional voice.',
+    ],
+    'claims-language': [
+      'TURN 4/8: CLAIM POLICY AND SURFACE LANGUAGE.',
+      'Return exactly {"claim_policy":{...},"surface_language":{...}}.',
+      'claim_policy={"rules":[{"id":"","label":"","claimType":"price|identity|credential|schedule|outcome|causality|suitability|location|historical_action|other","terms":[],"requiresEvidence":true,"allowedEvidenceStatuses":["supplied_fact"],"dynamic":false,"handling":"block|qualify|verify","source":{"status":"inference|supplied_fact|unknown","evidenceIds":[]}}],"prohibitedClaims":[],"dynamicInformation":[],"unknownHandling":[]}. Project claims require supplied evidence; approved observations support only what is visibly observed, never hidden project facts. Dynamic information must be verified at use time rather than frozen as fact.',
+      'Cross-check every historical_action rule against Turn 2 prohibitedUnsupportedHistories and Turn 3 serviceModel/role permissions. Include project-specific completion, personal-experience, third-party endorsement and repeat-contact terms where applicable. The policy may tighten prior role permissions but must never authorize a price, number, credential, schedule, promise, suitability, outcome, causal claim or history that prior evidence does not support. Unknowns stay explicit and are blocked, qualified or routed for verification rather than guessed.',
+      'surface_language={"registerDescription":"","preferredTerms":[],"optionalColloquialisms":[],"prohibitedCliches":[],"antiCopyRules":[]}. Observe project language without copying distinctive sample sentences. Slang and colloquialisms are optional, never mandatory. Preserve factual qualifiers and prevent style imitation from turning reference-corpus wording into project facts.',
+    ],
+    intelligence: [
+      'TURN 5/8: PROJECT INTELLIGENCE SYNTHESIS AND CROSS-MODULE CONSISTENCY CHECK.',
+      'Return exactly {"intelligence":{...}}.',
+      'intelligence={"industry":"","domain":"","projectSummary":"","verifiedFacts":[],"differentiators":[],"audienceStates":[],"hardBoundaries":[],"prohibitedClaims":[],"dynamicUnknowns":[],"evidenceIds":[],"domainAtlas":{"decisionTasks":[],"concepts":[],"userStates":[],"questionFamilies":[]},"evidenceLedger":[{"statement":"","sourceStatus":"supplied_fact|inference|hypothesis|unknown","evidenceIds":[]}]}.',
+      'Synthesize the accepted modules without replacing them. Resolve apparent contradictions by preferring supplied evidence, preserving the stricter boundary and recording explicit unknowns; never silently upgrade inference/hypothesis/approved observation to supplied fact. verifiedFacts must each have a matching evidenceLedger statement, sourceStatus=supplied_fact and valid source evidence ids. Differentiators also require project evidence; otherwise place them in inference/hypothesis or dynamicUnknowns rather than verifiedFacts.',
+      'Cross-check serviceModel, scenario prohibitedUnsupportedHistories, role permittedContributions/reply routing and claim_policy historical_action rules. Put unresolved conflicts and time-sensitive facts into hardBoundaries, prohibitedClaims or dynamicUnknowns so downstream turns cannot treat them as settled facts.',
+    ],
+    'information-gaps': [
+      'TURN 6/8: INFORMATION GAPS.',
+      'Return exactly {"informationGaps":[...]}. Produce 12 to 18 diverse editable gaps with unique stable keys.',
+      'Independently enumerate real domain decision tasks, recurring questions and information gaps; do not limit discovery to what the knowledge files already answer. Build on prior domain_model, audience states, scenario families, roles, intelligence and claim policy. Project answers and boundaries must still use only supplied evidence, and unanswered gaps must remain visible rather than being fabricated away.',
+      'Knowledge entries in the original shared source carry `evidenceSections` ([{evidenceId, heading}]); these are the ONLY citable evidence handles. For every gap the knowledge can answer even partially, fill answer using supplied wording while retaining qualifiers such as 以当期确认为准/源资料称, fill boundary, cite the exact matching evidenceSections ids, and set sourceStatus="supplied_fact". Prefer a supplied standard-answer or FAQ passage when present. Leave answer and evidenceIds empty only when no supplied passage supports an answer; then use inference, hypothesis or unknown. Never invent an evidence id.',
+      'Each item={"key":"stable_unique_key","title":"","description":"","priority":50,"label":"","question":"","category":"decision","audienceStages":["collecting"],"importance":0.5,"decisionLeverage":0.5,"proofability":0.3,"answer":"","framework":"","boundary":"","evidenceIds":[],"required":false,"preferredChannels":["N.body","Cref"],"sourceStatus":"supplied_fact|inference|hypothesis|unknown","knowledgeAction":"organize_existing|ask_user|none","knowledgeReason":""}. Every key must be unique and stable within this response.',
+      'knowledgeAction is independent from content planning. Use organize_existing only when supplied knowledge already contains project-specific facts worth consolidating into clearer Markdown. Use ask_user only when a missing, ambiguous or conflicting PROJECT-SPECIFIC fact would materially affect generation and only the project owner can resolve it. Use none for audience questions, domain education, optional angles and planning gaps that do not require a new project fact. Do not treat every information gap as a knowledge-document defect. knowledgeReason must state briefly why the action applies.',
+      'importance, decisionLeverage and proofability are mandatory 0..1 uncalibrated non-causal human review-ordering heuristics, never null, facts, predictions or population measurements. When evidence is weak still emit a conservative estimate (for example proofability<=0.3 without verifiable support), mark sourceStatus inference/hypothesis/unknown, and never use null to signal uncertainty.',
+    ],
+    'expression-strategies': [
+      'TURN 7/8: EXPRESSION STRATEGIES.',
+      'Return exactly {"expressionStrategies":[...]}. Produce exactly 8 materially different strategies.',
+      'Each item={"name":"","description":"","label":"","prototype":"narrow_request|live_moment|expectation_reversal|process_log|outcome_observation|retrospective_update|relationship_moment|option_comparison","openingMode":"","narrativeMode":"","bodyRole":"","imageRole":"","commentMode":"","voice":"","sequence":[],"targetChannels":["H","N.imageBrief","N.title","N.body","Cref"]}.',
+      'Ground every strategy in prior decision tasks, audience states, scenario families, role model, claim policy, hard boundaries and information gaps. Make the 8 strategies materially different in prototype, opening, narrative progression, body role, image role, comment behavior, voice or channel plan—not cosmetic renamings. Keep unanswered gaps visible, preserve factual qualifiers, never turn a simulated role/history into testimony, and never invent a claim or strategy premise outside accepted context.',
+    ],
+    'topic-opportunities': [
+      'TURN 8/8: TOPIC OPPORTUNITIES.',
+      'Return exactly {"topicOpportunities":[...]}. Produce 12 to 18 diverse opportunities.',
+      'Every opportunity must reference one or more exact Turn 6 information-gap keys through gapKeys and be expressible through at least one Turn 7 strategy prototype and its target channels. Reuse only those accepted gaps and strategies; do not invent keys or strategies. Do not copy one generic gap set to every topic. Vary decision task, angle, entry route, audience stage, scenario family and evidence boundary, while keeping each gap reference genuinely relevant.',
+      'Each item={"title":"","topic":"","angle":"","rationale":"","gapKeys":["stable_gap_key"],"audienceStage":"discovering|collecting|comparing|hesitating|ready","entry":"search|recommendation|profile|return_visit","relevance":0.5,"importance":0.5,"proofability":0.3,"novelty":0.5,"decisionLeverage":0.5,"cognitiveCost":0.5,"risk":0.3,"evidenceIds":[],"boundaries":[],"tags":[],"imageAssetIds":[],"status":"eligible|blocked|unknown","sourceStatus":"supplied_fact|inference|hypothesis|unknown"}.',
+      'Assess relevance, importance, proofability, novelty, decisionLeverage, cognitiveCost and risk separately. All seven are mandatory 0..1 uncalibrated non-causal review-ordering heuristics, never null, observations, predictions or population measurements. With weak support still emit conservative values (for example proofability<=0.3), preserve boundaries and use inference/hypothesis/unknown. Do not emit score, rank, finalScore, weights, causal claims or F28 labels; OpportunityRankHeuristicV1 is server-owned.',
+      'Set status="blocked" only for genuinely unsafe or prohibited topics; use status="unknown" for unresolved eligibility or evidence boundaries, not null metrics. Keep unsafe, unprovable or uncertain opportunities visible as blocked/unknown for review instead of deleting or laundering them into eligible. Never make project answers or factual claims beyond supplied evidence.',
+      'Populate imageAssetIds only with assetId values present in the original approvedImageObservations and only when visibly relevant; otherwise use []. Do not treat an approved visual observation as proof of a non-visible project claim.',
+    ],
+  };
+  const specific = instructions[turnKey];
+  if (!specific) throw new Error(`Unknown project analysis turn: ${turnKey}`);
+  return [...common, ...specific].join('\n\n');
 }
 
-function projectOpportunityAnalysisPrompt(
+function topicRefreshAnalysisPrompt(
   sourceJson: string,
   gaps: Record<string, unknown>[],
-  strategies: Record<string, unknown>[] = [],
   options: { userGuidance?: string; existingTitles?: string[] } = {},
 ): string {
   const gapCatalog = gaps.map((gap) => ({
@@ -3239,22 +3808,11 @@ function projectOpportunityAnalysisPrompt(
     audienceStages: uniqueStrings(gap.audienceStages),
     proofability: gap.proofability ?? null,
   }));
-  // 阶段串联（需求 6.3）：把阶段 2 的表达策略摘要作为选题阶段的输入上下文（gapCatalog 已存在，保留）。
-  const strategyCatalog = strategies.slice(0, 20).map((strategy) => ({
-    name: textFrom(strategy.name ?? strategy.label, 200),
-    prototype: textFrom(strategy.prototype, 100),
-    description: textFrom(strategy.description, 500),
-    targetChannels: uniqueStrings(strategy.targetChannels),
-  }));
   const sections = [
     projectAnalysisSourcePrefix(sourceJson),
-    'PROJECT_ANALYSIS_STAGE: 3/3 TOPIC OPPORTUNITIES. Return only one complete valid JSON object with topicOpportunities. Do not repeat blueprintModules, intelligence, informationGaps or expressionStrategies.',
+    'TOPIC_REFRESH_ANALYSIS_V1. Return only one complete valid JSON object with topicOpportunities.',
     `APPROVED_STAGE_2_GAP_CATALOG=${JSON.stringify(gapCatalog)}`,
   ];
-  if (strategyCatalog.length) {
-    sections.push(`APPROVED_STAGE_2_EXPRESSION_STRATEGIES=${JSON.stringify(strategyCatalog)}`);
-    sections.push('Build topic opportunities on the stage 2 expression strategies above: each opportunity should be expressible through at least one listed strategy prototype and stay consistent with its target channels. Do not invent strategies outside this catalog.');
-  }
   const existing = (options.existingTitles ?? []).filter(Boolean).slice(0, 60);
   if (existing.length) {
     sections.push(`ALREADY_GENERATED_TITLES=${JSON.stringify(existing)}`);
@@ -3980,6 +4538,65 @@ function integerBetween(value: unknown, min: number, max: number, fallback: numb
 
 function asciiJson(value: unknown): string {
   return JSON.stringify(value).replace(/[^\x00-\x7F]/g, (unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
+
+function analysisChatContent(content: PromptMessage['content']): string | Record<string, unknown>[] {
+  if (typeof content === 'string') return content;
+  return content.map((part) => part.type === 'text'
+    ? { type: 'text', text: part.text }
+    : { type: 'image_url', image_url: { ...part.image_url } });
+}
+
+function analysisResponsesContent(message: PromptMessage): string | Record<string, unknown>[] {
+  if (typeof message.content === 'string') return message.content;
+  return message.content.map((part) => part.type === 'text'
+    ? { type: message.role === 'assistant' ? 'output_text' : 'input_text', text: part.text }
+    : { type: 'input_image', image_url: part.image_url.url, ...(part.image_url.detail ? { detail: part.image_url.detail } : {}) });
+}
+
+function analysisResponseMeta(payload: unknown): {
+  finishReason?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  reasoningTokens?: number;
+  cacheHitTokens?: number;
+  cacheMissTokens?: number;
+} {
+  if (!isRecord(payload)) return {};
+  const choice = Array.isArray(payload.choices) && isRecord(payload.choices[0]) ? payload.choices[0] : undefined;
+  const incomplete = isRecord(payload.incomplete_details) ? payload.incomplete_details : undefined;
+  const usage = isRecord(payload.usage) ? payload.usage : undefined;
+  const completionDetails = usage && isRecord(usage.completion_tokens_details)
+    ? usage.completion_tokens_details
+    : undefined;
+  const rawFinish = typeof choice?.finish_reason === 'string'
+    ? choice.finish_reason
+    : typeof incomplete?.reason === 'string'
+      ? incomplete.reason
+      : typeof payload.status === 'string'
+        ? payload.status
+        : undefined;
+  const finishReason = rawFinish === 'max_output_tokens' ? 'length' : rawFinish;
+  const number = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  return {
+    ...(finishReason ? { finishReason } : {}),
+    ...(number(usage?.prompt_tokens ?? usage?.input_tokens) !== undefined
+      ? { promptTokens: number(usage?.prompt_tokens ?? usage?.input_tokens) }
+      : {}),
+    ...(number(usage?.completion_tokens ?? usage?.output_tokens) !== undefined
+      ? { completionTokens: number(usage?.completion_tokens ?? usage?.output_tokens) }
+      : {}),
+    ...(number(completionDetails?.reasoning_tokens) !== undefined
+      ? { reasoningTokens: number(completionDetails?.reasoning_tokens) }
+      : {}),
+    ...(number(usage?.prompt_cache_hit_tokens) !== undefined
+      ? { cacheHitTokens: number(usage?.prompt_cache_hit_tokens) }
+      : {}),
+    ...(number(usage?.prompt_cache_miss_tokens) !== undefined
+      ? { cacheMissTokens: number(usage?.prompt_cache_miss_tokens) }
+      : {}),
+  };
 }
 
 function modelText(payload: unknown): string {

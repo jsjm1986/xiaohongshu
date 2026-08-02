@@ -1,0 +1,31 @@
+{
+  "name": "@content-agent/agent-harness-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./methods": {
+      "types": "./dist/methods.d.ts",
+      "import": "./dist/methods.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@content-agent/agent-core": "^0.1.0",
+    "@types/node": "^24.0.15",
+    "vitest": "^3.2.4"
+  }
+}

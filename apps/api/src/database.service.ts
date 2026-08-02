@@ -13,7 +13,7 @@ export type SqlValue = string | number | bigint | Uint8Array | null;
  * 无关的测试变红——那不是回归信号,是维护噪声。测试断言这个常量,真正想验的
  * 「迁移到最新且表结构对得上」不变。
  */
-export const SCHEMA_VERSION = 19;
+export const SCHEMA_VERSION = 25;
 
 @Injectable()
 export class DatabaseService implements OnModuleDestroy {
@@ -1174,6 +1174,270 @@ export class DatabaseService implements OnModuleDestroy {
       `);
     });
     if (version < 19) version = 19;
+
+    if (version < 20) this.transaction(() => {
+      const hasAnalysisTasks = Boolean(
+        this.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='analysis_tasks'").get(),
+      );
+      // Partial migration fixtures may not contain analysis_tasks. Real databases do.
+      if (hasAnalysisTasks) {
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS analysis_task_turns (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES analysis_tasks(id) ON DELETE CASCADE,
+            turn_index INTEGER NOT NULL CHECK(turn_index >= 1),
+            turn_key TEXT NOT NULL,
+            label TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed')),
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+            user_message TEXT NOT NULL,
+            assistant_message TEXT,
+            output_json TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT,
+            UNIQUE(task_id, turn_index),
+            UNIQUE(task_id, turn_key)
+          );
+          CREATE INDEX IF NOT EXISTS analysis_task_turns_task_idx
+            ON analysis_task_turns(task_id, turn_index);
+          CREATE TRIGGER IF NOT EXISTS analysis_task_turns_terminal_sync
+          AFTER UPDATE OF status ON analysis_tasks
+          WHEN NEW.status IN ('completed', 'failed')
+          BEGIN
+            UPDATE analysis_task_turns
+               SET status='failed',
+                   error=COALESCE(error, 'Analysis task ended before this turn completed.'),
+                   completed_at=COALESCE(completed_at, NEW.completed_at),
+                   updated_at=NEW.updated_at
+             WHERE task_id=NEW.id AND status='running';
+          END;
+        `);
+      }
+      this.db.exec('PRAGMA user_version = 20');
+    });
+    if (version < 20) version = 20;
+
+    if (version < 21) this.transaction(() => {
+      const hasProjects = Boolean(
+        this.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='projects'").get(),
+      );
+      // Partial migration fixtures may omit the application tables. Real databases contain projects/users.
+      if (hasProjects) {
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS agent_harness_jobs (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed')),
+            progress INTEGER NOT NULL DEFAULT 0 CHECK(progress BETWEEN 0 AND 100),
+            topic TEXT NOT NULL,
+            goal TEXT NOT NULL DEFAULT '',
+            task_json TEXT NOT NULL DEFAULT '{}',
+            runtime_snapshot_json TEXT NOT NULL DEFAULT '{}',
+            evidence_snapshot_json TEXT NOT NULL DEFAULT '[]',
+            decision_summary TEXT NOT NULL DEFAULT '',
+            review_summary TEXT NOT NULL DEFAULT '',
+            usage_json TEXT NOT NULL DEFAULT '{}',
+            error TEXT,
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+            quota_consumed_count INTEGER NOT NULL DEFAULT 0 CHECK(quota_consumed_count >= 0),
+            created_by TEXT NOT NULL REFERENCES users(id),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT,
+            claimed_by TEXT,
+            claimed_at TEXT,
+            heartbeat_at TEXT,
+            deleted_at TEXT
+          );
+          CREATE INDEX IF NOT EXISTS agent_harness_jobs_project_idx
+            ON agent_harness_jobs(project_id, deleted_at, created_at DESC);
+          CREATE INDEX IF NOT EXISTS agent_harness_jobs_claim_idx
+            ON agent_harness_jobs(status, claimed_by, heartbeat_at, created_at);
+
+          CREATE TABLE IF NOT EXISTS agent_harness_candidates (
+            id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL REFERENCES agent_harness_jobs(id) ON DELETE CASCADE,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            candidate_index INTEGER NOT NULL CHECK(candidate_index BETWEEN 0 AND 2),
+            content_json TEXT NOT NULL,
+            validation_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(job_id, candidate_index)
+          );
+          CREATE INDEX IF NOT EXISTS agent_harness_candidates_job_idx
+            ON agent_harness_candidates(job_id, candidate_index);
+
+          CREATE TABLE IF NOT EXISTS agent_harness_tool_calls (
+            id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL REFERENCES agent_harness_jobs(id) ON DELETE CASCADE,
+            sequence INTEGER NOT NULL CHECK(sequence >= 1),
+            action TEXT NOT NULL CHECK(action IN ('search_knowledge','read_evidence','submit_candidates')),
+            input_json TEXT NOT NULL DEFAULT '{}',
+            output_json TEXT NOT NULL DEFAULT '{}',
+            summary TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            UNIQUE(job_id, sequence)
+          );
+          CREATE INDEX IF NOT EXISTS agent_harness_tool_calls_job_idx
+            ON agent_harness_tool_calls(job_id, sequence);
+        `);
+      }
+      this.db.exec('PRAGMA user_version = 21');
+    });
+    if (version < 21) version = 21;
+
+    if (version < 22) this.transaction(() => {
+      const hasHarnessJobs = Boolean(
+        this.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_harness_jobs'").get(),
+      );
+      if (hasHarnessJobs) {
+        const columns = new Set(
+          (this.prepare("SELECT name FROM pragma_table_info('agent_harness_jobs')").all() as { name: string }[])
+            .map((row) => row.name),
+        );
+        const additions: Array<[string, string]> = [
+          ['parent_job_id', 'TEXT REFERENCES agent_harness_jobs(id) ON DELETE SET NULL'],
+          ['run_kind', "TEXT NOT NULL DEFAULT 'original' CHECK(run_kind IN ('original','retry','revision'))"],
+          ['source_candidate_id', 'TEXT'],
+          ['instruction', "TEXT NOT NULL DEFAULT ''"],
+          ['image_snapshot_json', "TEXT NOT NULL DEFAULT '[]'"],
+          ['claim_audit_summary', "TEXT NOT NULL DEFAULT ''"],
+        ];
+        for (const [name, definition] of additions) {
+          if (!columns.has(name)) this.db.exec(`ALTER TABLE agent_harness_jobs ADD COLUMN ${name} ${definition}`);
+        }
+        this.db.exec(`
+          CREATE INDEX IF NOT EXISTS agent_harness_jobs_parent_idx
+            ON agent_harness_jobs(parent_job_id, created_at DESC);
+        `);
+      }
+      this.db.exec('PRAGMA user_version = 22');
+    });
+    if (version < 22) version = 22;
+
+    if (version < 23) this.transaction(() => {
+      const hasHarnessJobs = Boolean(
+        this.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_harness_jobs'").get(),
+      );
+      if (hasHarnessJobs) {
+        this.db.exec(`
+          CREATE TRIGGER IF NOT EXISTS agent_harness_jobs_active_retry_guard
+          BEFORE INSERT ON agent_harness_jobs
+          WHEN NEW.run_kind='retry' AND NEW.status IN ('queued','running') AND NEW.deleted_at IS NULL
+            AND EXISTS (
+              SELECT 1 FROM agent_harness_jobs existing
+               WHERE existing.parent_job_id=NEW.parent_job_id
+                 AND existing.run_kind='retry'
+                 AND existing.status IN ('queued','running')
+                 AND existing.deleted_at IS NULL
+            )
+          BEGIN
+            SELECT RAISE(ABORT, 'active agent harness retry already exists');
+          END;
+
+          CREATE TRIGGER IF NOT EXISTS agent_harness_jobs_active_revision_guard
+          BEFORE INSERT ON agent_harness_jobs
+          WHEN NEW.run_kind='revision' AND NEW.status IN ('queued','running') AND NEW.deleted_at IS NULL
+            AND EXISTS (
+              SELECT 1 FROM agent_harness_jobs existing
+               WHERE existing.parent_job_id=NEW.parent_job_id
+                 AND existing.source_candidate_id=NEW.source_candidate_id
+                 AND existing.run_kind='revision'
+                 AND existing.status IN ('queued','running')
+                 AND existing.deleted_at IS NULL
+            )
+          BEGIN
+            SELECT RAISE(ABORT, 'active agent harness revision already exists');
+          END;
+        `);
+      }
+      this.db.exec('PRAGMA user_version = 23');
+    });
+    if (version < 23) version = 23;
+
+    if (version < 24) this.transaction(() => {
+      const hasHarnessJobs = Boolean(
+        this.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_harness_jobs'").get(),
+      );
+      if (hasHarnessJobs) {
+        const columns = new Set(
+          (this.prepare("SELECT name FROM pragma_table_info('agent_harness_jobs')").all() as { name: string }[])
+            .map((row) => row.name),
+        );
+        const additions: Array<[string, string]> = [
+          ['project_snapshot_json', "TEXT NOT NULL DEFAULT '{}'"],
+          ['provider_snapshot_json', "TEXT NOT NULL DEFAULT '{}'"],
+          ['source_candidate_job_id', 'TEXT'],
+          ['failure_stage', "TEXT NOT NULL DEFAULT ''"],
+          ['partial_usage_json', "TEXT NOT NULL DEFAULT '{}'"],
+          ['provider_started_at', 'TEXT'],
+          ['cancelled_at', 'TEXT'],
+          ['cancelled_by', 'TEXT'],
+          ['selected_candidate_id', 'TEXT'],
+          ['approval_status', "TEXT NOT NULL DEFAULT 'draft' CHECK(approval_status IN ('draft','selected','approved'))"],
+          ['approval_notes', "TEXT NOT NULL DEFAULT ''"],
+          ['approved_by', 'TEXT'],
+          ['approved_at', 'TEXT'],
+          ['approved_content_hash', "TEXT NOT NULL DEFAULT ''"],
+          ['purge_after', 'TEXT'],
+        ];
+        for (const [name, definition] of additions) {
+          if (!columns.has(name)) this.db.exec(`ALTER TABLE agent_harness_jobs ADD COLUMN ${name} ${definition}`);
+        }
+        this.db.exec(`
+          CREATE INDEX IF NOT EXISTS agent_harness_jobs_queue_fairness_idx
+            ON agent_harness_jobs(status, deleted_at, created_by, created_at);
+          CREATE INDEX IF NOT EXISTS agent_harness_jobs_purge_idx
+            ON agent_harness_jobs(deleted_at, purge_after);
+        `);
+      }
+      this.db.exec('PRAGMA user_version = 24');
+    });
+    if (version < 24) version = 24;
+
+    if (version < 25) this.transaction(() => {
+      const hasHarnessJobs = Boolean(
+        this.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_harness_jobs'").get(),
+      );
+      if (hasHarnessJobs) {
+        const columns = new Set(
+          (this.prepare("SELECT name FROM pragma_table_info('agent_harness_jobs')").all() as { name: string }[])
+            .map((row) => row.name),
+        );
+        const additions: Array<[string, string]> = [
+          ['review_status', "TEXT NOT NULL DEFAULT 'pending' CHECK(review_status IN ('pending','running','completed','blocked'))"],
+          ['review_error', "TEXT NOT NULL DEFAULT ''"],
+          ['review_attempt_count', 'INTEGER NOT NULL DEFAULT 0 CHECK(review_attempt_count >= 0)'],
+          ['candidate_checkpoint_at', 'TEXT'],
+          ['read_evidence_ids_json', "TEXT NOT NULL DEFAULT '[]'"],
+        ];
+        for (const [name, definition] of additions) {
+          if (!columns.has(name)) this.db.exec(`ALTER TABLE agent_harness_jobs ADD COLUMN ${name} ${definition}`);
+        }
+        this.db.exec(`
+          UPDATE agent_harness_jobs
+             SET review_status=CASE
+               WHEN status='completed' AND EXISTS (SELECT 1 FROM agent_harness_candidates c WHERE c.job_id=agent_harness_jobs.id)
+                 THEN 'completed'
+               WHEN status='failed' AND EXISTS (SELECT 1 FROM agent_harness_candidates c WHERE c.job_id=agent_harness_jobs.id)
+                 THEN 'blocked'
+               ELSE review_status
+             END,
+             candidate_checkpoint_at=CASE
+               WHEN candidate_checkpoint_at IS NULL AND EXISTS (SELECT 1 FROM agent_harness_candidates c WHERE c.job_id=agent_harness_jobs.id)
+                 THEN updated_at
+               ELSE candidate_checkpoint_at
+             END;
+          CREATE INDEX IF NOT EXISTS agent_harness_jobs_review_idx
+            ON agent_harness_jobs(review_status, status, deleted_at, updated_at);
+        `);
+      }
+      this.db.exec('PRAGMA user_version = 25');
+    });
+    if (version < 25) version = 25;
   }
 
   onModuleDestroy(): void {

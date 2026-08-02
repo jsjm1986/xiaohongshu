@@ -1166,6 +1166,13 @@ export interface AnalysisTask {
   /** 后端一直在返回,前端类型此前漏了。知识库补充任务靠 `enrich:` 前缀区分。 */
   sourceFingerprint: string;
   attemptCount: number;
+  /** 完整项目分析使用同一对话的多轮进度；其他任务不返回这些字段。 */
+  currentTurn?: number;
+  totalTurns?: number;
+  turnKey?: string;
+  turnLabel?: string;
+  turnStatus?: "running" | "completed" | "failed";
+  turnAttemptCount?: number;
   resultId: string | null;
   error: string | null;
   createdAt: string;
@@ -1716,6 +1723,194 @@ export interface GenerationJob {
     parameterOverrides?: Record<string, unknown>;
     researchInjectedIntoPrompt?: boolean;
   };
+}
+
+export type AgentHarnessStatus = "queued" | "running" | "completed" | "failed";
+
+export interface AgentHarnessValidationIssue {
+  code: string;
+  severity: "error" | "warning";
+  candidateIndex: number;
+  message: string;
+}
+
+export interface AgentHarnessCandidate {
+  id: string;
+  candidateIndex: 0 | 1 | 2;
+  concept: string;
+  content: {
+    H: { hashtags: string[] };
+    N: {
+      coverHeadline: string;
+      coverSubheadline: string;
+      imageBrief: string;
+      imageSequence: Array<{
+        sequence: number;
+        source: "selected_asset" | "new_design";
+        assetId: string;
+        role: string;
+        overlayText: string;
+        direction: string;
+        evidenceIds: string[];
+      }>;
+      title: string;
+      body: string;
+      callToAction: string;
+    };
+    Cref: {
+      disclaimer: string;
+      ownedFirstComment: string;
+      threads: Array<{
+        id: string;
+        question: string;
+        answer: string;
+        followUps: Array<{ kind?: "follow_up" | "counterexample"; question: string; answer: string }>;
+        clarification?: string;
+        nextStep?: string;
+        stopReason?: "answered" | "no_new_gap" | "evidence_boundary" | "professional_review";
+        postingIdentity: "author" | "brand" | "staff" | "expert" | "publisher";
+        evidenceIds: string[];
+        boundary?: string;
+      }>;
+    };
+    publishing: {
+      entryPoint: string;
+      accountIdentity: string;
+      timingNote: string;
+      interactionGoal: string;
+      responseSla?: string;
+      liveQuestionRoutes?: Array<{ when: string; owner: "publisher" | "staff" | "expert"; action: string }>;
+      updateTriggers?: string[];
+      stopRules?: string[];
+    };
+  };
+  assetDecisions: Array<{
+    assetId: string;
+    decision: "use" | "omit";
+    rationale: string;
+    evidenceIds: string[];
+  }>;
+  citations: Array<{ statement: string; evidenceIds: string[] }>;
+  claimAudit?: Array<{
+    candidateIndex: 0 | 1 | 2;
+    statement: string;
+    evidenceIds: string[];
+    classification: "project_fact" | "general_guidance" | "unknown_or_hedged";
+  }>;
+  unknowns: string[];
+  selfReview: string;
+  revisionNotes: { instructionApplied: string[]; preservedElements: string[] };
+  publicationChecklist: Array<{
+    key: "evidence" | "simulation_disclosure" | "execution_plan" | "asset_authorization" | "platform_compliance" | "final_proofread";
+    status: "ready" | "blocked" | "manual_review";
+    note: string;
+  }>;
+  validation: { valid: boolean; issues: AgentHarnessValidationIssue[] };
+}
+
+export interface AgentHarnessTrace {
+  sequence: number;
+  action: "search_knowledge" | "read_evidence" | "submit_candidates";
+  input: Record<string, unknown>;
+  output: Record<string, unknown>;
+  summary: string;
+  createdAt?: string;
+}
+
+export interface AgentHarnessJob {
+  id: string;
+  projectId: string;
+  channel: "agent_harness";
+  status: AgentHarnessStatus;
+  progress: number;
+  topic: string;
+  goal: string;
+  runKind: "original" | "retry" | "revision";
+  parentJobId?: string | null;
+  sourceCandidateId?: string | null;
+  instruction?: string;
+  error?: string | null;
+  attemptCount: number;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
+  deletedAt?: string | null;
+  failureStage?: string;
+  reviewStatus?: "pending" | "running" | "completed" | "blocked";
+  reviewError?: string;
+  reviewAttemptCount?: number;
+  candidateCheckpointAt?: string | null;
+  queuePosition?: number;
+  queueLength?: number;
+  cancelledAt?: string | null;
+  selectedCandidateId?: string | null;
+  approvalStatus?: "draft" | "selected" | "approved";
+  approvalNotes?: string;
+  approvedBy?: string | null;
+  approvedAt?: string | null;
+  approvedContentHash?: string;
+  purgeAfter?: string | null;
+  parentDeleted?: boolean;
+  task?: Record<string, unknown>;
+  runtimeSnapshot?: Record<string, unknown>;
+  projectSnapshot?: Record<string, unknown>;
+  providerSnapshot?: Record<string, unknown>;
+  evidenceInventory?: Array<{
+    evidenceId: string;
+    path: string;
+    heading: string;
+    kind: string;
+    evidenceStatus: string;
+    caveats: string[];
+  }>;
+  decisionSummary?: string;
+  reviewSummary?: string;
+  claimAuditSummary?: string;
+  imageSnapshot?: Array<{
+    assetId: string;
+    evidenceId: string;
+    filename: string;
+    mediaType: string;
+    width?: number;
+    height?: number;
+    analysisId: string;
+    approvedAt?: string;
+  }>;
+  usage?: { modelCalls?: number; inputTokens?: number; outputTokens?: number; toolCalls?: number; replans?: number };
+  partialUsage?: { modelCalls?: number; inputTokens?: number; outputTokens?: number };
+  candidates?: AgentHarnessCandidate[];
+  traces?: AgentHarnessTrace[];
+  derivedRuns?: AgentHarnessJob[];
+}
+
+export interface AgentHarnessCreateInput {
+  projectId: string;
+  topic?: string;
+  topicMode?: "agent_discovery" | "user_defined";
+  creativeIntent?: string;
+  methodProfileId?: import("@content-agent/agent-harness-core/methods").HarnessMethodId;
+  audienceStage?: string;
+  goal?: string;
+  audience?: string;
+  entryPoint?: string;
+  tone?: string;
+  bodyLength?: "short" | "medium" | "long";
+  accountIdentity?: string;
+  callToAction?: string;
+  publishingNotes?: string;
+  mustInclude?: string[];
+  forbidden?: string[];
+  notes?: string;
+  imageAssetIds?: string[];
+  allowUngrounded?: boolean;
+}
+
+export interface AgentHarnessCapabilities {
+  projectId: string;
+  canRun: boolean;
+  canRevise: boolean;
+  canEdit: boolean;
+  canExport: boolean;
 }
 
 export type GenerationBatchStatus = "queued" | "running" | "completed" | "failed" | "partial";

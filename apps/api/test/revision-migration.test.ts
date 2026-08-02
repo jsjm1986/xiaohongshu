@@ -41,6 +41,35 @@ test('建出 revision_tasks 与全部列', () => {
   }
 });
 
+test('建出八轮分析表、索引、级联外键和任务终态同步触发器', () => {
+  const columns = columnsOf('analysis_task_turns');
+  for (const expected of [
+    'id', 'task_id', 'turn_index', 'turn_key', 'label', 'status', 'attempt_count',
+    'user_message', 'assistant_message', 'output_json', 'error',
+    'created_at', 'updated_at', 'completed_at',
+  ]) {
+    assert.ok(columns.includes(expected), `analysis_task_turns 缺列 ${expected}:实际 ${columns.join(',')}`);
+  }
+
+  const indexes = (database.prepare(
+    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='analysis_task_turns'",
+  ).all() as { name: string }[]).map((row) => row.name);
+  assert.ok(indexes.includes('analysis_task_turns_task_idx'));
+
+  const foreignKeys = database.prepare(
+    `SELECT "table", "from", on_delete FROM pragma_foreign_key_list('analysis_task_turns')`,
+  ).all() as { table: string; from: string; on_delete: string }[];
+  assert.ok(foreignKeys.some((key) =>
+    key.table === 'analysis_tasks' && key.from === 'task_id' && key.on_delete === 'CASCADE'));
+
+  const trigger = database.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='analysis_task_turns_terminal_sync'",
+  ).get() as { sql: string } | undefined;
+  assert.ok(trigger?.sql);
+  assert.match(trigger.sql, /NEW\.status\s+IN\s*\('completed',\s*'failed'\)/i);
+  assert.match(trigger.sql, /WHERE\s+task_id=NEW\.id\s+AND\s+status='running'/i);
+});
+
 test('三个索引都建在新表上', () => {
   const names = (database
     .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='revision_tasks'")

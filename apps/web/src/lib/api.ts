@@ -1,4 +1,6 @@
 import type {
+  AgentHarnessCapabilities, AgentHarnessCreateInput,
+  AgentHarnessJob,
   AnalysisTask,
   ApiList,
   AuditEntry,
@@ -1147,11 +1149,14 @@ export const api = {
       }),
   },
   imageAssets: {
-    list: async (projectId: string, options: { limit?: number; offset?: number } = {}) => {
+    list: async (projectId: string, options: { limit?: number; offset?: number; observationStatus?: 'approved' } = {}) => {
       const limit = options.limit ?? 50;
       const offset = options.offset ?? 0;
+      const observationStatus = options.observationStatus
+        ? `&observationStatus=${encodeURIComponent(options.observationStatus)}`
+        : '';
       const result = normalizeList(await request<JsonRecord[] | ApiList<JsonRecord>>(
-        `/api/projects/${encodeURIComponent(projectId)}/image-assets?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`,
+        `/api/projects/${encodeURIComponent(projectId)}/image-assets?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${observationStatus}`,
       ));
       return {
         items: result.items.map(normalizeImage),
@@ -1378,6 +1383,61 @@ export const api = {
         method: "PATCH",
         body: JSON.stringify(input),
       }),
+  },
+  agentHarness: {
+    list: async (projectId: string, options: { limit?: number; offset?: number } = {}) =>
+      normalizeList(await request<AgentHarnessJob[] | ApiList<AgentHarnessJob>>(
+        `/api/agent-harness?projectId=${encodeURIComponent(projectId)}&limit=${encodeURIComponent(String(options.limit ?? 30))}&offset=${encodeURIComponent(String(options.offset ?? 0))}`,
+      )),
+    trash: async (projectId: string, options: { limit?: number; offset?: number } = {}) =>
+      normalizeList(await request<AgentHarnessJob[] | ApiList<AgentHarnessJob>>(
+        `/api/agent-harness/trash?projectId=${encodeURIComponent(projectId)}&limit=${encodeURIComponent(String(options.limit ?? 30))}&offset=${encodeURIComponent(String(options.offset ?? 0))}`,
+      )),
+    get: (id: string) => request<AgentHarnessJob>(`/api/agent-harness/${encodeURIComponent(id)}`),
+    capabilities: (projectId: string) => request<AgentHarnessCapabilities>(
+      `/api/agent-harness/capabilities?projectId=${encodeURIComponent(projectId)}`,
+    ),
+    create: (input: AgentHarnessCreateInput) =>
+      request<AgentHarnessJob>('/api/agent-harness', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    retry: (id: string) =>
+      request<AgentHarnessJob>(`/api/agent-harness/${encodeURIComponent(id)}/retry`, {
+        method: 'POST', body: JSON.stringify({}),
+      }),
+    retryReview: (id: string) =>
+      request<AgentHarnessJob>(`/api/agent-harness/${encodeURIComponent(id)}/retry-review`, {
+        method: 'POST', body: JSON.stringify({}),
+      }),
+    revise: (id: string, candidateId: string, instruction: string) =>
+      request<AgentHarnessJob>(`/api/agent-harness/${encodeURIComponent(id)}/revise`, {
+        method: 'POST', body: JSON.stringify({ candidateId, instruction }),
+      }),
+    remove: (id: string) =>
+      request<{ id: string; topic: string; alreadyDeleted: boolean }>(
+        `/api/agent-harness/${encodeURIComponent(id)}`, { method: 'DELETE' },
+      ),
+    restore: (id: string) =>
+      request<AgentHarnessJob>(`/api/agent-harness/${encodeURIComponent(id)}/restore`, {
+        method: 'POST', body: JSON.stringify({}),
+      }),
+    select: (id: string, candidateId: string) =>
+      request<AgentHarnessJob>(`/api/agent-harness/${encodeURIComponent(id)}/select`, {
+        method: 'POST', body: JSON.stringify({ candidateId }),
+      }),
+    approve: (id: string, notes = '') =>
+      request<AgentHarnessJob>(`/api/agent-harness/${encodeURIComponent(id)}/approve`, {
+        method: 'POST', body: JSON.stringify({ notes }),
+      }),
+    purge: (id: string) =>
+      request<{ id: string; purged: true }>(`/api/agent-harness/${encodeURIComponent(id)}/purge`, {
+        method: 'DELETE',
+      }),
+    exportUrl: (id: string, candidateId: string, format: 'markdown' | 'json') =>
+      `/api/agent-harness/${encodeURIComponent(id)}/candidates/${encodeURIComponent(candidateId)}/export?format=${format}`,
+    runExportUrl: (id: string, format: 'markdown' | 'json') =>
+      `/api/agent-harness/${encodeURIComponent(id)}/export?format=${format}`,
   },
   generations: {
     list: async (projectId?: string) =>

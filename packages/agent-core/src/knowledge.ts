@@ -249,7 +249,7 @@ export function buildKnowledgeIndexMarkdown(documents: KnowledgeDocument[]): str
   return lines.join("\n");
 }
 
-function splitDocument(document: KnowledgeDocument): KnowledgeSection[] {
+export function splitKnowledgeDocument(document: KnowledgeDocument): KnowledgeSection[] {
   if (document.extension === ".txt" || document.headings.length === 0) {
     return [{
       id: `${document.id}:all`,
@@ -371,7 +371,7 @@ export function selectKnowledgeContext(options: SelectKnowledgeOptions): Knowled
   // mode would use, so a citation can name the price/doctor/recovery section
   // instead of the whole file. Same document + same section therefore yields
   // the same content-addressed evidence id in both modes.
-  const fullSections = documents.flatMap((document) => splitDocument(document));
+  const fullSections = documents.flatMap((document) => splitKnowledgeDocument(document));
   const fullContent = fullSections.map(renderSection).join("\n\n");
   const fullTokens = estimateTokens(fullContent);
   if (fullTokens <= availableTokens && !options.forceProgressive) {
@@ -405,7 +405,7 @@ export function selectKnowledgeContext(options: SelectKnowledgeOptions): Knowled
   };
   const candidates = documents
     .filter((document) => !document.isIndex)
-    .flatMap((document) => splitDocument(document).map((section) => ({
+    .flatMap((document) => splitKnowledgeDocument(document).map((section) => ({
       ...section,
       score: sectionScore(section, document, queryTerms, preferredKinds),
     })))
