@@ -59,7 +59,7 @@ function ShellContent() {
           <div key={group.id}>
             <div className="sidebar__section-label">{group.label}</div>
             <nav className="sidebar__nav">
-              {items.map(({ to, label, icon: Icon, end }) => (
+              {items.map(({ to, label, icon: Icon, end, badge }) => (
                 <NavLink
                   key={to}
                   to={to}
@@ -68,7 +68,7 @@ function ShellContent() {
                 >
                   <Icon size={18} />
                   <span>{label}</span>
-                  {to === "/generate" && <i>快捷</i>}
+                  {badge && <i>{badge}</i>}
                 </NavLink>
               ))}
             </nav>
