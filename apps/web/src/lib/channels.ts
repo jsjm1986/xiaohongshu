@@ -33,12 +33,19 @@ export interface Channel extends GroupableNavItem {
   /** NavLink 的 end：只有根路径需要精确匹配 */
   end?: boolean;
   adminOnly?: boolean;
+  /**
+   * 侧边栏项右侧的小徽标(「快捷」「测试」这类)。
+   *
+   * 原先写在 AppShell 里,判据是 `to === "/generate"`。第二个徽标出现时那种写法
+   * 会让频道表和壳各存一份真相,所以跟着频道下沉到这张表。
+   */
+  badge?: string;
 }
 
 export const CHANNELS: readonly Channel[] = [
   { to: '/', label: '概览', icon: LayoutDashboard, group: 'workspace', end: true },
-  { to: '/generate', label: '内容生成', icon: Sparkles, group: 'workspace' },
-  { to: '/agent-harness', label: 'Agent 创作', icon: Bot, group: 'workspace' },
+  { to: '/generate', label: '内容生成', icon: Sparkles, group: 'workspace', badge: '快捷' },
+  { to: '/agent-harness', label: 'Agent 创作', icon: Bot, group: 'workspace', badge: '测试' },
   // 生成历史是工作台的产出物——「我做过什么」,和概览、内容生成同一组。
   { to: '/history', label: '生成历史', icon: FileClock, group: 'workspace' },
   { to: '/projects', label: '项目管理', icon: Boxes, group: 'assets' },

@@ -56,6 +56,24 @@ test('频道声明的分组都在 NAV_GROUPS 里', () => {
   for (const group of used) assert.ok(declared.has(group), `分组 ${group} 未在 NAV_GROUPS 声明`);
 });
 
+test('徽标住在频道表里,AppShell 不再按路径硬编码', () => {
+  /*
+    徽标原先是 AppShell 里的 `to === "/generate"`。加第二个徽标时若照抄那种写法,
+    频道表(侧栏与 hero 的共同真源)和壳就各存一份真相。这条钉住两件事:
+    表里确实声明了徽标,且壳是读它而不是自己判路径。
+  */
+  const badges = [...channelSource.matchAll(/to: '([^']+)'[^}]*badge: '([^']+)'/g)]
+    .map((match) => ({ to: match[1], badge: match[2] }));
+  assert.deepEqual(badges, [
+    { to: '/generate', badge: '快捷' },
+    { to: '/agent-harness', badge: '测试' },
+  ]);
+
+  const shell = readFileSync(new URL('../src/components/AppShell.tsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(shell, /to === "\/generate"/u, 'AppShell 又按路径硬编码徽标了');
+  assert.match(shell, /badge &&/u, 'AppShell 没有读频道表的 badge');
+});
+
 test('hero 不再依赖硬编码页面序号', () => {
   /*
     原来十个页面各写一个 index="01".."10",靠人工与侧边栏顺序对齐,改分组后
