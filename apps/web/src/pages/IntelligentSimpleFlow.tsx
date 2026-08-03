@@ -25,8 +25,9 @@ import {
 } from "lucide-react";
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, EmptyState, Field, Modal, Skeleton, useToast } from "../components/Ui";
-import { api } from "../lib/api";
+import { api, ApiError } from "../lib/api";
 import { errorMessage } from "../lib/errors";
+import { appendedCount, reconcileTimedOut, topicRefreshOutcome } from "../lib/topic-refresh-sync";
 import { GAP_SOURCE_OPTIONS, sourceForAnswer } from "../lib/gap-source";
 import { gapMetricsInput, imageQualityPayload } from "../lib/metric-payload";
 import {
@@ -362,6 +363,24 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const assetRequestSeq = useRef(0);
   const taskRequestSeq = useRef(0);
   const templateRequestSeq = useRef(0);
+  /*
+   * 发起「换一批」之前已经存在的任务 id。
+   *
+   * 对账靠轮询任务表,而任务表里躺着历次换一批留下的 completed 行。不记下这个快照,
+   * 第一次轮询就会撞上旧的 completed 行、立刻当成「这次完成了」——列表其实还没变。
+   */
+  const knownTaskIds = useRef<string[]>([]);
+  /*
+   * 发起「换一批」之前列表里已有的选题 id。
+   *
+   * 只用来算「这次新增了几个」——后端返回的是全量列表(旧选题一并保留),拿它的长度
+   * 当新增数会把「已追加 N 个」说成总数。
+   */
+  const knownOpportunityIds = useRef<string[]>([]);
+  /** 本次换一批是否已经拿到结果(POST 先回或轮询先对上账,谁先谁算)。 */
+  const refreshSettled = useRef(true);
+  /** 本次换一批的起点(毫秒)。对账超时以它为基线。 */
+  const refreshStartedAt = useRef(0);
   activeProjectId.current = projectId;
   const toast = useToast();
 
@@ -449,6 +468,13 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     setTemplateError("");
     setAnalyzing(false);
     setRefreshing(false);
+    /*
+     * 换一批的对账闸也要归零。切项目时旧项目那次换一批可能还没落地,
+     * 留着 false 会让新项目的第一轮轮询把旧任务当成自己的结果。
+     */
+    refreshSettled.current = true;
+    knownTaskIds.current = [];
+    knownOpportunityIds.current = [];
     setUploading(false);
     setSelectedOpportunityId("");
     setSelectedAssetIds([]);
@@ -504,6 +530,52 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     const timer = window.setInterval(() => { void refreshLatestTask(requestedProjectId); }, 1800);
     return () => window.clearInterval(timer);
   }, [refreshing, analyzing, projectId]);
+
+  /*
+   * 换一批的对账轮询。
+   *
+   * 原先列表只靠那一个长响应更新,响应丢了就只剩进度条转着,新选题得刷新页面才看得见。
+   * 这里改成盯任务表:后端在**同一个事务**里插选题并把任务标 completed(见
+   * intelligence.service.refreshTopicOpportunities),所以看到 completed 时数据一定
+   * 已经落库,直接拉一次列表就是对的,不存在读到半成品。
+   */
+  useEffect(() => {
+    if (!refreshing) return;
+    const requestedProjectId = projectId;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      api.intelligence.tasks.list(requestedProjectId).then((tasks) => {
+        if (cancelled || activeProjectId.current !== requestedProjectId || refreshSettled.current) return;
+        const outcome = topicRefreshOutcome(tasks, knownTaskIds.current);
+        if (outcome.state === "waiting") {
+          /*
+           * 等过了头就收手。请求根本没到服务端时任务行永远不会出现,再等也等不出来,
+           * 而无上限地转下去就是这次要修掉的那种「界面卡住只能刷新」。
+           */
+          if (reconcileTimedOut(refreshStartedAt.current, Date.now())) {
+            refreshSettled.current = true;
+            setRefreshing(false);
+            toast.push("等太久了,没能确认后台是否收到这次换一批。可以重试,或刷新页面看看新选题是否已经生成。", "error");
+          }
+          return;
+        }
+        if (outcome.state === "failed") {
+          refreshSettled.current = true;
+          setRefreshing(false);
+          toast.push(outcome.error || "选题刷新失败", "error");
+          void refreshLatestTask(requestedProjectId);
+          return;
+        }
+        // 任务已完成:拉一次权威列表,不依赖那个可能永远回不来的响应
+        void api.opportunities.list(requestedProjectId).then((next) => {
+          if (cancelled || activeProjectId.current !== requestedProjectId) return;
+          settleRefresh(requestedProjectId, next.items, appendedCount(next.items, knownOpportunityIds.current));
+          void refreshLatestTask(requestedProjectId);
+        }).catch(() => { /* 下一轮再试 */ });
+      }).catch(() => { /* 网络抖动:下一轮再试 */ });
+    }, 1800);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [refreshing, projectId]);
 
   // Load the pickable knowledge sections once per project when the gap editor
   // opens; cached so reopening the modal does not refetch.
@@ -644,26 +716,75 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     }
   };
 
+  /*
+   * 换一批的收尾。POST 的响应和轮询对账都会走到这里,谁先到算谁,后到的直接退出。
+   *
+   * 需要这道闸是因为两条路都能拿到结果:响应带着新列表回来是快路径,而它丢了的时候
+   * (切标签页、网络抖动、代理掐断长连接)只有轮询能发现「后端其实已经存好了」。
+   */
+  const settleRefresh = (requestedProjectId: string, items: TopicOpportunity[], appended: number) => {
+    if (refreshSettled.current || activeProjectId.current !== requestedProjectId) return;
+    refreshSettled.current = true;
+    setOpportunities(items);
+    setSelectedOpportunityId("");
+    setRefreshing(false);
+    void loadPromptTemplates(requestedProjectId);
+    toast.push(
+      appended > 0
+        ? `已追加一批新选题（${appended} 个），旧选题已保留`
+        : "已追加一批新选题，旧选题已保留",
+      "info",
+    );
+  };
+
   const runRefresh = async (guidanceArg?: string, requestedProjectId = projectId) => {
     if (activeProjectId.current !== requestedProjectId) return;
     // 弹窗即关:进度移到第 2 步面板内联真实任务状态,不做假百分比
     setRefreshOpen(false);
     setGuidance("");
+    // 进度条先亮:下面还要取一次任务快照,不能让用户点完盯着没反应的界面
     setRefreshing(true);
+    refreshStartedAt.current = Date.now();
+    knownOpportunityIds.current = opportunities.map((item) => item.id);
+    /*
+     * 先记下「开工前就有的任务」,再发请求。顺序不能反:任务行是后端在处理这次请求时
+     * 才写进去的,快照必须早于它,否则本次任务会被自己当成旧任务而永远等不到。
+     *
+     * 这段 await 期间对账闸仍是关着的(refreshSettled 还是 true),所以万一轮询这时
+     * 就跑了一轮,它会直接跳过——不会拿着空快照把上次的 completed 行当成本次结果。
+     */
+    knownTaskIds.current = (await api.intelligence.tasks
+      .list(requestedProjectId)
+      .then((tasks) => tasks.map((task) => task.id))
+      .catch(() => [] as string[]));
+    if (activeProjectId.current !== requestedProjectId) return;
+    refreshSettled.current = false;
     try {
       const result = await api.opportunities.refresh(requestedProjectId, guidanceArg?.trim() || undefined);
       if (activeProjectId.current !== requestedProjectId) return;
-      setOpportunities(result.items);
-      setSelectedOpportunityId("");
-      void loadPromptTemplates(requestedProjectId);
-      toast.push(`已追加一批新选题（${result.items.length} 个），旧选题已保留`, "info");
+      settleRefresh(
+        requestedProjectId,
+        result.items,
+        appendedCount(result.items, knownOpportunityIds.current),
+      );
       void refreshLatestTask(requestedProjectId);
     } catch (error) {
-      if (activeProjectId.current === requestedProjectId) {
+      if (activeProjectId.current !== requestedProjectId) return;
+      /*
+       * 服务端明确回绝(4xx/5xx)才算失败:这时候后端没存东西,直接报错收工。
+       *
+       * 连接问题(fetch 抛 TypeError,没有 status)不能当失败——后端很可能已经把这批
+       * 存好了,只是响应没回来。那种情况交给轮询去对账,别弹一个「失败」把用户骗走。
+       */
+      const serverRejected = error instanceof ApiError;
+      if (serverRejected) {
+        refreshSettled.current = true;
+        setRefreshing(false);
         toast.push(errorMessage(error, "选题刷新失败"), "error");
+        void refreshLatestTask(requestedProjectId);
+        return;
       }
-    } finally {
-      if (activeProjectId.current === requestedProjectId) setRefreshing(false);
+      toast.push("网络中断，正在确认后台是否已经生成完毕……", "info");
     }
   };
 
