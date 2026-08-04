@@ -605,6 +605,24 @@ describe('素人代发模式按模式下发提示词', () => {
      */
     expect(packaging, '组包阶段仍在要求 2-3 条机构答疑,拓扑那两句没有真的分叉')
       .not.toContain('2-3 org_answer threads');
+    /*
+     * 三条正文指引各钉一个**独有**短语,钉的是「peer_seeding 下确实下发了」这个方向。
+     *
+     * 为什么不能靠上面两条代劳:`real individual` 和 `their own timeline` 都出现在
+     * BODY_VOICE_GUIDANCE.peer_seeding 那一句 fork 里,所以把整行
+     * `...(seedingMode === "peer_seeding" ? PEER_SEEDING_BODY_GUIDANCE : [])` 删掉时
+     * 那两条照旧命中 —— 实测 61/61 全绿。三条指引此前只在「不许漏进 brand_voice」
+     * 这个方向被钉住,反方向毫无保护,而它们正是让正文阶段拿到素人形态的实质内容。
+     *
+     * 每条各钉一个而不是共用一个:少任意一条都该变红。下面三个短语都只在
+     * PEER_SEEDING_BODY_GUIDANCE 里出现,BODY_VOICE_GUIDANCE 里没有,已逐个核对。
+     */
+    expect(bodyDraft, '正文阶段没要求用博主本人的第一人称写正文')
+      .toContain("Write the body in that person's own first person");
+    expect(bodyDraft, '正文阶段没要求把价格恢复期这类参数留给评论区')
+      .toContain('The body establishes one situation and one narrow question');
+    expect(bodyDraft, '正文阶段没说明医生姓名靠被问出来而非正文点名')
+      .toContain("does not need a doctor's or clinic's full name");
   });
 
   it('brand_voice:两个阶段都逐字保持原有契约,不漏进任何素人指引', async () => {
