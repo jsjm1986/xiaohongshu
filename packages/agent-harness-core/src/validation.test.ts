@@ -139,6 +139,49 @@ describe("素人代发种草模式", () => {
     expect(authorOnly, "品牌模式下博主回复不能替代机构答疑").toContain("comment_topology");
   });
 
+  it("peer_seeding:恰好 1 条博主回复 → comment_topology 报错", () => {
+    /*
+     * 边界用例,钉住 `authorReplies < 2` 里的那个 2。
+     *
+     * 「至少 2 条博主本人回复」是本次改动的核心数字:1 条博主回复配 1 条机构答疑
+     * 仍然是机构主导的评论区,不是素人自己在回帖。只测 0 条和 2 条时,把阈值降成
+     * `< 1` 也能全绿 —— 那等于这个数字根本没被测到。
+     */
+    const codes = codesOf([
+      authorThread("t1", "是哪个白白哦？", "老朱，朱冠锋呀"),
+      orgThread("t2"), readerExchange("t3"), organicReaction("t4"),
+    ], "peer_seeding");
+    expect(codes, "素人模式下只有 1 条博主回复必须报错").toContain("comment_topology");
+  });
+
+  it("brand_voice:恰好 1 条机构答疑 → comment_topology 报错", () => {
+    /* 同上,钉住 `accountableAnswers < 2` 里的那个 2。author 身份不计入机构答疑。 */
+    const codes = codesOf([
+      orgThread("t1"),
+      authorThread("t2", "价格多少", "看方案，5k到1w"),
+      readerExchange("t3"), organicReaction("t4"),
+    ], "brand_voice");
+    expect(codes, "品牌模式下只有 1 条机构答疑必须报错").toContain("comment_topology");
+  });
+
+  it("brand_voice:author 身份线程也必须带四个字段", () => {
+    /*
+     * 钉住 `accountable` 里的 `peerSeeding &&` 守卫。
+     *
+     * 去掉那个守卫后,author 身份在**任何**模式下都不再被要求带边界 ——
+     * brand_voice 就此丢掉了它声称守住的诚实边界:模型只要把机构答疑标成
+     * author 身份,四项约束全部消失。这条线程本身要让拓扑合格(另配 2 条 staff
+     * 机构答疑),否则报错会落在 comment_topology 上,断言不到真正要测的码。
+     */
+    const bareAuthor = thread({ id: "t3", postingIdentity: "author" });
+    const codes = codesOf([
+      orgThread("t1"), orgThread("t2"), bareAuthor,
+      readerExchange("t4"), organicReaction("t5"),
+    ], "brand_voice");
+    expect(codes, "品牌模式下 author 身份缺边界必须报错").toContain("missing_thread_boundary");
+    expect(codes, "品牌模式下 author 身份缺下一步必须报错").toContain("missing_thread_next_step");
+  });
+
   it("THREAD_SCHEMA 不再强制四个机构字段:只改校验会被 schema 假绿", () => {
     /*
      * 这四个键留在 required 里的话,模型必须为每条博主回复编出「可核验的下一步」
