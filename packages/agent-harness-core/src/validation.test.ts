@@ -57,8 +57,8 @@ function organicReaction(id: string): HarnessCommentThread {
  * revisionNotes / content / citations / assetDecisions,给纯空对象会 TypeError,
  * 那样测的就不是拓扑了。这些字段留空字符串,报错自然落在别的 code 上被过滤掉。
  */
-function codesOf(threads: HarnessCommentThread[], seedingMode?: "peer_seeding" | "brand_voice", body = ""): string[] {
-  const candidate = {
+function minimalCandidate(threads: HarnessCommentThread[], body = "", hashtags: string[] = []): HarnessCandidate {
+  return {
     candidateIndex: 0, concept: "", revisionNotes: { instructionApplied: [], preservedElements: [] },
     citations: [], assetDecisions: [],
     content: {
@@ -66,12 +66,15 @@ function codesOf(threads: HarnessCommentThread[], seedingMode?: "peer_seeding" |
         coverHeadline: "", coverSubheadline: "", imageBrief: "", title: "", body,
         callToAction: "", imageSequence: [],
       },
-      H: { hashtags: [] },
+      H: { hashtags },
       Cref: { ownedFirstComment: "", threads },
       publishing: { entryPoint: "", accountIdentity: "", timingNote: "", interactionGoal: "" },
     },
   } as unknown as HarnessCandidate;
-  return validateHarnessCandidates([candidate], [], new Set<string>(), {
+}
+
+function codesOf(threads: HarnessCommentThread[], seedingMode?: "peer_seeding" | "brand_voice", body = ""): string[] {
+  return validateHarnessCandidates([minimalCandidate(threads, body)], [], new Set<string>(), {
     ...(seedingMode ? { seedingMode } : {}),
   }).filter((issue) => issue.candidateIndex === 0).map((issue) => issue.code);
 }
@@ -375,5 +378,60 @@ describe("第一人称措辞按模式分叉", () => {
       fake, organicReaction("t4"),
     ], "peer_seeding");
     expect(codes).toContain("fabricated_experience");
+  });
+});
+
+/*
+  标签里的品牌词。67 篇真实语料无一篇标签带品牌名,全是品类词加城市词。
+*/
+describe("标签禁品牌词", () => {
+  /** 一套合格拓扑,免得拓扑报错混进断言。 */
+  const okThreads = (): HarnessCommentThread[] => [
+    authorThread("t1", "是哪个白白哦？", "老朱，朱冠锋呀"),
+    authorThread("t2", "价格多少", "看方案，5k到1w"),
+    readerExchange("t3"),
+    organicReaction("t4"),
+  ];
+
+  function issuesForHashtags(hashtags: string[], seedingMode: HarnessSeedingMode, projectName?: string) {
+    return validateHarnessCandidates([minimalCandidate(okThreads(), "", hashtags)], [], new Set<string>(), {
+      seedingMode, ...(projectName === undefined ? {} : { projectName }),
+    });
+  }
+
+  it("peer_seeding:标签含项目名给 WARNING", () => {
+    const issues = issuesForHashtags(["#成都眼袋", "#星零感微孔去眼袋"], "peer_seeding", "星零感微孔去眼袋");
+    const branded = issues.filter((issue) => issue.code === "brand_hashtag");
+    expect(branded.length, JSON.stringify(issues)).toBe(1);
+    expect(branded[0]?.severity, "品牌词必须是 WARNING：项目名可能含通用品类词，硬拦会误伤").toBe("warning");
+  });
+
+  it("peer_seeding:品牌词标签不阻断导出", () => {
+    /*
+     * 「不阻断」= 没有因此多出任何 error。这里的最小候选本身就缺一堆必填项、
+     * 恒定带一批无关 error,所以不能断言「一条 error 都没有」;改成和不带品牌词
+     * 的同一候选比对 error 集合 —— 差集为空才叫这次检查没升级成阻断项。
+     */
+    const clean = issuesForHashtags(["#成都眼袋"], "peer_seeding", "星零感微孔去眼袋");
+    const branded = issuesForHashtags(["#成都眼袋", "#星零感微孔去眼袋"], "peer_seeding", "星零感微孔去眼袋");
+    const errorCodes = (issues: readonly { code: string; severity: string }[]) =>
+      [...new Set(issues.filter((issue) => issue.severity === "error").map((issue) => issue.code))].sort();
+    expect(errorCodes(branded), "标签带品牌词不该新增任何 error").toEqual(errorCodes(clean));
+  });
+
+  it("peer_seeding:标签只有品类词与城市词不报品牌词", () => {
+    const issues = issuesForHashtags(["#成都眼袋", "#眼袋泪沟", "#变美日记"], "peer_seeding", "星零感微孔去眼袋");
+    expect(issues.map((issue) => issue.code), JSON.stringify(issues)).not.toContain("brand_hashtag");
+  });
+
+  it("brand_voice:标签含项目名不报警,机构自己发就该带品牌", () => {
+    const issues = issuesForHashtags(["#星零感微孔去眼袋"], "brand_voice", "星零感微孔去眼袋");
+    expect(issues.map((issue) => issue.code), JSON.stringify(issues)).not.toContain("brand_hashtag");
+  });
+
+  it("没传项目名时跳过该检查", () => {
+    /* 判据只有项目名,拿不到就不猜 —— 不维护关键词表。 */
+    const issues = issuesForHashtags(["#星零感微孔去眼袋"], "peer_seeding");
+    expect(issues.map((issue) => issue.code), JSON.stringify(issues)).not.toContain("brand_hashtag");
   });
 });

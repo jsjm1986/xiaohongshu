@@ -126,6 +126,8 @@ export function validateHarnessCandidates(
     revisionInstruction?: string; selectedImages?: readonly HarnessImageSource[]; bodyLength?: "short" | "medium" | "long";
     /** 素人代发种草模式。缺省走 DEFAULT_HARNESS_SEEDING_MODE(peer_seeding)。 */
     seedingMode?: HarnessSeedingMode;
+    /** 本轮项目名。只用于 peer_seeding 下提示标签堆了品牌词;缺省则跳过该检查。 */
+    projectName?: string;
   } = {},
 ): HarnessValidationIssue[] {
   const issues: HarnessValidationIssue[] = []; const knownEvidence = new Map(evidence.map((item) => [item.evidenceId, item]));
@@ -205,6 +207,25 @@ export function validateHarnessCandidates(
     if (!(execution.updateTriggers?.length) || execution.updateTriggers.some((item) => !item.trim())) add(index, "missing_update_triggers", "error", "缺少发布后更新触发条件。");
     if (!(execution.stopRules?.length) || execution.stopRules.some((item) => !item.trim())) add(index, "missing_stop_rules", "error", "缺少停止答复或转人工处理的规则。");
     if (!candidate.content.H.hashtags.length) add(index, "missing_hashtags", "error", "缺少发布标签。");
+    /*
+     * 标签堆品牌词只给 WARNING,不阻断。
+     *
+     * 依据:67 篇真实对标语料里无一篇标签带品牌名,全是「#成都眼袋」这类品类词加城市词。
+     * 品牌词一出现,帖子立刻不像素人发的。
+     *
+     * 判据拿本轮项目名做子串比对,不维护关键词表 —— 表会过期,而项目名一定是当前的。
+     * 用 WARNING 而非 ERROR 的理由:项目名可能恰好含通用品类词(项目就叫「眼袋」的情况),
+     * 子串比对会把正常的品类标签误判成品牌堆砌。给提示、让人自己判断,比硬拦误伤更划算。
+     *
+     * brand_voice 不查:机构以自己的口吻发布时,标签带品牌名是正常且应当的。
+     */
+    if (peerSeeding && constraints.projectName?.trim()) {
+      const projectName = constraints.projectName.trim();
+      const branded = candidate.content.H.hashtags.filter((tag) => tag.includes(projectName));
+      if (branded.length) {
+        add(index, "brand_hashtag", "warning", `标签里出现了项目名（${branded.join("、")}）。素人代发的标签更接近品类词和城市词，品牌词会让帖子显得像官方账号发的。`);
+      }
+    }
     if (!candidate.content.Cref.threads.length) add(index, "missing_comment_threads", "error", "缺少模拟问答线程。");
     const normalizedTitle = n.title.replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
     if (expectedCount > 1 && normalizedTitle && titles.has(normalizedTitle)) add(index, "duplicate_title", "error", "多个候选不能使用相同标题。");
