@@ -59,13 +59,14 @@ test('quickCandidateFields keeps only usable copy fields', () => {
   assert.equal((view as any).gapCoverageLedger, undefined);
   assert.equal((view.comments[0] as any).primaryGapId, undefined);
   assert.equal((view.comments[0] as any).densityProxy, undefined);
-  assert.equal((view.comments[0] as any).postingIdentity, undefined);
+  // postingIdentity 是仿真预览正确署名所需的最小发布字段，不再当作可丢弃审计数据。
+  assert.equal((view.comments[0] as any).postingIdentity, 'author');
 });
 
 // 身份三字段必须透传:创作区的仿真预览靠它们区分「机构答复」与「读者接话」。
 // 丢掉 threadKind 的后果不是少个徽标,而是 reader_exchange 的读者互聊被署名成机构发言,
 // 撞上方法论禁止假冒消费者那条红线。
-test('quickCandidateFields 透传 threadKind / displayName / replyDisplayName', () => {
+test('quickCandidateFields 透传线程形态、读者昵称与机构答复身份', () => {
   const view = quickCandidateFields({
     ...fullCandidate,
     comments: [
@@ -75,6 +76,8 @@ test('quickCandidateFields 透传 threadKind / displayName / replyDisplayName', 
         threadKind: 'reader_exchange',
         displayName: '打呼的小海豹',
         replyDisplayName: '冰美式续杯',
+        postingIdentity: 'expert',
+        surfaceRoleCard: { replyDisplayRole: '项雄院长' },
         followUps: [],
       },
     ],
@@ -82,6 +85,8 @@ test('quickCandidateFields 透传 threadKind / displayName / replyDisplayName', 
   assert.equal(view.comments[0].threadKind, 'reader_exchange');
   assert.equal(view.comments[0].displayName, '打呼的小海豹');
   assert.equal(view.comments[0].replyDisplayName, '冰美式续杯');
+  assert.equal(view.comments[0].postingIdentity, 'expert');
+  assert.equal(view.comments[0].surfaceRoleCard?.replyDisplayRole, '项雄院长');
 });
 
 test('quickCandidateFields marks publishable=false when validation invalid', () => {

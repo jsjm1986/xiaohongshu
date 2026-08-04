@@ -21,6 +21,7 @@ import type {
 import { evaluatePlanToCopyAlignment, isProhibitiveBoundary } from "./artifacts.js";
 import { conservativeEvidenceSupport } from "./knowledge.js";
 import { assertModelJsonComplexity } from "./model.js";
+import { guardedReplyIdentitiesForQuestion, questionMatchesPlannedGap } from "./planning.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -95,6 +96,46 @@ export function commentThreadFunction(value: unknown): ContentPackageContent["Cr
 /** Lenient optional-field read: trim a non-empty string, otherwise treat it as absent. */
 function optionalTrimmedText(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+const commentUtteranceModes = new Set([
+  "direct_question", "shared_concern", "experience_fragment", "counterexample",
+  "social_reaction", "detail_spotter", "knowledge_translation", "identity_route", "service_answer",
+]);
+
+/**
+ * 可见角色卡的白名单解析。身份校验依赖 replyDisplayRole；若解析阶段把它丢掉，
+ * “publisher=楼主”这类历史脏数据会在校验前消失，形成旁路。其余字段仍要求完整，
+ * 不接受任意对象透传。
+ */
+function surfaceRoleCard(value: unknown): ContentPackageContent["Cref"]["threads"][number]["surfaceRoleCard"] {
+  if (!isRecord(value)) return undefined;
+  const required = [
+    "displayRole", "relationToHost", "identityCue", "situationCue", "motive",
+    "knowledgePosition", "speechPattern", "interactionHook", "permittedContribution", "replyDisplayRole",
+  ] as const;
+  if (!required.every((key) => typeof value[key] === "string")) return undefined;
+  const lexicalCues = stringArray(value.lexicalCues);
+  const targetChars = value.targetChars;
+  if (!lexicalCues || !commentUtteranceModes.has(String(value.utteranceMode))
+    || !Array.isArray(targetChars) || targetChars.length !== 2
+    || !targetChars.every((item) => typeof item === "number" && Number.isFinite(item) && item >= 0)) return undefined;
+  return {
+    displayRole: String(value.displayRole).trim(),
+    relationToHost: String(value.relationToHost).trim(),
+    identityCue: String(value.identityCue).trim(),
+    situationCue: String(value.situationCue).trim(),
+    motive: String(value.motive).trim(),
+    knowledgePosition: String(value.knowledgePosition).trim(),
+    speechPattern: String(value.speechPattern).trim(),
+    lexicalCues,
+    interactionHook: String(value.interactionHook).trim(),
+    permittedContribution: String(value.permittedContribution).trim(),
+    utteranceMode: value.utteranceMode as NonNullable<ContentPackageContent["Cref"]["threads"][number]["surfaceRoleCard"]>["utteranceMode"],
+    targetChars: [Number(targetChars[0]), Number(targetChars[1])],
+    replyDisplayRole: String(value.replyDisplayRole).trim(),
+    ...(value.orgSide === true ? { orgSide: true } : {}),
+  };
 }
 
 function roleCard(value: unknown): ContentPackageContent["Cref"]["threads"][number]["roleCard"] {
@@ -475,6 +516,15 @@ function parseContent(value: unknown): ContentPackageContent {
       densityProxy: densityProxy(thread.densityProxy),
       replyPlan: replyPlan(thread.replyPlan),
       discoveryPlan: discoveryPlan(thread.discoveryPlan),
+      surfaceRoleCard: surfaceRoleCard(thread.surfaceRoleCard),
+      replySurfaceRoleCard: surfaceRoleCard(thread.replySurfaceRoleCard),
+      displayName: optionalTrimmedText(thread.displayName),
+      replyDisplayName: optionalTrimmedText(thread.replyDisplayName),
+      threadKind: thread.threadKind === "reader_exchange"
+        ? "reader_exchange" as const
+        : thread.threadKind === "organic_reaction"
+          ? "organic_reaction" as const
+          : thread.threadKind === "org_answer" ? "org_answer" as const : undefined,
       ...scenarioMetadata(thread),
     };
   });
@@ -1513,6 +1563,9 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
   // long-term follow-up prototype) leaves this check inactive.
   const hostDeclaresIntent = hostIntentPattern.test(draft.content.N.body)
     && !claimsFirstPersonCompletion(draft.content.N.body);
+  const plannedThreadById = new Map(
+    (input.orchestrationPlan?.dialogueThreads ?? []).map((thread) => [thread.id, thread]),
+  );
   for (const thread of draft.content.Cref.threads) {
     // 读者互动层:T1 机构问答(缺省)/ T2 读者互聊 / T3 漂浮短反应。
     const threadKind = commentThreadKindOf(thread);
@@ -1550,6 +1603,38 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     // P4-19: the answer side must carry an accountable publisher-side identity.
     if (!accountablePostingIdentities.has(thread.postingIdentity)) {
       add("comment_identity_violation", "error", "Cref", `Thread ${thread.id} posting identity "${thread.postingIdentity}" is not an accountable publisher-side identity (publisher/brand/staff/expert).`);
+    }
+    // publisher 是明确的项目方账号，不是正文叙事人物。历史错误合同曾把它强制
+    // 显示成“楼主”，导致“我们是门诊 / 发照片评估”等机构话术看起来由普通
+    // 消费者楼主说出。只要最终成品仍使用叙事身份别名，就直接阻断发布；上游路由、
+    // 模型提示词或历史数据任何一层回归，都不能越过这道成品门禁。
+    const replyDisplayRole = thread.surfaceRoleCard?.replyDisplayRole?.trim() ?? "";
+    if (threadKind === "org_answer" && thread.postingIdentity === "publisher"
+      && /^(?:楼主|楼主本人|博主|博主本人|作者本人)$/u.test(replyDisplayRole)) {
+      add("publisher_narrative_identity_alias", "error", "Cref", `Thread ${thread.id} uses narrative-person alias “${replyDisplayRole}” for an institutional publisher answer; label it as an explicit project publishing account instead.`);
+    }
+    // 身份与角色在规划期已经冻结。成稿层只核对，不根据可见问题重新映射：
+    // 任一模型阶段、修复阶段或历史兼容层改写 postingIdentity / replyDisplayRole，
+    // 都必须阻断发布，而不是静默“修回去”后掩盖串台。
+    const plannedThread = plannedThreadById.get(thread.id);
+    if (plannedThread && thread.postingIdentity !== plannedThread.postingIdentity) {
+      add("reply_identity_plan_drift", "error", "Cref", `Thread ${thread.id} changed frozen postingIdentity from “${plannedThread.postingIdentity}” to “${thread.postingIdentity}”.`);
+    }
+    const plannedReplyDisplayRole = plannedThread?.surfaceRoleCard?.replyDisplayRole?.trim() ?? "";
+    if (plannedThread && replyDisplayRole !== plannedReplyDisplayRole) {
+      add("reply_display_role_plan_drift", "error", "Cref", `Thread ${thread.id} changed frozen replyDisplayRole from “${plannedReplyDisplayRole || "(empty)"}” to “${replyDisplayRole || "(empty)"}”.`);
+    }
+    const plannedGap = input.orchestrationPlan?.gapPlanningCards?.find((card) => card.gapId === plannedThread?.primaryGapId);
+    if (plannedThread && plannedGap) {
+      const guardedIdentities = guardedReplyIdentitiesForQuestion(
+        thread.question,
+        input.projectBlueprint?.claimPolicy.rules ?? [],
+      );
+      const introducesConflictingResponsibility = [...guardedIdentities]
+        .some((identity) => identity !== plannedThread.postingIdentity);
+      if (!questionMatchesPlannedGap(thread.question, plannedGap) || introducesConflictingResponsibility) {
+        add("reply_question_plan_drift", "error", "Cref", `Thread ${thread.id} changed the frozen primary question responsibility for gap “${plannedGap.label}”; rewrite the question within the planned gap instead of changing the responder.`);
+      }
     }
     // 追问层级(方法论《问题—答复—追问的最小结构》L0—L3):只做**结构**判断,
     // 不判断"这一轮是否真的在补条件"——那是语义,归模型。两条结构规则:

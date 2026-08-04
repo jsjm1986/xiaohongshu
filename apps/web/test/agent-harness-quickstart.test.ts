@@ -11,11 +11,13 @@ test('Agent 快速开始默认已有推荐选择，不要求用户填写主题',
   const input = resolveHarnessQuickStart({ projectId: 'p1', approvedImageAssetIds: ['a1', 'a2'] });
   assert.equal(input.topicMode, 'agent_discovery');
   assert.equal(input.methodProfileId, DEFAULT_HARNESS_METHOD_ID);
-  assert.equal(input.audienceStage, 'collecting');
-  assert.equal(input.entryPoint, '搜索与常规信息收集');
-  assert.equal(input.bodyLength, 'medium');
+  assert.equal(input.creativeIntent, 'project_value');
+  assert.equal(input.audienceStage, 'discovering');
+  assert.equal(input.entryPoint, '推荐流中的状态与生活线索');
+  assert.equal(input.bodyLength, 'short');
   assert.equal(input.topic, undefined, '自主发现模式不应伪造主题字符串');
-  assert.ok(input.goal);
+  assert.match(input.goal ?? '', /种草成品/u);
+  assert.match(input.tone ?? '', /不写说明书/u);
   assert.ok(input.audience);
   assert.ok(input.entryPoint);
   assert.ok(input.tone);

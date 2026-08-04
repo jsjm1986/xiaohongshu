@@ -50,12 +50,11 @@ import {
 import type { ModelProvider } from "./model.js";
 import { buildParameterDiagnostics, compileGenerationParameters } from "./parameters.js";
 import {
-  applyReplyIdentityAssignments,
   assignCommentDisplayName,
   diagnoseAccountableIdentities,
-  buildReplyIdentityAssignmentBrief,
-  parseReplyIdentityAssignments,
+  guardedReplyIdentitiesForQuestion,
   planTopicOrchestrations,
+  questionMatchesPlannedGap,
   rankTopicOpportunities,
   createCoverageSignature,
 } from "./planning.js";
@@ -63,7 +62,6 @@ import {
   buildClaimJudgePrompt,
   buildKnowledgeAnchorReviewPrompt,
   buildRepairPrompt,
-  buildReplyIdentityAssignmentPrompt,
   buildStagedCommentGrowthPrompt,
   buildStagedCommentReadersPrompt,
   buildStagedCorePrompt,
@@ -1020,9 +1018,25 @@ function deterministicDraft(
     const threadKind = planned?.threadKind ?? "org_answer";
     const organicReactionTable = Object.fromEntries(utteranceModePool.map((mode, modeIndex) =>
       [mode, ["蹲一个", "姐妹我也是", "码住慢慢看", "先收藏了", "看看后续怎么说"][modeIndex % 5]!]));
-    const question = threadKind === "organic_reaction"
+    const generatedQuestion = threadKind === "organic_reaction"
       ? pickDistinct(organicReactionTable, usedNaturalQuestions, "蹲一个")
       : pickDistinct(questions, usedNaturalQuestions, rawQuestion);
+    // 无模型降级稿也遵守与阶段化生成相同的冻结主问题合同。通用人物模板可能只写
+    // “这个怎么确认”，无法证明仍在原 gap 上；此时把 gap 标签自然带回可见问题，
+    // 而不是等最终校验报错。T3 仍保持短反应，只保留一个主 gap 锚点。
+    const anchoredQuestion = gapCard && planned && !questionMatchesPlannedGap(generatedQuestion, gapCard)
+      ? threadKind === "organic_reaction"
+        ? `${gapCard.label}也蹲一个`
+        : `关于${gapCard.label}，${generatedQuestion}`
+      : generatedQuestion;
+    // 同一主 gap 可以有多条社会位置不同的评论，但不能生成完全相同的问题。
+    // 去重必须发生在“补回主 gap 锚点”之后，否则多个通用模板会被锚定成同一句。
+    const questionContexts = ["第一次了解时，", "拿不同选择比较时，", "准备下一步时，", "如果更在意风险，"];
+    const question = usedNaturalQuestions.has(comparable(anchoredQuestion))
+      ? threadKind === "organic_reaction"
+        ? `${gapCard?.label ?? shortGapCore}${["同问", "也想知道", "先码住", "等后续"][index % 4]}`
+        : `${questionContexts[index % questionContexts.length]}${anchoredQuestion}`
+      : anchoredQuestion;
     usedNaturalQuestions.add(comparable(question));
     const answer = threadKind === "organic_reaction"
       ? ""
@@ -1958,7 +1972,7 @@ export class ContentGenerationAgent implements GenerationEngine {
     const stageIssues: ContentValidationIssue[] = [];
     let draft: GenerationDraft;
     if (this.provider && useProvider) {
-      const promptInput = {
+      let promptInput = {
         config: input.config,
         formulaVersion: input.formulaVersion,
         knowledge: context,
@@ -2002,50 +2016,8 @@ export class ContentGenerationAgent implements GenerationEngine {
       for (const message of diagnoseAccountableIdentities(input.planningContext?.projectBlueprint)) {
         stageIssues.push({ code: "accountable_identity_incomplete", severity: "warning", channel: "Cref", message, repairable: false });
       }
-      // 三身份生态:阶段 2 开头先做 AI 答复身份分配(每候选 1 次轻量调用,
-      // seed 可复现)。规划层已按兜底表落位;AI 结果经护栏校验(price/
-      // location/schedule 线程强制 staff,缺失/非法回落兜底表)后覆盖
-      // postingIdentity,并逐身份强制 replyDisplayRole。调用失败/输出非法时
-      // 整体保留兜底表,记 warning 进 stageIssues,不阻断候选。
-      try {
-        const claimRules = input.planningContext?.projectBlueprint?.claimPolicy.rules ?? [];
-        const assignmentPrompt = buildReplyIdentityAssignmentPrompt(
-          buildReplyIdentityAssignmentBrief(orchestrationPlan.dialogueThreads, orchestrationPlan.gapPlanningCards ?? [], claimRules),
-        );
-        const assignmentResponse = await this.provider.generate({
-          messages: assignmentPrompt.messages,
-          responseSchema: assignmentPrompt.responseSchema,
-          schemaName: "reply_identity_assignment",
-          model: input.config.model.model,
-          seed: seed + 6,
-          temperature: Math.min(input.config.model.temperature, 0.2),
-          maxOutputTokens: Math.min(input.config.model.maxOutputTokens, 2_000),
-          metadata: { jobId: input.jobId, candidateIndex, purpose: "assign_reply_identities", stage: 1.9 },
-        });
-        const applied = applyReplyIdentityAssignments(
-          orchestrationPlan.dialogueThreads,
-          orchestrationPlan.gapPlanningCards ?? [],
-          parseReplyIdentityAssignments(assignmentResponse.text),
-          claimRules,
-          input.planningContext?.projectBlueprint,
-          orchestrationPlan.personaScenePlan?.commentCast ?? [],
-        );
-        for (const message of applied.warnings) {
-          stageIssues.push({ code: "reply_identity_assignment_adjusted", severity: "warning", channel: "Cref", message, repairable: false });
-        }
-        orchestrationPlan = { ...orchestrationPlan, dialogueThreads: applied.threads };
-      } catch (error) {
-        stageIssues.push({
-          code: "reply_identity_assignment_failed",
-          severity: "warning",
-          channel: "Cref",
-          message: `AI 答复身份分配失败，全部线程按确定性兜底表落位：${error instanceof Error ? error.message : String(error)}`,
-          repairable: false,
-        });
-      }
-      // 阶段2A-R 读者侧(1 次):全部线程的 question 与 T2 读者互聊的 answer。
-      // 读者上下文与机构身份整体隔离——不含助理/IP 定义、路由逻辑、证据原文
-      // 与编排元信息;开口人物由规划层分配,模型不选角(无 roleIndex)。
+      // 阶段2A-R 生成读者侧可见问题。每条线程的 gap、问题职责、答复身份与展示
+      // 角色均已由规划器冻结；模型必须在合同内措辞，不能通过改写问题来换答复人。
       const readersPrompt = buildStagedCommentReadersPrompt(promptInput, core);
       const readersResponse = await this.provider.generate({
         messages: readersPrompt.messages,
@@ -2057,11 +2029,36 @@ export class ContentGenerationAgent implements GenerationEngine {
         maxOutputTokens: input.config.model.maxOutputTokens,
         metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_comment_readers", stage: 2 },
       });
-      const readerSide = parseStagedCommentReaders(readersResponse.text);
-      if (readerSide.threads.length !== orchestrationPlan.dialogueThreads.length) {
-        throw new Error(`Staged comment output returned ${readerSide.threads.length} threads; expected ${orchestrationPlan.dialogueThreads.length}.`);
+      const parsedReaderSide = parseStagedCommentReaders(readersResponse.text);
+      if (parsedReaderSide.threads.length !== orchestrationPlan.dialogueThreads.length) {
+        throw new Error(`Staged comment output returned ${parsedReaderSide.threads.length} threads; expected ${orchestrationPlan.dialogueThreads.length}.`);
       }
-      // 阶段2A-O 机构答复(三身份:publisher 楼主/staff 助理/expert 机构 IP,
+      const gapCardById = new Map((orchestrationPlan.gapPlanningCards ?? []).map((card) => [card.gapId, card]));
+      const claimRules = input.planningContext?.projectBlueprint?.claimPolicy.rules ?? [];
+      const readerSide = {
+        ...parsedReaderSide,
+        threads: parsedReaderSide.threads.map((thread, index) => {
+          const planned = orchestrationPlan.dialogueThreads[index]!;
+          const gap = gapCardById.get(planned.primaryGapId);
+          if (!gap) return thread;
+          const guardedIdentities = guardedReplyIdentitiesForQuestion(thread.question, claimRules);
+          const introducesConflictingResponsibility = [...guardedIdentities].some((identity) => identity !== planned.postingIdentity);
+          if (questionMatchesPlannedGap(thread.question, gap) && !introducesConflictingResponsibility) return thread;
+          stageIssues.push({
+            code: "reader_question_plan_drift",
+            severity: "warning",
+            channel: "Cref",
+            message: `线程 ${planned.id} 的读者问题偏离冻结主问题，已回退为规划期问题原文；答复身份保持 ${planned.postingIdentity} 不变。`,
+            repairable: false,
+          });
+          return { ...thread, question: gap.question.trim() || planned.roleCard.decisionTask.trim() };
+        }),
+      };
+
+      // postingIdentity、replyDisplayRole 与 routingReason 已在线程规划时冻结。
+      // 读者模型只负责在该线程 questionIntent / gap 职责内写可见问题；这里不再
+      // 根据成稿问题调用模型重分配，避免“先写问题、后换角色”的映射漂移。
+      // 阶段2A-O 机构答复(三身份:publisher 项目发布账号/staff 助理/expert 机构 IP,
       // 各≤1 次,该身份无线程则跳过):每次调用只见本角色身份卡与逐 gap 口径
       // scope,其他身份的任何信息不出现。每个调用独立 try/catch:失败或缺 id
       // 的线程回落 answerFromPlan 并记 warning(沿用 stageIssues 通道,不阻断候选)。

@@ -875,9 +875,13 @@ function commentNicknamePrefix(value: unknown): string {
  */
 function commentReplyOrgName(thread: JsonObject): string {
   const raw = text(asObject(thread.surfaceRoleCard).replyDisplayRole).trim();
-  if (!raw) return '';
-  if (/^[a-z][a-z0-9_]*$/.test(raw)) return text(thread.postingIdentity) === 'staff' ? '机构助理' : '机构 IP';
-  return raw;
+  const invalid = !raw || /^[a-z][a-z0-9_]*$/u.test(raw)
+    || /^(?:楼主|楼主本人|博主|博主本人|作者本人)$/u.test(raw);
+  if (!invalid) return raw;
+  const identity = text(thread.postingIdentity);
+  return identity === 'staff' ? '机构助理'
+    : identity === 'expert' ? '机构 IP'
+      : identity === 'publisher' ? '项目发布账号' : '';
 }
 
 /**
@@ -905,8 +909,8 @@ function auditAnswerAttribution(thread: JsonObject): { label: string; identity: 
     };
   }
   return {
-    label: '回复',
-    identity: postingIdentityText(thread.postingIdentity) || '未标注',
+    label: '机构可追责身份回复',
+    identity: postingIdentityText(thread.postingIdentity) || '可追责发布者',
   };
 }
 

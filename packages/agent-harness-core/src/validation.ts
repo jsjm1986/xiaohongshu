@@ -1,24 +1,29 @@
 import type {
   HarnessCandidate, HarnessClaimAudit, HarnessEvidenceSource, HarnessImageSource, HarnessPublicationCheck, HarnessValidationIssue,
 } from "./types.js";
+import { HARNESS_BODY_LENGTH_TARGETS } from "./methods.js";
 
-const EXPERIENCE_CLAIM = /(亲测|我做过|我用过|我体验过|朋友做过|闺蜜做过|真实顾客|真实客户)/u;
+const EXPERIENCE_CLAIM = /(亲测|我做过|我用过|我体验过|朋友做过|闺蜜做过|真实顾客|真实客户|(?:我|朋友|闺蜜|同事|姐妹|家人).{0,12}(?:刚做|做完|做了|做的|术后|恢复))/u;
+const PUBLIC_AUDIT_LEAK = /(待人工审核|审核状态|证据编号|responseSla|\bSLA\b|发布计划|不代表已经发布|平台合规|终稿校对)/iu;
+const PUBLIC_SOURCE_META = /(项目资料(?:显示|表明|支持|中的?)|现有资料(?:显示|表明|支持|中的?)|根据(?:项目)?知识库|证据(?:显示|表明|支持)|本轮证据|evidence_section_)/iu;
+const UNSUPPORTED_POPULATION_LANGUAGE = /(很多人|大家都|最怕|最关心|普遍|通常用户|真实用户都)/u;
 const EVIDENCE_ERROR_CODES = new Set(["claim_audit_incomplete", "claim_audit_not_visible", "undeclared_project_fact", "claim_audit_evidence_mismatch", "empty_citation_statement", "citation_not_visible", "citation_without_evidence", "unknown_evidence", "unread_evidence", "non_factual_evidence"]);
 const ASSET_ERROR_CODES = new Set(["asset_decision_count", "asset_decision_duplicate", "unknown_asset_decision", "asset_decision_evidence", "asset_use_without_sequence", "asset_omit_still_used", "image_sequence_asset", "image_sequence_evidence"]);
 const EXECUTION_ERROR_CODES = new Set(["missing_response_sla", "missing_live_question_routes", "incomplete_live_question_route", "missing_update_triggers", "missing_stop_rules"]);
+const SOFT_MARKETING_ERROR_CODES = new Set([
+  "missing_marketing_strategy", "marketing_strategy_incomplete", "marketing_anchor_missing",
+  "marketing_anchor_order", "marketing_anchor_duplicate", "marketing_judgment_unchanged",
+  "marketing_bridge_without_reframe", "hard_sell_language",
+]);
+const HARD_SELL_LANGUAGE = /(限时|最后机会|赶紧|立刻下单|马上抢|错过(?:就|再等)|闭眼入|无脑冲|必做|必须做|不做就|全网最低|名额仅剩)/u;
 
 export function visibleCandidateText(candidate: HarnessCandidate): string {
   return [
-    candidate.content.N.coverHeadline, candidate.content.N.coverSubheadline, candidate.content.N.imageBrief,
-    ...candidate.content.N.imageSequence.flatMap((item) => [item.overlayText, item.direction]),
+    candidate.content.N.coverHeadline, candidate.content.N.coverSubheadline,
+    ...candidate.content.N.imageSequence.map((item) => item.overlayText),
     candidate.content.N.title, candidate.content.N.body, candidate.content.N.callToAction,
     ...candidate.content.H.hashtags, candidate.content.Cref.ownedFirstComment,
-    ...candidate.content.Cref.threads.flatMap((thread) => [thread.question, thread.answer, thread.clarification ?? "", thread.nextStep ?? "", thread.boundary ?? "", ...thread.followUps.flatMap((item) => [item.question, item.answer])]),
-    candidate.content.publishing.entryPoint, candidate.content.publishing.accountIdentity,
-    candidate.content.publishing.timingNote, candidate.content.publishing.interactionGoal,
-    candidate.content.publishing.responseSla ?? "",
-    ...(candidate.content.publishing.liveQuestionRoutes ?? []).flatMap((route) => [route.when, route.action]),
-    ...(candidate.content.publishing.updateTriggers ?? []), ...(candidate.content.publishing.stopRules ?? []),
+    ...candidate.content.Cref.threads.flatMap((thread) => [thread.question, thread.answer, ...thread.followUps.flatMap((item) => [item.question, item.answer])]),
   ].join("\n");
 }
 
@@ -27,8 +32,15 @@ export function publicationChecklistFor(candidate: HarnessCandidate, issues: Har
   const evidenceBlocked = [...errorCodes].some((code) => EVIDENCE_ERROR_CODES.has(code));
   const assetBlocked = [...errorCodes].some((code) => ASSET_ERROR_CODES.has(code));
   const executionBlocked = [...errorCodes].some((code) => EXECUTION_ERROR_CODES.has(code));
-  const simulationBlocked = ["comment_disclaimer", "missing_owned_first_comment", "empty_thread", "missing_thread_clarification", "missing_thread_next_step", "missing_thread_stop_reason"].some((code) => errorCodes.has(code));
+  const softMarketingBlocked = [...errorCodes].some((code) => SOFT_MARKETING_ERROR_CODES.has(code));
+  const simulationBlocked = [
+    "comment_disclaimer", "missing_owned_first_comment", "empty_thread", "missing_thread_clarification",
+    "missing_thread_next_step", "missing_thread_boundary", "missing_thread_stop_reason", "comment_thread_count",
+    "comment_topology", "comment_growth", "missing_thread_display_name", "reader_exchange_incomplete",
+    "organic_reaction_overbuilt", "organic_reaction_too_long",
+  ].some((code) => errorCodes.has(code));
   return [
+    { key: "soft_marketing", status: softMarketingBlocked ? "blocked" : "ready", note: softMarketingBlocked ? "用户欲望、认知翻转或项目承接没有形成完整软营销推进。" : "正文已形成顾虑进入、认知翻转、项目承接与低压力余味。" },
     { key: "evidence", status: evidenceBlocked ? "blocked" : "ready", note: evidenceBlocked ? "事实或证据绑定仍有阻断项。" : "可见事实已通过本轮证据校验。" },
     { key: "simulation_disclosure", status: simulationBlocked ? "blocked" : "ready", note: simulationBlocked ? "模拟互动披露或评论结构不完整。" : "首评归属与模拟问答披露已明确。" },
     { key: "execution_plan", status: executionBlocked ? "blocked" : "ready", note: executionBlocked ? "真实问题响应、分流、更新或停止规则不完整。" : "真实问题承接的响应、分流、更新与停止规则已齐备。" },
@@ -38,6 +50,20 @@ export function publicationChecklistFor(candidate: HarnessCandidate, issues: Har
   ];
 }
 
+function normalizedSimilarityTerms(value: string): Set<string> {
+  const normalized = value.replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
+  if (normalized.length < 2) return new Set(normalized ? [normalized] : []);
+  return new Set(Array.from({ length: normalized.length - 1 }, (_, index) => normalized.slice(index, index + 2)));
+}
+
+function jaccardSimilarity(left: string, right: string): number {
+  const a = normalizedSimilarityTerms(left); const b = normalizedSimilarityTerms(right);
+  if (!a.size || !b.size) return 0;
+  let intersection = 0;
+  for (const item of a) if (b.has(item)) intersection += 1;
+  return intersection / (a.size + b.size - intersection);
+}
+
 export function validateHarnessCandidates(
   candidates: HarnessCandidate[],
   evidence: HarnessEvidenceSource[],
@@ -45,7 +71,7 @@ export function validateHarnessCandidates(
   constraints: {
     mustInclude?: readonly string[]; forbidden?: readonly string[]; claimAudit?: HarnessClaimAudit;
     expectedCandidateCount?: number; runMode?: "original" | "retry" | "revision"; sourceCandidateIndex?: number;
-    revisionInstruction?: string; selectedImages?: readonly HarnessImageSource[];
+    revisionInstruction?: string; selectedImages?: readonly HarnessImageSource[]; bodyLength?: "short" | "medium" | "long";
   } = {},
 ): HarnessValidationIssue[] {
   const issues: HarnessValidationIssue[] = []; const knownEvidence = new Map(evidence.map((item) => [item.evidenceId, item]));
@@ -69,6 +95,33 @@ export function validateHarnessCandidates(
     }
     if (!candidate.concept.trim()) add(index, "missing_concept", "error", "缺少可审阅的创意命题。");
     const n = candidate.content.N;
+    const strategy = candidate.marketingStrategy;
+    if (!strategy) {
+      add(index, "missing_marketing_strategy", "error", "缺少可审阅的软营销心智策略。");
+    } else {
+      const strategyValues = Object.values(strategy).map((value) => value.trim());
+      if (strategyValues.some((value) => !value)) add(index, "marketing_strategy_incomplete", "error", "软营销策略必须写清用户欲望、隐藏卡点、旧判断、新判断、项目承接和低压力下一步。");
+      if (!["tension_first", "observation_first", "question_first"].includes(strategy.narrativePath)) add(index, "marketing_narrative_path", "error", "软营销策略必须声明有效的叙事路径。");
+      const anchors = [strategy.tensionAnchor, strategy.reframeAnchor, strategy.projectBridgeAnchor, strategy.openLoopAnchor];
+      if (new Set(anchors).size !== anchors.length) add(index, "marketing_anchor_duplicate", "error", "软营销四个正文锚点必须各自承担不同推进职责，不能重复一句话。");
+      const frozenEntryCopy = [n.coverHeadline, n.coverSubheadline, n.title, n.body].join("\n");
+      const frozenOpenCopy = [n.body, n.callToAction].join("\n");
+      const reframePosition = strategy.reframeAnchor ? n.body.indexOf(strategy.reframeAnchor) : -1;
+      const bridgePosition = strategy.projectBridgeAnchor ? n.body.indexOf(strategy.projectBridgeAnchor) : -1;
+      if (!strategy.tensionAnchor || !frozenEntryCopy.includes(strategy.tensionAnchor)
+        || reframePosition < 0 || bridgePosition < 0
+        || !strategy.openLoopAnchor || !frozenOpenCopy.includes(strategy.openLoopAnchor)) {
+        add(index, "marketing_anchor_missing", "error", "顾虑入口、认知翻转、项目承接和开放余味必须逐字落在各自允许的公开文案位置。");
+      } else if (reframePosition >= bridgePosition) {
+        add(index, "marketing_anchor_order", "error", "正文中的认知翻转必须早于项目承接，不能先卖项目再补判断标准。");
+      }
+      const bridgeGrounded = candidate.citations.some((citation) => citation.statement.includes(strategy.projectBridgeAnchor)
+        || strategy.projectBridgeAnchor.includes(citation.statement));
+      if (!bridgeGrounded) add(index, "marketing_bridge_ungrounded", "error", "项目承接必须与一条逐字证据声明重叠，不能用无引用的泛化卖点承接认知翻转。");
+      const normalizedOld = strategy.oldJudgment.replace(/[\s\p{P}\p{S}]+/gu, "");
+      const normalizedNew = strategy.newJudgment.replace(/[\s\p{P}\p{S}]+/gu, "");
+      if (!normalizedOld || normalizedOld === normalizedNew) add(index, "marketing_judgment_unchanged", "error", "种草正文必须完成一次真实的判断变化，不能只换句话重复原认知。");
+    }
     for (const [code, value, label] of [
       ["missing_cover_headline", n.coverHeadline, "封面主文案"], ["missing_cover_subheadline", n.coverSubheadline, "封面副文案"],
       ["missing_image_brief", n.imageBrief, "图片总任务"], ["missing_title", n.title, "标题"],
@@ -105,7 +158,25 @@ export function validateHarnessCandidates(
     const visible = visibleCandidateText(candidate);
     const audited = constraints.claimAudit?.claims.filter((claim) => claim.candidateIndex === candidate.candidateIndex) ?? [];
     for (const claim of audited) {
-      if (!claim.statement || !visible.includes(claim.statement)) { add(index, "claim_audit_not_visible", "error", "事实盘点返回的声明无法在可见内容中精确定位。"); continue; }
+      // The review model is instructed to copy exact spans. Compatible providers
+      // occasionally paraphrase despite that contract; a paraphrase is not a new
+      // visible claim and must not invalidate otherwise exact deterministic citations.
+      if (!claim.statement || !visible.includes(claim.statement)) {
+        const claimEvidence = [...new Set(claim.evidenceIds)].sort();
+        const matchesDeclaredCitation = claim.classification === "project_fact" && candidate.citations.some((citation) => {
+          const citationEvidence = [...new Set(citation.evidenceIds)].sort();
+          return visible.includes(citation.statement)
+            && claimEvidence.length > 0
+            && claimEvidence.length === citationEvidence.length
+            && claimEvidence.every((id, position) => id === citationEvidence[position]);
+        });
+        if (matchesDeclaredCitation) {
+          add(index, "claim_audit_paraphrase_ignored", "warning", "事实复核改写了已登记声明，已按相同证据集合回落到候选的逐字证据声明。");
+        } else {
+          add(index, "claim_audit_not_visible", "error", "事实盘点返回的声明无法在可见内容中精确定位，且不能对应到相同证据集合的候选声明。");
+        }
+        continue;
+      }
       if (claim.classification !== "project_fact") continue;
       const declared = candidate.citations.find((citation) => citation.statement === claim.statement);
       if (!declared) { add(index, "undeclared_project_fact", "error", `可见项目事实未在证据声明中登记：${claim.statement}`); continue; }
@@ -115,6 +186,16 @@ export function validateHarnessCandidates(
     for (const required of constraints.mustInclude ?? []) if (required && !visible.includes(required)) add(index, "required_content_missing", "error", `用户要求的内容未出现：${required}`);
     for (const prohibited of constraints.forbidden ?? []) if (prohibited && visible.includes(prohibited)) add(index, "forbidden_content", "error", `出现了用户禁止的内容：${prohibited}`);
     if (EXPERIENCE_CLAIM.test(visible)) add(index, "fabricated_experience", "error", "可见内容包含可能伪装真实经历或口碑的措辞。");
+    if (PUBLIC_AUDIT_LEAK.test(visible)) add(index, "audit_language_in_public_copy", "error", "公开文案混入了审核、SLA 或发布计划等后台语言，请只保留可直接阅读的成品表达。");
+    if (PUBLIC_SOURCE_META.test(visible)) add(index, "source_meta_in_public_copy", "error", "公开文案混入了“项目资料/证据”后台口吻，请直接自然表达已支持的项目事实。");
+    if (UNSUPPORTED_POPULATION_LANGUAGE.test(visible)) add(index, "unsupported_population_language", "warning", "公开文案使用了“很多人/最怕”等群体判断；没有总体证据时应改成直接问题或有边界的具体顾虑。");
+    if (HARD_SELL_LANGUAGE.test(visible)) add(index, "hard_sell_language", "error", "公开文案出现催促、稀缺或强迫成交措辞，不符合软营销边界。");
+    const effectiveLength = constraints.bodyLength ?? "medium";
+    const bodyChars = [...n.body.replace(/\s+/gu, "")].length;
+    const titleChars = [...n.title.replace(/\s+/gu, "")].length;
+    if (titleChars > 22) add(index, "title_shape_drift", "warning", "标题明显长于 70 篇参考语料的常见形态，请优先压缩到一个直接钩子。");
+    const bodyTarget = HARNESS_BODY_LENGTH_TARGETS[effectiveLength];
+    if (bodyChars < bodyTarget.min || bodyChars > bodyTarget.max) add(index, "body_shape_drift", "warning", `正文为 ${bodyChars} 字，偏离${effectiveLength === "short" ? "短" : effectiveLength === "medium" ? "中" : "长"}篇 ${bodyTarget.min}—${bodyTarget.max} 字的统一目标。`);
     for (const citation of candidate.citations) {
       if (!citation.statement.trim()) add(index, "empty_citation_statement", "error", "引用必须对应明确声明。");
       else if (!visible.includes(citation.statement)) add(index, "citation_not_visible", "error", `证据声明无法在可见内容中精确定位：${citation.statement}`);
@@ -144,19 +225,68 @@ export function validateHarnessCandidates(
       if (!image) add(index, "image_sequence_asset", "error", `逐图脚本引用了未选择的图片 ${item.assetId}。`);
       else if (!item.evidenceIds.includes(image.evidenceId) || !disclosedEvidenceIds.has(image.evidenceId)) add(index, "image_sequence_evidence", "error", `逐图脚本中的图片 ${item.assetId} 必须绑定已读批准观察证据。`);
     }
+    const typedThreads = candidate.content.Cref.threads.filter((thread) => thread.threadKind);
+    if (typedThreads.length) {
+      const kindCount = (kind: string) => typedThreads.filter((thread) => thread.threadKind === kind).length;
+      if (candidate.content.Cref.threads.length < 4 || candidate.content.Cref.threads.length > 6) add(index, "comment_thread_count", "error", "新评论关系网每套应有 4—6 条线程，避免只有一条 FAQ 或机械灌水。");
+      if (typedThreads.length !== candidate.content.Cref.threads.length || kindCount("org_answer") < 2 || kindCount("reader_exchange") < 1 || kindCount("organic_reaction") < 1) {
+        add(index, "comment_topology", "error", "新评论关系网必须混排至少 2 条机构答疑、1 条读者接话和 1 条短反应。");
+      }
+      if (!typedThreads.some((thread) => thread.threadKind !== "organic_reaction" && thread.followUps.length > 0)) add(index, "comment_growth", "error", "评论关系网至少应有一个由具体话头自然长出的二轮接话。");
+    }
     const threadIds = new Set<string>();
     for (const thread of candidate.content.Cref.threads) {
+      const threadKind = thread.threadKind ?? "org_answer";
       if (!thread.id.trim() || threadIds.has(thread.id)) add(index, "thread_id", "error", "评论线程 ID 必须非空且唯一。");
       threadIds.add(thread.id);
-      if (!thread.question.trim() || !thread.answer.trim()) add(index, "empty_thread", "error", "评论线程必须包含问题与直接回答。");
-      if (!thread.clarification?.trim()) add(index, "missing_thread_clarification", "error", "评论线程必须说明澄清内容或不可判断范围。");
-      if (!thread.nextStep?.trim()) add(index, "missing_thread_next_step", "error", "评论线程必须给出可核验的下一步。");
-      if (!thread.stopReason) add(index, "missing_thread_stop_reason", "error", "评论线程必须说明停止原因，避免机械追加追问。");
+      if (!thread.question.trim()) add(index, "empty_thread", "error", "评论线程必须包含可见内容。");
+      if (thread.threadKind && !thread.displayName?.trim()) add(index, "missing_thread_display_name", "error", "新评论线程需要一个仅用于展示的模拟读者昵称。");
+      if (threadKind === "org_answer") {
+        if (!thread.answer.trim()) add(index, "empty_thread", "error", "机构答疑必须包含直接回答。");
+        if (!thread.clarification?.trim()) add(index, "missing_thread_clarification", "error", "机构答疑必须说明澄清内容或不可判断范围。");
+        if (!thread.nextStep?.trim()) add(index, "missing_thread_next_step", "error", "机构答疑必须给出可核验的下一步。");
+        if (!thread.boundary?.trim()) add(index, "missing_thread_boundary", "error", "机构答疑必须在相关结论附近显示边界。");
+        if (!thread.stopReason) add(index, "missing_thread_stop_reason", "error", "机构答疑必须说明停止原因，避免机械追加追问。");
+      } else if (threadKind === "reader_exchange") {
+        if (!thread.answer.trim() || !thread.replyDisplayName?.trim()) add(index, "reader_exchange_incomplete", "error", "读者接话必须包含第二位模拟读者的昵称和接话内容。");
+      } else {
+        if (thread.answer.trim() || thread.followUps.length || thread.clarification?.trim() || thread.nextStep?.trim() || thread.boundary?.trim() || thread.replyDisplayName?.trim() || thread.evidenceIds.length) {
+          add(index, "organic_reaction_overbuilt", "error", "短反应只能保留一句模拟读者反应，不得伪造机构答复、证据或完整问答链。");
+        }
+        if ([...thread.question.replace(/\s+/gu, "")].length > 20) add(index, "organic_reaction_too_long", "error", "短反应应控制在 4—20 个字符左右。");
+      }
       for (const followUp of thread.followUps) {
         if (!followUp.kind) add(index, "missing_follow_up_kind", "error", "追问必须标明是新增追问还是反例。");
         if (!followUp.question.trim() || !followUp.answer.trim()) add(index, "empty_follow_up", "error", "追问或反例必须包含问题与答复。");
       }
       for (const evidenceId of thread.evidenceIds) if (!knownEvidence.has(evidenceId) || !disclosedEvidenceIds.has(evidenceId)) add(index, "thread_evidence", "error", `评论线程引用了未读取证据 ${evidenceId}。`);
+    }
+  }
+  if (expectedCount > 1 && candidates.length > 1) {
+    const narrativePaths = new Map<string, number>();
+    for (const candidate of candidates) {
+      const prior = narrativePaths.get(candidate.marketingStrategy?.narrativePath);
+      if (prior !== undefined) add(candidate.candidateIndex, "candidate_narrative_path_overlap", "error", `候选 ${prior + 1} 与候选 ${candidate.candidateIndex + 1} 使用了相同叙事路径。三套原稿必须分别从顾虑、观察和决策问题切入。`);
+      else narrativePaths.set(candidate.marketingStrategy?.narrativePath, candidate.candidateIndex);
+    }
+    for (let leftIndex = 0; leftIndex < candidates.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < candidates.length; rightIndex += 1) {
+        const left = candidates[leftIndex]!; const right = candidates[rightIndex]!;
+        const leftJudgment = left.marketingStrategy?.newJudgment.replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
+        const rightJudgment = right.marketingStrategy?.newJudgment.replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
+        if (leftJudgment && leftJudgment === rightJudgment) {
+          add(right.candidateIndex, "candidate_judgment_overlap", "warning", `候选 ${left.candidateIndex + 1} 与候选 ${right.candidateIndex + 1} 使用了相同认知翻转，三套方案的判断标准区分度不足。`);
+        }
+        const leftBridge = left.marketingStrategy?.projectBridge.replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
+        const rightBridge = right.marketingStrategy?.projectBridge.replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
+        if (leftBridge && leftBridge === rightBridge) {
+          add(right.candidateIndex, "candidate_bridge_overlap", "warning", `候选 ${left.candidateIndex + 1} 与候选 ${right.candidateIndex + 1} 承接了同一个项目价值点，请人工确认是否只是换写法。`);
+        }
+        const similarity = jaccardSimilarity(left.content.N.body, right.content.N.body);
+        if (similarity >= 0.72) {
+          add(right.candidateIndex, "candidate_body_similarity", "warning", `候选 ${left.candidateIndex + 1} 与候选 ${right.candidateIndex + 1} 正文相似度偏高（${Math.round(similarity * 100)}%），建议保留读者欲望或判断标准差异更大的版本。`);
+        }
+      }
     }
   }
   return issues;

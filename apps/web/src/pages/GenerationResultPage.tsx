@@ -61,6 +61,7 @@ import { resolveProductionArtifactView } from "../lib/image-production";
 import { resolveOpportunitySelectionAuditView } from "../lib/opportunity-rank";
 import { resolveReaderStateView } from "../lib/reader-state";
 import { generationProgressValue } from "../lib/quick-progress";
+import { generationDeliveryState } from "../lib/generation-delivery";
 import { resolveHistoricalTrendFitSnapshot } from "../lib/trend-fit";
 import { candidateToMarkdown, formatDate } from "../lib/utils";
 import { validationIssueLabel } from "../lib/validation-labels";
@@ -140,6 +141,7 @@ export function GenerationResultPage() {
     [job, selectedId],
   );
   const publishable = selected?.validation?.valid === true;
+  const deliveryState = useMemo(() => generationDeliveryState(job?.candidates), [job?.candidates]);
   const impactDetails = useMemo(
     () => {
       const normalized = normalizeImpactReport(
@@ -287,6 +289,49 @@ export function GenerationResultPage() {
         title="暂无候选内容"
         description="任务已完成，但没有可用的内容包。"
       />
+    );
+  if (deliveryState.allRejected)
+    return (
+      <div className="page result-page">
+        <Link to="/history" className="v2-back-link">
+          <ArrowLeft size={15} /> 返回历史
+        </Link>
+        <V2Hero
+          status={<>{job.projectName} · {job.mode === "simple" ? "简单模式" : "设置模式"} · {formatDate(job.completedAt, true)} · 选题方向:{job.topic}</>}
+          title="本次没有可交付候选"
+          actions={<Button onClick={() => navigate("/generate")} icon={<RefreshCcw size={16} />}>调整后重新生成</Button>}
+        />
+        <div className="generation-fallback-notice" role="alert">
+          <TriangleAlert size={18} />
+          <div>
+            <strong>3 个候选均未通过自动校验，仅保留诊断</strong>
+            <p>失败草稿的标题、正文和评论区不会作为成品展示，也不能复制或导出。请选择候选查看阻断原因，修正知识口径、角色配置或生成设置后重新生成。</p>
+          </div>
+        </div>
+        <section className="candidate-compare" aria-label="失败候选诊断">
+          <header>
+            <div><h2>候选诊断</h2><p>随机种子 {job.seed || "—"} · 草稿内容已隐藏</p></div>
+            <Badge tone="warning"><TriangleAlert size={13} />0 个候选可交付</Badge>
+          </header>
+          <div className="candidate-grid">
+            {job.candidates?.map((candidate, index) => {
+              const errors = candidate.validation?.issues.filter((issue) => issue.severity === "error").length ?? 0;
+              const warnings = candidate.validation?.issues.filter((issue) => issue.severity === "warning").length ?? 0;
+              return <button
+                type="button"
+                key={candidate.id}
+                className={`candidate-card ${candidate.id === selected.id ? "selected" : ""}`}
+                onClick={() => setSelectedId(candidate.id)}
+              >
+                <div className="candidate-card__top"><span>0{index + 1}</span><Badge tone="warning">未通过</Badge>{candidate.id === selected.id && <i><Check size={13} /></i>}</div>
+                <h3>候选 0{index + 1} · 诊断记录</h3>
+                <p>{errors} 个必须处理的问题 · {warnings} 个复核提醒</p>
+              </button>;
+            })}
+          </div>
+        </section>
+        {selected.validation && <ValidationSummaryCard candidate={selected} />}
+      </div>
     );
 
   return (
@@ -934,21 +979,18 @@ function identityLabel(value?: string) {
 }
 
 /**
- * 答复侧展示名:surfaceRoleCard.replyDisplayRole 原样显示;host_account /
- * assistant_account 这类内部 id 形态按 postingIdentity 显示通用文案
- * (publisher 楼主 / staff 机构助理 / expert 机构 IP),不裸露内部 id;历史包
- * 没有 surfaceRoleCard 时不显示(不出空徽标)。"楼主"是平台语境下"发帖账号"
- * 的事实用语,不表示顾客身份——身份性质由 orgAnswerIdentityBadge 表达。
+ * 答复侧展示名必须与 postingIdentity 同源。历史脏包把 institutional publisher
+ * 存成“楼主/博主/作者本人”时，保守显示“项目发布账号”，不能继续误导。
  */
 function replyOrgDisplayName(comment: Candidate["comments"][number]) {
   const raw = comment.surfaceRoleCard?.replyDisplayRole?.trim();
-  if (!raw) return undefined;
-  if (/^[a-z][a-z0-9_]*$/.test(raw)) {
-    return comment.postingIdentity === "staff" ? "机构助理"
-      : comment.postingIdentity === "publisher" ? "楼主"
-      : "机构 IP";
-  }
-  return raw;
+  const narrativeAlias = /^(?:楼主|楼主本人|博主|博主本人|作者本人)$/u.test(raw ?? "");
+  const internalRole = Boolean(raw && /^[a-z][a-z0-9_]*$/u.test(raw));
+  if (raw && !narrativeAlias && !internalRole) return raw;
+  return comment.postingIdentity === "staff" ? "机构助理"
+    : comment.postingIdentity === "expert" ? "机构 IP"
+      : comment.postingIdentity === "publisher" ? "项目发布账号"
+        : undefined;
 }
 
 function commentFunctionLabel(value?: string) {

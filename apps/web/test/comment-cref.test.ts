@@ -277,7 +277,7 @@ test("candidate markdown for v1.1 packages uses the two-part executive + audit l
 
   // Dialogue script keeps the four operator elements plus identity and follow-up pair.
   assert.match(executive, /- 提问：大概多少钱？/u);
-  assert.match(executive, /- 回复：我做的时候是这个区间，以当期确认为准。/u);
+  assert.match(executive, /- 回复：项目发布账号：我做的时候是这个区间，以当期确认为准。/u);
   assert.match(executive, /- 答复边界：价格以当期确认为准/u);
   assert.match(executive, /- 下一步：面诊时向医生核验/u);
   assert.match(executive, /- 可追责答复身份：发布账号（publisher）/u);
@@ -379,7 +379,7 @@ test("candidate markdown formats reader-exchange and organic-reaction threads by
   assert.match(markdown, /无需机构回复/u);
   assert.doesNotMatch(markdown, /历史脏答复|历史脏追问|历史脏回复/u);
   // 缺省 kind 的旧线程保持机构问答格式不变。
-  assert.match(markdown, /- 回复：以当期确认为准。/u);
+  assert.match(markdown, /- 回复：机构助理：以当期确认为准。/u);
   assert.match(markdown, /可追责答复身份：staff/u);
   assert.ok(!markdown.includes("undefined"));
 });
@@ -416,12 +416,12 @@ test("审计附录:没有 replyDisplayName 时仍不冒充机构,只说读者接
 
 test("审计附录:org_answer 与 threadKind 缺失的历史包保持机构口径", () => {
   const org = auditAnswerAttribution({ threadKind: "org_answer", postingIdentity: "staff" });
-  assert.equal(org.label, "楼主/可追责身份回复");
+  assert.equal(org.label, "机构可追责身份回复");
   assert.equal(org.identity, "staff");
 
   // 历史包没有 threadKind,按 org_answer 兜底——与其余判定同一套口径,行为不变。
   const legacy = auditAnswerAttribution({ postingIdentity: "publisher" });
-  assert.equal(legacy.label, "楼主/可追责身份回复");
+  assert.equal(legacy.label, "机构可追责身份回复");
   assert.equal(legacy.identity, "发布账号（publisher）");
 
   // 身份缺失时仍要有个可读兜底,不能出 undefined

@@ -55,12 +55,19 @@ export interface HarnessImageSource {
 
 export type HarnessFollowUpKind = "follow_up" | "counterexample";
 export type HarnessThreadStopReason = "answered" | "no_new_gap" | "evidence_boundary" | "professional_review";
+export type HarnessThreadKind = "org_answer" | "reader_exchange" | "organic_reaction";
 
 export interface HarnessCommentThread {
   id: string;
+  /** Optional only for historical runs; every new package declares the visible topology. */
+  threadKind?: HarnessThreadKind;
+  /** Display-only simulated reader name. Never evidence or a real account identity. */
+  displayName?: string;
+  /** Display-only second simulated reader name for reader_exchange. */
+  replyDisplayName?: string;
   /** The simulated reader's concrete residual question. */
   question: string;
-  /** Direct answer first; conditions and caveats may follow. */
+  /** Org answer, reader-B reply, or empty for organic_reaction. */
   answer: string;
   /** Optional: only continue when a new gap or counterexample exists. */
   followUps: Array<{ kind?: HarnessFollowUpKind; question: string; answer: string }>;
@@ -99,9 +106,26 @@ export interface HarnessAssetDecision {
   evidenceIds: string[];
 }
 
+export interface HarnessSoftMarketingStrategy {
+  /** Closed narrative route used to keep the three originals structurally distinct. */
+  narrativePath: "tension_first" | "observation_first" | "question_first";
+  readerDesire: string;
+  hiddenTension: string;
+  oldJudgment: string;
+  newJudgment: string;
+  projectBridge: string;
+  lowPressureNextStep: string;
+  tensionAnchor: string;
+  reframeAnchor: string;
+  projectBridgeAnchor: string;
+  openLoopAnchor: string;
+}
+
 export interface HarnessCandidate {
   candidateIndex: 0 | 1 | 2;
   concept: string;
+  /** Frozen, reviewable soft-marketing logic; reframe must precede the grounded bridge. */
+  marketingStrategy: HarnessSoftMarketingStrategy;
   content: {
     H: { hashtags: string[] };
     N: {
@@ -160,7 +184,7 @@ export interface HarnessClaimAudit {
 }
 
 export interface HarnessPublicationCheck {
-  key: "evidence" | "simulation_disclosure" | "execution_plan" | "asset_authorization" | "platform_compliance" | "final_proofread";
+  key: "soft_marketing" | "evidence" | "simulation_disclosure" | "execution_plan" | "asset_authorization" | "platform_compliance" | "final_proofread";
   status: "ready" | "blocked" | "manual_review";
   note: string;
 }

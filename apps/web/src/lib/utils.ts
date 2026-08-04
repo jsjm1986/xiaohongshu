@@ -76,10 +76,12 @@ const candidateToV11TwoPartMarkdown = (candidate: Candidate) => {
   const nicknamePrefix = (name?: string) => (name?.trim() ? `${name.trim()}：` : '');
   const replyOrgName = (item: Candidate['comments'][number]): string => {
     const raw = item.surfaceRoleCard?.replyDisplayRole?.trim() ?? '';
-    if (!raw) return '';
-    // assistant_account / host_account 这类内部 id 形态只显示通用文案,不裸露内部 id。
-    if (/^[a-z][a-z0-9_]*$/.test(raw)) return item.postingIdentity === 'staff' ? '机构助理' : '机构 IP';
-    return raw;
+    const invalid = !raw || /^[a-z][a-z0-9_]*$/u.test(raw)
+      || /^(?:楼主|楼主本人|博主|博主本人|作者本人)$/u.test(raw);
+    if (!invalid) return raw;
+    return item.postingIdentity === 'staff' ? '机构助理'
+      : item.postingIdentity === 'expert' ? '机构 IP'
+        : item.postingIdentity === 'publisher' ? '项目发布账号' : '';
   };
   const ownedFirstComment = candidate.commentOwnedFirstComment
     ? `## 可发布首评参考\n\n> 【可发布首评参考】由发布账号（publisher）身份发布：${candidate.commentOwnedFirstComment}\n\n`

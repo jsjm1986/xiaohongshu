@@ -2,8 +2,7 @@ import { createHash } from "node:crypto";
 import { estimateTokens } from "./knowledge.js";
 import { commentStageInstructions, parameterInstructionsForChannels } from "./parameters.js";
 import { directGenerationFormulas, resolveFormulaExecution } from "./formula.js";
-import { REPLY_IDENTITY_ASSIGNMENT_JSON_SCHEMA, resolveAssistantReplyDisplayRole, resolveIpDisplayRole } from "./planning.js";
-import type { ReplyIdentityAssignmentBrief } from "./planning.js";
+import { resolveAssistantReplyDisplayRole, resolveIpDisplayRole } from "./planning.js";
 import type {
   CommentPersonaRole,
   CommentSurfaceRoleCard,
@@ -683,7 +682,7 @@ ${commonPrefix}
 - 为每一条用户可见的事实声明单独建立 reasoning 台账项；location 和 occurrence 必须共同指向它实际出现的唯一字段，statement 必须是该字段中的逐字连续子串，不能只写摘要或隐藏推理。评论项必须写 threadId，追问还必须写 followUpIndex，禁止用另一线程的同名短句复用证据。
 - fact 的每个 sourceSpans.quote 必须是对应 evidenceId 所指证据中的逐字连续原文；evidenceIds 必须与 sourceSpans 中去重后的 evidenceId 完全一致。非事实项可以 sourceSpans=[]；没有依据则列入 unknowns 或明确写成 hypothesis，不能伪造引文。
 - 根级 evidenceIds 必须等于全部 reasoning.sourceSpans 使用的证据 ID 去重集合；不可把“本次看过但未支持任何可见声明”的上下文文件塞进证据台账。
-- personaScenePlan 是可见成品的第一写作合同。标题、图片、正文和楼主回复必须属于同一个人物、同一个阶段、同一件刚发生的小事；人物与生活事件是明确的创作情境，不是事实证据。
+- personaScenePlan 是图文叙事的第一写作合同。标题、图片和正文必须属于同一个人物、同一个阶段、同一件刚发生的小事；人物与生活事件是明确的创作情境，不是事实证据。评论中的项目发布账号、机构助理和机构 IP 是另行署名的机构答复方，绝不能伪装成这位叙事人物。
 - 正文自然、具体、短句优先；生活细节可以按 personaScenePlan 拟人创作，但不能把项目结果、消费记录或他人口碑写成已证实事实，也不要故意制造错别字。
 ${compiledParameterInstruction}
 - selectedTopicOpportunity 是本次已选定选题，不得擅自换题。必须实际执行 orchestrationPlan 的 strategy、sequence、gapPlanningCards、imagePlan 和 dialogueThreads；候选差异来自完整结构，而不只是换词。
@@ -691,7 +690,7 @@ ${compiledParameterInstruction}
 - 图片只允许把 imageAnalyses.observedFacts/visibleText 当作可见事实；inferredSignals 必须标为推断，unknowns 不能代填。N.imageBrief 要落实 imagePlan，而不是给通用配图建议。
 - 只把最关键、当下必须知道的一两个条件放正文；其余信息由评论人物在真实关系中自然带出。不能把所有知识缺口塞成正文清单。
 - 评论区不是 FAQ。personaScenePlan.commentCast 是可选的社会位置池；模型根据正文话头与缺口为每个根评论现场选角，不按顺序轮流填空。question 可以是提问、同款担心、经验片段、反例、熟人反应或几个字的情绪回应，不要求每条都是问句。
-- 评论人物至少形成三种社会位置，并至少含一条带身份/处境入口的短句和一条谨慎反例；允许少量纯反应。楼主回复必须延续 personaScenePlan.host 的声音。
+- 评论人物至少形成三种社会位置，并至少含一条带身份/处境入口的短句和一条谨慎反例；允许少量纯反应。机构答复必须使用明确机构身份，不继承 personaScenePlan.host 的消费者或生活记录口吻。
 - answer 通常只写一小句或两小句。replyPlan 的五项只是后台可用信息库存，只有当前回复确实需要时才取其中一两项，严禁每条回复把五项全部展开。
 - 每条线程仍保留一个 primaryGapId 供内部追踪，auxiliaryGapIds 最多两个；但公开短句优先通过预设、语境和关系暗示信息，不显示字段、清单或审计语言。
 - followUps服从整片评论区的multiTurnTarget分布，不服从逐线程固定配额；只有上一句出现了可接的具体词、细节或现实条件才继续。评论总行数和单行长度优先服从personaScenePlan.surfaceTargets，长短必须不齐。
@@ -907,6 +906,7 @@ function readerThreadSpecs(input: GenerationPromptInput): Array<Record<string, u
       id: thread.id,
       threadKind,
       gap标签: gapLabelById.get(thread.primaryGapId) ?? thread.primaryGapId,
+      问题职责: thread.questionIntent,
       开口人物: readerPersona(thread.surfaceRoleCard),
       // 方法论《simulated_reader 角色》表:本线程人物那一条"禁止代替的证据"随规格下发(标注制,非名额制)。
       ...(READER_ROLE_EVIDENCE_PROHIBITIONS[thread.personaRole]
@@ -936,7 +936,7 @@ export function buildStagedCommentReadersPrompt(
 
 整体目标：做出一个像样本的评论关系网，而不是多份FAQ。评论者不是“完成信息任务的角色”，而是带着自己的处境插一句；短问、短答、准备动作、反例、看图反应长短不齐，让信息在互动中被读者自己拼出来。
 
-逐线程读者规格（每条线程的开口人物已由规划分配，只用该人物的声音开口，不得换人、不得按角色池顺序轮流填空；开口人物缺省的线程，用角色池中最贴近其 gap 标签的读者声音）：
+逐线程读者规格（开口人物与问题职责已由规划分配并冻结。只用指定人物的声音，在“问题职责”范围内开口；不得换人、不得越过职责换题。答复身份由规划合同在另一隔离阶段承接，本阶段不可见也不可改。开口人物缺省的线程，用角色池中最贴近其 gap 标签的读者声音）：
 ${safeJson(specs)}
 
 每条线程必须：
@@ -1042,7 +1042,7 @@ type OrgReplyIdentity = "publisher" | "staff" | "expert";
  * 机构侧（2A-O/2B-O）上下文：只含本角色身份卡与答复契约；另一个角色的任
  * 何定义、路由逻辑与线程信息都不出现。三档答复身份都是方法论《统一身份协议》的
  * accountable_responder（真实 postingIdentity），区别只在承接什么话头：
- * publisher=发布账号本人(ROLE 04，直接回答＋条件＋反例＋下一步)、
+ * publisher=项目发布账号(ROLE 04，直接回答＋条件＋反例＋下一步)、
  * staff=工作人员(营销承接)、expert=专业人员(专业解答)。三者都不冒充消费者。
  */
 function orgSideCommentContext(
@@ -1084,19 +1084,8 @@ function orgSideIdentityContract(
     // .host)只用于保持语气连续,不构成"我是顾客"的身份主张。ownedFirstComment
     // 归此路,按《F03 评论三对象不可混用》明确标注为"常见问题整理"。
     const identityCard = {
-      身份: `${input.config.project.name}（发布账号）`,
-      身份说明: `发布这篇帖子的账号本人，以真实公开身份作答的可追责答复方；答项目事实时必须落在下方口径上，落不上就保留未知`,
-      叙述声音: host ? {
-        identityCue: host.identityCue,
-        lifeContext: host.lifeContext,
-        currentStage: host.currentStage,
-        motive: host.motive,
-        affect: host.affect,
-        voiceTraits: host.voiceTraits,
-        speechMarkers: host.speechMarkers,
-        knowledgeBoundary: host.knowledgeBoundary,
-      } : undefined,
-      声音用法: "只用来延续帖子的语气与关注点，不用来声称自己是消费者、不讲亲历效果",
+      身份: `${input.config.project.name}（项目发布账号）`,
+      身份说明: `以明确项目方身份作答的可追责账号；不是正文叙事人物，不继承其生活经历、第一人称位置或“楼主”身份；答项目事实必须落在下方口径上，落不上就保留未知`,
     };
     return `这是候选 ${input.candidateIndex + 1} 的答复侧固定上下文。你只知道下方列出的口径，除此之外一无所知。
 
@@ -1104,7 +1093,7 @@ function orgSideIdentityContract(
 ${safeJson(identityCard)}
 
 答复契约：
-- 你是发布账号本人，以真实公开身份回评论：给直接回答、适用条件、反例和下一步，延续帖子的语气但不冒充普通消费者。
+- 你是明确署名的项目发布账号，以项目方身份回评论；不是“楼主/博主/体验者”，不得延续正文人物的第一人称经历，也不得假装完成过正文人物的接触、交易或使用过程，不得替自己做需要专业资质的判断。
 - 有口径引口径：数字、单位、限定语照下方原文写，不四舍五入、不换近义词；价格、档期、恢复、地址等动态信息必须带“以当期确认为准”式限定。
 - 没有口径但能指出核验方式→给路由式回答：指名向谁核实什么、要带上什么材料；禁止空泛的“问客服/问专业人员”。
 - 完全没有口径→直说当前还不能确认，保留未知并给出核验方式；禁止编具体数字、地址或承诺。
@@ -1194,36 +1183,6 @@ function orgThreadList(
     gap标签: gapCardById.get(planned.primaryGapId)?.label ?? planned.primaryGapId,
     你手里的口径: buildOrgThreadScope(planned, gapCardById.get(planned.primaryGapId), input.evidenceReferences),
   }));
-}
-
-/**
- * 三身份生态的 AI 答复身份分配(轻量调用,每候选 1 次):输入线程清单、三身
- * 份职责、各 gap 的 claimType 命中与口径有无、分布要求;输出每线程身份+一
- * 句理由。装配在 planning.ts(输入准备/输出校验),模型调用在 engine.ts 发起。
- */
-export function buildReplyIdentityAssignmentPrompt(brief: ReplyIdentityAssignmentBrief): PromptBundle {
-  const user = `这是同一个候选评论区的线程清单。你是评论区运营，为每条线程指定由哪个身份来答复。
-
-三身份职责与分布要求、逐线程的话头信息（gap 标签与问题、claimType 命中、口径有无、护栏标记）如下：
-${safeJson(brief)}
-
-要求：
-- 逐条读话头再分派：专业解答类话头给 expert，营销承接类话头给 staff，需要发布方给结论或延续正文细节的话头给 publisher(发布账号本人)。
-- 三个身份都是可追责答复方，都不冒充独立消费者、都不讲亲历效果；个人经历类话头本身不构成分派理由。
-- 三个身份尽量齐备，同一身份不得包揽全部线程；护栏标记“必须工作人员(staff)”的线程不可改派。
-- 每条给一句简短理由（routingReason，可审计），说明为什么是这个身份。
-- id 严格沿用清单 ID，覆盖清单中的每一条。
-
-只返回：{"assignments":[{"id":"线程ID","identity":"publisher|staff|expert","reason":"一句理由"}]}`;
-  const messages: PromptMessage[] = [
-    { role: "system", content: STAGED_ISOLATED_SYSTEM_PROMPT },
-    { role: "user", content: user },
-  ];
-  return {
-    messages,
-    responseSchema: REPLY_IDENTITY_ASSIGNMENT_JSON_SCHEMA,
-    estimatedTokens: estimateTokens(`${STAGED_ISOLATED_SYSTEM_PROMPT}\n${user}`),
-  };
 }
 
 /**

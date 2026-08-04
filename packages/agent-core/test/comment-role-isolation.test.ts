@@ -568,9 +568,9 @@ describe("按侧+按角色隔离的评论提示词", () => {
   it("2A-O staff:只见助理身份卡与本角色线程口径,不见 IP/host 定义与其他线程", () => {
     const plan = isolationPlan();
     const staffThreads = plan.dialogueThreads.filter((thread) => thread.postingIdentity === "staff");
-    const publisherThreads = plan.dialogueThreads.filter((thread) => thread.postingIdentity === "publisher");
+    const otherIdentityThreads = plan.dialogueThreads.filter((thread) => thread.postingIdentity !== "staff");
     expect(staffThreads.length).toBeGreaterThan(0);
-    expect(publisherThreads.length).toBeGreaterThan(0);
+    expect(otherIdentityThreads.length).toBeGreaterThan(0);
     const prompt = buildStagedOrgAnswersPrompt(promptInput(plan), core, "staff", staffThreads.map((planned) => ({ planned, question: "这个多少钱？" })));
     const text = promptFullText(prompt);
     expect(text).toContain("知肤研究所助理");
@@ -592,27 +592,39 @@ describe("按侧+按角色隔离的评论提示词", () => {
     for (const banned of ["楼主", "发布者", "publisher", "host", "voiceTraits"]) {
       expect(text, `staff 调用不应出现: ${banned}`).not.toContain(banned);
     }
-    for (const thread of publisherThreads) expect(text).not.toContain(thread.id);
+    for (const thread of otherIdentityThreads) expect(text).not.toContain(thread.id);
   });
 
-  it("2A-O publisher:只见 host 声音与本角色线程,不见助理定义", () => {
+  it("2A-O publisher:明确项目方身份且不继承 host 叙事人物,不见助理定义", () => {
     const plan = isolationPlan();
-    const staffThreads = plan.dialogueThreads.filter((thread) => thread.postingIdentity === "staff");
-    const publisherThreads = plan.dialogueThreads.filter((thread) => thread.postingIdentity === "publisher");
-    const prompt = buildStagedOrgAnswersPrompt(promptInput(plan), core, "publisher", publisherThreads.map((planned) => ({ planned, question: "哪些条件影响适用性？" })));
+    const base = plan.dialogueThreads.find((thread) => thread.primaryGapId === "fit_gap")
+      ?? plan.dialogueThreads.find((thread) => thread.postingIdentity !== "staff")!;
+    // 该测试验证 publisher 单角色提示词隔离，不要求规划器为了凑身份产生 publisher。
+    const publisherThread: DialogueThreadPlan = {
+      ...base,
+      postingIdentity: "publisher",
+      routingReason: "测试夹具：规划期冻结 publisher",
+      surfaceRoleCard: base.surfaceRoleCard
+        ? { ...base.surfaceRoleCard, replyDisplayRole: "项目发布账号" }
+        : base.surfaceRoleCard,
+    };
+    const otherThreads = plan.dialogueThreads.filter((thread) => thread.id !== publisherThread.id);
+    const prompt = buildStagedOrgAnswersPrompt(promptInput(plan), core, "publisher", [{ planned: publisherThread, question: "哪些条件影响适用性？" }]);
     const text = promptFullText(prompt);
-    // 方法论 ROLE 04:publisher 是发布账号本人(可追责答复方),不是顾客人设;
-    // §1738「自有账号不能冒充独立消费者」。host 声音只用于延续语气。
-    expect(text).toContain("发布账号本人");
-    expect(text).toContain("叙述声音");
+    // publisher 是明确署名的机构项目账号，不是正文叙事人物；host 的生活经历、
+    // 语气卡与第一人称位置都不得进入这个机构答复阶段。
+    expect(text).toContain("项目发布账号");
+    expect(text).toContain("不是正文叙事人物");
     expect(text).toContain("不冒充独立消费者");
+    expect(text).not.toContain("叙述声音");
+    expect(text).not.toContain("voiceTraits");
     expect(text).toContain("你只知道下方列出的口径");
     // 无证据的适用条件 gap 走硬约束。
     expect(text).toContain("你手里没有适用条件的信息口径，只能走转人工（“我帮你跟专人确认”）或保留未知；禁止承诺提供");
     for (const banned of ["助理", "staff"]) {
       expect(text, `publisher 调用不应出现: ${banned}`).not.toContain(banned);
     }
-    for (const thread of staffThreads) expect(text).not.toContain(thread.id);
+    for (const thread of otherThreads) expect(text).not.toContain(thread.id);
   });
 
   it("2B 生长:精简读者上下文,不含双号契约与机构概念", () => {

@@ -1685,10 +1685,16 @@ export interface DialogueThreadPlan {
   /** T2 接话读者 B 的可见角色卡,displayRole 与开口者不同;B 接话范围限其 permittedContribution。 */
   replySurfaceRoleCard?: CommentSurfaceRoleCard;
   /**
-   * AI 答复身份分配的一句理由(三身份生态,可审计):引擎阶段 2 的 AI 分配调用
-   * 产出,随包落库;兜底/护栏接管时记录确定性原因。可选,历史包没有该字段。
+   * 规划期冻结答复身份时记录的一句理由，随包落库供审计；生成与修复阶段只读，
+   * 不得依据成稿问题重新分配。可选以兼容历史计划。
    */
   routingReason?: string;
+  /**
+   * 项目已审核角色库为当前提问角色指定的答复展示身份。它来自读者角色的
+   * replyDisplayRoles，不等于最终展示字段；路由层先把它解析成 staff/expert，
+   * 再写入最终 postingIdentity/replyDisplayRole。可选以兼容历史计划。
+   */
+  preferredReplyDisplayRole?: string;
   /**
    * 开口人物去重标记:读者角色池小于线程数时允许同一 displayRole 重复开口,
    * 重复线程置 true,提示词规格里提示换说法。可选,历史计划快照没有该字段。

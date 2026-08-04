@@ -2,12 +2,12 @@ import { createHash } from "node:crypto";
 
 const contract = {
   id: "agentic-creative-harness",
-  version: "2.3.0",
-  analysisProtocol: "fixed-search-read-submit-review-v4",
-  toolPolicy: "fixed-four-stage-v4",
-  outputContract: "complete-publishing-package-and-execution-plan-v4",
-  reviewPolicy: "checkpointed-merged-review-and-directed-revision-v4",
-  validationPolicy: "agent-harness-integrity-execution-asset-and-claim-audit-v5",
+  version: "2.11.0",
+  analysisProtocol: "search-deterministic-read-narrative-path-draft-per-candidate-package-review-v9",
+  toolPolicy: "fixed-three-tools-six-model-calls-v9",
+  outputContract: "grounded-narrative-path-frozen-editorial-package-v11",
+  reviewPolicy: "checkpointed-exception-review-and-directed-revision-v6",
+  validationPolicy: "agent-harness-grounded-bridge-and-narrative-diversity-v10",
 } as const;
 
 /** Immutable methodology identity frozen into every Agent Harness job. */

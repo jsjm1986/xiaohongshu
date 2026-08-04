@@ -622,7 +622,7 @@ test('renders v1.1 packages in the two-part executive + audit appendix layout', 
 
   // Dialogue script keeps the four operator elements plus identity and follow-up pair.
   assert.match(executive, /- 提问：大概多久恢复？/u);
-  assert.match(executive, /- 回复：恢复因人而异，项目资料中的观察窗口约为一周。/u);
+  assert.match(executive, /- 回复：项目发布账号：恢复因人而异，项目资料中的观察窗口约为一周。/u);
   assert.match(executive, /- 答复边界：恢复时间以当期确认与个体条件为准/u);
   assert.match(executive, /- 下一步：面诊时向医生核验个人恢复窗口/u);
   assert.match(executive, /- 可追责答复身份：发布账号（publisher）/u);
@@ -735,7 +735,7 @@ test('审计附录:org_answer 与历史包(无 threadKind)保持机构口径不�
   thread.postingIdentity = 'staff';
   thread.answer = '2800 元是普通脂肪，具体建议面诊确认。';
   const orgMarkdown = (await new ExportService().exportPackage(pkg, 'markdown')).toString('utf8');
-  assert.match(orgMarkdown, /- 回复：2800 元是普通脂肪，具体建议面诊确认。/u);
+  assert.match(orgMarkdown, /- 机构可追责身份回复：2800 元是普通脂肪，具体建议面诊确认。/u);
   assert.match(orgMarkdown, /可追责答复身份：staff/u);
 
   // 历史包没有 threadKind,按 org_answer 兜底,行为与修复前一致。

@@ -145,6 +145,7 @@ function optionalText(value: unknown, field: string, max: number): string | unde
 
 function publicationCheckLabel(key: string): string {
   return ({
+    soft_marketing: '软营销心智链',
     evidence: '事实与证据',
     simulation_disclosure: '模拟互动披露',
     execution_plan: '真实问题承接',
@@ -157,6 +158,15 @@ function publicationCheckLabel(key: string): string {
 function publicationCheckStatus(status: string): string {
   return ({ ready: '已就绪', blocked: '阻断', manual_review: '人工复核' } as Record<string, string>)[status] ?? status;
 }
+
+function narrativePathLabel(value?: string): string {
+  return value ? ({
+    tension_first: '顾虑切入',
+    observation_first: '观察切入',
+    question_first: '问题切入',
+  } as Record<string, string>)[value] ?? value : '旧运行未记录';
+}
+
 
 function publicFailure(error: unknown, mode: 'platform' | 'byok', refunded: boolean): string {
   const settlement = mode === 'platform'
@@ -636,7 +646,8 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
       ...AGENT_HARNESS_PROFILE,
       channel: 'agent_harness', source: 'neutral_project_evidence_and_approved_image_observations',
       excludes: ['project_intelligence', 'project_blueprint_modules', 'information_gaps', 'expression_strategies', 'topic_opportunities', 'coverage_records', 'planning_context'],
-      model: settings.model, providerMode: settings.mode, providerConfigVersion: settings.configVersion, fixedStages: ['search', 'read', 'submit', 'final_review'],
+      model: settings.model, providerMode: settings.mode, providerConfigVersion: settings.configVersion,
+      fixedStages: ['search', 'read_deterministic', 'body_draft', 'package_candidate_1', 'package_candidate_2', 'package_candidate_3', 'final_review'],
       evidenceReadiness: evidenceSourceCount ? 'grounded' : 'no_project_evidence', evidenceSourceCount,
     };
     this.database.transaction(() => {
@@ -1199,6 +1210,15 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
     const { N, H, Cref, publishing } = candidate.content;
     const lines = [
       `# ${N.title}`, '', `> 创意命题：${candidate.concept}`, '',
+      ...(candidate.marketingStrategy ? [
+        '## 软营销心智链', '',
+        `叙事路径：${narrativePathLabel(candidate.marketingStrategy.narrativePath)}`,
+        `用户欲望：${candidate.marketingStrategy.readerDesire}`,
+        `隐藏卡点：${candidate.marketingStrategy.hiddenTension}`,
+        `认知翻转：${candidate.marketingStrategy.oldJudgment} → ${candidate.marketingStrategy.newJudgment}`,
+        `项目承接：${candidate.marketingStrategy.projectBridge}`,
+        `低压力下一步：${candidate.marketingStrategy.lowPressureNextStep}`, '',
+      ] : []),
       '## 封面', '', `主文案：${N.coverHeadline}`, `副文案：${N.coverSubheadline}`, '',
       '## 逐图脚本', '', `总任务：${N.imageBrief}`, '',
       ...N.imageSequence.flatMap((item) => [
@@ -1213,7 +1233,17 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
       '## 模拟问答参考', '', Cref.disclaimer, '',
     ];
     for (const thread of Cref.threads) {
-      lines.push(`**问：${thread.question}**`, '', `答：${thread.answer}`, '');
+      const kind = thread.threadKind ?? 'org_answer';
+      if (kind === 'organic_reaction') {
+        lines.push(`**短反应 · ${thread.displayName || '模拟读者'}**`, '', thread.question, '');
+        continue;
+      }
+      if (kind === 'reader_exchange') {
+        lines.push(`**读者接话 · ${thread.displayName || '模拟读者 A'}**`, '', thread.question, '', `${thread.replyDisplayName || '模拟读者 B'}：${thread.answer}`, '');
+        for (const followUp of thread.followUps) lines.push(`${followUp.kind === 'counterexample' ? '反例' : '接着聊'}：${followUp.question}`, followUp.answer, '');
+        continue;
+      }
+      lines.push(`**${thread.displayName || '模拟读者'}问：${thread.question}**`, '', `${this.routeOwnerLabel(thread.postingIdentity === 'staff' || thread.postingIdentity === 'expert' ? thread.postingIdentity : 'publisher')}答：${thread.answer}`, '');
       for (const followUp of thread.followUps) lines.push(`${followUp.kind === 'counterexample' ? '反例' : '追问'}：${followUp.question}`, `答：${followUp.answer}`, '');
       if (thread.clarification) lines.push(`澄清：${thread.clarification}`, '');
       if (thread.nextStep) lines.push(`下一步：${thread.nextStep}`, '');
@@ -1432,15 +1462,26 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  // Keep this mapping byte-compatible with KnowledgeService: persisted rows use
+  // Chinese product labels (for example “已知事实” and “猜想”), while agent-core
+  // consumes the normalized English union. Falling unknown here silently strips
+  // every project selling point from the Harness.
   private knowledgeKind(value: string): KnowledgeKind {
-    return ['fact', 'case', 'user_view', 'methodology', 'inference', 'hypothesis', 'unknown', 'prohibited'].includes(value)
-      ? value as KnowledgeKind
-      : 'fact';
+    const lower = value.toLowerCase();
+    if (/禁止|prohibit|forbidden/u.test(lower)) return 'prohibited';
+    if (/未知|unknown|不足/u.test(lower)) return 'unknown';
+    if (/猜想|hypothesis/u.test(lower)) return 'hypothesis';
+    if (/推理|inference/u.test(lower)) return 'inference';
+    if (/方法|formula|method|prompt|提示词|evaluation|评分/u.test(lower)) return 'methodology';
+    if (/案例|样本|case|sample|reference|corpus|对标/u.test(lower)) return 'case';
+    if (/用户|观点|user/u.test(lower)) return 'user_view';
+    return 'fact';
   }
 
   private evidenceStatus(value: string): EvidenceStatus {
-    return ['observed', 'user_supplied', 'inferred', 'unknown'].includes(value)
-      ? value as EvidenceStatus
-      : 'unknown';
+    if (/observed|核验|已知事实/u.test(value)) return 'observed';
+    if (/inferred|推理|猜想/u.test(value)) return 'inferred';
+    if (/unknown|未知|不足/u.test(value)) return 'unknown';
+    return 'user_supplied';
   }
 }

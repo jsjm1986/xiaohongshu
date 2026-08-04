@@ -549,7 +549,7 @@ describe("Cref contract v1.1 staged prompt text", () => {
     expect(phase).toContain("followUps必须为空数组");
   });
 
-  it("2A-O publisher binds the host voice, the three reply paths and the optional first comment", () => {
+  it("2A-O publisher binds an explicit project identity, the three reply paths and the optional first comment", () => {
     const threads = [{
       planned: fakeThreadPlan({ id: "s1_thread_1", postingIdentity: "publisher", surfaceRoleCard: fakeSurfaceRoleCard("发布者") }),
       question: "适用条件怎么判断？",
@@ -559,10 +559,11 @@ describe("Cref contract v1.1 staged prompt text", () => {
       N: { imageBrief: "", title: "先核实信息", body: "正文。" },
     }, "publisher", threads);
     const text = promptFullText(prompt);
-    // 方法论 ROLE 04:publisher = 发布账号本人(accountable_responder),给
-    // 直接回答＋条件＋反例＋下一步;三条答复路径:有口径→引口径、无口径可核验
-    // →路由式回答、完全未知→保留未知。不是顾客人设(§1738)。
-    expect(text).toContain("发布账号本人");
+    // ROLE 04 的 publisher 是明确项目方，不继承正文叙事人物；三条答复路径仍为
+    // 有口径→引口径、无口径可核验→路由式回答、完全未知→保留未知。
+    expect(text).toContain("项目发布账号");
+    expect(text).toContain("不是正文叙事人物");
+    expect(text).not.toContain("叙述声音");
     expect(text).toContain("不冒充独立消费者");
     expect(text).toContain("以当期确认为准");
     expect(text).toContain("路由式回答");

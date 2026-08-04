@@ -1011,6 +1011,8 @@ export interface ReaderComment {
   /** 线程互动形态:只有 org_answer 的 answer 出自可追责身份,其余是模拟读者接话。 */
   threadKind?: "org_answer" | "reader_exchange" | "organic_reaction" | string;
   postingIdentity?: string;
+  /** 最终机构答复展示角色；创作区仿真预览也使用，避免统一署成项目账号。 */
+  surfaceRoleCard?: Pick<CommentSurfaceRoleCard, "replyDisplayRole">;
   personaRole?: string;
   stage?: string;
   gap?: string;
@@ -1738,6 +1740,19 @@ export interface AgentHarnessCandidate {
   id: string;
   candidateIndex: 0 | 1 | 2;
   concept: string;
+  marketingStrategy?: {
+    narrativePath?: "tension_first" | "observation_first" | "question_first";
+    readerDesire: string;
+    hiddenTension: string;
+    oldJudgment: string;
+    newJudgment: string;
+    projectBridge: string;
+    lowPressureNextStep: string;
+    tensionAnchor: string;
+    reframeAnchor: string;
+    projectBridgeAnchor: string;
+    openLoopAnchor: string;
+  };
   content: {
     H: { hashtags: string[] };
     N: {
@@ -1762,6 +1777,9 @@ export interface AgentHarnessCandidate {
       ownedFirstComment: string;
       threads: Array<{
         id: string;
+        threadKind?: "org_answer" | "reader_exchange" | "organic_reaction";
+        displayName?: string;
+        replyDisplayName?: string;
         question: string;
         answer: string;
         followUps: Array<{ kind?: "follow_up" | "counterexample"; question: string; answer: string }>;
@@ -1801,7 +1819,7 @@ export interface AgentHarnessCandidate {
   selfReview: string;
   revisionNotes: { instructionApplied: string[]; preservedElements: string[] };
   publicationChecklist: Array<{
-    key: "evidence" | "simulation_disclosure" | "execution_plan" | "asset_authorization" | "platform_compliance" | "final_proofread";
+    key: "soft_marketing" | "evidence" | "simulation_disclosure" | "execution_plan" | "asset_authorization" | "platform_compliance" | "final_proofread";
     status: "ready" | "blocked" | "manual_review";
     note: string;
   }>;

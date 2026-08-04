@@ -487,12 +487,11 @@ describe("three-candidate content generation engine", () => {
         imageAnalyses: approvedImageAnalyses,
       },
     });
-    // 按侧+按角色隔离后,每候选 6 次阶段调用:core + assign_reply_identities
-    // (1.9,答复身份分配) + comment_readers(2A-R) + org_answers(2A-O,本测试线程
-    // 全部同一身份路由,1 次) + comment_growth(2B,显式开启) + ledger;growth mock
-    // 不留空答复追问,故不触发 2B-O 补答。
-    expect(calls).toHaveLength(18);
-    expect(calls.filter((item) => item.metadata?.purpose === "assign_reply_identities")).toHaveLength(3);
+    // 身份已在规划期冻结，每候选 5 次阶段调用：core + comment_readers(2A-R)
+    // + org_answers(2A-O，本测试线程同一身份，1 次) + comment_growth(2B) + ledger。
+    // 不再存在 assign_reply_identities 二次映射调用。
+    expect(calls).toHaveLength(15);
+    expect(calls.filter((item) => item.metadata?.purpose === "assign_reply_identities")).toHaveLength(0);
     expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_readers")).toHaveLength(3);
     expect(calls.filter((item) => item.metadata?.purpose === "generate_org_answers")).toHaveLength(3);
     expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_growth")).toHaveLength(3);

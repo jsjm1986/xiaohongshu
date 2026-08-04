@@ -4468,6 +4468,10 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .harness-thread > p { margin:5px 0; font-size:10px; line-height:1.6; }
 .harness-thread > div { display:grid; gap:3px; margin-top:7px; padding-top:7px; border-top:1px dashed var(--v2-line); font-size:9px; }
 .harness-thread > small { display:block; margin-top:7px; color:var(--v2-warn); font-size:8px; }
+.harness-thread--reader_exchange { margin-left:28px; background:#fbfcff; border-color:#dce6f5; }
+.harness-thread--organic_reaction { display:inline-block; margin-left:28px; padding:9px 12px; background:var(--v2-canvas); border-style:dashed; }
+.harness-thread--organic_reaction .harness-thread__meta { margin-bottom:5px; }
+.harness-thread--organic_reaction strong { font-weight:500; }
 .harness-audit__grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:1px; margin:0 14px 12px; background:var(--v2-line); }
 .harness-audit__grid section { padding:12px; background:#fff; }
 .harness-audit__grid strong { font-size:9px; }
@@ -4519,6 +4523,16 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .harness-package-grid p { margin:5px 0 0; color:var(--v2-ink-2); font-size:9px; line-height:1.6; }
 .harness-copy-section { padding:18px 21px; border-bottom:1px solid var(--v2-line); }
 .harness-copy-section p { margin:0; line-height:1.85; white-space:pre-wrap; }
+.harness-marketing-strategy { margin:14px 15px; overflow:hidden; border:1px solid #d9d1f2; border-radius:11px; background:#f8f5ff; }
+.harness-marketing-strategy > header { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 14px; border-bottom:1px solid #e4ddf5; }
+.harness-marketing-strategy h4 { margin:3px 0 0; font-size:12px; }
+.harness-marketing-strategy > div { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:1px; background:#e4ddf5; }
+.harness-marketing-strategy article { min-width:0; padding:12px; background:#fff; }
+.harness-marketing-strategy article small,.harness-marketing-strategy article strong,.harness-marketing-strategy article del { display:block; }
+.harness-marketing-strategy article small { margin-bottom:6px; color:var(--v2-ai); font:600 8px var(--v2-mono); }
+.harness-marketing-strategy article strong { font-size:9px; line-height:1.55; }
+.harness-marketing-strategy article del { margin-bottom:4px; color:var(--v2-muted); font-size:8px; line-height:1.45; }
+.harness-marketing-strategy article p { margin:5px 0 0; color:var(--v2-muted); font-size:8px; line-height:1.5; }
 .harness-images { margin:14px 15px; overflow:hidden; border:1px solid var(--v2-line); border-radius:11px; background:#fff; }
 .harness-images summary { display:flex; align-items:center; gap:7px; padding:12px 15px; color:var(--v2-ink-2); font-size:10px; font-weight:700; cursor:pointer; }
 .harness-image-sequence { display:grid; gap:8px; padding:0 14px 12px; }
@@ -4546,9 +4560,10 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .harness-trash-list strong,.harness-trash-list small { display:block; }
 .harness-trash-list strong { overflow:hidden; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
 .harness-trash-list small { margin-top:4px; color:var(--v2-muted); font-size:8px; }
-@media (max-width:960px) { .harness-package-grid { grid-template-columns:1fr; } }
+@media (max-width:960px) { .harness-package-grid { grid-template-columns:1fr; } .harness-marketing-strategy > div { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 @media (max-width:640px) {
   .harness-run-tools { justify-content:flex-start; }
+  .harness-marketing-strategy > div { grid-template-columns:1fr; }
   .harness-candidate__actions { flex-wrap:wrap; }
   .harness-asset-decisions p { grid-template-columns:auto 1fr; }
   .harness-asset-decisions p span:last-child { grid-column:1 / -1; }

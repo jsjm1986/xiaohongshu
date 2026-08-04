@@ -118,6 +118,7 @@ function traceLabel(action: string): string {
 
 function publicationCheckLabel(key: AgentHarnessCandidate['publicationChecklist'][number]['key']): string {
   return {
+    soft_marketing: '软营销心智链',
     evidence: '事实与证据',
     simulation_disclosure: '模拟互动披露',
     execution_plan: '真实问题承接',
@@ -130,6 +131,18 @@ function publicationCheckLabel(key: AgentHarnessCandidate['publicationChecklist'
 function publicationCheckStatus(status: AgentHarnessCandidate['publicationChecklist'][number]['status']): string {
   return { ready: '已就绪', blocked: '阻断', manual_review: '人工复核' }[status];
 }
+
+type HarnessNarrativePath = NonNullable<AgentHarnessCandidate['marketingStrategy']>['narrativePath'];
+
+function narrativePathLabel(value?: HarnessNarrativePath): string {
+  const labels: Record<NonNullable<HarnessNarrativePath>, string> = {
+    tension_first: '顾虑切入',
+    observation_first: '观察切入',
+    question_first: '问题切入',
+  };
+  return value ? labels[value] : '旧运行未记录';
+}
+
 
 function postingIdentityLabel(value: AgentHarnessCandidate['content']['Cref']['threads'][number]['postingIdentity']): string {
   return { author: '作者本人', brand: '品牌账号', staff: '项目人员', expert: '专业人员', publisher: '发布账号' }[value];
@@ -148,10 +161,48 @@ function routeOwnerLabel(value: 'publisher' | 'staff' | 'expert'): string {
   return { publisher: '发布账号', staff: '项目人员', expert: '专业人员' }[value];
 }
 
+type AgentHarnessThread = AgentHarnessCandidate['content']['Cref']['threads'][number];
+
+function harnessThreadKind(thread: AgentHarnessThread): 'org_answer' | 'reader_exchange' | 'organic_reaction' {
+  return thread.threadKind ?? 'org_answer';
+}
+
+function harnessThreadMarkdown(thread: AgentHarnessThread): string[] {
+  const kind = harnessThreadKind(thread);
+  if (kind === 'organic_reaction') {
+    return ['', `**短反应 · ${thread.displayName || '模拟读者'}**`, thread.question];
+  }
+  if (kind === 'reader_exchange') {
+    return [
+      '', `**读者接话 · ${thread.displayName || '模拟读者 A'}**`, thread.question,
+      `${thread.replyDisplayName || '模拟读者 B'}：${thread.answer}`,
+      ...thread.followUps.flatMap((followUp) => [`${followUp.kind === 'counterexample' ? '反例' : '接着聊'}：${followUp.question}`, `${followUp.answer}`]),
+    ];
+  }
+  return [
+    '', `**${thread.displayName || '模拟读者'}问：${thread.question}**`, `${postingIdentityLabel(thread.postingIdentity)}答：${thread.answer}`,
+    ...thread.followUps.flatMap((followUp) => [`${followUp.kind === 'counterexample' ? '反例' : '追问'}：${followUp.question}`, `答：${followUp.answer}`]),
+    ...(thread.clarification ? [`澄清：${thread.clarification}`] : []),
+    ...(thread.nextStep ? [`下一步：${thread.nextStep}`] : []),
+    ...(thread.boundary ? [`边界：${thread.boundary}`] : []),
+    `停止原因：${threadStopReasonLabel(thread.stopReason)}`,
+    `证据：${thread.evidenceIds.join('、') || '无'}`,
+  ];
+}
+
 function candidateMarkdown(candidate: AgentHarnessCandidate): string {
   const { N, H, Cref, publishing } = candidate.content;
   return [
     `# ${N.title}`, '', `> 创意命题：${candidate.concept}`, '',
+    ...(candidate.marketingStrategy ? [
+      '## 软营销心智链',
+      `叙事路径：${narrativePathLabel(candidate.marketingStrategy.narrativePath)}`,
+      `用户欲望：${candidate.marketingStrategy.readerDesire}`,
+      `隐藏卡点：${candidate.marketingStrategy.hiddenTension}`,
+      `认知翻转：${candidate.marketingStrategy.oldJudgment} → ${candidate.marketingStrategy.newJudgment}`,
+      `项目承接：${candidate.marketingStrategy.projectBridge}`,
+      `低压力下一步：${candidate.marketingStrategy.lowPressureNextStep}`, '',
+    ] : []),
     '## 封面', `主文案：${N.coverHeadline}`, `副文案：${N.coverSubheadline}`, '',
     '## 逐图脚本', `总任务：${N.imageBrief}`,
     ...N.imageSequence.flatMap((item) => [
@@ -161,16 +212,8 @@ function candidateMarkdown(candidate: AgentHarnessCandidate): string {
       `证据：${item.evidenceIds.join('、') || '无'}`,
     ]),
     '', '## 发布正文', N.body, '', `行动引导：${N.callToAction}`, '', H.hashtags.join(' '),
-    '', '## 账号首评', Cref.ownedFirstComment, '', '## 模拟问答参考', Cref.disclaimer,
-    ...Cref.threads.flatMap((thread) => [
-      '', `**模拟读者问：${thread.question}**`, `${postingIdentityLabel(thread.postingIdentity)}答：${thread.answer}`,
-      ...thread.followUps.flatMap((followUp) => [`${followUp.kind === 'counterexample' ? '反例' : '追问'}：${followUp.question}`, `答：${followUp.answer}`]),
-      ...(thread.clarification ? [`澄清：${thread.clarification}`] : []),
-      ...(thread.nextStep ? [`下一步：${thread.nextStep}`] : []),
-      ...(thread.boundary ? [`边界：${thread.boundary}`] : []),
-      `停止原因：${threadStopReasonLabel(thread.stopReason)}`,
-      `证据：${thread.evidenceIds.join('、') || '无'}`,
-    ]),
+    '', '## 账号首评', Cref.ownedFirstComment, '', '## 模拟评论区参考', Cref.disclaimer,
+    ...Cref.threads.flatMap(harnessThreadMarkdown),
     '', '## 发布说明', `入口：${publishing.entryPoint}`, `发布身份：${publishing.accountIdentity}`,
     `时机说明：${publishing.timingNote}`, `互动目标：${publishing.interactionGoal}`,
     '', '## aC · 真实问题承接计划（计划，非已执行）',
@@ -241,6 +284,15 @@ function CandidateCard({
       <section><small>行动引导</small><p>{N.callToAction}</p><div className="harness-tags">{H.hashtags.map((tag) => <span key={tag}>{tag.startsWith('#') ? tag : `#${tag}`}</span>)}</div></section>
     </div>
     <section className="harness-copy-section"><small>正文</small><p className="harness-body">{N.body}</p></section>
+    {candidate.marketingStrategy && <section className="harness-marketing-strategy" aria-label="软营销心智链">
+      <header><div><span className="v2-lab-id">MINDSET PATH</span><h4>这篇如何自然种草</h4></div><Badge tone="blue">{narrativePathLabel(candidate.marketingStrategy.narrativePath)} · 可审阅策略</Badge></header>
+      <div>
+        <article><small>1 · 用户欲望</small><strong>{candidate.marketingStrategy.readerDesire}</strong><p>{candidate.marketingStrategy.hiddenTension}</p></article>
+        <article><small>2 · 认知翻转</small><del>{candidate.marketingStrategy.oldJudgment}</del><strong>{candidate.marketingStrategy.newJudgment}</strong></article>
+        <article><small>3 · 项目承接</small><strong>{candidate.marketingStrategy.projectBridge}</strong></article>
+        <article><small>4 · 低压力下一步</small><strong>{candidate.marketingStrategy.lowPressureNextStep}</strong></article>
+      </div>
+    </section>}
     <details className="harness-images" open>
       <summary><Images size={15} />逐图脚本 · {N.imageSequence.length} 张</summary>
       <p className="harness-disclaimer">{N.imageBrief}</p>
@@ -253,13 +305,25 @@ function CandidateCard({
       <summary><MessageCircleMore size={15} />首评与模拟问答 · {Cref.threads.length} 条线程</summary>
       <div className="harness-owned-comment"><small>账号首评</small><p>{Cref.ownedFirstComment}</p></div>
       <p className="harness-disclaimer">{Cref.disclaimer}</p>
-      {Cref.threads.map((thread) => <article className="harness-thread" key={thread.id}>
-        <div className="harness-thread__meta"><Badge tone="warning">模拟读者提问</Badge><Badge tone="blue">{postingIdentityLabel(thread.postingIdentity)}答复</Badge><span>证据 {thread.evidenceIds.length} 项</span></div>
-        <strong>问：{thread.question}</strong><p>答：{thread.answer}</p>
-        {thread.followUps.map((followUp, index) => <div className="harness-thread__follow-up" key={`${thread.id}-${index}`}><b>{followUp.kind === 'counterexample' ? '反例' : '追问'}：{followUp.question}</b><span>{followUp.answer}</span></div>)}
-        <div className="harness-thread__resolution"><p><b>澄清</b>{thread.clarification || '旧运行未记录'}</p><p><b>下一步</b>{thread.nextStep || '旧运行未记录'}</p><p><b>停止原因</b>{threadStopReasonLabel(thread.stopReason)}</p></div>
-        {thread.boundary && <small>边界：{thread.boundary}</small>}
-      </article>)}
+      {Cref.threads.map((thread) => {
+        const kind = harnessThreadKind(thread);
+        return <article className={`harness-thread harness-thread--${kind}`} key={thread.id}>
+          <div className="harness-thread__meta">
+            <Badge tone="warning">{kind === 'org_answer' ? '机构答疑' : kind === 'reader_exchange' ? '读者接话' : '短反应'}</Badge>
+            {kind === 'org_answer' && <Badge tone="blue">{postingIdentityLabel(thread.postingIdentity)}答复</Badge>}
+            <span>{thread.displayName || '模拟读者'}{kind === 'reader_exchange' ? ` → ${thread.replyDisplayName || '模拟读者'}` : ''}</span>
+          </div>
+          {kind === 'organic_reaction' ? <strong>{thread.question}</strong> : kind === 'reader_exchange' ? <>
+            <strong>{thread.displayName || '模拟读者 A'}：{thread.question}</strong>
+            <p>{thread.replyDisplayName || '模拟读者 B'}：{thread.answer}</p>
+          </> : <>
+            <strong>问：{thread.question}</strong><p>答：{thread.answer}</p>
+          </>}
+          {kind !== 'organic_reaction' && thread.followUps.map((followUp, index) => <div className="harness-thread__follow-up" key={`${thread.id}-${index}`}><b>{followUp.kind === 'counterexample' ? '反例' : kind === 'reader_exchange' ? '接着聊' : '追问'}：{followUp.question}</b><span>{followUp.answer}</span></div>)}
+          {kind === 'org_answer' && <div className="harness-thread__resolution"><p><b>澄清</b>{thread.clarification || '旧运行未记录'}</p><p><b>下一步</b>{thread.nextStep || '旧运行未记录'}</p><p><b>停止原因</b>{threadStopReasonLabel(thread.stopReason)}</p></div>}
+          {kind === 'org_answer' && thread.boundary && <small>边界：{thread.boundary}</small>}
+        </article>;
+      })}
     </details>
     <section className="harness-execution-plan" aria-label="真实问题承接计划">
       <header><div><span className="v2-lab-id">aC · EXECUTION PLAN</span><h4>真实问题承接计划</h4></div><Badge tone="warning">计划，非已执行</Badge></header>
@@ -289,7 +353,7 @@ export function AgentHarnessPage() {
   const navigate = useNavigate();
   const { projectId, currentProject, setProjectId } = useProjects();
   const [form, setForm] = useState<HarnessFineTune>(INITIAL_FINE_TUNE);
-  const [intentId, setIntentId] = useState<HarnessIntentId>('decision');
+  const [intentId, setIntentId] = useState<HarnessIntentId>('project_value');
   const [methodProfileId, setMethodProfileId] = useState<HarnessMethodId>(DEFAULT_HARNESS_METHOD_ID);
   const [audienceStageId, setAudienceStageId] = useState<HarnessAudienceStageId>(getHarnessMethodProfile(DEFAULT_HARNESS_METHOD_ID).audienceStage);
   const [audienceStageAdjusted, setAudienceStageAdjusted] = useState(false);

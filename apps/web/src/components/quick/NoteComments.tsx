@@ -48,6 +48,8 @@ export function replyIdentity(
   threadKind: string | undefined,
   accountLabel: string,
   displayName?: string,
+  postingIdentity?: string,
+  replyDisplayRole?: string,
 ): { name: string; badge?: string } | undefined {
   const kind = threadKind ?? 'org_answer';
   if (kind === 'organic_reaction') return undefined;
@@ -55,7 +57,14 @@ export function replyIdentity(
     // 提问者已用 displayName 署名,答复者是「另一位」才说得通;没昵称时只能说「读者」。
     return { name: displayName ? '另一位读者' : '读者' };
   }
-  return { name: accountLabel, badge: '作者' };
+  const rawRole = replyDisplayRole?.trim();
+  const narrativeAlias = /^(?:楼主|楼主本人|博主|博主本人|作者本人)$/u.test(rawRole ?? '');
+  const internalRole = Boolean(rawRole && /^[a-z][a-z0-9_]*$/u.test(rawRole));
+  const fallback = postingIdentity === 'staff' ? '机构助理'
+    : postingIdentity === 'expert' ? '机构 IP'
+      : postingIdentity === 'publisher' ? '项目发布账号'
+        : accountLabel;
+  return { name: rawRole && !narrativeAlias && !internalRole ? rawRole : fallback, badge: '作者' };
 }
 
 /**
@@ -130,7 +139,14 @@ export function NoteComments({ candidate, accountLabel }: NoteCommentsProps) {
       )}
 
       {view.rows.map((row, i) => {
-        const identity = replyIdentity(row.threadKind, accountLabel, row.displayName);
+        const source = candidate.comments[i];
+        const identity = replyIdentity(
+          row.threadKind,
+          accountLabel,
+          row.displayName,
+          source?.postingIdentity,
+          source?.surfaceRoleCard?.replyDisplayRole,
+        );
         return (
           <Row
             key={row.id ?? `${row.question}-${i}`}

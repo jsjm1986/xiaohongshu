@@ -161,6 +161,85 @@ describe("P4 comment identity and host-state validators", () => {
     }
   });
 
+  it("解析后仍硬拦机构 publisher 冒充楼主（真实问题原句回归）", () => {
+    const dirty = thread({
+      postingIdentity: "publisher",
+      question: "我周日做完第二天能开会吗？",
+      answer: "我们是门诊，先发照片过来评估。",
+      surfaceRoleCard: { ...surfaceRole("怕恢复期影响社交的上班族"), replyDisplayRole: "楼主" },
+    });
+    const parsed = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [dirty])));
+    // 这里同时守 parseGenerationDraft：若解析器再次丢 surfaceRoleCard，门禁会被绕过。
+    expect(parsed.content.Cref.threads[0]?.surfaceRoleCard?.replyDisplayRole).toBe("楼主");
+    expect(validate(parsed)).toContainEqual(expect.objectContaining({
+      code: "publisher_narrative_identity_alias", severity: "error", channel: "Cref",
+    }));
+
+    const explicit = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [
+      thread({
+        postingIdentity: "publisher",
+        answer: "这里由项目方按已核验口径说明。",
+        surfaceRoleCard: { ...surfaceRole("谨慎比较者"), replyDisplayRole: "项目发布账号" },
+      }),
+    ])));
+    expect(codes(validate(explicit))).not.toContain("publisher_narrative_identity_alias");
+  });
+
+  it("成稿身份和展示角色必须与生成前冻结计划完全一致", () => {
+    const frozenRole = { ...surfaceRole("咨询中的读者"), replyDisplayRole: "项目助理" };
+    const plan = commentNetworkPlan(1, [0, 0]);
+    plan.dialogueThreads = [{
+      id: "t1",
+      postingIdentity: "staff",
+      surfaceRoleCard: frozenRole,
+    }];
+
+    const clean = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({
+      postingIdentity: "staff",
+      surfaceRoleCard: frozenRole,
+    })])));
+    expect(codes(validate(clean, validationConfig(), { orchestrationPlan: plan })))
+      .not.toEqual(expect.arrayContaining(["reply_identity_plan_drift", "reply_display_role_plan_drift"]));
+
+    const identityDrift = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({
+      postingIdentity: "expert",
+      surfaceRoleCard: frozenRole,
+    })])));
+    expect(validate(identityDrift, validationConfig(), { orchestrationPlan: plan })).toContainEqual(expect.objectContaining({
+      code: "reply_identity_plan_drift", severity: "error", channel: "Cref",
+    }));
+
+    const roleDrift = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({
+      postingIdentity: "staff",
+      surfaceRoleCard: { ...frozenRole, replyDisplayRole: "机构 IP" },
+    })])));
+    expect(validate(roleDrift, validationConfig(), { orchestrationPlan: plan })).toContainEqual(expect.objectContaining({
+      code: "reply_display_role_plan_drift", severity: "error", channel: "Cref",
+    }));
+  });
+
+  it("硬拦最终问题偏离规划期主 gap，即使身份和展示角色字段没有漂移", () => {
+    const plannedSurface = { ...surfaceRole("到院信息核实者"), replyDisplayRole: "项目助理" };
+    const plan = {
+      ...commentNetworkPlan(1, [0, 0]),
+      gapPlanningCards: [{ gapId: "location_gap", label: "到院信息", question: "具体位置和预约方式是什么？", category: "location" }],
+      dialogueThreads: [{
+        id: "t1", primaryGapId: "location_gap", postingIdentity: "staff",
+        surfaceRoleCard: plannedSurface,
+      }],
+    } as any;
+    const drifted = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({
+      id: "t1", postingIdentity: "staff", question: "做的时候疼不疼？",
+      surfaceRoleCard: plannedSurface,
+    })])));
+    const issues = validate(drifted, validationConfig(), { orchestrationPlan: plan });
+    expect(issues).toContainEqual(expect.objectContaining({
+      code: "reply_question_plan_drift", severity: "error", channel: "Cref",
+    }));
+    expect(codes(issues)).not.toContain("reply_identity_plan_drift");
+    expect(codes(issues)).not.toContain("reply_display_role_plan_drift");
+  });
+
   it("flags a completed first-person publisher answer while the body only declares intent", () => {
     const config = validationConfig();
     const completionAnswer = "我之前已经问过了，按当期口径看。";
@@ -701,7 +780,7 @@ describe("P4 repair loop end-to-end", () => {
           const rawPatch = [
             "修复结果：",
             "```json",
-            `{“N”：{“body”：“${fixedBody}”}，“Cref”：{“disclaimer”：“以下为模拟情景问答参考模板，不代表真实评论。”，“threads”：[{“id”：“${second}”，“question”：“第二项怎么选才稳？”，“answer”：“先看自己的情况。”，“followUps”：[]}，{“id”：“${first}”，“question”：“第一项还要确认什么？”，“answer”：“多问一句再定。”，“followUps”：[]}]}}`,
+            `{“N”：{“body”：“${fixedBody}”}，“Cref”：{“disclaimer”：“以下为模拟情景问答参考模板，不代表真实评论。”，“threads”：[{“id”：“${second}”，“question”：“不同做法具体按哪些点比较？”，“answer”：“先看自己的情况。”，“followUps”：[]}，{“id”：“${first}”，“question”：“哪些条件会影响适用性？”，“answer”：“多问一句再定。”，“followUps”：[]}]}}`,
             "```",
           ].join("\n");
           return { text: rawPatch, raw: {} };
@@ -718,7 +797,7 @@ describe("P4 repair loop end-to-end", () => {
       expect(finalCodes).not.toContain("missing_required_phrase");
       expect(pkg.content.N.body).toBe(fixedBody);
       // Out-of-order patch merged by id: original order, new prose.
-      expect(pkg.content.Cref.threads.map((item) => item.question)).toEqual(["第一项还要确认什么？", "第二项怎么选才稳？"]);
+      expect(pkg.content.Cref.threads.map((item) => item.question)).toEqual(["哪些条件会影响适用性？", "不同做法具体按哪些点比较？"]);
       expect(pkg.validation.valid).toBe(true);
     }
   });
