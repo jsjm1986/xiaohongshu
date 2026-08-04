@@ -4,7 +4,21 @@ import type {
 import { DEFAULT_HARNESS_SEEDING_MODE, HARNESS_BODY_LENGTH_TARGETS } from "./methods.js";
 import type { HarnessSeedingMode } from "./methods.js";
 
-const EXPERIENCE_CLAIM = /(亲测|我做过|我用过|我体验过|朋友做过|闺蜜做过|真实顾客|真实客户|(?:我|朋友|闺蜜|同事|姐妹|家人).{0,12}(?:刚做|做完|做了|做的|术后|恢复))/u;
+/*
+ * 伪造口碑的营销话术。两种模式都是 ERROR。
+ *
+ * 实测 67 篇真实对标语料里这一支命中 0 篇 —— 真人不这么说话,
+ * 「亲测」「真实顾客」是广告文案的措辞,该一直禁。
+ */
+const FABRICATED_TESTIMONIAL = /(亲测|我做过|我用过|我体验过|朋友做过|闺蜜做过|真实顾客|真实客户)/u;
+/*
+ * 第一人称时间线叙述。peer_seeding 放开,brand_voice 仍 ERROR。
+ *
+ * 「我做完两天了」这类朴素叙述在 67 篇语料里命中 13 篇(19%),是这批内容的常态。
+ * 放开的依据:内容由真人素人账号发布、经历真实,AI 只是代笔起草。
+ * brand_voice 下保持阻断 —— 机构口吻不能假装自己是顾客。
+ */
+const FIRST_PERSON_TIMELINE = /(?:我|朋友|闺蜜|同事|姐妹|家人).{0,12}(?:刚做|做完|做了|做的|术后|恢复)/u;
 const PUBLIC_AUDIT_LEAK = /(待人工审核|审核状态|证据编号|responseSla|\bSLA\b|发布计划|不代表已经发布|平台合规|终稿校对)/iu;
 const PUBLIC_SOURCE_META = /(项目资料(?:显示|表明|支持|中的?)|现有资料(?:显示|表明|支持|中的?)|根据(?:项目)?知识库|证据(?:显示|表明|支持)|本轮证据|evidence_section_)/iu;
 const UNSUPPORTED_POPULATION_LANGUAGE = /(很多人|大家都|最怕|最关心|普遍|通常用户|真实用户都)/u;
@@ -196,7 +210,11 @@ export function validateHarnessCandidates(
     }
     for (const required of constraints.mustInclude ?? []) if (required && !visible.includes(required)) add(index, "required_content_missing", "error", `用户要求的内容未出现：${required}`);
     for (const prohibited of constraints.forbidden ?? []) if (prohibited && visible.includes(prohibited)) add(index, "forbidden_content", "error", `出现了用户禁止的内容：${prohibited}`);
-    if (EXPERIENCE_CLAIM.test(visible)) add(index, "fabricated_experience", "error", "可见内容包含可能伪装真实经历或口碑的措辞。");
+    if (FABRICATED_TESTIMONIAL.test(visible) || (!peerSeeding && FIRST_PERSON_TIMELINE.test(visible))) {
+      add(index, "fabricated_experience", "error", peerSeeding
+        ? "可见内容出现「亲测/真实顾客」这类伪造口碑的营销措辞。"
+        : "可见内容包含可能伪装真实经历或口碑的措辞。");
+    }
     if (PUBLIC_AUDIT_LEAK.test(visible)) add(index, "audit_language_in_public_copy", "error", "公开文案混入了审核、SLA 或发布计划等后台语言，请只保留可直接阅读的成品表达。");
     if (PUBLIC_SOURCE_META.test(visible)) add(index, "source_meta_in_public_copy", "error", "公开文案混入了“项目资料/证据”后台口吻，请直接自然表达已支持的项目事实。");
     if (UNSUPPORTED_POPULATION_LANGUAGE.test(visible)) add(index, "unsupported_population_language", "warning", "公开文案使用了“很多人/最怕”等群体判断；没有总体证据时应改成直接问题或有边界的具体顾虑。");

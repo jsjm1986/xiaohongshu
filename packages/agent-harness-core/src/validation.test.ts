@@ -57,13 +57,13 @@ function organicReaction(id: string): HarnessCommentThread {
  * revisionNotes / content / citations / assetDecisions,给纯空对象会 TypeError,
  * 那样测的就不是拓扑了。这些字段留空字符串,报错自然落在别的 code 上被过滤掉。
  */
-function codesOf(threads: HarnessCommentThread[], seedingMode?: "peer_seeding" | "brand_voice"): string[] {
+function codesOf(threads: HarnessCommentThread[], seedingMode?: "peer_seeding" | "brand_voice", body = ""): string[] {
   const candidate = {
     candidateIndex: 0, concept: "", revisionNotes: { instructionApplied: [], preservedElements: [] },
     citations: [], assetDecisions: [],
     content: {
       N: {
-        coverHeadline: "", coverSubheadline: "", imageBrief: "", title: "", body: "",
+        coverHeadline: "", coverSubheadline: "", imageBrief: "", title: "", body,
         callToAction: "", imageSequence: [],
       },
       H: { hashtags: [] },
@@ -248,5 +248,42 @@ describe("模拟提示语不进交付字段", () => {
     expect(runner, "提示词仍在要求模型把披露语写进评论里").not.toMatch(/模拟问答参考，不代表真实互动/u);
     const types = readFileSync(new URL("./types.ts", import.meta.url), "utf8");
     expect(types, "types.ts 的交付结构仍留着 disclaimer 字段").not.toMatch(/disclaimer: string/u);
+  });
+});
+
+/** 只为正文措辞测试服务:把待测句子放进正文,评论区给一套合格拓扑,免得拓扑报错混进来。 */
+function codesForBody(body: string, seedingMode: "peer_seeding" | "brand_voice"): string[] {
+  return codesOf([
+    authorThread("t1", "是哪个白白哦？", "老朱，朱冠锋呀"),
+    authorThread("t2", "价格多少", "看方案，5k到1w"),
+    readerExchange("t3"),
+    organicReaction("t4"),
+  ], seedingMode, body);
+}
+
+/*
+  第一人称措辞分两支:营销化的伪造口碑,和朴素的时间线叙述。原先一条正则同时管两类。
+*/
+describe("第一人称措辞按模式分叉", () => {
+  it("peer_seeding:朴素时间线叙述允许", () => {
+    /*
+     * 「我做完两天了」是真人自然叙述,不是营销话术。内容由真人素人账号发布、
+     * 经历真实,AI 只是代笔起草,所以素人模式放开这一支。
+     * 实测 67 篇语料里这一支命中 13 篇(19%),原规则会把它们全判死。
+     */
+    const codes = codesForBody("我做完两天了，确实不肿。", "peer_seeding");
+    expect(codes, `素人模式不该拦时间线叙述：${codes.join(",")}`).not.toContain("fabricated_experience");
+  });
+
+  it("brand_voice:时间线叙述仍然阻断", () => {
+    const codes = codesForBody("我做完两天了，确实不肿。", "brand_voice");
+    expect(codes, "品牌口吻下机构不能假装自己是顾客").toContain("fabricated_experience");
+  });
+
+  it("营销口碑话术两种模式都阻断", () => {
+    for (const mode of ["peer_seeding", "brand_voice"] as const) {
+      const codes = codesForBody("亲测有效，真实顾客都说好。", mode);
+      expect(codes, `${mode} 下「亲测」必须阻断`).toContain("fabricated_experience");
+    }
   });
 });
