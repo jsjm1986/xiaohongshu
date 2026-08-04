@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_HARNESS_SEEDING_MODE, type HarnessSeedingMode } from "./methods.js";
+import { DEFAULT_HARNESS_SEEDING_MODE, HARNESS_SIMULATION_NOTICE, type HarnessSeedingMode } from "./methods.js";
 import type { HarnessCandidate, HarnessCommentThread } from "./types.js";
 import { validateHarnessCandidates } from "./validation.js";
 
@@ -67,7 +67,7 @@ function codesOf(threads: HarnessCommentThread[], seedingMode?: "peer_seeding" |
         callToAction: "", imageSequence: [],
       },
       H: { hashtags: [] },
-      Cref: { ownedFirstComment: "", disclaimer: "模拟问答参考，不代表真实互动", threads },
+      Cref: { ownedFirstComment: "", threads },
       publishing: { entryPoint: "", accountIdentity: "", timingNote: "", interactionGoal: "" },
     },
   } as unknown as HarnessCandidate;
@@ -201,5 +201,52 @@ describe("素人代发种草模式", () => {
     for (const key of ["clarification", "nextStep", "stopReason", "boundary"]) {
       expect(source, `${key} 从 properties 里被误删`).toMatch(new RegExp(`${key}: \\{`, "u"));
     }
+  });
+});
+
+/*
+  模拟提示语的归属:它是给操盘手看的标注,不是交付内容。
+*/
+describe("模拟提示语不进交付字段", () => {
+  it("交付结构不再有 disclaimer 字段,校验不因此报错", () => {
+    /*
+     * disclaimer 原先是交付字段,由模型每次生成,于是那句「模拟问答参考」会跟着
+     * 评论正文一起被粘到小红书评论区里——读者看到的是一句对他毫无意义的内部标注。
+     * 字段删掉后,旧的 comment_disclaimer ERROR 也必须消失,否则每个候选都恒定阻断。
+     */
+    const codes = codesOf([
+      authorThread("t1", "是哪个白白哦？", "老朱，朱冠锋呀"),
+      authorThread("t2", "价格多少", "看方案，5k到1w"),
+      readerExchange("t3"),
+      organicReaction("t4"),
+    ], "peer_seeding");
+    expect(codes, "comment_disclaimer 应已删除").not.toContain("comment_disclaimer");
+  });
+
+  it("模拟提示语作为常量存在,不由模型生成", () => {
+    /*
+     * 写成常量而非模型输出:界面固定显示、导出固定携带,不会因为模型这次漏写就消失,
+     * 诚实性披露因此比原来更稳,只是不再是可粘贴的内容。
+     */
+    expect(HARNESS_SIMULATION_NOTICE).toMatch(/模拟/u);
+    expect(HARNESS_SIMULATION_NOTICE).toMatch(/不是|不代表/u);
+  });
+
+  it("schema、组装与提示词都不再产出 disclaimer", () => {
+    /*
+     * 源码断言:schema 的 required 少了这个键、组装时不再读它、提示词也不再要求
+     * 模型复述那句话。三处任一残留都会让这句标注以另一种形式回到交付物里,而单测
+     * 里没有模型可跑,只能直接看喂给模型的常量。
+     *
+     * 只匹配代码形态(带引号的键、属性访问、`键:`),不匹配裸词——否则解释这次改动
+     * 的注释本身会把测试搞红,反而逼人把 WHY 从源码里删掉。
+     */
+    const runner = readFileSync(new URL("./runner.ts", import.meta.url), "utf8");
+    expect(runner, 'disclaimer 仍在 schema 的 required 里').not.toMatch(/"disclaimer"/u);
+    expect(runner, "组装 Cref 时仍在读 cref.disclaimer").not.toMatch(/cref\.disclaimer/u);
+    expect(runner, "disclaimer 仍是 schema 的一个属性").not.toMatch(/disclaimer: \{/u);
+    expect(runner, "提示词仍在要求模型把披露语写进评论里").not.toMatch(/模拟问答参考，不代表真实互动/u);
+    const types = readFileSync(new URL("./types.ts", import.meta.url), "utf8");
+    expect(types, "types.ts 的交付结构仍留着 disclaimer 字段").not.toMatch(/disclaimer: string/u);
   });
 });

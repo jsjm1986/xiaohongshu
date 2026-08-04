@@ -137,9 +137,11 @@ const CANDIDATE_SCHEMA = {
           },
         },
         Cref: {
-          type: "object", additionalProperties: false, required: ["disclaimer", "ownedFirstComment", "threads"],
+          // 不收 disclaimer:模拟标注是给操盘手看的,不该混进用户要粘贴出去的评论区,
+          // 已改由 HARNESS_SIMULATION_NOTICE 常量在界面与导出里固定呈现。
+          type: "object", additionalProperties: false, required: ["ownedFirstComment", "threads"],
           properties: {
-            disclaimer: { type: "string" }, ownedFirstComment: { type: "string" },
+            ownedFirstComment: { type: "string" },
             threads: { type: "array", maxItems: MAX_THREADS, items: THREAD_SCHEMA },
           },
         },
@@ -299,7 +301,7 @@ function assertCandidateRuntimeBounds(candidate: HarnessCandidate): void {
     ["concept", candidate.concept, 1_000], ["coverHeadline", n.coverHeadline, 1_000],
     ["coverSubheadline", n.coverSubheadline, 1_000], ["imageBrief", n.imageBrief, 2_000],
     ["title", n.title, 1_000], ["body", n.body, 12_000], ["callToAction", n.callToAction, 1_000],
-    ["ownedFirstComment", cref.ownedFirstComment, 2_000], ["disclaimer", cref.disclaimer, 1_000],
+    ["ownedFirstComment", cref.ownedFirstComment, 2_000],
     ["entryPoint", publishing.entryPoint, 1_000], ["accountIdentity", publishing.accountIdentity, 1_000],
     ["timingNote", publishing.timingNote, 2_000], ["interactionGoal", publishing.interactionGoal, 2_000],
     ["responseSla", publishing.responseSla ?? "", 1_000], ["selfReview", candidate.selfReview, 2_000],
@@ -390,7 +392,7 @@ function candidates(value: unknown): PackagedCandidatePayload[] {
           imageBrief: String(n.imageBrief ?? "").trim(), imageSequence: imagePlans(n.imageSequence),
           title: String(n.title ?? "").trim(), body: String(n.body ?? "").trim(), callToAction: String(n.callToAction ?? "").trim(),
         },
-        Cref: { disclaimer: String(cref.disclaimer ?? "").trim(), ownedFirstComment: String(cref.ownedFirstComment ?? "").trim(), threads },
+        Cref: { ownedFirstComment: String(cref.ownedFirstComment ?? "").trim(), threads },
         publishing: {
           entryPoint: String(publishing.entryPoint ?? "").trim(), accountIdentity: String(publishing.accountIdentity ?? "").trim(),
           timingNote: String(publishing.timingNote ?? "").trim(), interactionGoal: String(publishing.interactionGoal ?? "").trim(),
@@ -619,7 +621,10 @@ function systemPrompt(input: HarnessRunInput, expectedCount: number, targetDraft
     "Use search_knowledge and read_evidence before submit_candidates. search_knowledge returns catalog metadata only; evidence content becomes available only through read_evidence. Approved image observations are evidence records, not decorative prompt context. Read each selected image evidence before deciding to use or omit it.",
     "Every selected asset must have exactly one assetDecisions entry. If used, bind it to an ordered imageSequence item with source=selected_asset. If omitted, explain why. Every asset decision must cite that asset's read approved-image evidence. For source=new_design, assetId must be the empty string and evidenceIds should be empty unless the image itself visibly states an evidence-backed fact.",
     "Every externally verifiable or project-specific visible factual span must appear exactly in citations.statement and cite read observed/user-supplied evidence. Evidence is addressed only by the short evidenceRef values such as E1 and E2 supplied in readEvidence. Never copy, infer or invent opaque evidence IDs. Unknown stays unknown. Never invent price, credential, location, schedule, outcome, suitability, causality, customer history or endorsement.",
-    "Cref is generated reference, not observed comments or independent social proof. ownedFirstComment is publisher-owned. Simulated threads must disclose with the exact natural phrase '模拟问答参考，不代表真实互动' and never impersonate successful customers. Questions should sound like short platform comments; clarification, boundary and routing metadata may be fuller but must not make the visible question/answer sound like a form.",
+    // 不再要求模型输出模拟标注。那句标注的读者是操盘手,而 Cref 的内容会被原样粘贴
+    // 到真实评论区,写在里面等于把内部标注发出去。标注改由界面与导出用固定常量呈现
+    // (HARNESS_SIMULATION_NOTICE),披露照旧到达用户,只是不再是可粘贴的交付内容。
+    "Cref is generated reference, not observed comments or independent social proof. ownedFirstComment is publisher-owned. Simulated threads must never impersonate successful customers. Do not write any simulation disclaimer or internal annotation into the comment text itself; that notice is presented separately outside the deliverable. Questions should sound like short platform comments; clarification, boundary and routing metadata may be fuller but must not make the visible question/answer sound like a form.",
     "Create 4-6 Cref threads per candidate as a small uneven comment section, not 4-6 FAQs. Mix all three threadKind values: 2-3 org_answer threads, at least 1 reader_exchange, and at least 1 organic_reaction. Give simulated readers short display-only nicknames; these names never imply real accounts.",
     "org_answer is a residual reader question answered by an accountable publishing identity. It follows: direct answer -> optional follow-up or counterexample only when a concrete new condition appears -> clarification -> verifiable next step -> explicit stopReason. Keep the visible answer compact; audit fields may be fuller.",
     "reader_exchange is two simulated readers naturally connecting over one word or condition already present. question is reader A's line and answer is reader B's line; set displayName and replyDisplayName. It is not an institutional answer, testimonial, or source of project facts, so clarification/nextStep/boundary may be empty and postingIdentity is ignored for display.",

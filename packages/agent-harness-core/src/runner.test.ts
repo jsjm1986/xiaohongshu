@@ -56,7 +56,7 @@ function candidate(index: 0 | 1 | 2, title: string, revision = false): HarnessCa
         title, body: `${TENSION}${REFRAME}${BRIDGE}${FACT}${OPEN_LOOP}`, callToAction: '收藏这份清单，行动前逐项确认。',
       },
       Cref: {
-        disclaimer: '以下为模拟问答参考模板，不代表真实互动。', ownedFirstComment: '账号首评：具体结论请以实际条件和正式信息为准。',
+        ownedFirstComment: '账号首评：具体结论请以实际条件和正式信息为准。',
         threads: [
           orgThread,
           { ...orgThread, id: `thread-${index}-practical`, displayName: `今天不加班${index + 1}`, question: '时间怎么安排更稳妥？', followUps: [] },

@@ -65,6 +65,16 @@ export const DEFAULT_HARNESS_METHOD_ID: HarnessMethodId = "state_experience_entr
  */
 export const DEFAULT_HARNESS_SEEDING_MODE: HarnessSeedingMode = "peer_seeding";
 
+/**
+ * 模拟问答的操盘标注。
+ *
+ * 这句话的读者是操盘手,不是小红书用户,所以它**不进交付字段**:原先它住在
+ * Cref.disclaimer 里由模型每次生成,而 Cref 是用户要整段复制到评论区去发的内容,
+ * 于是这句自我说明也跟着被粘出去了。改成常量后,界面固定显示、导出固定携带,
+ * 披露一点没少——只是不再是可粘贴的正文,也不会因模型漏写而消失。
+ */
+export const HARNESS_SIMULATION_NOTICE = "这些是模拟问答参考，用来安排评论区节奏，不是已经发生的真实互动。";
+
 export const HARNESS_METHOD_PROFILES: readonly HarnessMethodProfile[] = Object.freeze([
   {
     id: "real_minimal", label: "真实极简", description: "用一个人物处境和一个窄问题起帖，评论区自然接住细节。",

@@ -1773,7 +1773,8 @@ export interface AgentHarnessCandidate {
       callToAction: string;
     };
     Cref: {
-      disclaimer: string;
+      // disclaimer 不再是交付字段:模拟标注由 HARNESS_SIMULATION_NOTICE 常量提供,
+      // 界面与导出固定携带,不再混进用户要粘贴到评论区的内容里。
       ownedFirstComment: string;
       threads: Array<{
         id: string;

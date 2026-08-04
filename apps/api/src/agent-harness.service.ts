@@ -4,6 +4,7 @@ import {
   AGENT_HARNESS_PROFILE,
   DEFAULT_HARNESS_METHOD_ID,
   getHarnessMethodProfile,
+  HARNESS_SIMULATION_NOTICE,
   isHarnessMethodId,
   publicationChecklistFor,
   reviewHarnessCandidates,
@@ -1230,7 +1231,9 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
       '## 发布正文', '', N.body, '', `行动引导：${N.callToAction}`, '',
       '## 标签', '', H.hashtags.join(' '), '',
       '## 账号首评', '', Cref.ownedFirstComment, '',
-      '## 模拟问答参考', '', Cref.disclaimer, '',
+      // 提示语取自常量而非候选数据:它是给操盘手看的标注，不是要粘贴进评论区的内容。
+      // 导出件是内部工作文档，这句话该留；改成常量后也不会因模型漏写而消失。
+      '## 模拟问答参考', '', HARNESS_SIMULATION_NOTICE, '',
     ];
     for (const thread of Cref.threads) {
       const kind = thread.threadKind ?? 'org_answer';

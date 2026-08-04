@@ -137,8 +137,14 @@ export interface HarnessCandidate {
       body: string;
       callToAction: string;
     };
+    /**
+     * 这里没有 disclaimer 字段:模拟标注不进交付结构。
+     *
+     * 原先它由模型逐次生成,而 Cref 是用户要整段粘到评论区的内容,那句「以下为模拟
+     * 问答参考」就跟着贴了出去。标注本身没有取消——它改成 HARNESS_SIMULATION_NOTICE
+     * 常量,由界面固定显示、导出固定携带,反而不会因模型漏写而消失。
+     */
     Cref: {
-      disclaimer: string;
       ownedFirstComment: string;
       threads: HarnessCommentThread[];
     };

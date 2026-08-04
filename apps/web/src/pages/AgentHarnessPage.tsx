@@ -34,6 +34,7 @@ import { type FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState }
 import {
   DEFAULT_HARNESS_METHOD_ID,
   HARNESS_METHOD_PROFILES,
+  HARNESS_SIMULATION_NOTICE,
   getHarnessMethodProfile,
   type HarnessMethodId,
 } from '@content-agent/agent-harness-core/methods';
@@ -212,7 +213,7 @@ function candidateMarkdown(candidate: AgentHarnessCandidate): string {
       `证据：${item.evidenceIds.join('、') || '无'}`,
     ]),
     '', '## 发布正文', N.body, '', `行动引导：${N.callToAction}`, '', H.hashtags.join(' '),
-    '', '## 账号首评', Cref.ownedFirstComment, '', '## 模拟评论区参考', Cref.disclaimer,
+    '', '## 账号首评', Cref.ownedFirstComment, '', '## 模拟评论区参考', HARNESS_SIMULATION_NOTICE,
     ...Cref.threads.flatMap(harnessThreadMarkdown),
     '', '## 发布说明', `入口：${publishing.entryPoint}`, `发布身份：${publishing.accountIdentity}`,
     `时机说明：${publishing.timingNote}`, `互动目标：${publishing.interactionGoal}`,
@@ -304,7 +305,12 @@ function CandidateCard({
     <details className="harness-comments" open>
       <summary><MessageCircleMore size={15} />首评与模拟问答 · {Cref.threads.length} 条线程</summary>
       <div className="harness-owned-comment"><small>账号首评</small><p>{Cref.ownedFirstComment}</p></div>
-      <p className="harness-disclaimer">{Cref.disclaimer}</p>
+      {/*
+        模拟标注取常量,不再取 Cref.disclaimer:这句话的读者是操盘手,不是小红书用户,
+        留在交付字段里会被一起粘贴到真实评论区。改成常量后界面固定显示,也不会因为
+        模型这次漏写就消失——披露反而比原来更稳。
+      */}
+      <p className="harness-disclaimer">{HARNESS_SIMULATION_NOTICE}</p>
       {Cref.threads.map((thread) => {
         const kind = harnessThreadKind(thread);
         return <article className={`harness-thread harness-thread--${kind}`} key={thread.id}>

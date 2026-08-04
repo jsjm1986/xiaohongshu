@@ -35,7 +35,8 @@ export function publicationChecklistFor(candidate: HarnessCandidate, issues: Har
   const executionBlocked = [...errorCodes].some((code) => EXECUTION_ERROR_CODES.has(code));
   const softMarketingBlocked = [...errorCodes].some((code) => SOFT_MARKETING_ERROR_CODES.has(code));
   const simulationBlocked = [
-    "comment_disclaimer", "missing_owned_first_comment", "empty_thread", "missing_thread_clarification",
+    // comment_disclaimer 已删:披露语不再是模型产出的交付字段,改为界面/导出固定携带。
+    "missing_owned_first_comment", "empty_thread", "missing_thread_clarification",
     "missing_thread_next_step", "missing_thread_boundary", "missing_thread_stop_reason", "comment_thread_count",
     "comment_topology", "comment_growth", "missing_thread_display_name", "reader_exchange_incomplete",
     "organic_reaction_overbuilt", "organic_reaction_too_long",
@@ -158,8 +159,13 @@ export function validateHarnessCandidates(
     const normalizedTitle = n.title.replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
     if (expectedCount > 1 && normalizedTitle && titles.has(normalizedTitle)) add(index, "duplicate_title", "error", "多个候选不能使用相同标题。");
     titles.add(normalizedTitle);
-    const disclaimer = candidate.content.Cref.disclaimer;
-    if (!/(参考|模板)/u.test(disclaimer) || !/(模拟|不代表.{0,8}真实)/u.test(disclaimer)) add(index, "comment_disclaimer", "error", "评论区必须明确标为模拟问答参考，不代表真实互动。");
+    /*
+     * 这里原先校验 Cref.disclaimer 必须写明「模拟问答参考、不代表真实互动」。
+     * 删掉不是放宽诚实性要求,而是把这句话搬出了交付字段:它住在 Cref 里时会被
+     * 用户连同评论一起粘贴到小红书,而它的读者本来是操盘手。现在改由界面提示条与
+     * 导出文档从 HARNESS_SIMULATION_NOTICE 固定呈现,披露反而更稳——不会因模型
+     * 某次漏写而消失。评论区结构与首评归属仍由下面其余的 code 阻断。
+     */
     const visible = visibleCandidateText(candidate);
     const audited = constraints.claimAudit?.claims.filter((claim) => claim.candidateIndex === candidate.candidateIndex) ?? [];
     for (const claim of audited) {
