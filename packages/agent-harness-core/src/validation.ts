@@ -1,7 +1,8 @@
 import type {
   HarnessCandidate, HarnessClaimAudit, HarnessEvidenceSource, HarnessImageSource, HarnessPublicationCheck, HarnessValidationIssue,
 } from "./types.js";
-import { HARNESS_BODY_LENGTH_TARGETS } from "./methods.js";
+import { DEFAULT_HARNESS_SEEDING_MODE, HARNESS_BODY_LENGTH_TARGETS } from "./methods.js";
+import type { HarnessSeedingMode } from "./methods.js";
 
 const EXPERIENCE_CLAIM = /(亲测|我做过|我用过|我体验过|朋友做过|闺蜜做过|真实顾客|真实客户|(?:我|朋友|闺蜜|同事|姐妹|家人).{0,12}(?:刚做|做完|做了|做的|术后|恢复))/u;
 const PUBLIC_AUDIT_LEAK = /(待人工审核|审核状态|证据编号|responseSla|\bSLA\b|发布计划|不代表已经发布|平台合规|终稿校对)/iu;
@@ -72,9 +73,13 @@ export function validateHarnessCandidates(
     mustInclude?: readonly string[]; forbidden?: readonly string[]; claimAudit?: HarnessClaimAudit;
     expectedCandidateCount?: number; runMode?: "original" | "retry" | "revision"; sourceCandidateIndex?: number;
     revisionInstruction?: string; selectedImages?: readonly HarnessImageSource[]; bodyLength?: "short" | "medium" | "long";
+    /** 素人代发种草模式。缺省走 DEFAULT_HARNESS_SEEDING_MODE(peer_seeding)。 */
+    seedingMode?: HarnessSeedingMode;
   } = {},
 ): HarnessValidationIssue[] {
   const issues: HarnessValidationIssue[] = []; const knownEvidence = new Map(evidence.map((item) => [item.evidenceId, item]));
+  const seedingMode = constraints.seedingMode ?? DEFAULT_HARNESS_SEEDING_MODE;
+  const peerSeeding = seedingMode === "peer_seeding";
   const expectedCount = constraints.expectedCandidateCount ?? 3;
   const add = (candidateIndex: number, code: string, severity: "error" | "warning", message: string) => issues.push({ candidateIndex, code, severity, message });
   if (candidates.length !== expectedCount) add(-1, "candidate_count", "error", `本轮必须提交恰好 ${expectedCount} 个候选。`);
@@ -229,8 +234,21 @@ export function validateHarnessCandidates(
     if (typedThreads.length) {
       const kindCount = (kind: string) => typedThreads.filter((thread) => thread.threadKind === kind).length;
       if (candidate.content.Cref.threads.length < 4 || candidate.content.Cref.threads.length > 6) add(index, "comment_thread_count", "error", "新评论关系网每套应有 4—6 条线程，避免只有一条 FAQ 或机械灌水。");
-      if (typedThreads.length !== candidate.content.Cref.threads.length || kindCount("org_answer") < 2 || kindCount("reader_exchange") < 1 || kindCount("organic_reaction") < 1) {
-        add(index, "comment_topology", "error", "新评论关系网必须混排至少 2 条机构答疑、1 条读者接话和 1 条短反应。");
+      /*
+       * 拓扑要求按模式分叉。
+       *
+       * brand_voice 保持原样：至少 2 条机构答疑。
+       * peer_seeding 改成至少 2 条**博主本人回复**（org_answer + postingIdentity==='author'），
+       * 机构答疑 0 条也合格。依据：67 篇真实语料里博主回复 187 行，带机构口吻的只有 1 行，
+       * 而原规则强制 ≥2 条机构答疑，正是产出像客服话术的直接原因。
+       */
+      const authorReplies = typedThreads.filter((item) => item.threadKind === "org_answer" && item.postingIdentity === "author").length;
+      const accountableAnswers = typedThreads.filter((item) => item.threadKind === "org_answer" && item.postingIdentity !== "author").length;
+      const answerShortfall = peerSeeding ? authorReplies < 2 : accountableAnswers < 2;
+      if (typedThreads.length !== candidate.content.Cref.threads.length || answerShortfall || kindCount("reader_exchange") < 1 || kindCount("organic_reaction") < 1) {
+        add(index, "comment_topology", "error", peerSeeding
+          ? "素人种草评论区必须混排至少 2 条博主本人回复、1 条读者接话和 1 条短反应。"
+          : "新评论关系网必须混排至少 2 条机构答疑、1 条读者接话和 1 条短反应。");
       }
       if (!typedThreads.some((thread) => thread.threadKind !== "organic_reaction" && thread.followUps.length > 0)) add(index, "comment_growth", "error", "评论关系网至少应有一个由具体话头自然长出的二轮接话。");
     }
@@ -243,10 +261,20 @@ export function validateHarnessCandidates(
       if (thread.threadKind && !thread.displayName?.trim()) add(index, "missing_thread_display_name", "error", "新评论线程需要一个仅用于展示的模拟读者昵称。");
       if (threadKind === "org_answer") {
         if (!thread.answer.trim()) add(index, "empty_thread", "error", "机构答疑必须包含直接回答。");
-        if (!thread.clarification?.trim()) add(index, "missing_thread_clarification", "error", "机构答疑必须说明澄清内容或不可判断范围。");
-        if (!thread.nextStep?.trim()) add(index, "missing_thread_next_step", "error", "机构答疑必须给出可核验的下一步。");
-        if (!thread.boundary?.trim()) add(index, "missing_thread_boundary", "error", "机构答疑必须在相关结论附近显示边界。");
-        if (!thread.stopReason) add(index, "missing_thread_stop_reason", "error", "机构答疑必须说明停止原因，避免机械追加追问。");
+        /*
+         * 澄清/下一步/边界/停止原因只对**可追责的机构身份**强制。
+         *
+         * peer_seeding 下博主以 author 身份回复自己的帖子,那是朋友聊天的口气
+         * (「是哪个白白哦？」→「老朱，朱冠锋呀」),硬塞这四样就会写成客服话术。
+         * 但机构一开口仍然全部要求 —— 换模式不该让机构失去边界。
+         */
+        const accountable = !(peerSeeding && thread.postingIdentity === "author");
+        if (accountable) {
+          if (!thread.clarification?.trim()) add(index, "missing_thread_clarification", "error", "机构答疑必须说明澄清内容或不可判断范围。");
+          if (!thread.nextStep?.trim()) add(index, "missing_thread_next_step", "error", "机构答疑必须给出可核验的下一步。");
+          if (!thread.boundary?.trim()) add(index, "missing_thread_boundary", "error", "机构答疑必须在相关结论附近显示边界。");
+          if (!thread.stopReason) add(index, "missing_thread_stop_reason", "error", "机构答疑必须说明停止原因，避免机械追加追问。");
+        }
       } else if (threadKind === "reader_exchange") {
         if (!thread.answer.trim() || !thread.replyDisplayName?.trim()) add(index, "reader_exchange_incomplete", "error", "读者接话必须包含第二位模拟读者的昵称和接话内容。");
       } else {

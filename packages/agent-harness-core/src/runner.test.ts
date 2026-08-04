@@ -297,7 +297,7 @@ describe('runAgentHarness bounded multi-turn protocol', () => {
 
   it('produces three valid complete packages after a successful merged review', async () => {
     const result = await runAgentHarness({
-      ...baseInput,
+      ...baseInput, seedingMode: 'brand_voice',
       provider: scriptedProvider(protocolReplies([candidate(0, '先问条件，再问时间'), candidate(1, '别急着找统一答案'), candidate(2, '一张核验清单怎么用')])),
     });
     expect(result.reviewStatus).toBe('completed');
@@ -312,7 +312,7 @@ describe('runAgentHarness bounded multi-turn protocol', () => {
     const source = candidate(1, '原始候选');
     const revised = candidate(1, '更口语的候选', true);
     const result = await runAgentHarness({
-      ...baseInput, runMode: 'revision', revisionInstruction: '正文改得更口语', sourceCandidate: source,
+      ...baseInput, seedingMode: 'brand_voice', runMode: 'revision', revisionInstruction: '正文改得更口语', sourceCandidate: source,
       provider: scriptedProvider(protocolReplies([revised], finalReview([1]))),
     });
     expect(result.candidates).toHaveLength(1);
@@ -327,7 +327,7 @@ describe('runAgentHarness bounded multi-turn protocol', () => {
     distributed.content.N.body = `${REFRAME}${BRIDGE}${FACT}`;
     distributed.content.N.callToAction = OPEN_LOOP;
     const result = await runAgentHarness({
-      ...baseInput,
+      ...baseInput, seedingMode: 'brand_voice',
       provider: scriptedProvider(protocolReplies([distributed, candidate(1, '标题二'), candidate(2, '标题三')])),
     });
     expect(result.candidates[0]?.validation.valid).toBe(true);
@@ -375,7 +375,7 @@ describe('runAgentHarness bounded multi-turn protocol', () => {
 
   it('reports overlapping candidates for review without blocking otherwise valid packages', async () => {
     const result = await runAgentHarness({
-      ...baseInput,
+      ...baseInput, seedingMode: 'brand_voice',
       provider: scriptedProvider(protocolReplies([candidate(0, '标题一'), candidate(1, '标题二'), candidate(2, '标题三')])),
     });
     const warningCodes = new Set(result.candidates.flatMap((item) => item.validation.issues

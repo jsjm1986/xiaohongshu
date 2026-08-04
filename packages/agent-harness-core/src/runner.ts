@@ -4,6 +4,16 @@ import type {
 } from "./types.js";
 import { publicationChecklistFor, validateHarnessCandidates, visibleCandidateText } from "./validation.js";
 import { HARNESS_BODY_LENGTH_TARGETS } from "./methods.js";
+import type { HarnessSeedingMode } from "./methods.js";
+
+/*
+ * 素人代发种草模式沿运行入口向下传递。
+ *
+ * 用交叉类型在入口处附加而非改 types.ts:HarnessRunInput/HarnessReviewInput 住在
+ * types.ts,本次改动不碰那个文件。缺省由 validateHarnessCandidates 落到
+ * DEFAULT_HARNESS_SEEDING_MODE(peer_seeding),所以不传的调用点行为等同默认模式。
+ */
+type WithSeedingMode<T> = T & { seedingMode?: HarnessSeedingMode };
 
 const SHORT_TEXT_SCHEMA = { type: "string", maxLength: 1_000 } as const;
 const LONG_TEXT_SCHEMA = { type: "string", maxLength: 12_000 } as const;
@@ -68,7 +78,10 @@ const FOLLOW_UP_SCHEMA = {
 } as const;
 const THREAD_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["id", "threadKind", "displayName", "replyDisplayName", "question", "answer", "followUps", "clarification", "nextStep", "stopReason", "postingIdentity", "evidenceIds", "boundary"],
+  // 四个机构字段(clarification/nextStep/stopReason/boundary)不再列为必填:留在 required 里
+  // 模型就得为每条博主素人回复编出「可核验的下一步」和「停止原因」,客服味正是这么来的。
+  // properties 保持不变,机构身份仍可以填;该填时必须填由 validation.ts 的 accountable 分支保证。
+  required: ["id", "threadKind", "displayName", "replyDisplayName", "question", "answer", "followUps", "postingIdentity", "evidenceIds"],
   properties: {
     id: { type: "string" },
     threadKind: { type: "string", enum: ["org_answer", "reader_exchange", "organic_reaction"] },
@@ -792,7 +805,7 @@ function publicCitations(candidate: HarnessCandidate): HarnessCandidate["citatio
     .map((citation) => ({ ...citation, evidenceIds: [...citation.evidenceIds] }));
 }
 
-export async function reviewHarnessCandidates(input: HarnessReviewInput): Promise<Omit<HarnessRunResult, "traces" | "decisionSummary" | "sourceEvidenceIds">> {
+export async function reviewHarnessCandidates(input: WithSeedingMode<HarnessReviewInput>): Promise<Omit<HarnessRunResult, "traces" | "decisionSummary" | "sourceEvidenceIds">> {
   const runMode = input.runMode ?? "original";
   const expectedCount = runMode === "revision" ? 1 : 3;
   const allEvidence = withImageEvidence(input as HarnessRunInput);
@@ -849,6 +862,7 @@ export async function reviewHarnessCandidates(input: HarnessReviewInput): Promis
     mustInclude: input.task.mustInclude, forbidden: input.task.forbidden, claimAudit: audit, expectedCandidateCount: expectedCount,
     runMode, sourceCandidateIndex: input.sourceCandidate?.candidateIndex, revisionInstruction: input.revisionInstruction,
     selectedImages: input.images ?? [], bodyLength: input.task.bodyLength ?? input.task.methodProfile?.bodyLength,
+    ...(input.seedingMode ? { seedingMode: input.seedingMode } : {}),
   });
   const results = reconciledCandidates.map((candidate) => {
     const candidateIssues = issues.filter((issue) => issue.candidateIndex === candidate.candidateIndex || issue.candidateIndex === -1);
@@ -858,7 +872,7 @@ export async function reviewHarnessCandidates(input: HarnessReviewInput): Promis
   return { candidates: results, reviewSummary, claimAuditSummary: audit.summary, readEvidenceIds: [...disclosed], reviewStatus, ...(reviewError ? { reviewError } : {}), usage };
 }
 
-export async function runAgentHarness(input: HarnessRunInput): Promise<HarnessRunResult> {
+export async function runAgentHarness(input: WithSeedingMode<HarnessRunInput>): Promise<HarnessRunResult> {
   const runMode = input.runMode ?? "original";
   const expectedCount = runMode === "revision" ? 1 : 3;
   if (runMode === "revision" && (!input.sourceCandidate || !input.revisionInstruction?.trim())) throw new Error("Directed revision requires a source candidate and revision instruction.");
@@ -963,6 +977,7 @@ export async function runAgentHarness(input: HarnessRunInput): Promise<HarnessRu
     jobId: input.jobId, project: input.project, task: input.task, evidence: input.evidence, images: input.images,
     runMode, revisionInstruction: input.revisionInstruction, sourceCandidate: input.sourceCandidate,
     candidates: packagedCandidates, readEvidenceIds: [...disclosed], provider: input.provider, signal: input.signal, onProgress: input.onProgress,
+    ...(input.seedingMode ? { seedingMode: input.seedingMode } : {}),
   });
   usage.modelCalls += reviewed.usage.modelCalls;
   usage.inputTokens += reviewed.usage.inputTokens;
