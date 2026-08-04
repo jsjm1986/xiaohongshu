@@ -42,6 +42,39 @@ export function visibleCandidateText(candidate: HarnessCandidate): string {
   ].join("\n");
 }
 
+/**
+ * 可见文本按来源分区。
+ *
+ * peer_seeding 放开的是「博主本人叙述自己的时间线」,不是「谁都能编经历」。
+ * 但 visibleCandidateText 把正文、博主回复和模拟读者的话拼成一整段,拿它做
+ * FIRST_PERSON_TIMELINE 判断就成了无差别放开 —— 模拟读者也能说「我同事上个月
+ * 做了」。所以按来源分开:
+ *   authorOwned  发布账号自己的话(正文、首评、author 身份的答复)
+ *   simulated    虚构读者的话(reader_exchange 双方、organic_reaction、非 author 答复)
+ * 时间线叙述只在 authorOwned 里被允许;simulated 里出现照旧是 ERROR。
+ */
+export function candidateTextByOrigin(candidate: HarnessCandidate): { authorOwned: string[]; restricted: string[] } {
+  const authorOwned: string[] = [
+    candidate.content.N.coverHeadline, candidate.content.N.coverSubheadline,
+    ...candidate.content.N.imageSequence.map((item) => item.overlayText),
+    candidate.content.N.title, candidate.content.N.body, candidate.content.N.callToAction,
+    ...candidate.content.H.hashtags, candidate.content.Cref.ownedFirstComment,
+  ];
+  const restricted: string[] = [];
+  for (const thread of candidate.content.Cref.threads) {
+    const kind = thread.threadKind ?? "org_answer";
+    // 读者提问一律算模拟读者的话,与身份无关 —— 提问的是虚构昵称。
+    restricted.push(thread.question);
+    for (const followUp of thread.followUps) restricted.push(followUp.question);
+    // 答复按身份归属:author 是博主本人在回自己的帖,其余(staff/expert/brand/publisher)
+    // 是机构口吻,reader_exchange 的 answer 是第二位虚构读者。
+    const answerIsAuthor = kind === "org_answer" && thread.postingIdentity === "author";
+    (answerIsAuthor ? authorOwned : restricted).push(thread.answer);
+    for (const followUp of thread.followUps) (answerIsAuthor ? authorOwned : restricted).push(followUp.answer);
+  }
+  return { authorOwned, restricted };
+}
+
 export function publicationChecklistFor(candidate: HarnessCandidate, issues: HarnessValidationIssue[]): HarnessPublicationCheck[] {
   const errorCodes = new Set(issues.filter((issue) => issue.severity === "error").map((issue) => issue.code));
   const evidenceBlocked = [...errorCodes].some((code) => EVIDENCE_ERROR_CODES.has(code));
@@ -210,9 +243,21 @@ export function validateHarnessCandidates(
     }
     for (const required of constraints.mustInclude ?? []) if (required && !visible.includes(required)) add(index, "required_content_missing", "error", `用户要求的内容未出现：${required}`);
     for (const prohibited of constraints.forbidden ?? []) if (prohibited && visible.includes(prohibited)) add(index, "forbidden_content", "error", `出现了用户禁止的内容：${prohibited}`);
-    if (FABRICATED_TESTIMONIAL.test(visible) || (!peerSeeding && FIRST_PERSON_TIMELINE.test(visible))) {
+    const origin = candidateTextByOrigin(candidate);
+    /*
+     * 口碑话术两种模式都禁,不分来源。
+     * 时间线叙述:brand_voice 下全禁(机构不能假装自己是顾客);peer_seeding 下只允许
+     * 出现在博主自己的话里 —— 模拟读者被编造经历仍然是 ERROR,那是伪造社会证明。
+     */
+    const timelineNodes = peerSeeding
+      ? origin.restricted
+      : [...origin.authorOwned, ...origin.restricted];
+    // Test each speaker node independently. Joining question and answer text can
+    // create a false timeline across the boundary (for example “我...?” + “要，...做...”).
+    const timelineViolation = timelineNodes.some((text) => FIRST_PERSON_TIMELINE.test(text));
+    if (FABRICATED_TESTIMONIAL.test(visible) || timelineViolation) {
       add(index, "fabricated_experience", "error", peerSeeding
-        ? "可见内容出现「亲测/真实顾客」这类伪造口碑的营销措辞。"
+        ? "可见内容出现伪造口碑措辞，或模拟读者声称了未经证实的体验时间线。"
         : "可见内容包含可能伪装真实经历或口碑的措辞。");
     }
     if (PUBLIC_AUDIT_LEAK.test(visible)) add(index, "audit_language_in_public_copy", "error", "公开文案混入了审核、SLA 或发布计划等后台语言，请只保留可直接阅读的成品表达。");

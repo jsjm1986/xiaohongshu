@@ -275,6 +275,40 @@ describe("第一人称措辞按模式分叉", () => {
     expect(codes, `素人模式不该拦时间线叙述：${codes.join(",")}`).not.toContain("fabricated_experience");
   });
 
+  it("peer_seeding:模拟读者的问题、接话和追问始终不能伪造体验时间线", () => {
+    const placements: HarnessCommentThread[] = [
+      readerExchange("question"),
+      readerExchange("answer"),
+      readerExchange("follow-up"),
+    ];
+    placements[0]!.question = "我同事上个月做了，第三天就不肿了。";
+    placements[1]!.answer = "我朋友做完两天就恢复了。";
+    placements[2]!.followUps = [{ kind: "follow_up", question: "我姐妹刚做完也是这样吗？", answer: "我家人术后很快就好了。" }];
+
+    for (const leaked of placements) {
+      const codes = codesOf([
+        authorThread("t1", "是哪个白白哦？", "老朱，朱冠锋呀"),
+        authorThread("t2", "价格多少", "看方案，5k到1w"),
+        leaked,
+        organicReaction("t4"),
+      ], "peer_seeding");
+      expect(codes).toContain("fabricated_experience");
+    }
+  });
+
+  it("peer_seeding:机构账号答复不能借作者豁免伪装顾客经历", () => {
+    const institution = orgThread("institution", "staff");
+    institution.answer = "我朋友做完两天就恢复了。";
+    const codes = codesOf([
+      authorThread("t1", "是哪个白白哦？", "老朱，朱冠锋呀"),
+      authorThread("t2", "价格多少", "看方案，5k到1w"),
+      readerExchange("t3"),
+      organicReaction("t4"),
+      institution,
+    ], "peer_seeding");
+    expect(codes).toContain("fabricated_experience");
+  });
+
   it("brand_voice:时间线叙述仍然阻断", () => {
     const codes = codesForBody("我做完两天了，确实不肿。", "brand_voice");
     expect(codes, "品牌口吻下机构不能假装自己是顾客").toContain("fabricated_experience");
@@ -285,5 +319,39 @@ describe("第一人称措辞按模式分叉", () => {
       const codes = codesForBody("亲测有效，真实顾客都说好。", mode);
       expect(codes, `${mode} 下「亲测」必须阻断`).toContain("fabricated_experience");
     }
+  });
+
+  it("peer_seeding:模拟读者被编造经历仍然阻断 —— 放开的只是博主自己的时间线", () => {
+    /*
+     * 这条守住规格里的另半句:发布账号可以说自己「做完两天」,虚构读者不能被安排成
+     * 「我同事上个月做了」。两者都命中 FIRST_PERSON_TIMELINE,区别只在谁在说 ——
+     * 所以判断必须按文本来源分区,不能拿整段可见文本一刀切。
+     */
+    const codes = codesOf([
+      authorThread("t1", "是哪个白白哦？", "老朱，朱冠锋呀"),
+      authorThread("t2", "价格多少", "看方案，5k到1w"),
+      { ...readerExchange("t3"), question: "我同事上个月做了，第三天就不肿了。" },
+      organicReaction("t4"),
+    ], "peer_seeding");
+    expect(codes).toContain("fabricated_experience");
+  });
+
+  it("peer_seeding:博主自己讲时间线不阻断,同一句话换成模拟读者说就阻断", () => {
+    // 同一字符串,只换说话人 —— 直接证明判据是「谁在说」而不是「说了什么」。
+    const line = "我刚做完第三天，肿得还没消。";
+    const asAuthor = codesOf([
+      { ...authorThread("t1", "恢复几天了？", line) },
+      authorThread("t2", "价格多少", "看方案，5k到1w"),
+      readerExchange("t3"), organicReaction("t4"),
+    ], "peer_seeding");
+    expect(asAuthor).not.toContain("fabricated_experience");
+
+    const asReader = codesOf([
+      authorThread("t1", "是哪个白白哦？", "老朱，朱冠锋呀"),
+      authorThread("t2", "价格多少", "看方案，5k到1w"),
+      { ...readerExchange("t3"), answer: line },
+      organicReaction("t4"),
+    ], "peer_seeding");
+    expect(asReader).toContain("fabricated_experience");
   });
 });
