@@ -14,6 +14,15 @@ export type HarnessAudienceStage = "collecting" | "discovering" | "comparing" | 
 export type HarnessEntryRoute = "search" | "recommendation" | "profile";
 export type HarnessBodyLength = "short" | "medium" | "long";
 
+/**
+ * 内容形态模式。
+ *
+ * `peer_seeding`(默认):素人代发种草。内容由真人素人账号发布、经历真实,AI 只是
+ * 代笔起草,所以允许第一人称时间线叙述,评论区以博主本人回复为主。
+ * `brand_voice`:机构口吻。保留原有全部严格校验——机构不能假装自己是顾客。
+ */
+export type HarnessSeedingMode = "peer_seeding" | "brand_voice";
+
 /** One authoritative body-length contract shared by prompts and validation. */
 export const HARNESS_BODY_LENGTH_TARGETS: Readonly<Record<HarnessBodyLength, Readonly<{ min: number; max: number }>>> = Object.freeze({
   short: Object.freeze({ min: 60, max: 140 }),
@@ -46,6 +55,15 @@ export interface HarnessMethodProfile {
 }
 
 export const DEFAULT_HARNESS_METHOD_ID: HarnessMethodId = "state_experience_entry";
+
+/**
+ * 默认走素人代发。
+ *
+ * 这个通道的实际用途是给真人素人账号起草代发内容,默认关掉会让每次运行都要手动
+ * 勾选。默认开,但保留 brand_voice 这条路——通道里有 brand 发布身份和偏机构口吻
+ * 的写法,那些用法不该被强制伪造成素人。
+ */
+export const DEFAULT_HARNESS_SEEDING_MODE: HarnessSeedingMode = "peer_seeding";
 
 export const HARNESS_METHOD_PROFILES: readonly HarnessMethodProfile[] = Object.freeze([
   {
