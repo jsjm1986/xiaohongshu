@@ -49,9 +49,12 @@ export function visibleCandidateText(candidate: HarnessCandidate): string {
  * 但 visibleCandidateText 把正文、博主回复和模拟读者的话拼成一整段,拿它做
  * FIRST_PERSON_TIMELINE 判断就成了无差别放开 —— 模拟读者也能说「我同事上个月
  * 做了」。所以按来源分开:
- *   authorOwned  发布账号自己的话(正文、首评、author 身份的答复)
- *   simulated    虚构读者的话(reader_exchange 双方、organic_reaction、非 author 答复)
- * 时间线叙述只在 authorOwned 里被允许;simulated 里出现照旧是 ERROR。
+ *   authorOwned  发布账号自己的话(正文、首评、org_answer + author 身份的答复)
+ *   restricted   虚构读者的话(读者提问、reader_exchange 双方、organic_reaction、非 author 答复)
+ * 时间线叙述只在 authorOwned 里被允许;restricted 里出现照旧是 ERROR。
+ *
+ * 返回逐节点数组而不是拼好的整段:把提问和答复拼起来会跨边界拼出假时间线
+ * (例如「我...?」+「要,...做...」),按节点分别匹配才不误报。
  */
 export function candidateTextByOrigin(candidate: HarnessCandidate): { authorOwned: string[]; restricted: string[] } {
   const authorOwned: string[] = [
@@ -252,8 +255,8 @@ export function validateHarnessCandidates(
     const timelineNodes = peerSeeding
       ? origin.restricted
       : [...origin.authorOwned, ...origin.restricted];
-    // Test each speaker node independently. Joining question and answer text can
-    // create a false timeline across the boundary (for example “我...?” + “要，...做...”).
+    // 逐个说话节点单独匹配:把提问和答复拼成一段会跨边界拼出假时间线
+    // (例如「我...?」+「要，...做...」),那是误报。
     const timelineViolation = timelineNodes.some((text) => FIRST_PERSON_TIMELINE.test(text));
     if (FABRICATED_TESTIMONIAL.test(visible) || timelineViolation) {
       add(index, "fabricated_experience", "error", peerSeeding

@@ -354,4 +354,26 @@ describe("第一人称措辞按模式分叉", () => {
     ], "peer_seeding");
     expect(asReader).toContain("fabricated_experience");
   });
+
+  it("peer_seeding:reader_exchange 谎报 author 身份也不能借豁免", () => {
+    /*
+     * schema 对 threadKind 与 postingIdentity 是独立约束的(runner.ts:87-96 两个
+     * 平行 enum,不做交叉校验),15 种组合都合法;而 runner.ts:633 那句提示词还明写
+     * reader_exchange 的 postingIdentity「仅供显示」——等于告诉模型这个字段随便填。
+     * 所以「reader_exchange 且身份为 author」是模型真能产出的组合。
+     *
+     * 时间线豁免只认「org_answer + author」这一对。少了 kind 判断,虚构读者
+     * 只要把身份标成 author 就能说「我朋友做完两天就恢复了」,那正是伪造社会
+     * 证明——这条测试钉住那个 kind 守卫。
+     */
+    const fake: HarnessCommentThread = {
+      ...readerExchange("t3"), postingIdentity: "author", answer: "我朋友做完两天就恢复了",
+    };
+    const codes = codesOf([
+      authorThread("t1", "是哪个白白哦？", "老朱，朱冠锋呀"),
+      authorThread("t2", "价格多少", "看方案，5k到1w"),
+      fake, organicReaction("t4"),
+    ], "peer_seeding");
+    expect(codes).toContain("fabricated_experience");
+  });
 });
