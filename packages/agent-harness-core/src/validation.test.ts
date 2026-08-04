@@ -379,6 +379,102 @@ describe("第一人称措辞按模式分叉", () => {
     ], "peer_seeding");
     expect(codes).toContain("fabricated_experience");
   });
+
+  /*
+   * 第三方伪造经历:两种模式都必须拦。
+   *
+   * 这 9 条实测在拆正则之后、加第三方分支之前,素人模式下 9/9 全部漏过 ——
+   * 而拆之前 9/9 全部拦住,是对默认路径的回归(三个生产调用点都用默认素人模式)。
+   * 放开的依据是「发布人真的做过、真的用自己账号发」,只覆盖「我」;闺蜜同事朋友
+   * 没做过那件事,也没人为那句话负责,所以这一支与模式无关。
+   */
+  const THIRD_PARTY_FABRICATIONS = [
+    "我闺蜜做完第二天就上班了，一点都不肿",
+    "我同事上个月刚做完，效果很好",
+    "朋友做完三天就出门了",
+    "我姐妹去年做的没反弹",
+    "家人也做了效果很稳",
+    "我朋友术后基本没肿",
+    "我表姐做完当天就回家",
+    "闺蜜刚做完说不疼",
+    "同事术后第二天上班",
+  ] as const;
+
+  for (const line of THIRD_PARTY_FABRICATIONS) {
+    it(`第三方伪造经历两种模式都阻断：${line}`, () => {
+      for (const mode of ["peer_seeding", "brand_voice"] as const) {
+        const codes = codesForBody(line, mode);
+        expect(codes, `${mode} 下「${line}」必须阻断`).toContain("fabricated_experience");
+      }
+    });
+  }
+
+  /*
+   * 语料里的称呼式提问:素人模式必须干净。
+   *
+   * PEER_SEEDING_GUIDANCE 主动要求「模拟读者问哪个医生/哪家医院,由博主回答」,
+   * 医生名字靠被问出来正是这个模式的机制。这里的「姐妹」是称呼博主本人,
+   * 不是第三方主张。67 篇语料 13 处命中里有 3 处是这种问法,拦掉就是误伤。
+   */
+  const CORPUS_QUESTIONS = [
+    "姐妹哪家医院做的",
+    "姐妹你做的体验感怎么样呀",
+    "姐妹在哪里做的",
+    // 语料里的原句写法是口语的「咋样」,不带问号也不带「怎么样」。
+    // 只按书面疑问词列表判会漏掉它,于是这句真实语料会被第三方分支误拦成 ERROR
+    // —— 这是跑语料回归时实测发现的,不是假想。疑问词表必须覆盖口语变体。
+    "姐妹 你做的咋样",
+  ] as const;
+
+  for (const line of CORPUS_QUESTIONS) {
+    it(`peer_seeding:语料提问句不误拦：${line}`, () => {
+      /*
+       * 两条通道都要测,漏一条就测不到真正的误拦路径:
+       *   正文   → authorOwned,peer_seeding 下时间线分支根本不扫这里;
+       *   提问句 → restricted,才是时间线分支实际扫的地方。
+       * 语料里这些话正是读者的提问(thread.question),所以只测正文会假绿 ——
+       * 把第三方主语并回 FIRST_PERSON_TIMELINE 的变异在只测正文时杀不掉。
+       */
+      expect(codesForBody(line, "peer_seeding"), `正文里「${line}」是提问不是经历断言`)
+        .not.toContain("fabricated_experience");
+      const asQuestion = codesOf([
+        authorThread("t1", line, "内切，恢复挺快"),
+        authorThread("t2", "价格多少", "看方案，5k到1w"),
+        readerExchange("t3"), organicReaction("t4"),
+      ], "peer_seeding");
+      expect(asQuestion, `读者提问「${line}」被误判成第三方经历断言`)
+        .not.toContain("fabricated_experience");
+    });
+  }
+
+  /*
+   * 「我」主语时间线的 6 个完成态跨度:素人放开、品牌口吻仍拦。
+   * 语料 13 处命中里 10 处是「我」主语,这一支是验收的主体。
+   */
+  const FIRST_PERSON_LINES = [
+    "我刚做完两天，还有点肿",
+    "我做完第三天就消了",
+    "我做了之后眼下平整很多",
+    "我做的是内切，恢复挺快",
+    "我术后一周基本看不出来",
+    "我恢复得比想象中快",
+  ] as const;
+
+  for (const line of FIRST_PERSON_LINES) {
+    it(`「我」主语时间线:peer_seeding 放行 / brand_voice 阻断：${line}`, () => {
+      expect(codesForBody(line, "peer_seeding"), `素人模式不该拦「${line}」`).not.toContain("fabricated_experience");
+      expect(codesForBody(line, "brand_voice"), `品牌口吻应拦「${line}」`).toContain("fabricated_experience");
+    });
+  }
+
+  it("半陈述半提问不能靠一个疑问词洗白整段", () => {
+    /*
+     * 疑问豁免必须按小句判。整段里只要出现「哪」就放行的话,
+     * 「闺蜜做完第二天就上班了，哪家医院?」会把伪造断言夹带过去。
+     */
+    const codes = codesForBody("闺蜜做完第二天就上班了，哪家医院？", "peer_seeding");
+    expect(codes).toContain("fabricated_experience");
+  });
 });
 
 /*

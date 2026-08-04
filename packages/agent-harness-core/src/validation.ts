@@ -12,13 +12,58 @@ import type { HarnessSeedingMode } from "./methods.js";
  */
 const FABRICATED_TESTIMONIAL = /(亲测|我做过|我用过|我体验过|朋友做过|闺蜜做过|真实顾客|真实客户)/u;
 /*
- * 第一人称时间线叙述。peer_seeding 放开,brand_voice 仍 ERROR。
+ * 第一人称时间线叙述。**只认「我」这一个主语。** peer_seeding 放开,brand_voice 仍 ERROR。
  *
  * 「我做完两天了」这类朴素叙述在 67 篇语料里命中 13 篇(19%),是这批内容的常态。
  * 放开的依据:内容由真人素人账号发布、经历真实,AI 只是代笔起草。
  * brand_voice 下保持阻断 —— 机构口吻不能假装自己是顾客。
+ *
+ * 为什么主语必须收窄到「我」(这里最容易被后人改回去):
+ * 原正则把 朋友|闺蜜|同事|姐妹|家人 和「我」并列在一个字符组里,名字叫「第一人称」
+ * 但 6 个主语里 5 个是别人。brand_voice 下无害(整条都 ERROR),可 peer_seeding 一旦
+ * 整条豁免,「我闺蜜做完第二天就上班了」也跟着放行 —— 那是 AI 编造的第三方社会证明。
+ * 放开的依据只覆盖「我」:发布人真的做过、真的用自己账号发。闺蜜同事没做过,也没人
+ * 为那句话负责。所以第三方主语必须另判(见 THIRD_PARTY_EXPERIENCE),不能并回来。
  */
-const FIRST_PERSON_TIMELINE = /(?:我|朋友|闺蜜|同事|姐妹|家人).{0,12}(?:刚做|做完|做了|做的|术后|恢复)/u;
+const FIRST_PERSON_TIMELINE = /我.{0,12}(?:刚做|做完|做了|做的|术后|恢复)/u;
+/*
+ * 第三方伪造经历。**两种模式都是 ERROR**,与文本来源无关。
+ *
+ * 「我闺蜜做完第二天就上班了」「同事术后第二天上班」这类句子是替不存在的第三方
+ * 编造完成态经历,即伪造社会证明。它挂在真人账号上发出去,但没有任何真人为它负责,
+ * 因此与「账号是真人」这个放开依据无关,peer_seeding 也不能放开。
+ * 提示词本身已明令不得编造他人(BODY_VOICE_GUIDANCE.peer_seeding 的
+ * "Never invent anyone else"),校验层的职责正是模型漂移时的最后一道兜底。
+ *
+ * FABRICATED_TESTIMONIAL 不兜底这一支:它只抓营销体措辞(「亲测」「闺蜜做过」),
+ * 对「我闺蜜做完第二天就上班了」返回 false —— 实测确认。
+ */
+const THIRD_PARTY_EXPERIENCE = /(?:朋友|闺蜜|同事|姐妹|家人|表姐|表妹|同学|亲戚).{0,12}(?:刚做|做完|做了|做的|术后|恢复)/u;
+/*
+ * 疑问标记:带疑问的小句不算经历断言,不拦。
+ *
+ * PEER_SEEDING_GUIDANCE 主动要求「模拟读者问哪个医生/哪家医院,由博主回答」——
+ * 医生名字靠被问出来是这个模式的核心机制,而 thread.question 在两种模式下都算
+ * restricted,于是「姐妹哪家医院做的」会被第三方分支误判。那里的「姐妹」是称呼博主
+ * 本人,不是第三方主张。67 篇语料 13 处命中里有 3 处正是这种问法,拦掉就是误伤。
+ *
+ * 必须收口语变体:语料里真实那句是「姐妹 你做的咋样」,写的是「咋样」不是「怎么样」。
+ * 只列书面疑问词会漏掉它,于是这句被当成第三方断言拦下 —— 实测出现过,故补「咋」。
+ */
+const QUESTION_MARKER = /[?？]|哪|几|多少|吗|呢|怎么样|怎样|咋样|咋|如何|有没有/u;
+/** 小句切分:疑问要按小句判,否则一句陈述后面跟个问句就能把整段洗白。 */
+const CLAUSE_BOUNDARY = /[，,。！!？?；;、\n]+/u;
+
+/**
+ * 是否存在「第三方主语 + 完成态断言」的小句。
+ *
+ * 逐小句判而非整段判:整段里只要有一个疑问词就豁免的话,
+ * 「闺蜜做完第二天就上班了，哪家医院?」这种半陈述半提问会整段漏过。
+ */
+function hasThirdPartyExperienceClaim(text: string): boolean {
+  return text.split(CLAUSE_BOUNDARY)
+    .some((clause) => THIRD_PARTY_EXPERIENCE.test(clause) && !QUESTION_MARKER.test(clause));
+}
 const PUBLIC_AUDIT_LEAK = /(待人工审核|审核状态|证据编号|responseSla|\bSLA\b|发布计划|不代表已经发布|平台合规|终稿校对)/iu;
 const PUBLIC_SOURCE_META = /(项目资料(?:显示|表明|支持|中的?)|现有资料(?:显示|表明|支持|中的?)|根据(?:项目)?知识库|证据(?:显示|表明|支持)|本轮证据|evidence_section_)/iu;
 const UNSUPPORTED_POPULATION_LANGUAGE = /(很多人|大家都|最怕|最关心|普遍|通常用户|真实用户都)/u;
@@ -287,7 +332,15 @@ export function validateHarnessCandidates(
     // 逐个说话节点单独匹配:把提问和答复拼成一段会跨边界拼出假时间线
     // (例如「我...?」+「要，...做...」),那是误报。
     const timelineViolation = timelineNodes.some((text) => FIRST_PERSON_TIMELINE.test(text));
-    if (FABRICATED_TESTIMONIAL.test(visible) || timelineViolation) {
+    /*
+     * 第三方伪造经历:两种模式、全部来源一起查,不受 peerSeeding 豁免。
+     * 「我」的时间线可以放开(真人自己的事,自己负责),别人的经历不行 ——
+     * 没有任何真人为「我闺蜜做完第二天就上班了」负责,那是伪造社会证明。
+     * 同样逐节点判,不拼整段:避免跨说话人拼出假断言。
+     */
+    const thirdPartyViolation = [...origin.authorOwned, ...origin.restricted]
+      .some((text) => hasThirdPartyExperienceClaim(text));
+    if (FABRICATED_TESTIMONIAL.test(visible) || timelineViolation || thirdPartyViolation) {
       add(index, "fabricated_experience", "error", peerSeeding
         ? "可见内容出现伪造口碑措辞，或模拟读者声称了未经证实的体验时间线。"
         : "可见内容包含可能伪装真实经历或口碑的措辞。");
