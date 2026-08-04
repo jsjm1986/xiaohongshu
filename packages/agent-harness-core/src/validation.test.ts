@@ -466,28 +466,37 @@ describe("生产路径把模式真的传下去", () => {
    * 而那正是本任务要防的分叉。断言必须落在参数块内才咬得住。
    */
   function validatorCallBlock(source: string): string {
-    const start = source.lastIndexOf("validateHarnessCandidates(");
+    // 锚在赋值那一行而不是 lastIndexOf:后者只是「碰巧文件里最后一次出现」,
+    // 将来任一文件多出一处调用(哪怕在注释或类型里),截出来的就不是被测的那一次。
+    const start = source.indexOf("const issues = validateHarnessCandidates(");
+    expect(start, "没找到 `const issues = validateHarnessCandidates(` 这次调用").toBeGreaterThan(-1);
     const end = source.indexOf("});", start);
-    expect(start, "没找到 validateHarnessCandidates 的调用").toBeGreaterThan(-1);
     expect(end, "没找到调用的参数块结尾").toBeGreaterThan(start);
     return source.slice(start, end);
   }
 
-  it("两个调用点都传了 seedingMode,不能只改一处", () => {
+  it("两个调用点都传了同一套 seedingMode,不能只改一处", () => {
     /*
      * validateHarnessCandidates 有两个调用点:runner(生成时)和 service(断点恢复读结果时)。
      * 只改一处的后果是同一份候选在两条路上判定不同——界面说合格、导出却被拦,极难查。
      * 实测既有缺陷:service 此前漏传 bodyLength,导致长度检查静默按 medium 判。
+     *
+     * 断言到**值**而不只是键:只查键名时,service 里写死 `seedingMode: 'brand_voice'`
+     * 照样能过 —— 而这条测试的全部意义就是两处判定标准一致。
      */
     const runnerSource = readFileSync(new URL("./runner.ts", import.meta.url), "utf8");
     const serviceSource = readFileSync(
       new URL("../../../apps/api/src/agent-harness.service.ts", import.meta.url), "utf8");
-    for (const [label, source] of [["runner", runnerSource], ["service", serviceSource]] as const) {
-      const block = validatorCallBlock(source);
-      expect(block, `${label} 的校验调用没有传 seedingMode`).toMatch(/seedingMode:/u);
-      expect(block, `${label} 的校验调用没有传 projectName`).toMatch(/projectName:/u);
-      expect(block, `${label} 的校验调用没有传 bodyLength`).toMatch(/bodyLength:/u);
+    const runnerBlock = validatorCallBlock(runnerSource);
+    const serviceBlock = validatorCallBlock(serviceSource);
+    for (const [label, block] of [["runner", runnerBlock], ["service", serviceBlock]] as const) {
+      expect(block, `${label} 的校验调用没有传 projectName`).toMatch(/projectName: \w+\.project\.name/u);
+      expect(block, `${label} 的校验调用没有传 bodyLength`).toMatch(/bodyLength: \w+\.task\.bodyLength/u);
+      expect(block, `${label} 的校验调用没有把模式落到 DEFAULT_HARNESS_SEEDING_MODE`)
+        .toMatch(/seedingMode: (?:input\.seedingMode \?\? )?DEFAULT_HARNESS_SEEDING_MODE/u);
     }
+    // runner 那处要尊重调用方显式指定的模式,service 那处没有调用方可尊重。
+    expect(runnerBlock, "runner 丢掉了调用方显式指定的模式").toContain("input.seedingMode ??");
   });
 
   it("提示词区分博主本人与模拟读者:博主可讲自己时间线,读者不许编经历", () => {
@@ -543,12 +552,28 @@ describe("生产路径把模式真的传下去", () => {
     expect(peerSeeding, "peer_seeding 仍把四段式写成无条件必须")
       .toMatch(/clarification, verifiable next step and boundary are optional/u);
 
-    expect(brandVoiceLinesUnchanged(brandVoice), "brand_voice 那两句必须逐字保留原文").toBe(true);
+    /*
+     * 「逐字保留」按整句比对,不是抓两个中间片段。
+     *
+     * 原先只 includes 两个句中片段,于是两句的句尾都没人管:实测把
+     * 「4-6」改成「3-7」、把「these names never imply real accounts」
+     * 反转成「may imply real accounts」,测试照旧全绿 —— 后者紧邻伪造边界。
+     * 整句相等才是这条断言名字所声称的东西。
+     */
+    expect(brandVoiceLines(brandVoice), "brand_voice 那两句必须逐字保留原文").toEqual(BRAND_VOICE_TOPOLOGY_LINES);
   });
 });
 
-/** brand_voice 两句原文逐字比对。写成独立函数只为让上面的断言读起来是一句结论。 */
-function brandVoiceLinesUnchanged(brandVoiceBlock: string): boolean {
-  return brandVoiceBlock.includes("Mix all three threadKind values: 2-3 org_answer threads, at least 1 reader_exchange, and at least 1 organic_reaction.")
-    && brandVoiceBlock.includes("org_answer is a residual reader question answered by an accountable publishing identity. It follows: direct answer -> optional follow-up or counterexample only when a concrete new condition appears -> clarification -> verifiable next step -> explicit stopReason.");
+/*
+ * brand_voice 拓扑两句的原文,取自本次改动前的 runner.ts,作为回归基线。
+ * 它们的作用是「不许动」,所以写成整句字面量而不是片段。
+ */
+const BRAND_VOICE_TOPOLOGY_LINES = [
+  "Create 4-6 Cref threads per candidate as a small uneven comment section, not 4-6 FAQs. Mix all three threadKind values: 2-3 org_answer threads, at least 1 reader_exchange, and at least 1 organic_reaction. Give simulated readers short display-only nicknames; these names never imply real accounts.",
+  "org_answer is a residual reader question answered by an accountable publishing identity. It follows: direct answer -> optional follow-up or counterexample only when a concrete new condition appears -> clarification -> verifiable next step -> explicit stopReason. Keep the visible answer compact; audit fields may be fuller.",
+] as const;
+
+/** 从源码块里取出 brand_voice 那两条字符串字面量的完整内容。 */
+function brandVoiceLines(brandVoiceBlock: string): string[] {
+  return [...brandVoiceBlock.matchAll(/^\s*"((?:[^"\\]|\\.)*)",$/gmu)].map((match) => match[1]!);
 }

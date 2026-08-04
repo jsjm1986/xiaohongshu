@@ -561,3 +561,87 @@ describe('Agent Harness security and output bounds', () => {
     expect(checkpointed).toBe(false);
   });
 });
+
+/*
+  模式选择逻辑的行为测试。
+
+  上面 validation.test.ts 里那三条是源码断言,盯的是常量文本本身;它们对「选哪一支」
+  一无所知 —— 实测把 PEER_SEEDING_GUIDANCE 改成两种模式都下发、或把拓扑那两句永远
+  取 brand_voice,57 条全绿。后者正是本任务要修的生产故障。
+
+  这里改成跑 runAgentHarness、断言真正发给模型的 system message:
+  calls[1] 是正文阶段(唯一写得出 N.body 的阶段),calls[2..4] 是组包阶段。
+*/
+describe('素人代发模式按模式下发提示词', () => {
+  /** 跑一轮并取回各阶段的 system message。三个候选是这条链路的固定形态。 */
+  async function systemMessages(seedingMode?: 'peer_seeding' | 'brand_voice') {
+    const calls: HarnessModelRequest[] = [];
+    await runAgentHarness({
+      ...baseInput,
+      ...(seedingMode ? { seedingMode } : {}),
+      provider: scriptedProvider(protocolReplies([candidate(0, '标题一'), candidate(1, '标题二'), candidate(2, '标题三')]), calls),
+    });
+    return { bodyDraft: calls[1]!.messages[0]!.content, packaging: calls[2]!.messages[0]!.content };
+  }
+
+  it('默认(不传 seedingMode)按素人代发下发,正文阶段放开自述时间线', async () => {
+    /*
+     * 默认模式必须真的走 peer_seeding,而不是「校验器默认了但提示词还按机构口吻发」。
+     * 正文阶段是关键:组包阶段被明令逐字复制 N.body、assertFrozenBodyDrafts 还会在
+     * 正文有差异时 throw,所以第一人称只能在这一阶段被要求出来。
+     */
+    const { bodyDraft, packaging } = await systemMessages();
+    expect(bodyDraft, '正文阶段没被告知发布账号是真人素人').toContain('real individual');
+    expect(bodyDraft, '正文阶段没放开博主自述时间线').toContain('their own timeline');
+    expect(bodyDraft, '机构口吻那句原文仍在,与素人指引正面冲突')
+      .not.toContain("Use an accountable official/publisher voice that stands inside the reader's problem");
+    expect(packaging, '组包阶段没点名 author 身份,模型会全部漏填成 publisher')
+      .toContain("postingIdentity 'author'");
+    /*
+     * 这一条单独存在,不能靠上一条代劳:素人指引里也有一句带 `postingIdentity 'author'`,
+     * 所以拓扑那两句被恒定取成 brand_voice 时,上面那条照旧命中 —— 实测正是如此。
+     * 而拓扑句才是撞 comment_topology 的那一句:它要求「2-3 条机构答疑」时模型不会
+     * 产出 author 身份,校验层却要求 ≥2 条,默认模式每次实跑必然阻断。
+     */
+    expect(packaging, '组包阶段仍在要求 2-3 条机构答疑,拓扑那两句没有真的分叉')
+      .not.toContain('2-3 org_answer threads');
+  });
+
+  it('brand_voice:两个阶段都逐字保持原有契约,不漏进任何素人指引', async () => {
+    /*
+     * 红线:brand_voice 下每一句提示词必须与改动前一致。素人指引漏进来会让机构口吻
+     * 拿到「可以讲自己的经历」的豁免 —— 那就是机构假装顾客。
+     */
+    const { bodyDraft, packaging } = await systemMessages('brand_voice');
+    expect(bodyDraft, '正文阶段的机构口吻原句被改动').toContain(
+      "Use an accountable official/publisher voice that stands inside the reader's problem without impersonating the reader. Never invent a visit, treatment, customer, friend, quote, recovery day, before/after image, result, endorsement or observed interaction.");
+    expect(packaging, 'brand_voice 的拓扑句不是原文').toContain('2-3 org_answer threads');
+    for (const [label, message] of [['正文', bodyDraft], ['组包', packaging]] as const) {
+      expect(message, `${label}阶段漏进了素人指引`).not.toContain('This run is peer seeding');
+      expect(message, `${label}阶段漏进了博主自述豁免`).not.toContain('their own timeline');
+      expect(message, `${label}阶段漏进了素人的标签要求`).not.toContain('category words and city words');
+    }
+  });
+
+  it('两个模式下发的不是同一份提示词', async () => {
+    /* 兜住「两支恒取同一支」这类改动:任一阶段两模式文本相同,分叉就是假的。 */
+    const peer = await systemMessages('peer_seeding');
+    const brand = await systemMessages('brand_voice');
+    expect(peer.bodyDraft, '正文阶段两个模式拿到同一份提示词').not.toBe(brand.bodyDraft);
+    expect(peer.packaging, '组包阶段两个模式拿到同一份提示词').not.toBe(brand.packaging);
+  });
+
+  it('正文阶段不重复组包阶段的评论区与标签指引,反之亦然', async () => {
+    /*
+     * 按「哪个阶段改得动」分家:正文阶段被明令不许规划评论区,组包阶段改不动正文。
+     * 同一条重复下发时,模型会在改不动的阶段试着遵守,那是无效指令也是噪声。
+     */
+    const { bodyDraft, packaging } = await systemMessages('peer_seeding');
+    expect(bodyDraft, '正文阶段收到了组包阶段才能落地的评论线程要求')
+      .not.toContain("At least 2 Cref threads must be org_answer");
+    expect(bodyDraft, '正文阶段收到了标签要求,而这一阶段不产出标签')
+      .not.toContain('category words and city words');
+    expect(packaging, '组包阶段收到了正文的参数分配要求,而它改不动正文')
+      .not.toContain('The body establishes one situation and one narrow question');
+  });
+});
