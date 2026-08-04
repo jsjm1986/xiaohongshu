@@ -434,4 +434,21 @@ describe("标签禁品牌词", () => {
     const issues = issuesForHashtags(["#星零感微孔去眼袋"], "peer_seeding");
     expect(issues.map((issue) => issue.code), JSON.stringify(issues)).not.toContain("brand_hashtag");
   });
+
+  it("项目名是空白时跳过该检查,不把每条标签都标成品牌词", () => {
+    /*
+     * 钉住守卫里的 `.trim()`,它不是顺手整理空白而是必要条件:
+     * 项目名为 "" 或纯空格时 `tag.includes("")` 对任何字符串都为真,
+     * 于是**每一条**标签都会收到一条 brand_hashtag —— 一个名字填空的项目
+     * 会让整个标签区变成一片噪声警告。
+     *
+     * 用两条毫不相干的标签,把「误报」和「恰好命中」彻底分开:它们与任何
+     * 真实项目名都无关,报出来只可能是空串匹配所致。
+     */
+    for (const blank of ["", "   "]) {
+      const issues = issuesForHashtags(["#成都眼袋", "#变美日记"], "peer_seeding", blank);
+      const branded = issues.filter((issue) => issue.code === "brand_hashtag");
+      expect(branded, `项目名为 ${JSON.stringify(blank)} 时不该报品牌词：${JSON.stringify(branded)}`).toEqual([]);
+    }
+  });
 });
