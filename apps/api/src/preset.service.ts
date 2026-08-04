@@ -596,7 +596,7 @@ export class PresetService {
     const modelLayer: Record<string, unknown> = {};
     if (typeof legacyConfig.model === 'string' && legacyConfig.model !== '项目默认') modelLayer.model = legacyConfig.model;
     if (typeof legacyConfig.temperature === 'number') modelLayer.temperature = clamp(legacyConfig.temperature, 0, 2);
-    if (typeof legacyConfig.maxOutputTokens === 'number') modelLayer.maxOutputTokens = Math.floor(clamp(legacyConfig.maxOutputTokens, 1_000, 32_000));
+    if (typeof legacyConfig.maxOutputTokens === 'number') modelLayer.maxOutputTokens = Math.floor(clamp(legacyConfig.maxOutputTokens, 1_000, 384_000));
     if (Object.keys(modelLayer).length) {
       layer.model = modelLayer;
       traces.push({ parameterId: 'model-runtime', path: 'model', value: modelLayer, source: 'legacy-config', directive: '运行时模型参数已真实写入底层配置。' });
@@ -824,9 +824,16 @@ function applyDirectReaderTaskOverrides(
     if (!Object.prototype.hasOwnProperty.call(raw, key)) continue;
     task[key] = raw[key] ?? [];
   }
-  if (!Object.prototype.hasOwnProperty.call(raw, 'readerHistory')) return;
-  if (raw.readerHistory === undefined || raw.readerHistory === null) delete task.readerHistory;
-  else task.readerHistory = raw.readerHistory;
+  if (Object.prototype.hasOwnProperty.call(raw, 'readerHistory')) {
+    if (raw.readerHistory === undefined || raw.readerHistory === null) delete task.readerHistory;
+    else task.readerHistory = raw.readerHistory;
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, 'publishingTopology')) {
+    task.publishingTopology = raw.publishingTopology;
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, 'authorContext')) {
+    task.authorContext = raw.authorContext;
+  }
 }
 
 const READER_TASK_LIST_MAX_ITEMS = 50;
@@ -861,11 +868,36 @@ function normalizeReaderTaskFields(config: ResolvedGenerationConfig): void {
   const task = config.task as unknown as Record<string, unknown>;
   task.preContactKnown = normalizedReaderTaskList(task.preContactKnown ?? [], 'preContactKnown');
   task.readerConstraints = normalizedReaderTaskList(task.readerConstraints ?? [], 'readerConstraints');
-  if (task.readerHistory === undefined || task.readerHistory === null) {
-    delete task.readerHistory;
-    return;
+  if (task.readerHistory === undefined || task.readerHistory === null) delete task.readerHistory;
+  else task.readerHistory = normalizedReaderTaskList(task.readerHistory, 'readerHistory');
+
+  const topology = task.publishingTopology ?? 'institution_owned';
+  if (topology !== 'institution_owned' && topology !== 'confirmed_individual_author') {
+    throw new BadRequestException('publishingTopology must be institution_owned or confirmed_individual_author.');
   }
-  task.readerHistory = normalizedReaderTaskList(task.readerHistory, 'readerHistory');
+  task.publishingTopology = topology;
+  const rawContext = isRecord(task.authorContext) ? task.authorContext : { status: 'not_provided', facts: [] };
+  const rawFacts = Array.isArray(rawContext.facts) ? rawContext.facts : [];
+  const allowedCategories = new Set(['current_state', 'intent', 'constraint', 'project_contact', 'purchase', 'service_completion', 'recovery', 'outcome']);
+  const facts = rawFacts.map((item, index) => {
+    if (!isRecord(item)) throw new BadRequestException(`authorContext.facts[${index}] must be an object.`);
+    const id = typeof item.id === 'string' ? item.id.trim() : '';
+    const statement = typeof item.statement === 'string' ? item.statement.trim() : '';
+    const category = typeof item.category === 'string' ? item.category : '';
+    const confirmedBy = typeof item.confirmedBy === 'string' ? item.confirmedBy.trim() : '';
+    const confirmedAt = typeof item.confirmedAt === 'string' ? item.confirmedAt.trim() : '';
+    if (!id || !statement || !allowedCategories.has(category) || !confirmedBy || !confirmedAt || !Number.isFinite(Date.parse(confirmedAt))) {
+      throw new BadRequestException(`authorContext.facts[${index}] is incomplete or invalid.`);
+    }
+    return { id, statement, category, confirmedBy, confirmedAt };
+  });
+  if (new Set(facts.map((fact) => fact.id)).size !== facts.length) {
+    throw new BadRequestException('authorContext fact ids must be unique.');
+  }
+  if (topology === 'confirmed_individual_author' && facts.length === 0) {
+    throw new BadRequestException('confirmed_individual_author requires at least one human-confirmed author fact.');
+  }
+  task.authorContext = facts.length ? { status: 'confirmed', facts } : { status: 'not_provided', facts: [] };
 }
 
 function taskLayer(raw: Record<string, unknown>, current: ResolvedGenerationConfig): Record<string, unknown> {

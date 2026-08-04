@@ -12,6 +12,32 @@ export type KnowledgeKind =
 
 export type EvidenceStatus = "observed" | "user_supplied" | "inferred" | "unknown";
 
+/** Frozen account topology for one traditional-generation job. */
+export type PublishingTopology = "institution_owned" | "confirmed_individual_author";
+
+export type ConfirmedAuthorFactCategory =
+  | "current_state"
+  | "intent"
+  | "constraint"
+  | "project_contact"
+  | "purchase"
+  | "service_completion"
+  | "recovery"
+  | "outcome";
+
+export interface ConfirmedAuthorFact {
+  id: string;
+  statement: string;
+  category: ConfirmedAuthorFactCategory;
+  confirmedBy: string;
+  confirmedAt: string;
+}
+
+export interface AuthorContext {
+  status: "not_provided" | "confirmed";
+  facts: ConfirmedAuthorFact[];
+}
+
 export interface KnowledgeSourceInput {
   id?: string;
   projectId: string;
@@ -400,6 +426,10 @@ export interface ResolvedGenerationConfig {
     readerHistory?: string[];
     /** Reader-side constraints supplied for this scenario, not project rules. */
     readerConstraints: string[];
+    /** Frozen per-job publishing topology. Historical configs default to institution_owned. */
+    publishingTopology: PublishingTopology;
+    /** Human-confirmed author facts. Project knowledge and scenario hypotheses never populate this. */
+    authorContext: AuthorContext;
     mustMention: string[];
     forbidden: string[];
   };
@@ -965,7 +995,7 @@ export type CommentFollowUpStopReason = "answered" | "unknown_pending_evidence" 
  * 注意与节点级 `kind`(CommentNodeKind,提问/回答/追问/澄清)区分:threadKind 是
  * 线程级互动形态。可选,历史包缺省按 `org_answer` 理解与渲染。
  */
-export type CommentThreadKind = "org_answer" | "reader_exchange" | "organic_reaction";
+export type CommentThreadKind = "org_answer" | "host_reply" | "reader_exchange" | "organic_reaction";
 
 export interface CommentFollowUp extends CommentScenarioMetadata {
   id?: string;
@@ -1048,6 +1078,10 @@ export interface CommentReferenceThread extends CommentScenarioMetadata {
    * surfaceRoleCard 必不相同;B 的接话范围限其 permittedContribution。
    */
   replySurfaceRoleCard?: CommentSurfaceRoleCard;
+  /** Human-confirmed author facts used by a host_reply. Never project evidenceIds into this field. */
+  authorFactIds?: string[];
+  /** Social threads may stay on-topic without owning or resolving a project information gap. */
+  topicAnchorGapId?: string;
 }
 
 export interface ContentPackageContent {
@@ -1660,7 +1694,7 @@ export interface DialogueThreadPlan {
   /** M7: downgraded to optional (streamlined-capable); see CommentDiscoveryPlan. */
   discoveryPlan?: CommentDiscoveryPlan;
   conversationPlan?: {
-    topology: "single_exchange" | "two_turn" | "three_person_branch" | "reaction_then_reply" | "reader_exchange" | "organic_reaction";
+    topology: "single_exchange" | "two_turn" | "three_person_branch" | "reaction_then_reply" | "host_reply" | "reader_exchange" | "organic_reaction";
     targetFollowUps: 0 | 1 | 2;
     openingMove: string;
     replyMove: string;
@@ -1680,6 +1714,18 @@ export interface DialogueThreadPlan {
    * 话头 gap 的线程 org_answer 概率自然偏高)。缺省 `org_answer`。
    */
   threadKind?: CommentThreadKind;
+  /** New plans set primary_gap only for org_answer; historical plans omit it. */
+  coverageRole?: "primary_gap" | "topic_anchor" | "none";
+  /** Social thread topic association; it never resolves the gap. */
+  topicAnchorGapId?: string;
+  /** Confirmed author facts available to a host_reply; empty for every other kind. */
+  authorFactIds?: string[];
+  /** Narrow host-only reply contract. Present only on host_reply in new plans. */
+  hostReplyPlan?: {
+    focus: "current_state" | "intent" | "constraint" | "visible_detail" | "open_loop";
+    allowedAuthorFactIds: string[];
+    questionIntent: string;
+  };
   /** T2 接话读者 B 的展示昵称(纯展示元数据),与开口者 A 不同;仅 T2 线程出现。 */
   replyDisplayName?: string;
   /** T2 接话读者 B 的可见角色卡,displayRole 与开口者不同;B 接话范围限其 permittedContribution。 */

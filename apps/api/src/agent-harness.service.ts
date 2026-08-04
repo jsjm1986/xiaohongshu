@@ -47,7 +47,7 @@ import { classifyModelFailure } from './model-failure.js';
 import type { SessionPrincipal } from './models.js';
 import { ResourceService } from './resource.service.js';
 import { createSafeModelFetch } from './safe-model-fetch.js';
-import { SettingsService, type ResolvedProviderSettings } from './settings.service.js';
+import { modelOutputTokenLimit, SettingsService, type ResolvedProviderSettings } from './settings.service.js';
 import { readStoredText } from './storage-file.js';
 import { nowIso, parseJson, requireString, type Pagination } from './utils.js';
 
@@ -938,7 +938,13 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async process(id: string): Promise<void> {
-    const job = this.jobRow(id);
+    // The job can be soft-deleted after claimNextFair() schedules this callback but
+    // before setImmediate runs. Treat that narrow race as a cancelled claim rather
+    // than allowing jobRow() to reject outside the process settlement boundary.
+    const job = this.database.prepare(
+      'SELECT * FROM agent_harness_jobs WHERE id=? AND deleted_at IS NULL',
+    ).get(id) as unknown as HarnessJobRow | undefined;
+    if (!job) return;
     const project = this.resources.projectRow(job.project_id);
     const workspaceId = String(project.workspace_id);
     const controller = new AbortController();
@@ -1293,6 +1299,7 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
             allowPrivateNetwork: this.options.byokAllowPrivateNetwork,
           })
         : undefined,
+      maxOutputTokenLimit: modelOutputTokenLimit(settings),
       timeoutMs: Math.max(10_000, Math.min(300_000, this.options.modelRequestTimeoutMs)),
     });
     return {

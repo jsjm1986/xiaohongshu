@@ -4,10 +4,17 @@ import {
   ContentGenerationAgent,
   createDefaultGenerationConfig,
   DEFAULT_FORMULA_VERSION,
+  GENERATION_CORE_OUTPUT_TOKENS,
+  GENERATION_OUTPUT_TOKENS,
+  GENERATION_SHORT_OUTPUT_TOKENS,
   FORMULA_EXECUTION_POLICY_DIGEST,
   FORMULA_EXECUTION_POLICY_VERSION,
   indexKnowledgeSource,
+  normalizeProjectCreativeBlueprint,
   resolveGenerationConfig,
+  shouldAttemptGenerationRepair,
+  shouldCorrectCommentReadersFailure,
+  ModelProviderError,
 } from "../src/index.js";
 import type { ModelGenerationRequest, ModelProvider } from "../src/index.js";
 
@@ -69,7 +76,38 @@ function stagedCommentThreads(request: ModelGenerationRequest, answer: string) {
   }));
 }
 
+describe("observed generation cost controls", () => {
+  it("only corrects completed HTTP-200 reader failures", () => {
+    expect(shouldCorrectCommentReadersFailure(new ModelProviderError("empty output", 200, "r", false, "stop"))).toBe(true);
+    expect(shouldCorrectCommentReadersFailure(new ModelProviderError("gateway", 502, "r", true))).toBe(false);
+    expect(shouldCorrectCommentReadersFailure(new ModelProviderError("auth", 401, "r", false))).toBe(false);
+    expect(shouldCorrectCommentReadersFailure(new Error("parser error"))).toBe(false);
+  });
+
+  it("skips model repair when a terminal hard error already makes the candidate non-publishable", () => {
+    expect(shouldAttemptGenerationRepair([
+      { code: "visible_claim_not_in_ledger", severity: "error", channel: "N.body", message: "repairable", repairable: true },
+      { code: "gap_resolution_not_realized", severity: "error", channel: "N.body", message: "terminal", repairable: false },
+    ])).toBe(false);
+    expect(shouldAttemptGenerationRepair([
+      { code: "visible_claim_not_in_ledger", severity: "error", channel: "N.body", message: "repairable", repairable: true },
+    ])).toBe(true);
+    expect(shouldAttemptGenerationRepair([
+      { code: "shape", severity: "warning", channel: "N.body", message: "warning", repairable: true },
+    ])).toBe(false);
+  });
+});
+
 describe("resolved generation config", () => {
+  it("defaults to a 64K output budget and reserves the same capacity in the context window", () => {
+    const defaults = createDefaultGenerationConfig(project, DEFAULT_FORMULA_VERSION);
+    expect(defaults.model.maxOutputTokens).toBe(GENERATION_OUTPUT_TOKENS);
+    expect(defaults.knowledge.outputReserveTokens).toBe(GENERATION_OUTPUT_TOKENS);
+    expect(GENERATION_OUTPUT_TOKENS).toBe(64_000);
+    expect(GENERATION_CORE_OUTPUT_TOKENS).toBe(32_000);
+    expect(GENERATION_SHORT_OUTPUT_TOKENS).toBe(16_000);
+  });
+
   it("applies system -> workspace -> project -> task precedence and replaces arrays", () => {
     const defaults = config();
     const resolved = resolveGenerationConfig(defaults, {
@@ -263,6 +301,10 @@ describe("three-candidate content generation engine", () => {
     const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-07-12T00:00:00Z") })
       .generate({ jobId: "repair-job", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge: [knowledge[0]!] });
     expect(calls.filter((item) => item.metadata?.purpose === "generate_core")).toHaveLength(3);
+    expect(calls.filter((item) => item.metadata?.purpose === "generate_core").every((item) => item.maxOutputTokens === GENERATION_CORE_OUTPUT_TOKENS)).toBe(true);
+    expect(calls.filter((item) => item.metadata?.purpose === "generate_org_answers").every((item) => item.maxOutputTokens === GENERATION_SHORT_OUTPUT_TOKENS)).toBe(true);
+    expect(calls.filter((item) => ["generate_comment_readers", "generate_ledger", "repair"].includes(String(item.metadata?.purpose)))
+      .every((item) => item.maxOutputTokens === GENERATION_OUTPUT_TOKENS)).toBe(true);
     // 按侧+按角色隔离后,评论读者侧调用取代原合并评论调用(purpose 更名)。
     expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_readers")).toHaveLength(3);
     // Task 7.3: multi-turn comment growth (stage 2B) is opt-in and conservative by
@@ -342,6 +384,57 @@ describe("three-candidate content generation engine", () => {
     await expect(new ContentGenerationAgent({ modelProvider: provider })
       .generate({ jobId: "all-candidates-failed", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge }))
       .rejects.toThrow(/三个模型候选全部生成失败.*未生成可发布降级稿/u);
+  });
+
+  it("Core 身份屏障失败后不启动任何评论、答复或台账阶段", async () => {
+    const calls: ModelGenerationRequest[] = [];
+    const provider: ModelProvider = {
+      async generate(request) {
+        calls.push(request);
+        return {
+          text: JSON.stringify({
+            H: { hashtags: ["记录"] },
+            N: { imageBrief: "记录画面", title: "昨天的记录", body: "我昨天已经面诊了。" },
+          }),
+          raw: {},
+        };
+      },
+    };
+    const blueprint = normalizeProjectCreativeBlueprint({
+      projectId: "p1",
+      sourceFingerprint: "core-identity-barrier",
+      moduleRevisions: {},
+      modules: {
+        domain_model: { projectNoun: "服务", actions: ["面诊"] },
+        scenario_model: {
+          families: [{
+            id: "current", label: "当前状态", prototype: "narrow_request",
+            applicableStages: ["comparing"], prohibitedUnsupportedHistories: ["已经面诊"],
+            source: { status: "inference", evidenceIds: [] },
+          }],
+        },
+      },
+    });
+
+    await expect(new ContentGenerationAgent({ modelProvider: provider }).generate({
+      jobId: "core-identity-barrier",
+      config: config(),
+      formulaVersion: DEFAULT_FORMULA_VERSION,
+      knowledge,
+      planningContext: { projectBlueprint: blueprint },
+    })).rejects.toThrow(/三个模型候选全部生成失败.*Publishing-topology preflight failed/u);
+
+    expect(calls).toHaveLength(6);
+    for (const candidateIndex of [0, 1, 2]) {
+      expect(calls
+        .filter((call) => call.metadata?.candidateIndex === candidateIndex)
+        .map((call) => call.metadata?.purpose))
+        .toEqual(["generate_core", "repair_core_identity"]);
+    }
+    expect(calls.some((call) => [
+      "generate_comment_readers", "repair_comment_readers", "generate_host_answers",
+      "generate_org_answers", "generate_comment_growth", "generate_ledger", "repair",
+    ].includes(String(call.metadata?.purpose)))).toBe(false);
   });
 
   it("revises only the selected candidate and preserves unaffected channels", async () => {
@@ -525,7 +618,12 @@ describe("three-candidate content generation engine", () => {
       && item.productionArtifacts.deployment.status === "not_deployed")).toBe(true);
     expect(result.packages.every((item) => item.dialogueThreads?.[0]?.postingIdentity === "publisher")).toBe(true);
     expect(result.packages.every((item) => item.dialogueThreads?.every((thread) => thread.roleCard.stage === thread.stage && Object.values(thread.replyPlan).every(Boolean)))).toBe(true);
-    expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => Boolean(thread.roleCard && thread.replyPlan && thread.primaryGapId)))).toBe(true);
+    expect(result.packages.every((item) => item.content.Cref.threads
+      .filter((thread) => (thread.threadKind ?? "org_answer") === "org_answer")
+      .every((thread) => Boolean(thread.roleCard && thread.replyPlan && thread.primaryGapId)))).toBe(true);
+    expect(result.packages.every((item) => item.content.Cref.threads
+      .filter((thread) => (thread.threadKind ?? "org_answer") !== "org_answer")
+      .every((thread) => !thread.roleCard && !thread.replyPlan && !thread.primaryGapId && thread.evidenceIds.length === 0))).toBe(true);
     expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => thread.followUps.length <= 2))).toBe(true);
     expect(result.packages.some((item) => item.content.Cref.threads.some((thread) => thread.followUps.length === 0))).toBe(true);
     // 按侧+按角色隔离:T1 答复来自机构调用,T2 来自读者侧(同一 mock 文案);

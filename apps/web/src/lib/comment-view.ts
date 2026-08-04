@@ -56,6 +56,7 @@ export function answererLabelFor(comment: {
 }): string | undefined {
   const kind = comment.threadKind ?? 'org_answer';
   if (kind === 'organic_reaction') return undefined;
+  if (kind === 'host_reply') return comment.answer?.trim() ? '楼主本人（已确认）' : undefined;
   if (kind === 'reader_exchange') {
     return comment.answer?.trim() ? '模拟读者接话' : undefined;
   }
@@ -154,7 +155,7 @@ export function commentSectionView(
   // 线程的身份;把「模拟读者接话」混进去会让这份声明失真。
   const identities = [...new Set(
     rows
-      .filter((row) => (row.threadKind ?? 'org_answer') === 'org_answer')
+      .filter((row) => ['org_answer', 'host_reply'].includes(row.threadKind ?? 'org_answer'))
       .map((row) => row.answererLabel)
       .filter((value): value is string => Boolean(value)),
   )];

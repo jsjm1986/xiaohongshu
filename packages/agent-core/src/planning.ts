@@ -1571,34 +1571,31 @@ function dialoguePlans(
   // strategy's commentMode carries one (see deriveThreadFunction).
   const counterexampleAllowed = strategy.commentMode.includes("counterexample");
   let counterexampleAssigned = false;
-  // 读者互动层:线程级互动形态(org_answer 机构问答 / reader_exchange 读者互聊 /
-  // organic_reaction 漂浮短反应)按种子确定性预分配——每线程独立抽取,不设死
-  // 比例;营销话头 gap(答复分流为 staff)的线程 T1 概率自然偏高。
-  const rawThreadKinds = Array.from({ length: targetCount }, (_, index) => {
-    const gap = primaryOrdered[index % primaryOrdered.length]!;
-    const marketingTopic = routeReplyPostingIdentity(gap, replyRouting.claimRules) === "staff";
-    return assignCommentThreadKind(seed, `thread-kind:${strategy.id}_thread_${index + 1}`, marketingTopic);
-  });
-  // T2 可行性:读者互聊需要两个不同 displayRole 的**读者侧**可见角色(机构
-  // 角色只能答复不能坐读者席),读者角色池不足时确定性退化为 T1 机构问答。
+  // New plans allocate responsibility before style. Every Cref-owned gap gets an
+  // org_answer seat and can never be randomized into reader speech. Social seats are
+  // additional: they keep the section human without stealing required-gap capacity.
+  const primarySeatCount = primaryOrdered.length;
+  const individualAuthor = config.task.publishingTopology === "confirmed_individual_author"
+    && config.task.authorContext.status === "confirmed"
+    && config.task.authorContext.facts.length > 0;
   const readerExchangeFeasible = new Set(personaScenePlan.commentCast.filter((role) => !role.orgSide).map((role) => role.displayRole)).size >= 2;
-  const threadKinds: CommentThreadKind[] = rawThreadKinds.map((kind) =>
-    kind === "reader_exchange" && !readerExchangeFeasible ? "org_answer" : kind);
-  // T3 规划为 1-3 条:超过 3 条按确定性顺序降级多余条;targetCount>=3 且一条
-  // 都没抽到时,从 T2 线程里确定性提拔一条(不挤占 T1 机构问答)。
+  const threadKinds: CommentThreadKind[] = Array.from({ length: targetCount }, (_, index) => {
+    if (index < primarySeatCount) return "org_answer";
+    const socialIndex = index - primarySeatCount;
+    if (individualAuthor && socialIndex === 0) return "host_reply";
+    const drawn = assignCommentThreadKind(seed, `social-thread-kind:${strategy.id}_thread_${index + 1}`, false);
+    // A social seat must remain social. If two-reader exchange is impossible, use a
+    // floating reaction rather than silently turning it back into an institution FAQ.
+    if (drawn === "org_answer") return readerExchangeFeasible ? "reader_exchange" : "organic_reaction";
+    if (drawn === "reader_exchange" && !readerExchangeFeasible) return "organic_reaction";
+    return drawn;
+  });
+  // Keep floating reactions bounded without consuming an org-answer seat.
   const organicIndexes = threadKinds
     .map((kind, index) => (kind === "organic_reaction" ? index : -1))
-    .filter((index) => index >= 0)
-    .sort((left, right) => hashUnit(seed, `organic-order:${left}`) - hashUnit(seed, `organic-order:${right}`));
+    .filter((index) => index >= primarySeatCount);
   for (const dropped of organicIndexes.slice(3)) {
-    threadKinds[dropped] = readerExchangeFeasible ? "reader_exchange" : "org_answer";
-  }
-  if (organicIndexes.length === 0 && targetCount >= 3) {
-    const promotable = threadKinds
-      .map((kind, index) => (kind === "reader_exchange" ? index : -1))
-      .filter((index) => index >= 0)
-      .sort((left, right) => hashUnit(seed, `organic-promote:${left}`) - hashUnit(seed, `organic-promote:${right}`));
-    if (promotable[0] !== undefined) threadKinds[promotable[0]] = "organic_reaction";
+    threadKinds[dropped] = readerExchangeFeasible ? "reader_exchange" : "organic_reaction";
   }
   // T3 漂浮短反应不生长(见 conversationPlan),多轮/深轮候选池只从非 T3 线程
   // 抽取,保证 commentNetwork.multiTurnTarget 的生长下限不会落在不生长的线程上。
@@ -1639,6 +1636,7 @@ function dialoguePlans(
   const threads: DialogueThreadPlan[] = Array.from({ length: targetCount }, (_, index) => {
     const threadId = `${strategy.id}_thread_${index + 1}`;
     const threadKind = threadKinds[index]!;
+    const ownsPrimaryGap = index < primarySeatCount;
     const gap = primaryOrdered[index % primaryOrdered.length]!;
     const displayName = assignCommentDisplayName(seed, `nickname:${threadId}`, usedDisplayNames);
     usedDisplayNames.add(displayName);
@@ -1710,11 +1708,17 @@ function dialoguePlans(
     // 没有项目职责映射时属于行业中立降级场景：保留原读者池的社会位置轮换，
     // 不因词面锚点不足把全篇压成同一个中性角色。存在已审核职责映射时才执行
     // “主 gap 话题 + 冻结答复方”双匹配，真实项目不允许用无关人物带偏问题。
-    const eligiblePool = !hasProjectResponsibilityMap
+    const eligiblePool = !ownsPrimaryGap
+      // 社会席位不承担项目缺口，也不决定答复职责；只需从真实读者角色池轮换。
+      // 若仍套用项目职责匹配，词面不重合时会把所有社会席位压成 gap 核实者。
       ? (unusedSeatRoles.length ? unusedSeatRoles : seatRoles)
-      : structuralIdentity === "publisher"
-        ? (unusedTopicMatched.length ? unusedTopicMatched : topicMatched)
-        : (unusedResponsibilityMatched.length ? unusedResponsibilityMatched : responsibilityMatched);
+      : !hasProjectResponsibilityMap
+        ? (unusedSeatRoles.length ? unusedSeatRoles : seatRoles)
+        : structuralIdentity === "publisher"
+          ? unusedTopicMatched
+          : unusedResponsibilityMatched;
+    // 项目缺口席位存在职责映射时，命中角色一旦用尽就生成当前缺口专属的
+    // 中性读者卡；社会席位则已在上面从真实读者角色池轮换。
     const openerCard = eligiblePool[0] ?? neutralRole;
     const personaRepeated = usedOpenerDisplayRoles.has(openerCard.displayRole);
     usedOpenerDisplayRoles.add(openerCard.displayRole);
@@ -1849,11 +1853,13 @@ function dialoguePlans(
       replyRouting.projectBlueprint,
       personaScenePlan.commentCast,
     );
-    const postingIdentity = frozenReplyRoute.identity;
-    const routingReason = frozenReplyRoute.reason;
+    const postingIdentity = threadKind === "host_reply" ? "author" as const : frozenReplyRoute.identity;
+    const routingReason = threadKind === "host_reply"
+      ? "发布拓扑冻结:经确认的真实个人作者只承接本人已确认处境"
+      : frozenReplyRoute.reason;
     const threadSurfaceRoleCard: DialogueThreadPlan["surfaceRoleCard"] = {
       ...surfaceRoleCard,
-      replyDisplayRole: frozenReplyRoute.replyDisplayRole,
+      replyDisplayRole: threadKind === "host_reply" ? "楼主" : frozenReplyRoute.replyDisplayRole,
     };
     const surfaceIntent: Record<typeof surfaceRoleCard.utteranceMode, string> = {
       direct_question: `像${surfaceRoleCard.displayRole}一样，只问“${gap.question}”里最现实的一点`,
@@ -1881,6 +1887,9 @@ function dialoguePlans(
     // T3 漂浮短反应:开口意图是一条 4-20 字短共鸣,不提问、不答题、无需回复。
     if (threadKind === "organic_reaction") {
       questionIntent = `主问题原文：“${gap.question}”；只留一句4-20字短共鸣，但必须保留“${gap.label}”或原问题中的一个具体对象，不提问、不答题、无需回复`;
+    }
+    if (threadKind === "host_reply") {
+      questionIntent = "只问楼主正文已经公开的当前状态、打算或现实限制；不得询问价格、地址、预约、效果、恢复、风险、适用性、资质或其他项目事实";
     }
     // M7 per-mechanism ruling — 需求 7.6 / design 组件 E · E1: discoveryPlan STRUCTURE = (c)
     // no traceable evidence → DOWNGRADED to optional (task 7.1). Its derived *safety* checks
@@ -1915,7 +1924,7 @@ function dialoguePlans(
       : Math.min(2, config.content.followUpDepth, deepTurnIndexes.has(index) ? 2 : 1) as 1 | 2;
     // 读者互动层:T3 漂浮短反应不生长;T2 读者互聊最多再接一轮(读者对读者
     // 或机构按 postingIdentity 插话一次);T1 机构问答维持原多轮逻辑。
-    const targetFollowUps = threadKind === "organic_reaction"
+    const targetFollowUps = threadKind === "organic_reaction" || threadKind === "host_reply"
       ? 0 as const
       : threadKind === "reader_exchange"
         ? Math.min(1, plannedFollowUps) as 0 | 1
@@ -1923,6 +1932,8 @@ function dialoguePlans(
     const extensionGapId = threadKind === "org_answer" && branchingStrength >= 45 ? auxiliaryGapIds[0] : undefined;
     const topology: NonNullable<DialogueThreadPlan["conversationPlan"]>["topology"] = threadKind === "organic_reaction"
       ? "organic_reaction"
+      : threadKind === "host_reply"
+        ? "host_reply"
       : threadKind === "reader_exchange"
         ? "reader_exchange"
         : targetFollowUps === 0
@@ -1940,6 +1951,8 @@ function dialoguePlans(
         : `${surfaceRoleCard.displayRole}以“${surfaceRoleCard.interactionHook}”开口；${surfaceRoleCard.lexicalCues.length ? `可择一参考语域：${surfaceRoleCard.lexicalCues.join("、")}` : "使用普通口语"}`,
       replyMove: threadKind === "organic_reaction"
         ? "无回答需求，机构不出现"
+        : threadKind === "host_reply"
+          ? "楼主只依据已确认作者事实和已发布正文回应自己的当前状态、打算或现实限制，不回答项目事实"
         : threadKind === "reader_exchange"
           ? `${replySurfaceRoleCard?.displayRole ?? "另一位读者"}以模拟读者身份接话，只说自己的处境、感受、疑问或轻反应，范围限「${replySurfaceRoleCard?.permittedContribution ?? "自身处境与感受"}」；不讲项目事实、价格数字、效果证词或机构信息`
           : surfaceRoleCard.utteranceMode === "knowledge_translation"
@@ -1947,6 +1960,8 @@ function dialoguePlans(
             : "发布账号接住对方真正关心的一点：有口径就给直接回答＋一个会改变答案的条件，没口径就保留未知并指出核验方式；延续正文语气，不做完整讲座，也不讲自己的亲历效果",
       extensionMove: threadKind === "organic_reaction"
         ? "本支为漂浮短反应，不生长"
+        : threadKind === "host_reply"
+          ? "本支由楼主回应一次后自然停住，不切换成机构答疑"
         : threadKind === "reader_exchange"
           ? (targetFollowUps > 0
             ? "读者对读者继续接话，或机构按 postingIdentity 插话一次；读者发言仍只谈处境与感受"
@@ -1962,6 +1977,16 @@ function dialoguePlans(
       id: threadId,
       displayName,
       threadKind,
+      coverageRole: ownsPrimaryGap ? "primary_gap" : threadKind === "organic_reaction" ? "none" : "topic_anchor",
+      ...(ownsPrimaryGap ? {} : { topicAnchorGapId: gap.gapId }),
+      ...(threadKind === "host_reply" ? {
+        authorFactIds: config.task.authorContext.facts.map((fact) => fact.id),
+        hostReplyPlan: {
+          focus: "current_state" as const,
+          allowedAuthorFactIds: config.task.authorContext.facts.map((fact) => fact.id),
+          questionIntent,
+        },
+      } : {}),
       ...(replyDisplayName ? { replyDisplayName } : {}),
       gapId: gap.gapId,
       stage: roleStage,
@@ -1982,8 +2007,8 @@ function dialoguePlans(
       routingReason,
       ...(preferredReplyDisplayRole ? { preferredReplyDisplayRole } : {}),
       ...(personaRepeated ? { personaRepeated: true } : {}),
-      sourceClusterIds: gap.evidenceIds.map((sourceId) => sourceId.replace(/^evidence_/u, "")),
-      evidenceIds: [...gap.evidenceIds],
+      sourceClusterIds: ownsPrimaryGap ? gap.evidenceIds.map((sourceId) => sourceId.replace(/^evidence_/u, "")) : [],
+      evidenceIds: ownsPrimaryGap ? [...gap.evidenceIds] : [],
       boundaryRequired: Boolean(gap.boundary),
       personaRole,
       speakerType: "simulated_reader",
@@ -2052,8 +2077,14 @@ function buildGapCoverageLedger(
   capacityWarning?: string,
 ): OrchestrationPlan["gapCoverageLedger"] {
   const entries = gapCards.map((gap) => {
-    const primaryThreadIds = threads.filter((thread) => thread.primaryGapId === gap.gapId).map((thread) => thread.id);
-    const auxiliaryThreadIds = threads.filter((thread) => thread.auxiliaryGapIds.includes(gap.gapId)).map((thread) => thread.id);
+    const primaryThreadIds = threads
+      .filter((thread) => (thread.coverageRole ?? (thread.threadKind === "org_answer" || !thread.threadKind ? "primary_gap" : "topic_anchor")) === "primary_gap")
+      .filter((thread) => (thread.threadKind ?? "org_answer") === "org_answer" && thread.primaryGapId === gap.gapId)
+      .map((thread) => thread.id);
+    const auxiliaryThreadIds = threads
+      .filter((thread) => (thread.coverageRole ?? "primary_gap") === "primary_gap")
+      .filter((thread) => thread.auxiliaryGapIds.includes(gap.gapId))
+      .map((thread) => thread.id);
     const groundedAnswer = Boolean((gap.answer || gap.framework) && gap.evidenceIds.length);
     const bodyAllocated = gap.plannedPlacements.includes("N.body");
     const commentAllocated = gap.plannedPlacements.includes("Cref");
@@ -2194,9 +2225,19 @@ export function planTopicOrchestrations(input: PlanTopicOrchestrationsInput): [O
     const desiredThreadCount = commentsEnabled
       ? Math.min(5, input.config.content.commentThreadMin + Math.round(commentSpan * (input.config.parameters?.commentExpansion ?? 70) / 100))
       : 0;
-    const effectiveThreadTarget = Math.max(desiredThreadCount, primaryGapIds.length);
+    const individualAuthor = input.config.task.publishingTopology === "confirmed_individual_author";
+    if (individualAuthor && (input.config.task.authorContext.status !== "confirmed" || input.config.task.authorContext.facts.length === 0)) {
+      throw new Error("confirmed_individual_author requires at least one human-confirmed author fact.");
+    }
+    const requiredSocialSlots = commentsEnabled ? (individualAuthor ? 2 : 1) : 0;
+    const minimumThreadTarget = primaryGapIds.length + requiredSocialSlots;
+    const effectiveThreadTarget = commentsEnabled ? Math.max(desiredThreadCount, minimumThreadTarget) : 0;
+    const COMMENT_THREAD_HARD_MAX = 8;
+    if (effectiveThreadTarget > COMMENT_THREAD_HARD_MAX) {
+      throw new Error(`comment_capacity_hard_limit_exceeded: ${primaryGapIds.length} project-gap seats + ${requiredSocialSlots} social seats exceed ${COMMENT_THREAD_HARD_MAX}; split the topic.`);
+    }
     const capacityWarning = effectiveThreadTarget > input.config.content.commentThreadMax
-      ? `为让 ${primaryGapIds.length} 个主缺口不静默消失，实际线程数 ${effectiveThreadTarget} 超出可读性目标 ${input.config.content.commentThreadMax}；建议分批发布或合并正文，但不得把辅助提及算作解决。`
+      ? `为同时保留 ${primaryGapIds.length} 个项目缺口与 ${requiredSocialSlots} 个必要互动席位，实际线程数 ${effectiveThreadTarget} 超出可读性目标 ${input.config.content.commentThreadMax}，但未超过硬上限 ${COMMENT_THREAD_HARD_MAX}。`
       : undefined;
     const dialogueThreads = dialoguePlans(
       opportunity,
@@ -2247,8 +2288,8 @@ export function planTopicOrchestrations(input: PlanTopicOrchestrationsInput): [O
       // Cref reference content (F03): these are operating rules for the account,
       // never text to be published as comments.
       deploymentPlan: {
-        postingIdentity: "publisher",
-        ownedFirstComment: true,
+        postingIdentity: individualAuthor ? "author" : "publisher",
+        ownedFirstComment: !individualAuthor,
         // P3-15: pinPriority must only contain legal thread-function values
         // ("boundary" was never one); stays linked to the strategy commentMode.
         pinPriority: strategy.commentMode.includes("verification") ? ["verification", "next_step"] : ["verification", "clarify"],

@@ -5,6 +5,12 @@ import { fileURLToPath } from 'node:url';
 
 export const APP_OPTIONS = Symbol('APP_OPTIONS');
 
+export const MODEL_CONTEXT_WINDOW_TOKENS = 1_000_000;
+// Knowledge is duplicated into section-scoped evidence projections in some stages.
+// Keep a conservative budget until those projections are deduplicated; this still
+// uses substantially more of the 1M context window than the historical 120K cap.
+export const DEFAULT_KNOWLEDGE_CONTEXT_TOKENS = 600_000;
+
 const INSECURE_MASTER_ENCRYPTION_KEYS = new Set([
   'change-me-now-123!',
   'replace-with-a-strong-password',
@@ -162,8 +168,8 @@ export function resolveOptions(input: ApiOptionsInput = {}): ApiOptions {
     input.knowledgeContextTokens,
     'knowledgeContextTokens',
     'KNOWLEDGE_CONTEXT_TOKENS',
-    120_000,
-    { min: 1 },
+    DEFAULT_KNOWLEDGE_CONTEXT_TOKENS,
+    { min: 1, max: MODEL_CONTEXT_WINDOW_TOKENS },
   );
   const jobHeartbeatMs = integerOption(
     input.jobHeartbeatMs,

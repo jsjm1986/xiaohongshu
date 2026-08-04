@@ -53,6 +53,7 @@ export function replyIdentity(
 ): { name: string; badge?: string } | undefined {
   const kind = threadKind ?? 'org_answer';
   if (kind === 'organic_reaction') return undefined;
+  if (kind === 'host_reply') return { name: '楼主本人', badge: '已确认作者' };
   if (kind === 'reader_exchange') {
     // 提问者已用 displayName 署名,答复者是「另一位」才说得通;没昵称时只能说「读者」。
     return { name: displayName ? '另一位读者' : '读者' };

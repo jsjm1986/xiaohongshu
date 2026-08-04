@@ -83,3 +83,11 @@ test('评论总数把自备首评算进去', () => {
 test('免责声明兜底文案不为空', () => {
   assert.ok(COMMENT_DISCLAIMER_FALLBACK.length > 0);
 });
+
+test('host_reply 只署楼主本人和已确认作者标', () => {
+  assert.deepEqual(replyIdentity('host_reply', '项目账号', undefined, 'author', '楼主'), {
+    name: '楼主本人',
+    badge: '已确认作者',
+  });
+  assert.equal(answererLabelFor({ threadKind: 'host_reply', postingIdentity: 'author', answer: '我还没决定' }), '楼主本人（已确认）');
+});

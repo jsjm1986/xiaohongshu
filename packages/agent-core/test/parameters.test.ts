@@ -13,6 +13,8 @@ import {
   DEFAULT_FORMULA_VERSION,
   DEFAULT_METHOD_PARAMETERS,
   GENERATION_PARAMETER_REGISTRY,
+  DEEPSEEK_MAX_OUTPUT_TOKENS,
+  GENERATION_OUTPUT_TOKENS,
   indexKnowledgeSource,
   selectKnowledgeContext,
 } from "../src/index.js";
@@ -26,6 +28,11 @@ const project = {
   cities: ["成都"],
   doctors: [],
 };
+
+function sharedTaskData(text: string): Record<string, any> {
+  const match = text.match(/<task_data scope="shared">\n([\s\S]*?)\n<\/task_data>/u);
+  return JSON.parse(match?.[1] ?? "{}");
+}
 
 function baseConfig() {
   const config = createDefaultGenerationConfig(project, DEFAULT_FORMULA_VERSION);
@@ -126,6 +133,12 @@ describe("explainable generation parameter registry", () => {
       commentInferenceEffort: expect.any(Number), commentPlatformRegister: 68, commentConversationRate: 48,
       commentBranchingStrength: 62, commentOrganicVariation: 58,
     });
+  });
+
+  it("exposes the 64K standard output budget and 384K DeepSeek ceiling", () => {
+    const definition = GENERATION_PARAMETER_REGISTRY.find((item) => item.id === "max_output_tokens");
+    expect(definition?.defaultValue).toBe(GENERATION_OUTPUT_TOKENS);
+    expect(definition?.control).toMatchObject({ kind: "number", max: DEEPSEEK_MAX_OUTPUT_TOKENS });
   });
 
   it("compiles social-register and conversation-network controls into executable instructions", () => {
@@ -488,7 +501,7 @@ describe("parameter compilation semantics", () => {
     const text = prompt.messages.map((item) => item.content).join("\n");
     expect(text).not.toContain("F30_PROMPT_ISOLATION_MARKER");
     expect(text).not.toContain("TrendFit");
-    const taskData = JSON.parse(text.match(/<task_data>\n([\s\S]*?)\n<\/task_data>/u)?.[1] ?? "{}");
+    const taskData = sharedTaskData(text);
     expect(taskData).not.toHaveProperty("compiledParameters");
   });
 
@@ -546,7 +559,7 @@ describe("parameter compilation semantics", () => {
       impactReport: result.impactReport,
     });
     const text = prompt.messages.map((item) => item.content).join("\n");
-    const taskData = JSON.parse(text.match(/<task_data>\n([\s\S]*?)\n<\/task_data>/u)?.[1] ?? "{}");
+    const taskData = sharedTaskData(text);
     expect(taskData).not.toHaveProperty("compiledParameters");
     expect(taskData.contentConstraints).toMatchObject({
       bodyMinChars: result.config.content.bodyMinChars,
@@ -651,7 +664,7 @@ describe("parameter compilation semantics", () => {
     expect(text).toContain('"content":{"H":{"hashtags":[]}');
     expect(text).not.toContain("components_only");
     expect(text).not.toContain("reference_copy_70_descriptive_v1");
-    const taskData = JSON.parse(text.match(/<task_data>\n([\s\S]*?)\n<\/task_data>/u)?.[1] ?? "{}");
+    const taskData = sharedTaskData(text);
     expect(taskData.compiledParameters).not.toHaveProperty("channelAllocation");
   });
 
@@ -878,7 +891,12 @@ describe("engine parameter trace", () => {
       expect(item.configSnapshot.content).toMatchObject({ bodyMinChars: 20, bodyMaxChars: 70 });
       expect(item.resolutionSnapshot?.styleProfileId).toBe("natural_concise");
       expect(item.impactReport?.behaviorInstructions.join(" ")).toContain("人物关系网逐层补全");
-      expect(item.content.Cref.threads.every((thread) => Boolean(thread.stage && thread.gap && thread.function && thread.nextStep))).toBe(true);
+      expect(item.content.Cref.threads
+        .filter((thread) => (thread.threadKind ?? "org_answer") === "org_answer")
+        .every((thread) => Boolean(thread.stage && thread.gap && thread.function && thread.nextStep))).toBe(true);
+      expect(item.content.Cref.threads
+        .filter((thread) => (thread.threadKind ?? "org_answer") !== "org_answer")
+        .every((thread) => !thread.gap && !thread.nextStep && !thread.primaryGapId && !thread.replyPlan)).toBe(true);
       const proxyDiagnostics = item.diagnostics.filter((diagnostic) => diagnostic.aggregation === "components_only");
       expect(proxyDiagnostics).toHaveLength(2);
       expect(proxyDiagnostics.every((diagnostic) => diagnostic.score === undefined)).toBe(true);

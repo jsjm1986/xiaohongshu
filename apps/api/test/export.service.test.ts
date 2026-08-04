@@ -745,3 +745,29 @@ test('审计附录:org_answer 与历史包(无 threadKind)保持机构口径不�
   const legacyMarkdown = (await new ExportService().exportPackage(legacy, 'markdown')).toString('utf8');
   assert.match(legacyMarkdown, /可追责答复身份：发布账号（publisher）/u);
 });
+
+test('host_reply export is attributed to the confirmed author and carries no institution reply label', async () => {
+  const host = structuredClone(contentPackage) as any;
+  host.schemaVersion = '1.1';
+  host.content.Cref.uncoveredGaps = [];
+  Object.assign(host.content.Cref.threads[0], {
+    threadKind: 'host_reply',
+    postingIdentity: 'author',
+    question: '所以你还没定吗？',
+    answer: '我目前还没决定',
+    authorFactIds: ['af1'],
+    topicAnchorGapId: 'recovery',
+    evidenceIds: [],
+    primaryGapId: undefined,
+    replyPlan: undefined,
+    roleCard: undefined,
+    densityProxy: undefined,
+    discoveryPlan: undefined,
+    followUps: [],
+  });
+  const markdown = (await new ExportService().exportPackage(host, 'markdown')).toString('utf8');
+  assert.match(markdown, /楼主本人回复：我目前还没决定/u);
+  assert.match(markdown, /作者本人（人工确认）/u);
+  assert.doesNotMatch(markdown, /机构可追责身份回复：我目前还没决定/u);
+  assert.doesNotMatch(markdown, /隐藏答复计划/u);
+});

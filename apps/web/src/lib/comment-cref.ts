@@ -23,8 +23,8 @@ export const commentNodeKindLabel = (value?: string): string => {
  * org_answer(T1 机构问答)处理——历史包没有 threadKind 字段,界面与
  * 复制markdown 都按 T1 渲染,不出错。
  */
-export const commentThreadKindOf = (thread: { threadKind?: string }): "org_answer" | "reader_exchange" | "organic_reaction" =>
-  thread.threadKind === "reader_exchange" || thread.threadKind === "organic_reaction"
+export const commentThreadKindOf = (thread: { threadKind?: string }): "org_answer" | "host_reply" | "reader_exchange" | "organic_reaction" =>
+  thread.threadKind === "host_reply" || thread.threadKind === "reader_exchange" || thread.threadKind === "organic_reaction"
     ? thread.threadKind
     : "org_answer";
 
@@ -32,6 +32,7 @@ export const commentThreadKindOf = (thread: { threadKind?: string }): "org_answe
 export const commentThreadKindLabel = (value?: string): string => {
   const labels: Record<string, string> = {
     org_answer: "机构问答",
+    host_reply: "楼主回复",
     reader_exchange: "读者互聊",
     organic_reaction: "漂浮短反应",
   };
@@ -73,6 +74,12 @@ export const auditAnswerAttribution = (
     return {
       label: "漂浮短反应",
       identity: "不适用（漂浮短反应，机构不出现）",
+    };
+  }
+  if (kind === "host_reply") {
+    return {
+      label: "楼主本人回复",
+      identity: "作者本人（已确认）",
     };
   }
   if (kind === "reader_exchange") {

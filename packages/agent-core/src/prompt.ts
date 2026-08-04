@@ -437,7 +437,10 @@ const STAGED_ISOLATED_SYSTEM_PROMPT = `你正在分阶段完成同一个中文�
 // 与校验互相锁死)。同轮把 author 计入可追责集合(《统一身份协议》四值皆合法)。digest
 // 覆盖 generationSchema,故版本随之移动;既有 active release 失效,需按既定
 // 流程重新激活。
-export const PROMPT_CONTRACT_VERSION = "2.3.0";
+//
+// 2.4.0: 将跨候选稳定知识/公式/共享任务前缀移到候选差异之前，并加入一次
+// bounded comment-reader shape correction 合同。digest 随正式提示词布局移动。
+export const PROMPT_CONTRACT_VERSION = "2.4.0";
 export const PROMPT_CONTRACT_DIGEST = createHash("sha256")
   .update(JSON.stringify({
     version: PROMPT_CONTRACT_VERSION,
@@ -633,18 +636,19 @@ function generationPromptContext(input: GenerationPromptInput): {
     && parameterContract.behaviorInstructions.length > 0
     ? parameterContract
     : undefined;
-  const taskData = {
+  // Keep the largest cross-candidate bytes first. Provider prefix caches can
+  // reuse the project knowledge, formulas and shared task contract; candidate
+  // seed/orchestration differences are deliberately appended afterwards.
+  const sharedTaskData = {
     project: input.config.project,
     task: input.config.task,
     informationWindow: input.config.informationWindow,
     expressionWindow: input.config.expressionWindow,
     contentConstraints: input.config.content,
     diagnostics: input.config.diagnostics,
-    candidate: { index: input.candidateIndex, seed: input.seed, variation: input.variation },
     selectedTopicOpportunity: modelVisibleTopicOpportunity(input.topicOpportunity),
     projectIntelligence: input.projectIntelligence,
     projectBlueprint: input.projectBlueprint,
-    orchestrationPlan: modelVisibleOrchestrationPlan(input.orchestrationPlan),
     imageAnalyses: input.imageAnalyses?.map((analysis) => ({
       ...analysis,
       imageUrl: analysis.imageUrl ? "[attached as image_url]" : undefined,
@@ -656,10 +660,14 @@ function generationPromptContext(input: GenerationPromptInput): {
     prohibitedClaims: input.ledger.prohibited,
     compiledParameters,
   };
+  const candidateTaskData = {
+    candidate: { index: input.candidateIndex, seed: input.seed, variation: input.variation },
+    orchestrationPlan: modelVisibleOrchestrationPlan(input.orchestrationPlan),
+  };
   const compiledParameterInstruction = compiledParameters
     ? "- 必须逐条执行 compiledParameters.behaviorInstructions；缺口内容与位置只服从 orchestrationPlan.gapPlanningCards[].plannedPlacements。channelAllocation 只是由这些卡片渲染出的兼容视图；不能把 compiledParameters 或旧参数报告中的分配建议当作第二套写作真源，也不能用线程条数或字数代替质量。"
     : "- 本次没有已启用且经审核的参数公式行为指令；不得自行恢复、猜测或执行未注入的方法论指令。仍须遵守 task_data 中的内容长度、必须提及项、禁止项与安全边界。";
-  const commonPrefix = `<task_data>\n${safeJson(taskData)}\n</task_data>\n\n<formula_guidance mode="direct-executable-generation-only" version=${JSON.stringify(input.formulaVersion.version)} digest=${JSON.stringify(input.formulaVersion.digest)}>\n${formulas}\n</formula_guidance>\n\n<knowledge_data mode=${JSON.stringify(input.knowledge.mode)}>\n${input.knowledge.content}\n</knowledge_data>`;
+  const commonPrefix = `<knowledge_data mode=${JSON.stringify(input.knowledge.mode)}>\n${input.knowledge.content}\n</knowledge_data>\n\n<formula_guidance mode="direct-executable-generation-only" version=${JSON.stringify(input.formulaVersion.version)} digest=${JSON.stringify(input.formulaVersion.digest)}>\n${formulas}\n</formula_guidance>\n\n<task_data scope="shared">\n${safeJson(sharedTaskData)}\n</task_data>\n\n<task_data scope="candidate">\n${safeJson(candidateTaskData)}\n</task_data>`;
   const imageParts = (input.imageAnalyses ?? [])
     .filter((analysis) => Boolean(analysis.imageUrl))
     .map((analysis) => ({
@@ -671,9 +679,9 @@ function generationPromptContext(input: GenerationPromptInput): {
 
 export function buildGenerationPrompt(input: GenerationPromptInput): PromptBundle {
   const { commonPrefix, compiledParameterInstruction, imageParts } = generationPromptContext(input);
-  const user = `生成第 ${input.candidateIndex + 1} 个候选。三个候选必须保持事实一致，但表达有明显差异；不要把随机差异写成固定策略标签。
+  const user = `${commonPrefix}
 
-${commonPrefix}
+生成第 ${input.candidateIndex + 1} 个候选。三个候选必须保持事实一致，但表达有明显差异；不要把随机差异写成固定策略标签。
 
 输出要求：
 - 正文 ${input.config.content.bodyMinChars}-${input.config.content.bodyMaxChars} 字，标签 ${input.config.content.hashtagMin}-${input.config.content.hashtagMax} 个，${input.orchestrationPlan ? `问答线程严格输出 orchestrationPlan.effectiveThreadCount=${input.orchestrationPlan.effectiveThreadCount} 个；commentThreadMax=${input.config.content.commentThreadMax} 只是可读性目标` : `问答线程 ${input.config.content.commentThreadMin}-${input.config.content.commentThreadMax} 个`}。
@@ -730,7 +738,7 @@ ${compiledParameterInstruction}
 function stagedCommonUser(input: GenerationPromptInput): { text: string; imageParts: ReturnType<typeof generationPromptContext>["imageParts"] } {
   const { commonPrefix, compiledParameterInstruction, imageParts } = generationPromptContext(input);
   return {
-    text: `这是候选 ${input.candidateIndex + 1} 的固定上下文。后续阶段都必须在这个上下文内继续，事实和边界不能漂移。\n\n${commonPrefix}\n\n共同执行要求：\n${compiledParameterInstruction}\n- 必须提及：${safeJson(input.config.task.mustMention)}。\n- 禁止出现：${safeJson(input.config.task.forbidden)}。\n- selectedTopicOpportunity不可换题；stateSeed只是写作情景，不是真实心理测量或人群分布。\n- 图片只把observedFacts/visibleText当事实；inferredSignals必须标成推断，unknowns不得补写。\n- 后台严谨，前台自然：orchestrationPlan、公式、卡片字段和证据台账只决定写什么，绝不是可见文案用词。公开文字禁止复述“内容任务、只回应、不承担答题、核验路径、后台库存、本线程、资料未覆盖”等指令。\n- 先把知识翻译成人话再写：边界、动态信息和证据分别用 projectBlueprint.claimPolicy、项目语言模块与 usableEvidenceReferences 决定，静态提示词不提供行业示例。一条回复最多保留一个必要的严谨点。\n- 前台评论不是采访提纲。禁止“你最想问什么、你最关心什么、还有什么想了解、欢迎留言咨询”这类主持人/客服元问题；评论者直接说自己的处境、反应或窄问题。`,
+    text: `${commonPrefix}\n\n这是候选 ${input.candidateIndex + 1} 的固定上下文。后续阶段都必须在这个上下文内继续，事实和边界不能漂移。\n\n共同执行要求：\n${compiledParameterInstruction}\n- 必须提及：${safeJson(input.config.task.mustMention)}。\n- 禁止出现：${safeJson(input.config.task.forbidden)}。\n- selectedTopicOpportunity不可换题；stateSeed只是写作情景，不是真实心理测量或人群分布。\n- 图片只把observedFacts/visibleText当事实；inferredSignals必须标成推断，unknowns不得补写。\n- 后台严谨，前台自然：orchestrationPlan、公式、卡片字段和证据台账只决定写什么，绝不是可见文案用词。公开文字禁止复述“内容任务、只回应、不承担答题、核验路径、后台库存、本线程、资料未覆盖”等指令。\n- 先把知识翻译成人话再写：边界、动态信息和证据分别用 projectBlueprint.claimPolicy、项目语言模块与 usableEvidenceReferences 决定，静态提示词不提供行业示例。一条回复最多保留一个必要的严谨点。\n- 前台评论不是采访提纲。禁止“你最想问什么、你最关心什么、还有什么想了解、欢迎留言咨询”这类主持人/客服元问题；评论者直接说自己的处境、反应或窄问题。`,
     imageParts,
   };
 }
@@ -764,6 +772,39 @@ export function buildStagedCorePrompt(input: GenerationPromptInput): PromptBundl
     messages,
     responseSchema: STAGED_CORE_JSON_SCHEMA,
     estimatedTokens: estimateTokens(`${STAGED_SYSTEM_PROMPT}\n${common.text}\n${phase}`),
+  };
+}
+
+/** Stage 1.1: rewrite only H/N when publishing-topology validation fails. */
+export function buildStagedCoreIdentityRepairPrompt(
+  input: GenerationPromptInput,
+  core: Pick<ContentPackageContent, "H" | "N">,
+  issues: ContentValidationIssue[],
+): PromptBundle {
+  const confirmedFacts = input.config.task.authorContext.facts.map((fact) => ({
+    id: fact.id, statement: fact.statement, category: fact.category,
+  }));
+  const phase = `阶段1.1：当前图文违反冻结的发布身份合同。只重写标签与图文，不生成评论，不换题。
+
+发布拓扑：${input.config.task.publishingTopology}
+人工确认的作者事实：${safeJson(confirmedFacts)}
+问题：${safeJson(issues.map((issue) => ({ code: issue.code, message: issue.message })))}
+当前图文：${safeJson(core)}
+
+硬规则：
+- institution_owned：改成明确项目账号可承担的观察、说明或待核实表达；不得保留消费者亲历。
+- confirmed_individual_author：任何已发生的接触、购买、服务、恢复或结果细节必须逐项来自作者事实；超出范围改成当前打算、担心或未决定。
+- 不新增事实，不改主题，不写后台说明。
+
+只返回：{"H":{"hashtags":[]},"N":{"imageBrief":"","title":"","body":""}}`;
+  return {
+    messages: [
+      { role: "system", content: STAGED_SYSTEM_PROMPT },
+      { role: "user", content: phase },
+    ],
+    responseSchema: STAGED_CORE_JSON_SCHEMA,
+    estimatedTokens: estimateTokens(`${STAGED_SYSTEM_PROMPT}
+${phase}`),
   };
 }
 
@@ -907,6 +948,12 @@ function readerThreadSpecs(input: GenerationPromptInput): Array<Record<string, u
       threadKind,
       gap标签: gapLabelById.get(thread.primaryGapId) ?? thread.primaryGapId,
       问题职责: thread.questionIntent,
+      ...(threadKind === "host_reply" ? {
+        楼主可确认事实: input.config.task.authorContext.facts
+          .filter((fact) => (thread.authorFactIds ?? []).includes(fact.id))
+          .map((fact) => ({ id: fact.id, statement: fact.statement, category: fact.category })),
+        楼主答复边界: "只可询问这些已确认事实或已发布正文中的当前状态，不得索取项目事实",
+      } : {}),
       开口人物: readerPersona(thread.surfaceRoleCard),
       // 方法论《simulated_reader 角色》表:本线程人物那一条"禁止代替的证据"随规格下发(标注制,非名额制)。
       ...(READER_ROLE_EVIDENCE_PROHIBITIONS[thread.personaRole]
@@ -932,6 +979,10 @@ export function buildStagedCommentReadersPrompt(
 ): PromptBundle {
   const context = readerSideCommentContext(input);
   const specs = readerThreadSpecs(input);
+  const hasHostReply = (input.orchestrationPlan?.dialogueThreads ?? []).some((thread) => thread.threadKind === "host_reply");
+  const hostReplyRule = hasHostReply
+    ? `\n- threadKind=host_reply：question只问已发布正文或“作者可确认事实”中的当前状态、打算、限制与明确细节；严禁询问价格、地址、预约、档期、效果、恢复、风险、适用性、资质、身份或因果结论；answer留空给作者隔离阶段填写。`
+    : "";
   const phase = `阶段2A-R：上一步图文已经完成。现在写评论区的读者开口，以及读者互聊线程里读者B的接话，不改标签、图片说明、标题或正文；本轮不要预编后续接龙。
 
 整体目标：做出一个像样本的评论关系网，而不是多份FAQ。评论者不是“完成信息任务的角色”，而是带着自己的处境插一句；短问、短答、准备动作、反例、看图反应长短不齐，让信息在互动中被读者自己拼出来。
@@ -942,6 +993,7 @@ ${safeJson(specs)}
 每条线程必须：
 - id严格沿用规格ID。question字段表示开口人物的一条可见评论，不要求每条都是问句：可以是提问、同款担心、正在做的准备、不同意见或几个字的反应。长度优先服从所分配人物的targetChars。
 - 每条线程规格里带“禁止代替的证据”——那是这条线程分配到的人物必须守的一条硬边界，逐条照它执行。开口人物可以说自己的处境和做过的功课，但不写成效果证词（不给效果数字、不背书）。“开口人物重复需换说法”=true的线程，同一人物类型也要换一种说法和切入点，不和前一位撞腔。
+${hostReplyRule}
 - threadKind=reader_exchange：answer是同帖下读者B的自然接话——B只说自己的处境、感受、疑问或轻反应，范围限其permittedContribution；B同样遵守读者须知，不回答项目事实类问题。
 - 其余threadKind：answer一律输出空字符串""，留给能回答的一方后续补；其中threadKind=organic_reaction 的 question 是一条4-20字短共鸣（“姐妹我也是”“蹲一个”“码住”这类），不提问、不答题。
 - 按内容为线程标注隐藏字段：function六选一——补充或核实项目事实标verification，校准风险或过高期待标clarify，给谨慎反例标counterexample，分条件回答标answer，给核验路由标next_step，正文已覆盖信息的再次浮出标surface_gap；kind标根评论节点类型，常规为question（即使它实为经验片段或纯反应也仍标question）；该线程有明确边界时写出boundary，没有就省略该字段。
@@ -965,6 +1017,92 @@ ${safeJson(specs)}
     messages,
     responseSchema: STAGED_COMMENT_READERS_JSON_SCHEMA,
     estimatedTokens: estimateTokens(`${STAGED_ISOLATED_SYSTEM_PROMPT}\n${context}\n${safeJson(core)}\n${phase}`),
+  };
+}
+
+/**
+ * One bounded correction for an HTTP-200 reader-stage response that is JSON-like
+ * but violates the frozen shape. It receives no project knowledge: only the
+ * original response, exact IDs and the parser error, so salvaging a paid Core
+ * candidate is much cheaper than regenerating its full context.
+ */
+export function buildStagedCommentReadersCorrectionPrompt(
+  originalResponse: string,
+  expectedThreads: Array<{ id: string; threadKind: string }>,
+  validationError: string,
+): PromptBundle {
+  const boundedResponse = originalResponse.slice(0, 32_000);
+  const boundedError = validationError.slice(0, 1_000);
+  const user = `修正一次评论读者侧 JSON 结构。不要重写内容含义，不新增事实，不解释错误。
+
+冻结线程 ID（数量、顺序、拼写必须完全一致）：
+${safeJson(expectedThreads)}
+
+结构错误：
+${boundedError}
+
+原始响应：
+${boundedResponse}
+
+只返回完整 JSON：{"threads":[{"id":"冻结ID","question":"保留原意的评论","answer":"原答案或空字符串","kind":"question","function":"verification","boundary":"可选","followUps":[]}]}
+- threads 数量与顺序严格等于冻结线程。
+- 每项 id 使用对应冻结 ID；question、answer 必须是字符串；followUps 必须是空数组。
+- threadKind=reader_exchange 时保留一条读者接话；其他 threadKind 的 answer 必须为空字符串。
+- 不输出 Markdown、说明或额外根字段。`;
+  return {
+    messages: [
+      { role: "system", content: STAGED_ISOLATED_SYSTEM_PROMPT },
+      { role: "user", content: user },
+    ],
+    responseSchema: STAGED_COMMENT_READERS_JSON_SCHEMA,
+    estimatedTokens: estimateTokens(`${STAGED_ISOLATED_SYSTEM_PROMPT}\n${user}`),
+  };
+}
+
+/**
+ * 阶段2A-H：真实个人作者的隔离答复。只看已通过正文与人工确认事实，
+ * 不接收项目知识、replyPlan 或机构身份卡。
+ */
+export function buildStagedHostAnswersPrompt(
+  input: GenerationPromptInput,
+  core: Pick<ContentPackageContent, "H" | "N">,
+  threads: Array<{ planned: DialogueThreadPlan; question: string }>,
+): PromptBundle {
+  const allowedFacts = new Map(input.config.task.authorContext.facts.map((fact) => [fact.id, fact]));
+  const threadList = threads.map(({ planned, question }) => ({
+    id: planned.id,
+    读者评论: question,
+    可用作者事实: (planned.authorFactIds ?? [])
+      .map((id) => allowedFacts.get(id))
+      .filter((fact): fact is NonNullable<typeof fact> => Boolean(fact))
+      .map((fact) => ({ id: fact.id, statement: fact.statement, category: fact.category })),
+    答复范围: planned.hostReplyPlan?.questionIntent ?? "只回应正文已公开的本人状态",
+  }));
+  const forbidden = input.config.task.forbidden.filter(Boolean);
+  const phase = `阶段2A-H：你是发布这篇图文的真实个人作者。只答复下列楼主线程，不改图文，不回答项目事实。
+
+已通过预检的图文：
+${safeJson(core)}
+
+逐线程可用事实：
+${safeJson(threadList)}
+
+硬约束：
+- 只能复述或轻量口语化“可用作者事实”和图文已经明确写出的本人状态；不得增加项目接触、交易、服务完成、后续状态、结果、他人评价或时间细节。
+- 不回答价格、地址、预约、档期、效果、恢复、风险、适用性、资质、身份、因果或任何项目结论；也不说“我们门诊/我们项目”。
+- 不引导私信、发照片、到店或预约。每条一小句，像本人自然回复。
+${forbidden.length ? `- 禁止出现：${safeJson(forbidden)}。
+` : ""}- id严格沿用清单并覆盖每条。
+
+只返回：{"answers":[{"id":"清单ID","answer":"楼主自然回复"}]}`;
+  const messages: PromptMessage[] = [
+    { role: "system", content: STAGED_ISOLATED_SYSTEM_PROMPT },
+    { role: "user", content: phase },
+  ];
+  return {
+    messages,
+    responseSchema: STAGED_ORG_ANSWERS_JSON_SCHEMA,
+    estimatedTokens: estimateTokens(`${STAGED_ISOLATED_SYSTEM_PROMPT}\n${phase}`),
   };
 }
 

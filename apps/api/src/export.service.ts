@@ -334,6 +334,14 @@ function renderCrefV11TwoPartMarkdown(pkg: JsonObject): string {
           `- 漂浮反应：${commentNicknamePrefix(thread.displayName)}${text(thread.question) || '未提供'}`,
           '- 无需机构回复（4-20 字短共鸣，机构不出现）',
         );
+      } else if (threadKind === 'host_reply') {
+        lines.push(
+          `### 话术 ${index + 1}（楼主回复）`,
+          '',
+          `- 提问：${commentNicknamePrefix(thread.displayName)}${text(thread.question) || '未提供'}`,
+          `- 楼主本人回复：${text(thread.answer) || '未提供'}`,
+          '- 身份说明：已确认个人作者；只承接作者事实，不承担项目事实',
+        );
       } else if (threadKind === 'reader_exchange') {
         lines.push(
           `### 话术 ${index + 1}（读者互聊）`,
@@ -394,6 +402,7 @@ function appendCommentThreadAudit(lines: string[], threads: JsonObject[], dialog
     const replyPlan = asObject(metadata('replyPlan'));
     const discoveryPlan = asObject(metadata('discoveryPlan'));
     const isOrganicReaction = text(thread.threadKind) === 'organic_reaction';
+    const isHostReply = text(thread.threadKind) === 'host_reply';
     const attribution = auditAnswerAttribution(thread);
     lines.push(
       `### 模拟问答 ${index + 1}`,
@@ -419,17 +428,17 @@ function appendCommentThreadAudit(lines: string[], threads: JsonObject[], dialog
     if (text(thread.boundary)) lines.push(`- 答复边界：${text(thread.boundary)}`);
     if (stringArray(thread.evidenceIds).length) lines.push(`- 证据引用：${stringArray(thread.evidenceIds).join('、')}`);
     if (text(thread.nextStep)) lines.push(`- 下一步：${text(thread.nextStep)}`);
-    if (Object.keys(roleCard).length) lines.push(
+    if (!isHostReply && Object.keys(roleCard).length) lines.push(
       `- 动态角色卡：阶段=${text(roleCard.stage) || '未标注'}；知识=${stringArray(roleCard.knowledge).join('、') || '未标注'}；约束=${stringArray(roleCard.constraints).join('、') || '无'}；任务=${text(roleCard.decisionTask) || '未标注'}；证据态度=${text(roleCard.evidenceStance) || '未标注'}`,
       `- 缺口结构：主缺口=${text(metadata('primaryGapId')) || '未标注'}；辅助缺口=${stringArray(metadata('auxiliaryGapIds')).join('、') || '无'}`,
     );
-    if (Object.keys(density).length) lines.push(
+    if (!isHostReply && Object.keys(density).length) lines.push(
       `- 信息密度代理：角色维度=${text(density.roleDimensionCount) || '0'}；现实约束=${text(density.constraintCount) || '0'}；辅助维度=${text(density.auxiliaryDimensionCount) || '0'}；短问软目标≈${text(density.questionTargetChars) || '未标注'}字（非效果分）`,
     );
-    if (Object.keys(replyPlan).length) lines.push(
+    if (!isHostReply && Object.keys(replyPlan).length) lines.push(
       `- 隐藏答复计划：直接回答=${text(replyPlan.directAnswer)}；条件=${text(replyPlan.condition)}；边界=${text(replyPlan.boundary)}；未知=${text(replyPlan.unknown)}；下一问=${text(replyPlan.nextQuestion)}`,
     );
-    if (Object.keys(discoveryPlan).length) lines.push(
+    if (!isHostReply && Object.keys(discoveryPlan).length) lines.push(
       `- 发现式路径：线索=${text(discoveryPlan.cue)}；一步推断=${text(discoveryPlan.inferencePrompt)}；同线程揭示=${text(discoveryPlan.reveal)}；自检=${text(discoveryPlan.selfCheck)}；边界=${text(discoveryPlan.boundary)}；难度=${text(discoveryPlan.difficulty)}`,
     );
     const followUps = isOrganicReaction ? [] : objectArray(thread.followUps);
@@ -842,6 +851,7 @@ function commentKindText(value: string): string {
 function commentThreadKindText(value: string): string {
   const labels: Record<string, string> = {
     org_answer: '机构问答',
+    host_reply: '楼主回复',
     reader_exchange: '读者互聊',
     organic_reaction: '漂浮短反应',
   };
@@ -899,6 +909,12 @@ function auditAnswerAttribution(thread: JsonObject): { label: string; identity: 
     return {
       label: '漂浮短反应',
       identity: '不适用（漂浮短反应，机构不出现）',
+    };
+  }
+  if (kind === 'host_reply') {
+    return {
+      label: '楼主本人回复',
+      identity: '作者本人（人工确认）',
     };
   }
   if (kind === 'reader_exchange') {

@@ -769,6 +769,75 @@ describe("按侧+按角色隔离的引擎合并", () => {
     }
   });
 
+  it("个人作者拓扑走独立楼主调用，最终线程不携带项目答复元数据", async () => {
+    const calls: ModelGenerationRequest[] = [];
+    const provider: ModelProvider = {
+      async generate(request) {
+        calls.push(request);
+        const purpose = String(request.metadata?.purpose);
+        if (purpose === "generate_comment_readers") {
+          return {
+            text: JSON.stringify({
+              threads: stagedThreadIds(request).map((id, index) => ({
+                id,
+                question: `第${index + 1}条想确认一下？`,
+                answer: "姐妹我也在看",
+                followUps: [],
+              })),
+            }),
+            raw: {},
+          };
+        }
+        if (purpose === "generate_host_answers") {
+          return {
+            text: JSON.stringify({
+              answers: stagedThreadIds(request).map((id) => ({ id, answer: "我目前还没决定" })),
+            }),
+            raw: {},
+          };
+        }
+        if (purpose === "generate_org_answers") {
+          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "这个需要按项目口径确认。" })) }), raw: {} };
+        }
+        if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
+        return { text: coreResponse(), raw: {} };
+      },
+    };
+    const value = engineConfig();
+    value.task.publishingTopology = "confirmed_individual_author";
+    value.task.authorContext = {
+      status: "confirmed",
+      facts: [{
+        id: "af1",
+        statement: "我目前还没决定",
+        category: "current_state",
+        confirmedBy: "user-1",
+        confirmedAt: "2026-08-04T12:00:00Z",
+      }],
+    };
+    const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-07-12T12:00:00Z") })
+      .generate({ jobId: "host-isolation", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge, planningContext });
+
+    expect(calls.some((call) => call.metadata?.purpose === "generate_host_answers")).toBe(true);
+    for (const pkg of result.packages) {
+      const host = pkg.content.Cref.threads.find((thread) => thread.threadKind === "host_reply");
+      expect(host).toBeDefined();
+      expect(host).toMatchObject({
+        postingIdentity: "author",
+        answer: "我目前还没决定",
+        evidenceIds: [],
+        sourceClusterIds: [],
+        authorFactIds: ["af1"],
+        followUps: [],
+      });
+      expect(host?.primaryGapId).toBeUndefined();
+      expect(host?.gap).toBeUndefined();
+      expect(host?.replyPlan).toBeUndefined();
+      expect(host?.discoveryPlan).toBeUndefined();
+      expect(host?.nextStep).toBeUndefined();
+    }
+  });
+
   it("机构答复调用失败或缺 id 时,该角色线程回落规划口径并记 model_org_answer_failed", async () => {
     const provider: ModelProvider = {
       async generate(request) {

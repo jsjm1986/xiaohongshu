@@ -495,3 +495,28 @@ test("整份 markdown（legacy 单流）:审计段同样不把读者接话署成
   assert.ok(!markdown.includes("楼主/可追责身份回复：同问"));
   assert.ok(!markdown.includes("答复身份：staff"));
 });
+
+test("host_reply helpers preserve confirmed-author attribution", () => {
+  assert.equal(commentThreadKindOf({ threadKind: "host_reply" }), "host_reply");
+  assert.equal(commentThreadKindLabel("host_reply"), "楼主回复");
+  assert.deepEqual(auditAnswerAttribution({ threadKind: "host_reply", postingIdentity: "author" }), {
+    label: "楼主本人回复",
+    identity: "作者本人（已确认）",
+  });
+  const markdown = candidateToMarkdown({
+    ...baseCandidate,
+    commentUncoveredGaps: [],
+    comments: [{
+      question: "所以你还没定吗？",
+      answer: "我目前还没决定",
+      threadKind: "host_reply",
+      postingIdentity: "author",
+      simulated: true,
+      simulationLabel: "模拟潜在读者情景",
+      followUps: [],
+    }],
+  });
+  assert.match(markdown, /楼主本人回复：我目前还没决定/u);
+  assert.match(markdown, /答复身份：作者本人（已确认）/u);
+  assert.doesNotMatch(markdown, /机构可追责身份回复：我目前还没决定/u);
+});

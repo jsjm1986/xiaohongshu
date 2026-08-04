@@ -76,8 +76,8 @@ function commentFollowUpStopReason(value: unknown): CommentFollowUpStopReason | 
  * org_answer(机构问答)处理——历史包没有 threadKind 字段,校验、渲染与导出
  * 都按 T1 理解,不出错。
  */
-export function commentThreadKindOf(thread: { threadKind?: string }): "org_answer" | "reader_exchange" | "organic_reaction" {
-  return thread.threadKind === "reader_exchange" || thread.threadKind === "organic_reaction"
+export function commentThreadKindOf(thread: { threadKind?: string }): "org_answer" | "host_reply" | "reader_exchange" | "organic_reaction" {
+  return thread.threadKind === "host_reply" || thread.threadKind === "reader_exchange" || thread.threadKind === "organic_reaction"
     ? thread.threadKind
     : "org_answer";
 }
@@ -520,11 +520,15 @@ function parseContent(value: unknown): ContentPackageContent {
       replySurfaceRoleCard: surfaceRoleCard(thread.replySurfaceRoleCard),
       displayName: optionalTrimmedText(thread.displayName),
       replyDisplayName: optionalTrimmedText(thread.replyDisplayName),
-      threadKind: thread.threadKind === "reader_exchange"
-        ? "reader_exchange" as const
-        : thread.threadKind === "organic_reaction"
-          ? "organic_reaction" as const
-          : thread.threadKind === "org_answer" ? "org_answer" as const : undefined,
+      threadKind: thread.threadKind === "host_reply"
+        ? "host_reply" as const
+        : thread.threadKind === "reader_exchange"
+          ? "reader_exchange" as const
+          : thread.threadKind === "organic_reaction"
+            ? "organic_reaction" as const
+            : thread.threadKind === "org_answer" ? "org_answer" as const : undefined,
+      authorFactIds: stringArray(thread.authorFactIds) ?? undefined,
+      topicAnchorGapId: optionalTrimmedText(thread.topicAnchorGapId),
       ...scenarioMetadata(thread),
     };
   });
@@ -913,6 +917,69 @@ function claimsFirstPersonCompletion(text: string): boolean {
 }
 
 /**
+ * Validate the visible title/body against the frozen publishing topology before
+ * comment generation. Project knowledge never authorizes a personal history;
+ * only human-confirmed author facts do.
+ */
+export function validatePublishingTopologyCopy(
+  core: Pick<ContentPackageContent, "N">,
+  config: ResolvedGenerationConfig,
+  blueprint?: ProjectCreativeBlueprint,
+): ContentValidationIssue[] {
+  const issues: ContentValidationIssue[] = [];
+  const text = `${core.N.title}
+${core.N.body}`;
+  const authorFacts = config.task.authorContext?.facts ?? [];
+  const historyTerms = blueprint ? prohibitedHistoryTerms(blueprint) : [];
+  const actionTerms = [...new Set([
+    ...(blueprint?.domainModel.actions ?? []),
+    ...historyTerms,
+  ].map((item) => item.trim()).filter((item) => item.length >= 2))];
+  const statements = text.split(/[。！？!?；;\n]+/u).map((item) => item.trim()).filter(Boolean);
+  const experienceClaims = statements.filter((statement) => {
+    const firstPersonCompletion = claimsFirstPersonCompletion(statement);
+    const actionHit = actionTerms.some((term) => statement.includes(term));
+    const prohibitedHit = assertsProhibitedHistory(statement, historyTerms);
+    return prohibitedHit || (firstPersonCompletion && actionHit);
+  });
+  const add = (code: string, message: string): void => {
+    issues.push({ code, severity: "error", channel: "N.body", message, repairable: true });
+  };
+  if (config.task.publishingTopology === "institution_owned") {
+    if (experienceClaims.length) {
+      add("unsupported_narrative_history", `Institution-owned copy claims an unsupported personal project history: ${experienceClaims[0]}`);
+    }
+    return issues;
+  }
+  if (config.task.authorContext?.status !== "confirmed" || authorFacts.length === 0) {
+    add("publishing_topology_voice_mismatch", "Individual-author publishing requires human-confirmed author facts.");
+    return issues;
+  }
+  if (/(?:我们门诊|我们机构|我们项目|本店|我方)/u.test(text)) {
+    add("publishing_topology_voice_mismatch", "Individual-author copy speaks as an institution-owned account.");
+  }
+  const domainActions = (blueprint?.domainModel.actions ?? [])
+    .map((action) => action.trim())
+    .filter((action) => action.length >= 2);
+  const factAuthorizesClaim = (claim: string, fact: ResolvedGenerationConfig["task"]["authorContext"]["facts"][number]): boolean => {
+    // Shared first-person/time wording is not authorization: two different completed project actions
+    // must never authorize “我昨天已经购买”. If the claim names a project
+    // action, at least one identical action must appear in the confirmed fact.
+    const claimActions = domainActions.filter((action) => claim.includes(action));
+    if (claimActions.length && !claimActions.some((action) => fact.statement.includes(action))) return false;
+    return meaningfulTextOverlap(claim, fact.statement, 0.35)
+      || normalizedComparable(claim).includes(normalizedComparable(fact.statement))
+      || normalizedComparable(fact.statement).includes(normalizedComparable(claim));
+  };
+  const unsupported = experienceClaims.find((claim) => !authorFacts.some((fact) => factAuthorizesClaim(claim, fact)));
+  if (unsupported) {
+    add("author_fact_scope_exceeded", `Individual-author copy exceeds the confirmed author facts: ${unsupported}`);
+  }
+  return issues;
+}
+
+
+/**
  * True when the visible text shares any contiguous fragment of at least
  * `minLength` characters with the needle (both already normalized). Lets a
  * gap be named by a natural partial phrase instead of its exact full label.
@@ -1091,7 +1158,10 @@ export function evaluateGapCoverageRealization(
     }
 
     if (card.plannedPlacements.includes("Cref")) {
-      const plannedThreads = orchestrationPlan.dialogueThreads.filter((thread) => thread.primaryGapId === card.gapId);
+      const plannedThreads = orchestrationPlan.dialogueThreads.filter((thread) =>
+        (thread.threadKind ?? "org_answer") === "org_answer"
+        && (thread.coverageRole ?? "primary_gap") === "primary_gap"
+        && thread.primaryGapId === card.gapId);
       for (const plannedThread of plannedThreads) {
         const actualThread = draft.content.Cref.threads.find((thread) => thread.id === plannedThread.id);
         const primaryMatches = Boolean(
@@ -1216,6 +1286,7 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
   };
   if (!draft.content.N.title) add("title_required", "error", "N.title", "Title is required.");
   if (!draft.content.N.body) add("body_required", "error", "N.body", "Body is required.");
+  issues.push(...validatePublishingTopologyCopy({ N: draft.content.N }, config, input.projectBlueprint));
   if (config.content.imageBriefEnabled && !draft.content.N.imageBrief) add("image_brief_required", "error", "N.imageBrief", "Image brief is required.");
   const bodyLength = [...draft.content.N.body].length;
   if (bodyLength < config.content.bodyMinChars) add("body_too_short", "error", "N.body", `Body has ${bodyLength} characters; minimum is ${config.content.bodyMinChars}.`);
@@ -1576,7 +1647,7 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
       !thread.question ? "Q" : "",
       // T3 漂浮短反应无回答需求:answer 为空、无下一步属正常形态,不算缺漏。
       threadKind !== "organic_reaction" && !thread.answer ? "A" : "",
-      threadKind !== "organic_reaction" && !thread.nextStep ? "Next" : "",
+      threadKind !== "organic_reaction" && threadKind !== "host_reply" && !thread.nextStep ? "Next" : "",
       !thread.postingIdentity ? "Role" : "",
     ].filter(Boolean);
     if (missingThreadFields.length) {
@@ -1604,6 +1675,38 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     if (!accountablePostingIdentities.has(thread.postingIdentity)) {
       add("comment_identity_violation", "error", "Cref", `Thread ${thread.id} posting identity "${thread.postingIdentity}" is not an accountable publisher-side identity (publisher/brand/staff/expert).`);
     }
+    if (threadKind === "host_reply" && thread.postingIdentity !== "author") {
+      add("host_reply_identity_violation", "error", "Cref", `Thread ${thread.id} host_reply must be answered only by the confirmed author.`);
+    }
+    if (threadKind === "org_answer" && !["publisher", "staff", "expert"].includes(thread.postingIdentity)) {
+      add("org_answer_identity_violation", "error", "Cref", `Thread ${thread.id} org_answer must use publisher, staff or expert.`);
+    }
+    if (threadKind === "organic_reaction" && thread.answer.trim()) {
+      add("organic_reaction_answer_violation", "error", "Cref", `Thread ${thread.id} organic_reaction must not contain an answer.`);
+    }
+    if (threadKind === "host_reply") {
+      if (config.task.publishingTopology !== "confirmed_individual_author" || config.task.authorContext.status !== "confirmed") {
+        add("host_reply_unconfirmed_author", "error", "Cref", `Thread ${thread.id} exposes a host reply without a confirmed individual-author topology.`);
+      }
+      if (thread.evidenceIds.length > 0) {
+        add("host_reply_evidence_violation", "error", "Cref", `Thread ${thread.id} host reply must not carry project evidence IDs.`);
+      }
+      const allowedFacts = config.task.authorContext.facts.filter((fact) => (thread.authorFactIds ?? []).includes(fact.id));
+      if (!allowedFacts.length || !allowedFacts.some((fact) => realizesText(thread.answer, fact.statement) || meaningfulTextOverlap(thread.answer, fact.statement, 0.35))) {
+        add("host_reply_author_fact_mismatch", "error", "Cref", `Thread ${thread.id} host reply is not traceable to its allowed human-confirmed author facts.`);
+      }
+      const hostControlled = splitSensitiveStatements(thread.answer).find((statement) =>
+        genericMeasuredClaim.test(statement)
+        || marketingPromiseClaim.test(statement)
+        || controlledRules.some((rule) => rule.claimType !== "historical_action" && rule.terms.some((term) => term && statement.includes(term)))
+        || /(?:我们门诊|我们机构|我们项目|本店|预约|地址|价格|费用|适合|恢复|效果|风险|资质|复发)/u.test(statement));
+      if (hostControlled) {
+        add("host_reply_controlled_claim", "error", "Cref", `Thread ${thread.id} host reply crosses into a project-controlled claim: ${hostControlled}`);
+      }
+      if ((thread.followUps?.length ?? 0) > 0) {
+        add("host_reply_followup_violation", "error", "Cref", `Thread ${thread.id} host reply must remain a single exchange until node-level identities exist.`);
+      }
+    }
     // publisher 是明确的项目方账号，不是正文叙事人物。历史错误合同曾把它强制
     // 显示成“楼主”，导致“我们是门诊 / 发照片评估”等机构话术看起来由普通
     // 消费者楼主说出。只要最终成品仍使用叙事身份别名，就直接阻断发布；上游路由、
@@ -1625,7 +1728,7 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
       add("reply_display_role_plan_drift", "error", "Cref", `Thread ${thread.id} changed frozen replyDisplayRole from “${plannedReplyDisplayRole || "(empty)"}” to “${replyDisplayRole || "(empty)"}”.`);
     }
     const plannedGap = input.orchestrationPlan?.gapPlanningCards?.find((card) => card.gapId === plannedThread?.primaryGapId);
-    if (plannedThread && plannedGap) {
+    if (plannedThread && plannedGap && threadKind === "org_answer") {
       const guardedIdentities = guardedReplyIdentitiesForQuestion(
         thread.question,
         input.projectBlueprint?.claimPolicy.rules ?? [],

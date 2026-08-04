@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
-import { resolveOptions, type ApiOptionsInput } from '../src/config.js';
+import { DEFAULT_KNOWLEDGE_CONTEXT_TOKENS, MODEL_CONTEXT_WINDOW_TOKENS, resolveOptions, type ApiOptionsInput } from '../src/config.js';
 
 const MANAGED_ENV = [
   'NODE_ENV',
@@ -76,6 +76,13 @@ test('retry attempts and model concurrency stay within one through eight', () =>
     assert.throws(() => options({ modelRetryAttempts: value }), /modelRetryAttempts/u);
     assert.throws(() => options({ modelMaxConcurrentRequests: value }), /modelMaxConcurrentRequests/u);
   }
+});
+
+test('the 1M model context exposes an expanded 600K knowledge budget', () => {
+  assert.equal(options().knowledgeContextTokens, DEFAULT_KNOWLEDGE_CONTEXT_TOKENS);
+  assert.equal(DEFAULT_KNOWLEDGE_CONTEXT_TOKENS, 600_000);
+  assert.equal(options({ knowledgeContextTokens: MODEL_CONTEXT_WINDOW_TOKENS }).knowledgeContextTokens, 1_000_000);
+  assert.throws(() => options({ knowledgeContextTokens: MODEL_CONTEXT_WINDOW_TOKENS + 1 }), /knowledgeContextTokens/u);
 });
 
 test('retry delay can be zero while positive durations reject zero and negatives', () => {

@@ -166,6 +166,9 @@ describe('runAgentHarness bounded multi-turn protocol', () => {
       'agent_harness_package_candidate', 'agent_harness_package_candidate', 'agent_harness_package_candidate',
       'agent_harness_final_review',
     ]);
+    expect(calls.map((call) => call.maxOutputTokens)).toEqual([
+      16_000, 32_000, 64_000, 64_000, 64_000, 16_000,
+    ]);
     expect(calls.every((call) => call.messages.some((message) => /Response JSON Schema/iu.test(message.content)))).toBe(true);
     expect(JSON.stringify(calls[0]?.responseSchema)).not.toContain('coverHeadline');
     expect(JSON.stringify(calls[1]?.responseSchema)).toContain('postingIntent');

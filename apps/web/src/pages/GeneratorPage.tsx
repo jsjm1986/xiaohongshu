@@ -78,6 +78,11 @@ import type {
   ResolvedConfigPreview,
 } from "../types";
 import { IntelligentSimpleFlow } from "./IntelligentSimpleFlow";
+import {
+  applyPublishingTopology,
+  DEFAULT_PUBLISHING_TOPOLOGY_DRAFT,
+  type PublishingTopologyDraft,
+} from "../lib/publishing-topology";
 
 interface GenerationFormState {
   topic: string;
@@ -135,6 +140,7 @@ export function GeneratorPage() {
   const { projects, projectId, setProjectId, currentProject } = useProjects();
   const [mode, setMode] = useState<"simple" | "advanced">("simple");
   const [form, setForm] = useState<GenerationFormState>(defaultForm);
+  const [publishingTopology, setPublishingTopology] = useState<PublishingTopologyDraft>({ ...DEFAULT_PUBLISHING_TOPOLOGY_DRAFT });
   const [advanced, setAdvanced] = useState<AdvancedGenerationConfig>(defaultAdvanced);
   const [parameterOverrides, setParameterOverrides] = useState<Record<string, unknown>>({});
   const [advancedOverrides, setAdvancedOverrides] = useState("{}");
@@ -438,7 +444,14 @@ export function GeneratorPage() {
     await prepareInputPreview(input);
   };
 
-  const prepareInputPreview = async (input: GenerateInput) => {
+  const prepareInputPreview = async (rawInput: GenerateInput) => {
+    let input: GenerateInput;
+    try {
+      input = applyPublishingTopology(rawInput, publishingTopology);
+    } catch (error) {
+      toast.push(errorMessage(error, "发布账号信息不完整"), "error");
+      return;
+    }
     setPreviewOpen(true);
     setPreviewLoading(true);
     setPreviewInput(input);
@@ -479,6 +492,7 @@ export function GeneratorPage() {
     setAdvanced(defaultAdvanced);
     setParameterOverrides({});
     setForm((current) => ({ ...current, goal: "", mustInclude: "" }));
+    setPublishingTopology({ ...DEFAULT_PUBLISHING_TOPOLOGY_DRAFT });
     setSelectedPresetId("");
     toast.push("参数已恢复为系统默认", "info");
   };
@@ -520,6 +534,8 @@ export function GeneratorPage() {
       />
 
       {schemaWarning && <div className="inline-load-error" role="alert"><AlertTriangle size={17} /><span><strong>生成参数暂未从服务端加载</strong><small>{schemaWarning}。当前只显示界面默认值，配置预览仍须由服务端确认。</small></span><Button variant="ghost" onClick={() => setResourceReload((value) => value + 1)}>重试</Button></div>}
+
+      <PublishingTopologyPanel value={publishingTopology} onChange={setPublishingTopology} />
 
       {mode === "simple" ? (
         <IntelligentSimpleFlow
@@ -652,6 +668,46 @@ function PresetShelf({ presets, selectedId, loading, error, compact, onApply, on
         </div>
       </article>)}
     </div>}
+  </section>;
+}
+
+const authorFactCategoryOptions: Array<{ value: PublishingTopologyDraft["factCategory"]; label: string }> = [
+  { value: "current_state", label: "当前状态" },
+  { value: "intent", label: "本人打算" },
+  { value: "constraint", label: "现实限制" },
+  { value: "project_contact", label: "已发生项目接触" },
+  { value: "purchase", label: "已购买" },
+  { value: "service_completion", label: "已完成服务" },
+  { value: "recovery", label: "恢复经历" },
+  { value: "outcome", label: "结果经历" },
+];
+
+function PublishingTopologyPanel({ value, onChange }: {
+  value: PublishingTopologyDraft;
+  onChange: (value: PublishingTopologyDraft) => void;
+}) {
+  const individual = value.topology === "confirmed_individual_author";
+  return <section className="settings-panel publishing-topology-panel">
+    <header><div><ShieldCheck size={19} /><span><h2>发布账号与作者事实</h2><p>本次任务先冻结谁在发帖；项目资料不能自动变成个人经历</p></span></div><Badge tone={individual ? "warning" : "positive"}>{individual ? "个人作者" : "机构账号"}</Badge></header>
+    <div className="settings-panel__body form-stack">
+      <Field label="发布账号类型" required hint="默认使用机构自有账号。只有确有真实个人作者且事实已人工确认时，才选择个人作者。">
+        <select value={value.topology} onChange={(event) => onChange({ ...value, topology: event.target.value as PublishingTopologyDraft["topology"] })}>
+          <option value="institution_owned">机构自有账号（默认）</option>
+          <option value="confirmed_individual_author">已确认的真实个人作者</option>
+        </select>
+      </Field>
+      {individual && <>
+        <Field label="已确认作者事实" required hint="只填一条本次可公开使用的真实事实；不要从项目知识库复制或推断个人经历。">
+          <textarea rows={3} value={value.factStatement} onChange={(event) => onChange({ ...value, factStatement: event.target.value })} placeholder="例如：我目前还没决定，只是在比较方案" />
+        </Field>
+        <div className="field-grid field-grid--three">
+          <Field label="事实类别" required><select value={value.factCategory} onChange={(event) => onChange({ ...value, factCategory: event.target.value as PublishingTopologyDraft["factCategory"] })}>{authorFactCategoryOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></Field>
+          <Field label="确认人" required><input value={value.confirmedBy} onChange={(event) => onChange({ ...value, confirmedBy: event.target.value })} placeholder="负责人姓名或工号" /></Field>
+          <Field label="确认时间" required><input type="datetime-local" value={value.confirmedAt} onChange={(event) => onChange({ ...value, confirmedAt: event.target.value })} /></Field>
+        </div>
+        <div className="trendfit-settings-boundary"><Info size={17} /><div><strong>个人作者只回答本人事实</strong><p>楼主回复不会承接价格、地址、预约、效果、恢复结论、适用性或其他项目事实；这些问题仍由机构可追责身份回答。</p></div></div>
+      </>}
+    </div>
   </section>;
 }
 
@@ -845,7 +901,7 @@ function localPreview(input: GenerateInput, advanced: AdvancedGenerationConfig, 
     })
     .filter((item): item is ParameterImpact => Boolean(item));
   return {
-    resolvedConfig: { schemaVersion: "1.0", task: { theme: input.topic || "由选题卡决定", goal: input.goal || "根据选题卡补全决策信息", audienceStage: input.audienceStage, entry: input.entryPoint, city: input.city || undefined, doctor: input.doctor || undefined, mustMention: must, forbidden }, opportunityId: input.opportunityId, imageAssetIds: input.imageAssetIds, parameters: inputParameterOverrides(input), legacyConfig: advanced, presetId: input.presetId },
+    resolvedConfig: { schemaVersion: "1.0", task: { theme: input.topic || "由选题卡决定", goal: input.goal || "根据选题卡补全决策信息", audienceStage: input.audienceStage, entry: input.entryPoint, city: input.city || undefined, doctor: input.doctor || undefined, publishingTopology: input.publishingTopology, authorContext: input.authorContext, mustMention: must, forbidden }, opportunityId: input.opportunityId, imageAssetIds: input.imageAssetIds, parameters: inputParameterOverrides(input), legacyConfig: advanced, presetId: input.presetId },
     conflicts,
     warnings: [],
     impacts,

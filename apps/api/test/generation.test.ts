@@ -644,12 +644,22 @@ test('formula registry, settings and deterministic generation form one working f
   assert.ok(job.candidates.every((item: any) => item.comments.length >= 3));
   assert.ok(job.candidates.every((item: any) => item.comments.every((comment: any) => comment.simulated === true)));
   assert.ok(job.candidates.every((item: any) => item.comments.every((comment: any) => comment.personaRole && comment.speakerType === 'simulated_reader' && comment.claimStatus)));
-  assert.ok(job.candidates.every((item: any) => item.comments.every((comment: any) => comment.roleCard?.decisionTask && comment.primaryGapId && comment.densityProxy?.primaryGapCount === 1)));
-  assert.ok(job.candidates.every((item: any) => item.comments.every((comment: any) => comment.replyPlan?.directAnswer && comment.replyPlan?.nextQuestion)));
-  assert.ok(job.candidates.every((item: any) => item.comments.every((comment: any) => comment.discoveryPlan?.cue && comment.discoveryPlan?.revealTiming === 'same_thread' && ['low', 'moderate'].includes(comment.discoveryPlan?.difficulty))));
+  assert.ok(job.candidates.every((item: any) => item.comments
+    .filter((comment: any) => (comment.threadKind ?? 'org_answer') === 'org_answer')
+    .every((comment: any) => comment.roleCard?.decisionTask && comment.primaryGapId && comment.densityProxy?.primaryGapCount === 1)));
+  assert.ok(job.candidates.every((item: any) => item.comments
+    .filter((comment: any) => (comment.threadKind ?? 'org_answer') === 'org_answer')
+    .every((comment: any) => comment.replyPlan?.directAnswer && comment.replyPlan?.nextQuestion)));
+  assert.ok(job.candidates.every((item: any) => item.comments
+    .filter((comment: any) => (comment.threadKind ?? 'org_answer') === 'org_answer')
+    .every((comment: any) => comment.discoveryPlan?.cue && comment.discoveryPlan?.revealTiming === 'same_thread' && ['low', 'moderate'].includes(comment.discoveryPlan?.difficulty))));
+  assert.ok(job.candidates.every((item: any) => item.comments
+    .filter((comment: any) => (comment.threadKind ?? 'org_answer') !== 'org_answer')
+    .every((comment: any) => !comment.primaryGapId && !comment.replyPlan && !(comment.evidenceIds?.length))));
   assert.ok(job.candidates.every((item: any) => item.comments.every((comment: any) => comment.surfaceRoleCard?.displayRole
     && comment.surfaceRoleCard?.speechPattern && !/DirectAnswer|本线程/u.test(`${comment.question}${comment.answer}`))));
-  assert.ok(job.candidates.every((item: any) => new Set(item.comments.map((comment: any) => comment.surfaceRoleCard?.displayRole)).size >= 3));
+  assert.ok(job.candidates.every((item: any) =>
+    new Set(item.comments.map((comment: any) => comment.surfaceRoleCard?.displayRole)).size >= 3));
   assert.ok(job.candidates.every((item: any) => item.gapCoverageLedger?.closureRate === 1 && item.gapCoverageLedger?.uncoveredGapIds?.length === 0));
   assert.ok(job.candidates.every((item: any) => item.effectiveThreadCount === item.comments.length));
   assert.ok(job.candidates.every((item: any) => item.comments.every((comment: any) => ['publisher', 'brand', 'staff', 'expert'].includes(comment.postingIdentity))));

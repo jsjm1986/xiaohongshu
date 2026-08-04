@@ -13,6 +13,7 @@ import {
   parseGenerationDraft,
   planTopicOrchestrations,
   validateGenerationDraft,
+  validatePublishingTopologyCopy,
 } from "../src/index.js";
 import type {
   GenerationDraft,
@@ -120,7 +121,7 @@ function opportunity(id = "topic-kind"): TopicOpportunity {
   };
 }
 
-const THREAD_KINDS = new Set(["org_answer", "reader_exchange", "organic_reaction"]);
+const THREAD_KINDS = new Set(["org_answer", "host_reply", "reader_exchange", "organic_reaction"]);
 
 describe("assignCommentThreadKind (互动形态确定性抽取)", () => {
   it("is deterministic for the same seed + salt and only emits legal kinds", () => {
@@ -166,6 +167,39 @@ describe("dialoguePlans threadKind assignment", () => {
     });
   });
 
+
+  it("项目缺口席位固定为 org_answer，社会线程不冒充 primary gap owner", () => {
+    for (const plan of build()) {
+      for (const entry of plan.gapCoverageLedger.entries) {
+        for (const id of entry.primaryThreadIds) {
+          const thread = plan.dialogueThreads.find((item) => item.id === id)!;
+          expect(thread.threadKind).toBe("org_answer");
+          expect(thread.coverageRole).toBe("primary_gap");
+        }
+      }
+      for (const thread of plan.dialogueThreads.filter((item) => item.threadKind !== "org_answer")) {
+        expect(thread.coverageRole).not.toBe("primary_gap");
+        expect(plan.gapCoverageLedger.entries.flatMap((entry) => entry.primaryThreadIds)).not.toContain(thread.id);
+      }
+    }
+  });
+
+  it("个人作者拓扑预留一条 host_reply，且只引用人类确认事实", () => {
+    const value = config();
+    value.task.publishingTopology = "confirmed_individual_author";
+    value.task.authorContext = {
+      status: "confirmed",
+      facts: [{ id: "af1", statement: "我目前还没决定", category: "current_state", confirmedBy: "u1", confirmedAt: "2026-08-04T12:00:00Z" }],
+    };
+    for (const plan of planTopicOrchestrations({ opportunity: opportunity("host"), gaps, config: value, seeds: [11, 22, 33] })) {
+      const hosts = plan.dialogueThreads.filter((thread) => thread.threadKind === "host_reply");
+      expect(hosts).toHaveLength(1);
+      expect(hosts[0]).toMatchObject({ postingIdentity: "author", coverageRole: "topic_anchor", evidenceIds: [], authorFactIds: ["af1"] });
+      expect(hosts[0]!.hostReplyPlan?.allowedAuthorFactIds).toEqual(["af1"]);
+      expect(hosts[0]!.conversationPlan?.targetFollowUps).toBe(0);
+    }
+  });
+
   it("T2 线程:speakerA/B 不同 displayRole 且不同昵称,B 接话范围限 permittedContribution", () => {
     const exchanges = build().flatMap((plan) =>
       plan.dialogueThreads.filter((thread) => thread.threadKind === "reader_exchange"));
@@ -187,11 +221,8 @@ describe("dialoguePlans threadKind assignment", () => {
   it("T3 线程:1-3 条漂浮短反应,不生长、answer 无回答需求", () => {
     for (const plan of build()) {
       const organics = plan.dialogueThreads.filter((thread) => thread.threadKind === "organic_reaction");
-      // targetCount>=3 时 T3 为 1-3 条。
-      if (plan.dialogueThreads.length >= 3) {
-        expect(organics.length).toBeGreaterThanOrEqual(1);
-        expect(organics.length).toBeLessThanOrEqual(3);
-      }
+      // 漂浮反应只来自额外社会席位；项目缺口席位不得为了凑 T3 被降级。
+      expect(organics.length).toBeLessThanOrEqual(3);
       for (const thread of organics) {
         expect(thread.conversationPlan?.topology).toBe("organic_reaction");
         expect(thread.conversationPlan?.targetFollowUps).toBe(0);
@@ -371,5 +402,74 @@ describe("threadKind validation (读者互动层)", () => {
     expect(codes(legacy)).not.toContain("reader_exchange_controlled_claim");
     expect(commentThreadKindOf({})).toBe("org_answer");
     expect(commentThreadKindOf({ threadKind: "未知形态" })).toBe("org_answer");
+  });
+});
+
+
+describe("publishing topology and host-reply hard gates", () => {
+  const blueprint = normalizeProjectCreativeBlueprint({
+    projectId: "p1",
+    sourceFingerprint: "topology-gate",
+    moduleRevisions: {},
+    modules: {
+      domain_model: { projectNoun: "服务", actions: ["面诊", "购买"] },
+      scenario_model: {
+        families: [{
+          id: "current", label: "当前状态", prototype: "narrow_request",
+          applicableStages: ["comparing"], prohibitedUnsupportedHistories: ["已经面诊", "已经购买"],
+          source: { status: "inference", evidenceIds: [] },
+        }],
+      },
+    },
+  });
+
+  it("机构拓扑拦截未经确认的个人项目经历，但不误伤当前打算", () => {
+    const value = config();
+    const bad = validatePublishingTopologyCopy({ N: { imageBrief: "", title: "记录", body: "我昨天已经面诊了。" } }, value, blueprint);
+    expect(bad).toContainEqual(expect.objectContaining({ code: "unsupported_narrative_history", channel: "N.body" }));
+    const safe = validatePublishingTopologyCopy({ N: { imageBrief: "", title: "记录", body: "我还没去，打算先把问题问清楚。" } }, value, blueprint);
+    expect(safe).toEqual([]);
+  });
+
+  it("个人作者拓扑只允许人工确认事实范围内的已发生经历", () => {
+    const value = config();
+    value.task.publishingTopology = "confirmed_individual_author";
+    value.task.authorContext = {
+      status: "confirmed",
+      facts: [{ id: "af1", statement: "我昨天已经面诊", category: "project_contact", confirmedBy: "u1", confirmedAt: "2026-08-04T12:00:00Z" }],
+    };
+    expect(validatePublishingTopologyCopy({ N: { imageBrief: "", title: "记录", body: "我昨天已经面诊。" } }, value, blueprint)).toEqual([]);
+    expect(validatePublishingTopologyCopy({ N: { imageBrief: "", title: "记录", body: "我昨天已经购买了。" } }, value, blueprint))
+      .toContainEqual(expect.objectContaining({ code: "author_fact_scope_exceeded" }));
+  });
+
+  it("host_reply 仅允许已确认作者、零项目证据且不承担项目缺口", () => {
+    const value = config();
+    value.content.bodyMinChars = 2;
+    value.content.hashtagMin = 1;
+    value.task.publishingTopology = "confirmed_individual_author";
+    value.task.authorContext = {
+      status: "confirmed",
+      facts: [{ id: "af1", statement: "我目前还没决定", category: "current_state", confirmedBy: "u1", confirmedAt: "2026-08-04T12:00:00Z" }],
+    };
+    const draft = draftWithKind("host_reply", "所以你还没定吗？", "我目前还没决定");
+    const host = draft.content.Cref.threads[0]!;
+    host.postingIdentity = "author";
+    host.authorFactIds = ["af1"];
+    host.topicAnchorGapId = "fit_gap";
+    host.primaryGapId = undefined;
+    host.gap = undefined;
+    host.nextStep = undefined;
+    host.evidenceIds = [];
+    const issues = validateGenerationDraft({ draft, config: value, ledger: buildKnowledgeLedger([]), allowedEvidenceIds: [], projectBlueprint: blueprint });
+    expect(codes(issues)).not.toContain("host_reply_identity_violation");
+    expect(codes(issues)).not.toContain("host_reply_evidence_violation");
+    expect(codes(issues)).not.toContain("host_reply_author_fact_mismatch");
+
+    host.postingIdentity = "publisher";
+    host.evidenceIds = ["evidence_d2"];
+    const broken = validateGenerationDraft({ draft, config: value, ledger: buildKnowledgeLedger([]), allowedEvidenceIds: ["evidence_d2"], projectBlueprint: blueprint });
+    expect(codes(broken)).toContain("host_reply_identity_violation");
+    expect(codes(broken)).toContain("host_reply_evidence_violation");
   });
 });

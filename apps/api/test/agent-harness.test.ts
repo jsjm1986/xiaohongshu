@@ -104,7 +104,7 @@ function candidate(index: 0 | 1 | 2, evidenceId: string, imageEvidenceId: string
           clarification: '不同答案取决于实际条件，不能用单条互动替代核验。',
           nextStep: '补充自己的条件，并由可追责账号核验。',
           stopReason: 'evidence_boundary',
-          postingIdentity: 'publisher',
+          postingIdentity: 'author',
           evidenceIds: [evidenceId],
           boundary: '不替代个体判断',
         }, {
@@ -118,7 +118,7 @@ function candidate(index: 0 | 1 | 2, evidenceId: string, imageEvidenceId: string
           clarification: '没有个人时间条件时不能给统一安排。',
           nextStep: '列出不可调整的日期后再确认。',
           stopReason: 'answered',
-          postingIdentity: 'staff',
+          postingIdentity: 'author',
           evidenceIds: [evidenceId],
           boundary: '实际安排以正式确认为准',
         }, {
@@ -546,7 +546,10 @@ test('Agent Harness 完整生命周期走独立表，不写旧分析、规划或
   assert.equal(original.task.creativeIntent, 'decision');
   assert.match(original.topic, /Agent 从项目资料中自主发现选题/u);
   assert.equal(original.candidates.length, 3);
-  assert.ok(original.candidates.every((item: any) => item.validation.valid));
+  assert.ok(
+    original.candidates.every((item: any) => item.validation.valid),
+    JSON.stringify(original.candidates.map((item: any) => item.validation.issues)),
+  );
   assert.ok(original.candidates.every((item: any) => item.marketingStrategy?.readerDesire));
   assert.ok(original.candidates.every((item: any) => item.publicationChecklist.some((check: any) => check.key === 'soft_marketing' && check.status === 'ready')));
   assert.ok(original.candidates.every((item: any) => item.claimAudit.length === 1));
@@ -760,7 +763,10 @@ test('最终复核空正文时保留候选，单独重试复核只增加一次�
   assert.equal(counts(database, ['agent_harness_jobs']).agent_harness_jobs, jobsBefore + 1);
   assert.equal(recovered.reviewStatus, 'completed');
   assert.equal(recovered.reviewError, undefined);
-  assert.ok(recovered.candidates.every((item: any) => item.validation.valid));
+  assert.ok(
+    recovered.candidates.every((item: any) => item.validation.valid),
+    JSON.stringify(recovered.candidates.map((item: any) => item.validation.issues)),
+  );
   assert.deepEqual(recovered.candidates.map((item: any) => item.id), candidateIds, '复核升级不得替换候选记录身份');
   assert.equal(recovered.traces.length, traceCount, '独立复核不得重跑或追加检索、读证据、生成轨迹');
   assert.equal(recovered.usage.modelCalls, 6, '逻辑运行用量包含正文、三次逐候选组包与复核；确定性读证据不调用模型');

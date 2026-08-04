@@ -20,7 +20,7 @@ test('serializes retried requests and continues the queue after a final failure'
       starts.push(`${id}:${attempt}`);
       try {
         await wait(5);
-        if (id === 'first') throw new Error('permanent failure');
+        if (id === 'first') throw new ModelProviderError('permanent failure', 500);
         return { text: id, raw: { id } };
       } finally {
         active -= 1;
@@ -91,6 +91,36 @@ test('持续数秒的 5xx 断流能被重试跨过，而不是在同一故障窗
   // 退避必须真正拉开:累计等待要够跨过数秒级的故障窗口。
   const total = slept.reduce((sum, ms) => sum + ms, 0);
   assert.ok(total >= 3000, `累计退避 ${total}ms 太短，跨不过实测的数秒断流窗口`);
+});
+
+test('HTTP 200 空输出与结构错误不进入网络重试循环', async () => {
+  for (const error of [
+    new ModelProviderError('Model response did not contain output text.', 200, 'req-empty', false, 'stop'),
+    new ModelProviderError('Model response was not a JSON object.', 200, 'req-json', false),
+    new ModelProviderError('Model output was truncated at 16000 max tokens.', 200, 'req-length', false, 'length'),
+  ]) {
+    let attempts = 0;
+    const provider: ModelProvider = {
+      generate: async () => { attempts += 1; throw error; },
+    };
+    const wrapped = retryModelProvider(provider, {
+      maxAttempts: 6, baseDelayMs: 0, sleep: async () => undefined,
+    });
+    await assert.rejects(() => wrapped.generate({ messages: [] }));
+    assert.equal(attempts, 1, error.message);
+  }
+});
+
+test('未知普通异常不冒充网络故障重复扣费', async () => {
+  let attempts = 0;
+  const provider: ModelProvider = {
+    generate: async () => { attempts += 1; throw new Error('parser contract failed'); },
+  };
+  const wrapped = retryModelProvider(provider, {
+    maxAttempts: 6, baseDelayMs: 0, sleep: async () => undefined,
+  });
+  await assert.rejects(() => wrapped.generate({ messages: [] }));
+  assert.equal(attempts, 1);
 });
 
 test('4xx 客户端错误仍然立即放弃，不浪费重试', async () => {

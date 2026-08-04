@@ -26,6 +26,9 @@ const MAX_ASSET_DECISIONS = 12;
 const MAX_CITATIONS = 50;
 const MAX_AUDIT_CLAIMS = 100;
 const MAX_TOOL_TEXT = 2_000;
+const HARNESS_COMPLEX_OUTPUT_TOKENS = 64_000;
+const HARNESS_BODY_OUTPUT_TOKENS = 32_000;
+const HARNESS_SHORT_OUTPUT_TOKENS = 16_000;
 const SOFT_MARKETING_STRATEGY_SCHEMA = {
   type: "object", additionalProperties: false,
   required: [
@@ -675,7 +678,7 @@ function assertFrozenBodyDrafts(candidates: readonly HarnessCandidate[], drafts:
     }
   }
 }
-async function call(provider: HarnessModelProvider, messages: HarnessModelRequestMessages, schemaName: string, schema: Record<string, unknown>, purpose: string, signal?: AbortSignal, maxOutputTokens = 24_000) {
+async function call(provider: HarnessModelProvider, messages: HarnessModelRequestMessages, schemaName: string, schema: Record<string, unknown>, purpose: string, signal?: AbortSignal, maxOutputTokens = HARNESS_COMPLEX_OUTPUT_TOKENS) {
   if (signal?.aborted) throw signal.reason ?? new Error("Agent Harness run cancelled.");
   // Some OpenAI-compatible providers expose only json_object mode and silently
   // ignore responseSchema. Put the exact contract in the prompt as well so native
@@ -719,7 +722,7 @@ async function callStage<T>(
   parse: (value: Record<string, unknown>) => T,
   usage: HarnessRunResult["usage"],
   signal?: AbortSignal,
-  maxOutputTokens = 24_000,
+  maxOutputTokens = HARNESS_COMPLEX_OUTPUT_TOKENS,
 ): Promise<T> {
   const execute = async (stageMessages: HarnessModelRequestMessages): Promise<T> => {
     // Transport, authentication, timeout and provider errors are not response
@@ -832,7 +835,7 @@ export async function reviewHarnessCandidates(input: WithSeedingMode<HarnessRevi
     ], "agent_harness_final_review", FINAL_REVIEW_SCHEMA, "agent_harness_final_review", (value) => ({
       summary: boundedText(value.summary, "reviewSummary", MAX_TOOL_TEXT),
       audit: claimAudit(value, refToEvidenceId),
-    }), usage, input.signal, 4_000);
+    }), usage, input.signal, HARNESS_SHORT_OUTPUT_TOKENS);
     reviewSummary = reviewed.summary;
     audit = reviewed.audit;
     if (!audit.complete) reviewStatus = "blocked";
@@ -895,7 +898,7 @@ export async function runAgentHarness(input: WithSeedingMode<HarnessRunInput>): 
     const parsed = searchRequest(value);
     if (!parsed.query || !parsed.rationale) throw new Error("Search stage requires a non-empty query and rationale.");
     return parsed;
-  }, usage, input.signal, 1_000);
+  }, usage, input.signal, HARNESS_SHORT_OUTPUT_TOKENS);
   const ranked = allEvidence.map((source) => ({ source, rank: score(search.query, `${source.path} ${source.heading} ${source.kind} ${source.caveats.join(" ")} ${source.content.slice(0, 1_000)}`) }))
     .sort((a, b) => b.rank - a.rank || a.source.path.localeCompare(b.source.path, "zh-CN") || a.source.evidenceId.localeCompare(b.source.evidenceId));
   const matching = ranked.filter((item) => item.rank > 0);
@@ -940,7 +943,7 @@ export async function runAgentHarness(input: WithSeedingMode<HarnessRunInput>): 
   const drafted = await callStage(input.provider, [
     { role: "system", content: bodyDraftPrompt(input, expectedCount) },
     { role: "user", content: JSON.stringify({ ...base, readEvidence: evidenceOutput, instruction: `Write exactly ${expectedCount} finished title-and-body original(s).` }) },
-  ], "agent_harness_body_draft", BODY_DRAFT_SCHEMA, "agent_harness_body_draft", (value) => bodyDrafts(value, expectedCount, refToEvidenceId), usage, input.signal, 6_000);
+  ], "agent_harness_body_draft", BODY_DRAFT_SCHEMA, "agent_harness_body_draft", (value) => bodyDrafts(value, expectedCount, refToEvidenceId), usage, input.signal, HARNESS_BODY_OUTPUT_TOKENS);
 
   const packagedCandidates: HarnessCandidate[] = [];
   const packageSummaries: string[] = [];
@@ -967,7 +970,7 @@ export async function runAgentHarness(input: WithSeedingMode<HarnessRunInput>): 
       const parsed = packageCandidate(value, draft, refToEvidenceId);
       assertFrozenBodyDrafts([parsed.candidate], [draft]);
       return parsed;
-    }, usage, input.signal, 12_000);
+    }, usage, input.signal, HARNESS_COMPLEX_OUTPUT_TOKENS);
     packagedCandidates.push(packaged.candidate);
     packageSummaries.push(packaged.decisionSummary);
   }

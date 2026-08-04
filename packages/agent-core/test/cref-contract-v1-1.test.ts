@@ -4,7 +4,9 @@ import {
   buildKnowledgeLedger,
   buildRepairPrompt,
   buildStagedCommentGrowthPrompt,
+  buildStagedCommentReadersCorrectionPrompt,
   buildStagedCommentReadersPrompt,
+  buildStagedCorePrompt,
   buildStagedLedgerPrompt,
   buildStagedOrgAnswersPrompt,
   ContentGenerationAgent,
@@ -126,8 +128,16 @@ describe("Cref contract v1.1 binding", () => {
         expect(thread.postingIdentity).toBe("publisher");
         const planned = plannedById.get(thread.id);
         expect(planned).toBeDefined();
-        // The demo states the planned reply boundary directly; bind keeps it.
-        expect(thread.boundary).toBe(planned!.replyPlan.boundary);
+        const ownsPrimaryGap = (planned!.coverageRole
+          ?? ((planned!.threadKind ?? "org_answer") === "org_answer" ? "primary_gap" : "topic_anchor")) === "primary_gap";
+        // Project-answer boundaries belong only to primary-gap threads. Social
+        // nodes remain readable but cannot expose the project's reply inventory.
+        expect(thread.boundary).toBe(ownsPrimaryGap ? planned!.replyPlan.boundary : undefined);
+        if (!ownsPrimaryGap) {
+          expect(thread.primaryGapId).toBeUndefined();
+          expect(thread.replyPlan).toBeUndefined();
+          expect(thread.evidenceIds).toEqual([]);
+        }
         for (const followUp of thread.followUps) {
           expect(followUp.kind).toBe("follow_up");
         }
@@ -135,7 +145,10 @@ describe("Cref contract v1.1 binding", () => {
       // Same projection the engine must apply: selected gap cards not covered by any
       // dialogue thread (primary or auxiliary) and not planned for N.body.
       const plan = pkg.orchestrationSnapshot!;
-      const covered = new Set(plan.dialogueThreads.flatMap((thread) => [thread.primaryGapId, ...thread.auxiliaryGapIds]));
+      const covered = new Set(plan.dialogueThreads
+        .filter((thread) => (thread.coverageRole
+          ?? ((thread.threadKind ?? "org_answer") === "org_answer" ? "primary_gap" : "topic_anchor")) === "primary_gap")
+        .flatMap((thread) => [thread.primaryGapId, ...thread.auxiliaryGapIds]));
       const expected = (plan.gapPlanningCards ?? [])
         .filter((card) => !covered.has(card.gapId) && !card.plannedPlacements.includes("N.body"))
         .map((card) => card.gapId);
@@ -250,7 +263,14 @@ describe("Cref contract v1.1 binding", () => {
           const planned = (pkg.dialogueThreads ?? []).find((candidate) => candidate.id === thread.id);
           expect(thread.kind).toBe("question");
           expect(thread.answerKind).toBe("answer");
-          expect(thread.boundary).toBe(planned?.replyPlan.boundary);
+          const ownsPrimaryGap = (planned?.coverageRole
+            ?? ((planned?.threadKind ?? "org_answer") === "org_answer" ? "primary_gap" : "topic_anchor")) === "primary_gap";
+          expect(thread.boundary).toBe(ownsPrimaryGap ? planned?.replyPlan.boundary : undefined);
+          if (!ownsPrimaryGap) {
+            expect(thread.primaryGapId).toBeUndefined();
+            expect(thread.replyPlan).toBeUndefined();
+            expect(thread.evidenceIds).toEqual([]);
+          }
         }
         for (const [followUpIndex, followUp] of thread.followUps.entries()) {
           if (followUpIndex === 0) {
@@ -393,10 +413,8 @@ describe("Cref contract v1.1 parse compatibility", () => {
 
 describe("Cref contract v1.1 prompt contract", () => {
   it("bumps the prompt contract version and exposes the new optional staged-schema fields", () => {
-    // 2.3.0: postingIdentity enum 补齐方法论 §1744 的四档并加入 publisher
-    // (原 enum 少 publisher、校验层又不认 author,模型照 schema 输出 author
-    // 必吃 comment_identity_violation)。digest 覆盖 generationSchema,版本随之移动。
-    expect(PROMPT_CONTRACT_VERSION).toBe("2.3.0");
+    // 2.4.0: stable cross-candidate prefix + one bounded reader-shape correction.
+    expect(PROMPT_CONTRACT_VERSION).toBe("2.4.0");
     const properties = STAGED_COMMENTS_JSON_SCHEMA.properties as Record<string, any>;
     expect(STAGED_COMMENTS_JSON_SCHEMA.required).toEqual(["disclaimer", "threads"]);
     expect(properties.ownedFirstComment).toEqual({ type: "string" });
@@ -428,6 +446,46 @@ describe("Cref contract v1.1 prompt contract", () => {
     expect(orgProperties.answers.items.required).toEqual(["id", "answer"]);
     expect(orgProperties.answers.items.properties.answerKind).toEqual({ enum: ["question", "answer", "follow_up", "clarification"] });
     expect(orgProperties.answers.items.properties.boundary).toEqual({ type: "string" });
+  });
+
+  it("places the large stable knowledge prefix before candidate-specific orchestration", () => {
+    const base = {
+      config: config(),
+      formulaVersion: DEFAULT_FORMULA_VERSION,
+      knowledge: selectKnowledgeContext({
+        documents: knowledge,
+        query: "资料",
+        budget: { maxInputTokens: 5000, systemPromptTokens: 10, formulaPromptTokens: 10, outputReserveTokens: 100, safetyMarginTokens: 0 },
+      }),
+      ledger: buildKnowledgeLedger([]),
+      candidateIndex: 0 as const,
+      seed: 1,
+      variation: { opening: "问题", pacing: "短句", structure: "问答", phrasing: "克制" },
+    };
+    const first = requestText(buildStagedCorePrompt(base));
+    const second = requestText(buildStagedCorePrompt({
+      ...base, candidateIndex: 1 as const, seed: 2,
+      variation: { opening: "反问", pacing: "长短句", structure: "递进", phrasing: "口语" },
+    }));
+    const firstKnowledge = first.indexOf("<knowledge_data");
+    const firstCandidate = first.indexOf('<task_data scope="candidate">');
+    expect(firstKnowledge).toBeGreaterThanOrEqual(0);
+    expect(firstCandidate).toBeGreaterThan(firstKnowledge);
+    expect(first.slice(firstKnowledge, firstCandidate)).toBe(second.slice(second.indexOf("<knowledge_data"), second.indexOf('<task_data scope="candidate">')));
+  });
+
+  it("builds a bounded one-shot reader correction without project knowledge", () => {
+    const prompt = buildStagedCommentReadersCorrectionPrompt(
+      '{"threads":[]}',
+      [{ id: "t1", threadKind: "org_answer" }, { id: "t2", threadKind: "reader_exchange" }],
+      "missing IDs",
+    );
+    const text = requestText(prompt);
+    expect(text).toMatch(/"id"\s*:\s*"t1"/u);
+    expect(text).toMatch(/"threadKind"\s*:\s*"reader_exchange"/u);
+    expect(text).toContain("只返回完整 JSON");
+    expect(text).not.toContain("<knowledge_data");
+    expect(prompt.responseSchema).toBe(STAGED_COMMENT_READERS_JSON_SCHEMA);
   });
 
   it("exposes the same optional fields on the repair Cref schema", () => {

@@ -670,6 +670,8 @@ export function GenerationResultPage() {
                     <div>
                       {threadKind === "reader_exchange" ? (
                         <div className="comment-meta">{comment.replyDisplayName && <Badge tone="blue">{comment.replyDisplayName}</Badge>}<Badge tone="purple">读者互聊{comment.displayName && comment.replyDisplayName ? ` · ${comment.displayName} → ${comment.replyDisplayName}` : ""}</Badge></div>
+                      ) : threadKind === "host_reply" ? (
+                        <div className="comment-meta"><Badge tone="positive">楼主本人 · 已确认作者</Badge></div>
                       ) : (
                         replyOrgDisplayName(comment) && <div className="comment-meta"><Badge tone="positive">{replyOrgDisplayName(comment)}</Badge></div>
                       )}
@@ -1289,6 +1291,7 @@ function conversationTopologyLabel(value: string) {
     two_turn: "两轮接话",
     three_person_branch: "第三人分支",
     reaction_then_reply: "反应后轻回复",
+    host_reply: "楼主单次回复",
     reader_exchange: "读者互聊",
     organic_reaction: "漂浮短反应",
   };

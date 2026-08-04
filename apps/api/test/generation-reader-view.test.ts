@@ -240,3 +240,17 @@ test('缺 reasoning/evidence 的历史包返回空数组,不返回 undefined', (
   assert.deepEqual(view.sources, []);
   assert.deepEqual(view.unknowns, []);
 });
+
+test('host_reply 阅读投影保留作者事实与话题锚点，不冒充机构答复', () => {
+  const p = pkg();
+  Object.assign(p.content.Cref.threads[0] as unknown as Record<string, unknown>, {
+    threadKind: 'host_reply', postingIdentity: 'author', authorFactIds: ['af1'], topicAnchorGapId: 'gap-1',
+    surfaceRoleCard: { replyDisplayRole: '楼主' }, primaryGapId: undefined,
+  });
+  const comment = readerView(p).comments[0]!;
+  assert.equal(comment.threadKind, 'host_reply');
+  assert.equal(comment.postingIdentity, 'author');
+  assert.deepEqual(comment.authorFactIds, ['af1']);
+  assert.equal(comment.topicAnchorGapId, 'gap-1');
+  assert.equal(comment.surfaceRoleCard?.replyDisplayRole, '楼主');
+});

@@ -18,6 +18,7 @@ import {
   type StagedCommentCopy,
   type StagedOrgAnswersCopy,
   validateGenerationDraft,
+  validatePublishingTopologyCopy,
 } from "./content.js";
 import { buildProductionArtifacts } from "./artifacts.js";
 import {
@@ -47,7 +48,8 @@ import {
   resolveClaimJudgments,
   type KnowledgeAnchorContext,
 } from "./knowledge-anchor.js";
-import type { ModelProvider } from "./model.js";
+import { ModelProviderError, type ModelProvider } from "./model.js";
+import { GENERATION_CORE_OUTPUT_TOKENS, GENERATION_SHORT_OUTPUT_TOKENS } from "./output-budget.js";
 import { buildParameterDiagnostics, compileGenerationParameters } from "./parameters.js";
 import {
   assignCommentDisplayName,
@@ -63,8 +65,11 @@ import {
   buildKnowledgeAnchorReviewPrompt,
   buildRepairPrompt,
   buildStagedCommentGrowthPrompt,
+  buildStagedCommentReadersCorrectionPrompt,
   buildStagedCommentReadersPrompt,
   buildStagedCorePrompt,
+  buildStagedCoreIdentityRepairPrompt,
+  buildStagedHostAnswersPrompt,
   buildStagedLedgerPrompt,
   buildStagedOrgAnswersPrompt,
   buildStagedOrgFollowUpAnswersPrompt,
@@ -952,9 +957,13 @@ function deterministicDraft(
   const naturalThreads = personaScene ? Array.from({ length: threadCount }, (_, index) => {
     const planned = orchestrationPlan?.dialogueThreads[index % Math.max(1, orchestrationPlan.dialogueThreads.length)];
     const surface = planned?.surfaceRoleCard ?? personaScene.commentCast[index % personaScene.commentCast.length]!;
-    const gapCard = orchestrationPlan?.gapPlanningCards?.find((item) => item.gapId === planned?.gapId)
-      ?? commentGapCards[index % Math.max(1, commentGapCards.length)];
-    const gapText = (gapCard?.question ?? planned?.questionIntent ?? primaryGap).replace(/[。！!]+$/u, "");
+    const threadKind = planned?.threadKind ?? "org_answer";
+    const ownsProjectGap = (planned?.coverageRole ?? (threadKind === "org_answer" ? "primary_gap" : "topic_anchor")) === "primary_gap";
+    const gapCard = ownsProjectGap
+      ? (orchestrationPlan?.gapPlanningCards?.find((item) => item.gapId === planned?.gapId)
+        ?? commentGapCards[index % Math.max(1, commentGapCards.length)])
+      : undefined;
+    const gapText = (gapCard?.question ?? primaryGap).replace(/[。！!]+$/u, "");
     const shortGap = [...gapText].slice(0, 20).join("");
     const shortGapCore = shortGap.replace(/[？?]+$/u, "");
     // Weave the gap phrase only when it is short enough to read naturally inside
@@ -1015,16 +1024,19 @@ function deterministicDraft(
     };
     // 读者互动层:T3 漂浮短反应从 4-20 字短共鸣池取开口,answer 为空(无回答
     // 需求);T2 读者互聊的 answer 是读者 B 的接话,不用机构答复模板。
-    const threadKind = planned?.threadKind ?? "org_answer";
     const organicReactionTable = Object.fromEntries(utteranceModePool.map((mode, modeIndex) =>
       [mode, ["蹲一个", "姐妹我也是", "码住慢慢看", "先收藏了", "看看后续怎么说"][modeIndex % 5]!]));
     const generatedQuestion = threadKind === "organic_reaction"
       ? pickDistinct(organicReactionTable, usedNaturalQuestions, "蹲一个")
-      : pickDistinct(questions, usedNaturalQuestions, rawQuestion);
+      : threadKind === "reader_exchange"
+        ? ["我也卡在这一步", "同问，我也没想明白", "这个我也在纠结", "先蹲蹲大家怎么想"][index % 4]!
+        : threadKind === "host_reply"
+          ? "所以你现在还是没定下来吗？"
+          : pickDistinct(questions, usedNaturalQuestions, rawQuestion);
     // 无模型降级稿也遵守与阶段化生成相同的冻结主问题合同。通用人物模板可能只写
     // “这个怎么确认”，无法证明仍在原 gap 上；此时把 gap 标签自然带回可见问题，
     // 而不是等最终校验报错。T3 仍保持短反应，只保留一个主 gap 锚点。
-    const anchoredQuestion = gapCard && planned && !questionMatchesPlannedGap(generatedQuestion, gapCard)
+    const anchoredQuestion = ownsProjectGap && gapCard && planned && !questionMatchesPlannedGap(generatedQuestion, gapCard)
       ? threadKind === "organic_reaction"
         ? `${gapCard.label}也蹲一个`
         : `关于${gapCard.label}，${generatedQuestion}`
@@ -1038,19 +1050,25 @@ function deterministicDraft(
         : `${questionContexts[index % questionContexts.length]}${anchoredQuestion}`
       : anchoredQuestion;
     usedNaturalQuestions.add(comparable(question));
+    const groundedGapAnswer = gapCard?.answer ?? gapCard?.framework;
     const answer = threadKind === "organic_reaction"
       ? ""
       : threadKind === "reader_exchange"
-        ? pickDistinct(answers, usedNaturalAnswers, "姐妹我也是，还在纠结要不要去问问")
-        : pickDistinct(ungroundedGap ? unknownAnswerVariants : answers, usedNaturalAnswers, rawAnswer);
+        ? ["我也是，准备再多问一句。", "同感，我还没敢定。", "我也先等等看。", "这个确实容易纠结。"][index % 4]!
+        : threadKind === "host_reply"
+          ? (config.task.authorContext.facts.find((fact) => (planned?.authorFactIds ?? []).includes(fact.id))?.statement
+            ?? "我现在还没定下来。")
+          : groundedGapAnswer
+            ? `${groundedGapAnswer}${gapCard?.boundary ? `；${gapCard.boundary}` : ""}`
+            : `${gapCard?.label ?? "这件事"}还没确认，先问清具体情况再定。`;
     usedNaturalAnswers.add(comparable(answer));
-    if (process.env.PROBE && answer.includes("我也是想先把这个问明白")) console.log("[PROBE natural]", threadKind, planned?.postingIdentity, surface.utteranceMode);
     const plannedFollowUps = planned?.conversationPlan?.targetFollowUps ?? 0;
     const fallbackFollowUpLines = [
       { question: "等等，你说的是紧接着就有重要安排吗", answer: "对，我最怕的就是现实时间对不上" },
       { question: "那我懂了，我还得把自己的安排也算进去", answer: "是，先把时间卡点说清楚会好问很多" },
     ];
-    const followUps = Array.from({ length: Math.min(config.content.followUpDepth, plannedFollowUps) }, (_, followUpIndex) => {
+    const followUps = threadKind === "org_answer"
+      ? Array.from({ length: Math.min(config.content.followUpDepth, plannedFollowUps) }, (_, followUpIndex) => {
       const visible = fallbackFollowUpLines[followUpIndex % fallbackFollowUpLines.length]!;
       return {
           question: visible.question,
@@ -1066,7 +1084,8 @@ function deterministicDraft(
           simulated: true,
           simulationLabel: "模拟潜在读者接话",
         };
-    });
+      })
+      : [];
     return {
       id: planned?.id ?? `thread_${candidateIndex + 1}_${index + 1}`,
       stage: planned?.stage ?? stageLabel[config.task.audienceStage],
@@ -1148,7 +1167,12 @@ function deterministicDraft(
   const threads = personaScene ? naturalThreads : Array.from({ length: threadCount }, (_, index) => {
     const planned = orchestrationPlan?.dialogueThreads[index % Math.max(1, orchestrationPlan.dialogueThreads.length)];
     const fallbackCommentGap = commentGapCards[index % Math.max(1, commentGapCards.length)];
-    const gap = planned?.questionIntent ?? fallbackCommentGap?.question ?? gaps[index % gaps.length] ?? `还需要核实什么信息${index + 1}？`;
+    const threadKind = planned?.threadKind ?? "org_answer";
+    const ownsProjectGap = (planned?.coverageRole ?? (threadKind === "org_answer" ? "primary_gap" : "topic_anchor")) === "primary_gap";
+    const plannedGapCard = ownsProjectGap
+      ? orchestrationPlan?.gapPlanningCards?.find((item) => item.gapId === planned?.gapId)
+      : undefined;
+    const gap = plannedGapCard?.question ?? fallbackCommentGap?.question ?? gaps[index % gaps.length] ?? `还需要确认什么信息${index + 1}？`;
     const rawQuestion = personaQuestion(planned, gap);
     let question = rawQuestion;
     const normalizedQuestion = (value: string) => value.replace(/[\s\p{P}\p{S}]+/gu, "");
@@ -1160,7 +1184,6 @@ function deterministicDraft(
     }
     usedCommentQuestions.add(normalizedQuestion(question));
     // 读者互动层:T3 漂浮短反应的开口为 4-20 字短共鸣,不走缺口问句模板。
-    const threadKind = planned?.threadKind ?? "org_answer";
     if (threadKind === "organic_reaction") {
       question = ["蹲一个", "姐妹我也是", "码住慢慢看", "先收藏了"][index % 4]!;
     }
@@ -1191,7 +1214,7 @@ function deterministicDraft(
       skeptical_returning_reader: "复核说法时，回到原始资料检查口径和适用范围",
     };
     const perspective = roleLead[planned?.personaRole ?? ""] ?? "先明确当前要解决的判断问题";
-    const plannedGap = orchestrationPlan?.gapPlanningCards?.find((item) => item.gapId === planned?.gapId);
+    const plannedGap = plannedGapCard;
     const unknownGapLead = plannedGap && !plannedGap.answer && !plannedGap.framework
       ? `${plannedGap.label}目前仍需核实，请核实相关来源和适用条件。`
       : "";
@@ -1209,13 +1232,17 @@ function deterministicDraft(
       `${unknownGapLead}先看${naturalCondition}：${directAnswer}。${unknown}；${boundary}。下一步确认${nextQuestion}。`,
       `${unknownGapLead}${directAnswer}。比较时单独核实${naturalCondition}；${unknown}。${boundary}，再看${nextQuestion}。`,
     ];
+    const groundedGapAnswer = plannedGap?.answer ?? plannedGap?.framework;
     const answer = threadKind === "organic_reaction"
       ? ""
       : threadKind === "reader_exchange"
-        ? "姐妹我也是，还在纠结要不要去问问"
-        : method.commentReplyIncrement >= 70
-          ? richAnswerVariants[index % richAnswerVariants.length]!
-          : compactAnswerVariants[index % compactAnswerVariants.length]!;
+        ? ["我也是，准备再多问一句。", "同感，我还没敢定。", "我也先等等看。", "这个确实容易纠结。"][index % 4]!
+        : threadKind === "host_reply"
+          ? (config.task.authorContext.facts.find((fact) => (planned?.authorFactIds ?? []).includes(fact.id))?.statement
+            ?? "我现在还没定下来。")
+          : groundedGapAnswer
+            ? `${groundedGapAnswer}${plannedGap?.boundary ? `；${plannedGap.boundary}` : ""}`
+            : `${plannedGap?.label ?? "这件事"}还没确认，先问清具体情况再定。`;
     const followUpQuestions = [
       [`${nextQuestion}具体怎么核实？`, `如果${naturalCondition}还没确定怎么办？`],
       [`核实${nextQuestion}时先看什么？`, `什么情况会让上面的判断改变？`],
@@ -1233,7 +1260,7 @@ function deterministicDraft(
       function: planned?.function ?? (method.commentConditionality >= 70 ? "clarify" as const : "answer" as const),
       question,
       answer,
-      followUps: threadKind === "organic_reaction" ? [] : Array.from({ length: Math.max(0, config.content.followUpDepth - 1) }, (__, followUpIndex) => ({
+      followUps: threadKind === "org_answer" ? Array.from({ length: Math.max(0, config.content.followUpDepth - 1) }, (__, followUpIndex) => ({
         question: followUpQuestions[followUpIndex % followUpQuestions.length]!,
         answer: followUpAnswers[followUpIndex % followUpAnswers.length]!,
         evidenceIds: [],
@@ -1244,7 +1271,7 @@ function deterministicDraft(
         threadDepth: followUpIndex + 1,
         simulated: true,
         simulationLabel: "模拟潜在读者追问",
-      })),
+      })) : [],
       postingIdentity: planned?.postingIdentity ?? "publisher" as const,
       sourceClusterIds: planned?.sourceClusterIds.length ? planned.sourceClusterIds : context.selectedDocumentIds.slice(0, 3),
       evidenceIds: planned?.evidenceIds.length ? planned.evidenceIds : primaryEvidence ? [primaryEvidence] : [],
@@ -1405,6 +1432,7 @@ function deterministicDraft(
  */
 function answerFromPlan(planned: OrchestrationPlan["dialogueThreads"][number]): string {
   if (planned.threadKind === "organic_reaction") return "";
+  if (planned.threadKind === "host_reply") return "我现在只说正文里已经写明的情况，其他还没定。";
   // T2 的 answer 本就是读者 B 接话,路人腔在这里是正确的。
   if (planned.threadKind === "reader_exchange") return "姐妹我也是，还在纠结要不要去问问";
   // T1(org_answer)是可追责答复位:三档身份都是发布方,不是路人。此前这里按
@@ -1416,7 +1444,6 @@ function answerFromPlan(planned: OrchestrationPlan["dialogueThreads"][number]): 
   const plan = planned.replyPlan;
   const spoken = [plan?.directAnswer, plan?.condition].map((part) => part?.trim()).filter(Boolean);
   if (spoken.length) return `${spoken.join("；")}。`;
-  if (process.env.PROBE) console.log("[PROBE fromPlan-unknown]", planned.postingIdentity);
   return "这一项我先不下结论，我帮你跟专人确认后再回你。";
 }
 
@@ -1495,6 +1522,8 @@ function bindDialogueProvenance(
     // 读者互动层:线程形态透传(缺省 org_answer);T2 接话读者 B 的昵称优先取
     // 计划侧,缺失时按同一盐确定性补算,包内去重。
     const threadKind = planned.threadKind ?? "org_answer";
+    const ownsPrimaryGap = (planned.coverageRole
+      ?? (threadKind === "org_answer" ? "primary_gap" : "topic_anchor")) === "primary_gap";
     const replyDisplayName = threadKind === "reader_exchange"
       ? (planned.replyDisplayName ?? assignCommentDisplayName(plan.seed, `nickname:${planned.id}:reader:b`, usedDisplayNames))
       : undefined;
@@ -1531,18 +1560,18 @@ function bindDialogueProvenance(
       // fall back to the planned reply boundary. A boundary is never invented.
       kind: base.kind ?? "question" as const,
       answerKind: base.answerKind ?? "answer" as const,
-      boundary: base.boundary ?? planned.replyPlan?.boundary,
+      boundary: ownsPrimaryGap ? (base.boundary ?? planned.replyPlan?.boundary) : undefined,
       postingIdentity: planned.postingIdentity,
-      sourceClusterIds: [...planned.sourceClusterIds],
-      evidenceIds,
-      followUps,
+      sourceClusterIds: ownsPrimaryGap ? [...planned.sourceClusterIds] : [],
+      evidenceIds: ownsPrimaryGap ? evidenceIds : [],
+      followUps: threadKind === "host_reply" || threadKind === "organic_reaction" ? [] : followUps,
       stage: planned.stage,
-      gap: planned.gapId,
+      gap: ownsPrimaryGap ? planned.gapId : undefined,
       // P3-15: the model may state the thread function in the staged schema; a
       // legal enum value wins, anything else silently falls back to the
       // content-derived planning value (no more positional rotation anywhere).
       function: commentThreadFunction(base.function) ?? planned.function,
-      nextStep: planned.nextStep,
+      nextStep: ownsPrimaryGap ? planned.nextStep : undefined,
       personaRole: planned.personaRole,
       speakerType: planned.speakerType,
       claimStatus: evidenceIds.length
@@ -1554,13 +1583,15 @@ function bindDialogueProvenance(
       threadDepth: planned.threadDepth,
       simulated: planned.simulated,
       simulationLabel: planned.simulationLabel,
-      roleCard: planned.roleCard,
-      primaryGapId: planned.primaryGapId,
-      auxiliaryGapIds: [...planned.auxiliaryGapIds],
-      densityProxy: { ...planned.densityProxy },
-      replyPlan: { ...planned.replyPlan },
+      roleCard: ownsPrimaryGap ? planned.roleCard : undefined,
+      primaryGapId: ownsPrimaryGap ? planned.primaryGapId : undefined,
+      auxiliaryGapIds: ownsPrimaryGap ? [...planned.auxiliaryGapIds] : [],
+      authorFactIds: threadKind === "host_reply" ? [...(planned.authorFactIds ?? [])] : undefined,
+      topicAnchorGapId: planned.topicAnchorGapId,
+      densityProxy: ownsPrimaryGap ? { ...planned.densityProxy } : undefined,
+      replyPlan: ownsPrimaryGap ? { ...planned.replyPlan } : undefined,
       // M7: discoveryPlan is optional; preserve presence/absence rather than coercing to {}.
-      discoveryPlan: planned.discoveryPlan ? { ...planned.discoveryPlan } : undefined,
+      discoveryPlan: ownsPrimaryGap && planned.discoveryPlan ? { ...planned.discoveryPlan } : undefined,
       conversationPlan: realizedConversation ? { ...realizedConversation } : undefined,
       surfaceRoleCard: selectedSurface ? { ...selectedSurface, targetChars: [...selectedSurface.targetChars] as [number, number] } : undefined,
       ...(planned.replySurfaceRoleCard ? {
@@ -1890,6 +1921,17 @@ function uniqueUnknowns(ledger: KnowledgeLedger, draft: GenerationDraft): Genera
   return [...new Map([...ledger.unknowns, ...draft.unknowns].map((item) => [item.id, item])).values()];
 }
 
+/** Only completed HTTP-200 responses may receive one bounded shape correction. */
+export function shouldCorrectCommentReadersFailure(error: unknown): boolean {
+  return error instanceof ModelProviderError && error.status === 200 && error.retryable === false;
+}
+
+/** A patch cannot make a candidate publishable while any terminal hard error remains. */
+export function shouldAttemptGenerationRepair(issues: readonly ContentValidationIssue[]): boolean {
+  return issues.some((item) => item.severity === "error" && item.repairable)
+    && !issues.some((item) => item.severity === "error" && !item.repairable);
+}
+
 function cloneConfig(config: ResolvedGenerationConfig): ResolvedGenerationConfig {
   return structuredClone(config);
 }
@@ -1920,14 +1962,27 @@ export class ContentGenerationAgent implements GenerationEngine {
     const context = buildContext(effectiveInput.config, effectiveInput.formulaVersion, effectiveInput.knowledge, this.systemPromptTokenEstimate);
     const ledger = buildKnowledgeLedger(effectiveInput.claims ?? [], effectiveInput.unknowns ?? []);
     const planning = resolveGenerationPlanning(effectiveInput, context);
-    // Candidates may plan independently, while the API's shared provider limiter
-    // controls actual gateway concurrency. A limit of one interleaves candidate
-    // stages without issuing simultaneous long requests or blocking the whole job
-    // behind one candidate's complete repair chain.
+    // Warm the provider prefix cache with candidate 0's Core request before the
+    // other two large Core requests start. Only Core is staggered: after the first
+    // Core settles, all candidate pipelines may continue under the API limiter.
+    let releaseCoreWarmup!: () => void;
+    const coreWarmup = new Promise<void>((resolve) => { releaseCoreWarmup = resolve; });
+    let coreWarmupReleased = false;
+    const releaseOnce = (): void => {
+      if (coreWarmupReleased) return;
+      coreWarmupReleased = true;
+      releaseCoreWarmup();
+    };
+    const firstCandidate = this.generateCandidate(
+      effectiveInput, context, ledger, 0, planning, compilation.resolutionSnapshot,
+      compilation.impactReport, true, undefined, releaseOnce,
+    );
+    // Prevent a pre-Core exception from deadlocking candidates 1/2.
+    void firstCandidate.then(releaseOnce, releaseOnce);
     const candidateResults = await Promise.allSettled([
-      this.generateCandidate(effectiveInput, context, ledger, 0, planning, compilation.resolutionSnapshot, compilation.impactReport),
-      this.generateCandidate(effectiveInput, context, ledger, 1, planning, compilation.resolutionSnapshot, compilation.impactReport),
-      this.generateCandidate(effectiveInput, context, ledger, 2, planning, compilation.resolutionSnapshot, compilation.impactReport),
+      firstCandidate,
+      this.generateCandidate(effectiveInput, context, ledger, 1, planning, compilation.resolutionSnapshot, compilation.impactReport, true, coreWarmup),
+      this.generateCandidate(effectiveInput, context, ledger, 2, planning, compilation.resolutionSnapshot, compilation.impactReport, true, coreWarmup),
     ]);
     // 部分成功即交付:原先任一候选 rejected 就整单抛错,另外两个已跑完的候选
     // (每个 6+ 次模型调用)连同产物一起丢弃——实测 87 个失败任务落库包数均为
@@ -1963,6 +2018,8 @@ export class ContentGenerationAgent implements GenerationEngine {
     resolutionSnapshot: ParameterResolutionSnapshot,
     impactReport: ParameterImpactReport,
     useProvider = true,
+    coreStartBarrier?: Promise<void>,
+    onCoreSettled?: () => void,
   ): Promise<ContentPackage> {
     let orchestrationPlan = planning.plans[candidateIndex];
     const seed = orchestrationPlan.seed;
@@ -2000,17 +2057,42 @@ export class ContentGenerationAgent implements GenerationEngine {
         evidenceSources,
       );
       const corePrompt = buildStagedCorePrompt(promptInput);
-      const coreResponse = await this.provider.generate({
-        messages: corePrompt.messages,
-        responseSchema: corePrompt.responseSchema,
-        schemaName: "content_candidate_core",
-        model: input.config.model.model,
-        seed,
-        temperature: input.config.model.temperature,
-        maxOutputTokens: Math.min(input.config.model.maxOutputTokens, 4_000),
-        metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_core", stage: 1 },
-      });
-      const core = parseStagedCoreCopy(coreResponse.text);
+      if (coreStartBarrier) await coreStartBarrier;
+      let coreResponse;
+      try {
+        coreResponse = await this.provider.generate({
+          messages: corePrompt.messages,
+          responseSchema: corePrompt.responseSchema,
+          schemaName: "content_candidate_core",
+          model: input.config.model.model,
+          seed,
+          temperature: input.config.model.temperature,
+          maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_CORE_OUTPUT_TOKENS),
+          metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_core", stage: 1 },
+        });
+      } finally {
+        onCoreSettled?.();
+      }
+      let core = parseStagedCoreCopy(coreResponse.text);
+      const coreIdentityIssues = validatePublishingTopologyCopy(core, input.config, input.planningContext?.projectBlueprint);
+      if (coreIdentityIssues.length) {
+        const identityRepairPrompt = buildStagedCoreIdentityRepairPrompt(promptInput, core, coreIdentityIssues);
+        const identityRepairResponse = await this.provider.generate({
+          messages: identityRepairPrompt.messages,
+          responseSchema: identityRepairPrompt.responseSchema,
+          schemaName: "content_candidate_core_identity_repair",
+          model: input.config.model.model,
+          seed: seed + 9,
+          temperature: Math.min(input.config.model.temperature, 0.3),
+          maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_CORE_OUTPUT_TOKENS),
+          metadata: { jobId: input.jobId, candidateIndex, purpose: "repair_core_identity", stage: 1.1 },
+        });
+        core = parseStagedCoreCopy(identityRepairResponse.text);
+        const remainingIdentityIssues = validatePublishingTopologyCopy(core, input.config, input.planningContext?.projectBlueprint);
+        if (remainingIdentityIssues.length) {
+          throw new Error(`Publishing-topology preflight failed after one focused repair: ${remainingIdentityIssues.map((issue) => issue.code).join(", ")}`);
+        }
+      }
       // 存量蓝图的可追责身份体检:审批层校验只挡新模块,已批准的不合规
       // role_model 会让答复展示名静默回落到通用兜底名。这里显性记 warning。
       for (const message of diagnoseAccountableIdentities(input.planningContext?.projectBlueprint)) {
@@ -2019,19 +2101,62 @@ export class ContentGenerationAgent implements GenerationEngine {
       // 阶段2A-R 生成读者侧可见问题。每条线程的 gap、问题职责、答复身份与展示
       // 角色均已由规划器冻结；模型必须在合同内措辞，不能通过改写问题来换答复人。
       const readersPrompt = buildStagedCommentReadersPrompt(promptInput, core);
-      const readersResponse = await this.provider.generate({
-        messages: readersPrompt.messages,
-        responseSchema: readersPrompt.responseSchema,
-        schemaName: "content_candidate_comment_readers",
-        model: input.config.model.model,
-        seed: seed + 1,
-        temperature: input.config.model.temperature,
-        maxOutputTokens: input.config.model.maxOutputTokens,
-        metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_comment_readers", stage: 2 },
-      });
-      const parsedReaderSide = parseStagedCommentReaders(readersResponse.text);
-      if (parsedReaderSide.threads.length !== orchestrationPlan.dialogueThreads.length) {
-        throw new Error(`Staged comment output returned ${parsedReaderSide.threads.length} threads; expected ${orchestrationPlan.dialogueThreads.length}.`);
+      const expectedReaderThreads = orchestrationPlan.dialogueThreads.map((thread) => ({
+        id: thread.id,
+        threadKind: thread.threadKind ?? "org_answer",
+      }));
+      const expectedReaderIds = expectedReaderThreads.map((thread) => thread.id);
+      const parseReaders = (text: string): ReturnType<typeof parseStagedCommentReaders> => {
+        const parsed = parseStagedCommentReaders(text);
+        const actualIds = parsed.threads.map((thread) => thread.id);
+        if (actualIds.length !== expectedReaderIds.length
+          || actualIds.some((id, index) => id !== expectedReaderIds[index])) {
+          throw new Error(`Staged comment output IDs ${JSON.stringify(actualIds)} did not match expected ${JSON.stringify(expectedReaderIds)}.`);
+        }
+        return parsed;
+      };
+      let initialReaderText = "";
+      let initialReaderError: unknown;
+      try {
+        const readersResponse = await this.provider.generate({
+          messages: readersPrompt.messages,
+          responseSchema: readersPrompt.responseSchema,
+          schemaName: "content_candidate_comment_readers",
+          model: input.config.model.model,
+          seed: seed + 1,
+          temperature: input.config.model.temperature,
+          maxOutputTokens: input.config.model.maxOutputTokens,
+          metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_comment_readers", stage: 2 },
+        });
+        initialReaderText = readersResponse.text;
+      } catch (error) {
+        // Only a completed HTTP-200 response may use the one bounded correction.
+        // Transport, 429/5xx, auth and cancellation errors preserve their normal
+        // retry/failure semantics and are never disguised as shape drift.
+        if (!shouldCorrectCommentReadersFailure(error)) throw error;
+        initialReaderError = error;
+      }
+      let parsedReaderSide: ReturnType<typeof parseStagedCommentReaders>;
+      try {
+        if (initialReaderError) throw initialReaderError;
+        parsedReaderSide = parseReaders(initialReaderText);
+      } catch (error) {
+        const correctionPrompt = buildStagedCommentReadersCorrectionPrompt(
+          initialReaderText,
+          expectedReaderThreads,
+          error instanceof Error ? error.message : String(error),
+        );
+        const corrected = await this.provider.generate({
+          messages: correctionPrompt.messages,
+          responseSchema: correctionPrompt.responseSchema,
+          schemaName: "content_candidate_comment_readers_correction",
+          model: input.config.model.model,
+          seed: seed + 101,
+          temperature: Math.min(input.config.model.temperature, 0.2),
+          maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_SHORT_OUTPUT_TOKENS),
+          metadata: { jobId: input.jobId, candidateIndex, purpose: "repair_comment_readers", stage: 2.01, attempt: 1 },
+        });
+        parsedReaderSide = parseReaders(corrected.text);
       }
       const gapCardById = new Map((orchestrationPlan.gapPlanningCards ?? []).map((card) => [card.gapId, card]));
       const claimRules = input.planningContext?.projectBlueprint?.claimPolicy.rules ?? [];
@@ -2040,7 +2165,22 @@ export class ContentGenerationAgent implements GenerationEngine {
         threads: parsedReaderSide.threads.map((thread, index) => {
           const planned = orchestrationPlan.dialogueThreads[index]!;
           const gap = gapCardById.get(planned.primaryGapId);
-          if (!gap) return thread;
+          const threadKind = planned.threadKind ?? "org_answer";
+          if (threadKind === "host_reply") {
+            const guarded = guardedReplyIdentitiesForQuestion(thread.question, claimRules);
+            if (guarded.size === 0) return thread;
+            const firstFact = input.config.task.authorContext.facts
+              .find((fact) => (planned.authorFactIds ?? []).includes(fact.id));
+            stageIssues.push({
+              code: "reader_question_plan_drift",
+              severity: "warning",
+              channel: "Cref",
+              message: `线程 ${planned.id} 的楼主问题越过个人处境边界，已回退到已确认作者事实。`,
+              repairable: false,
+            });
+            return { ...thread, question: firstFact ? `你现在还是“${firstFact.statement}”这个状态吗？` : "所以你现在还没定下来吗？" };
+          }
+          if (threadKind !== "org_answer" || !gap) return thread;
           const guardedIdentities = guardedReplyIdentitiesForQuestion(thread.question, claimRules);
           const introducesConflictingResponsibility = [...guardedIdentities].some((identity) => identity !== planned.postingIdentity);
           if (questionMatchesPlannedGap(thread.question, gap) && !introducesConflictingResponsibility) return thread;
@@ -2062,6 +2202,48 @@ export class ContentGenerationAgent implements GenerationEngine {
       // 各≤1 次,该身份无线程则跳过):每次调用只见本角色身份卡与逐 gap 口径
       // scope,其他身份的任何信息不出现。每个调用独立 try/catch:失败或缺 id
       // 的线程回落 answerFromPlan 并记 warning(沿用 stageIssues 通道,不阻断候选)。
+      const hostAnswersById = new Map<string, StagedOrgAnswersCopy["answers"][number]>();
+      const hostAnswerThreads = orchestrationPlan.dialogueThreads
+        .map((planned, index) => ({ planned, reader: readerSide.threads[index]! }))
+        .filter(({ planned }) => planned.threadKind === "host_reply");
+      if (hostAnswerThreads.length) {
+        try {
+          const hostPrompt = buildStagedHostAnswersPrompt(
+            promptInput,
+            core,
+            hostAnswerThreads.map(({ planned, reader }) => ({ planned, question: reader.question })),
+          );
+          const hostResponse = await this.provider.generate({
+            messages: hostPrompt.messages,
+            responseSchema: hostPrompt.responseSchema,
+            schemaName: "content_candidate_host_answers",
+            model: input.config.model.model,
+            seed: seed + 10,
+            temperature: input.config.model.temperature,
+            maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_SHORT_OUTPUT_TOKENS),
+            metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_host_answers", stage: 2.05 },
+          });
+          const hostSide = parseStagedOrgAnswers(hostResponse.text);
+          for (const { planned } of hostAnswerThreads) {
+            const found = hostSide.answers.find((answer) => answer.id === planned.id);
+            if (found) hostAnswersById.set(planned.id, found);
+            else stageIssues.push({ code: "model_host_answer_failed", severity: "warning", channel: "Cref", message: `楼主答复未覆盖线程 ${planned.id}，已回落到人工确认事实。`, repairable: false });
+          }
+        } catch (error) {
+          stageIssues.push({
+            code: "model_host_answer_failed",
+            severity: "warning",
+            channel: "Cref",
+            message: `楼主答复阶段失败，已回落到人工确认事实：${error instanceof Error ? error.message : String(error)}`,
+            repairable: false,
+          });
+        }
+      }
+      const hostFallback = (planned: OrchestrationPlan["dialogueThreads"][number]): string => {
+        const fact = input.config.task.authorContext.facts.find((item) => (planned.authorFactIds ?? []).includes(item.id));
+        return fact?.statement ?? answerFromPlan(planned);
+      };
+
       const orgAnswersById = new Map<string, StagedOrgAnswersCopy["answers"][number]>();
       let ownedFirstComment: string | undefined;
       const orgAnswerThreads = orchestrationPlan.dialogueThreads
@@ -2085,7 +2267,7 @@ export class ContentGenerationAgent implements GenerationEngine {
             model: input.config.model.model,
             seed: seed + orgAnswerSeeds[identity],
             temperature: input.config.model.temperature,
-            maxOutputTokens: input.config.model.maxOutputTokens,
+            maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_SHORT_OUTPUT_TOKENS),
             metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_org_answers", stage: 2.1, identity },
           });
           const orgSide = parseStagedOrgAnswers(orgResponse.text);
@@ -2123,6 +2305,7 @@ export class ContentGenerationAgent implements GenerationEngine {
           const reader = readerSide.threads[index]!;
           const threadKind = planned.threadKind ?? "org_answer";
           const orgAnswer = threadKind === "org_answer" ? orgAnswersById.get(planned.id) : undefined;
+          const hostAnswer = threadKind === "host_reply" ? hostAnswersById.get(planned.id) : undefined;
           return {
             id: reader.id,
             question: reader.question,
@@ -2131,10 +2314,12 @@ export class ContentGenerationAgent implements GenerationEngine {
               ? ""
               : threadKind === "reader_exchange"
                 ? reader.answer
-                : (orgAnswer?.answer ?? answerFromPlan(planned)),
+                : threadKind === "host_reply"
+                  ? (hostAnswer?.answer ?? hostFallback(planned))
+                  : (orgAnswer?.answer ?? answerFromPlan(planned)),
             kind: reader.kind,
-            answerKind: orgAnswer?.answerKind ?? reader.answerKind,
-            boundary: orgAnswer?.boundary ?? reader.boundary,
+            answerKind: hostAnswer?.answerKind ?? orgAnswer?.answerKind ?? reader.answerKind,
+            boundary: threadKind === "host_reply" ? undefined : (orgAnswer?.boundary ?? reader.boundary),
             function: reader.function,
             followUps: [],
           };
@@ -2232,7 +2417,7 @@ export class ContentGenerationAgent implements GenerationEngine {
               model: input.config.model.model,
               seed: seed + orgFollowUpSeeds[identity],
               temperature: input.config.model.temperature,
-              maxOutputTokens: input.config.model.maxOutputTokens,
+              maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_SHORT_OUTPUT_TOKENS),
               metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_org_followup_answers", stage: 2.3, identity },
             });
             const followUpSide = parseStagedOrgAnswers(followUpResponse.text);
@@ -2277,6 +2462,13 @@ export class ContentGenerationAgent implements GenerationEngine {
           }),
         };
       }
+      comments = {
+        ...comments,
+        threads: comments.threads.map((thread, index) =>
+          orchestrationPlan.dialogueThreads[index]?.threadKind === "host_reply"
+            ? { ...thread, followUps: [] }
+            : thread),
+      };
       const maxVisibleCommentLines = orchestrationPlan.personaScenePlan?.surfaceTargets.visibleCommentLines[1]
         ?? comments.threads.length * 2 + input.config.content.followUpDepth * 2;
       let remainingFollowUps = Math.max(0, Math.floor((maxVisibleCommentLines - comments.threads.length * 2) / 2));
@@ -2292,12 +2484,11 @@ export class ContentGenerationAgent implements GenerationEngine {
             const visible = comments.threads[threadIndex]!;
             const root = normalizedRoots.threads[threadIndex]!;
             // T3 漂浮短反应不生长:模型多写了也确定性截为空。
-            const followUps = base.threadKind === "organic_reaction"
+            const followUps = base.threadKind === "organic_reaction" || base.threadKind === "host_reply"
               ? []
               : visible.followUps.slice(0, Math.min(input.config.content.followUpDepth, remainingFollowUps));
             remainingFollowUps -= followUps.length;
             const rootAnswer = root.answer.split(/\n\s*(?:追问|Q\d*)[：:]/iu)[0]?.trim() || root.answer.trim();
-            if (process.env.PROBE && rootAnswer.includes("我也是想先把这个问明白")) console.log("[PROBE staged]", base.threadKind, orchestrationPlan.dialogueThreads[threadIndex]?.postingIdentity);
             // 身份以规划层为准:不再用模型输出的 roleIndex 选卡——按侧+按角色
             // 隔离后模型只做分配好的人物开口,surfaceRoleCard 直接取规划值
             // (base.surfaceRoleCard 仅作历史兜底)。
@@ -2305,6 +2496,8 @@ export class ContentGenerationAgent implements GenerationEngine {
             // 读者互动层:T2/T3 线程的对话拓扑由线程形态决定,不随接话数漂移。
             const topology = base.threadKind === "organic_reaction"
               ? "organic_reaction" as const
+              : base.threadKind === "host_reply"
+                ? "host_reply" as const
               : base.threadKind === "reader_exchange"
                 ? "reader_exchange" as const
                 : followUps.length >= 2
@@ -2437,7 +2630,11 @@ export class ContentGenerationAgent implements GenerationEngine {
       ...stageIssues,
     ];
     let repairAttempts = 0;
-    while (issues.some((item) => item.severity === "error" && item.repairable) && repairAttempts < input.config.generation.maxRepairAttempts) {
+    // A model patch cannot make a candidate publishable while any terminal hard
+    // error remains. Skip expensive repairs instead of spending tens of thousands
+    // of tokens on a candidate that must still be reviewed.
+    while (shouldAttemptGenerationRepair(issues)
+      && repairAttempts < input.config.generation.maxRepairAttempts) {
       repairAttempts += 1;
       const channels = channelsForIssues(issues);
       if (!channels.length) break;

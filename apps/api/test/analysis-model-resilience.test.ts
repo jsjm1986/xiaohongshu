@@ -103,7 +103,7 @@ async function bodyOf(request: Parameters<Parameters<typeof createServer>[0]>[0]
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, any>;
 }
 
-test('分析输出在 16K 截断时自动扩容到 32K，且诊断日志不含提示词、密钥或响应正文', async () => {
+test('分析输出在 32K 截断时自动扩容到模型 64K 能力，且诊断日志不含提示词、密钥或响应正文', async () => {
   const budgets: number[] = [];
   const secretPrompt = 'SECRET_PROMPT_MUST_NOT_APPEAR_IN_LOGS';
   const secretResponse = 'SECRET_RESPONSE_MUST_NOT_APPEAR_IN_LOGS';
@@ -116,7 +116,7 @@ test('分析输出在 16K 截断时自动扩容到 32K，且诊断日志不含�
     if (call === 1) {
       response.end(JSON.stringify({
         choices: [{ finish_reason: 'length', message: { content: secretResponse } }],
-        usage: { prompt_tokens: 100, completion_tokens: 16_000, completion_tokens_details: { reasoning_tokens: 15_900 } },
+        usage: { prompt_tokens: 100, completion_tokens: 32_000, completion_tokens_details: { reasoning_tokens: 31_900 } },
       }));
       return;
     }
@@ -140,7 +140,7 @@ test('分析输出在 16K 截断时自动扩容到 32K，且诊断日志不含�
       settings, secretPrompt, [], 0, { taskId: 'task-safe-log', stage: 'project-blueprint', attempt: 1 },
     );
     assert.deepEqual(result, { ok: true });
-    assert.deepEqual(budgets, [16_000, 32_000]);
+    assert.deepEqual(budgets, [32_000, 64_000]);
     const joined = logs.join('\n');
     assert.match(joined, /analysis_output_budget_expanded/u);
     assert.match(joined, /project-blueprint/u);
@@ -178,5 +178,46 @@ test('分析重试次数和指数退避读取统一配置，HTTP 200 的不完�
     const delay = requestTimes[1]! - requestTimes[0]!;
     assert.ok(delay >= 70, `configured retry delay was ignored: ${delay}ms`);
     assert.ok(delay < 2_000, `unexpected retry delay: ${delay}ms`);
+  });
+});
+
+test('HTTP 200 连续坏 JSON 即使配置六次也只做一次纠正重试', async () => {
+  let calls = 0;
+  const server = createServer(async (request, response) => {
+    await bodyOf(request);
+    calls += 1;
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({
+      choices: [{ finish_reason: 'stop', message: { content: '{"broken":' } }],
+    }));
+  });
+
+  await withApp(server, { modelRetryAttempts: 6, modelRetryBaseDelayMs: 0 }, async ({ service, projectId, principal }) => {
+    await assert.rejects(
+      service.runEnrichmentModel(projectId, principal, 'return JSON', 'draft'),
+      /结果不完整/iu,
+    );
+    assert.equal(calls, 2, 'completed malformed responses must not consume the six-attempt outage budget');
+  });
+});
+
+test('达到模型输出能力后仍截断不会触发外层整轮重跑', async () => {
+  const budgets: number[] = [];
+  const server = createServer(async (request, response) => {
+    const body = await bodyOf(request);
+    budgets.push(Number(body.max_tokens));
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({
+      choices: [{ finish_reason: 'length', message: { content: '' } }],
+      usage: { prompt_tokens: 100, completion_tokens: Number(body.max_tokens) },
+    }));
+  });
+
+  await withApp(server, { modelRetryAttempts: 6, modelRetryBaseDelayMs: 0 }, async ({ service, projectId, principal }) => {
+    await assert.rejects(
+      service.runEnrichmentModel(projectId, principal, 'return JSON', 'draft'),
+      /结果不完整/iu,
+    );
+    assert.deepEqual(budgets, [32_000, 64_000], 'the inner widening is the only retry after explicit truncation');
   });
 });

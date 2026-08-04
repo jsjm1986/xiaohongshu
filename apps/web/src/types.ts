@@ -1979,6 +1979,19 @@ export interface GenerateInput {
   doctor?: string;
   mustInclude?: string;
   forbidden?: string;
+  /** Frozen account topology for this generation job. */
+  publishingTopology?: "institution_owned" | "confirmed_individual_author";
+  /** Human-confirmed author facts; project knowledge must never populate this field. */
+  authorContext?: {
+    status: "not_provided" | "confirmed";
+    facts: Array<{
+      id: string;
+      statement: string;
+      category: "current_state" | "intent" | "constraint" | "project_contact" | "purchase" | "service_completion" | "recovery" | "outcome";
+      confirmedBy: string;
+      confirmedAt: string;
+    }>;
+  };
   config?: AdvancedGenerationConfig;
   presetId?: string;
   overrides?: Record<string, unknown>;

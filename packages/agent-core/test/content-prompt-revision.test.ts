@@ -22,6 +22,11 @@ import type { GenerationDraft, InformationGap, TopicOpportunity } from "../src/i
 
 const project = { id: "p1", name: "测试项目", domain: "信息服务", productPoints: [], organizationPoints: [], cities: [], doctors: [] };
 
+function scopedTaskData(text: string, scope: "shared" | "candidate"): Record<string, any> {
+  const match = text.match(new RegExp(`<task_data scope="${scope}">\\n([\\s\\S]*?)\\n<\\/task_data>`, "u"));
+  return JSON.parse(match?.[1] ?? "{}");
+}
+
 function validDraftJson(body = "这是有依据且保留边界的正文内容，帮助读者补全信息。") {
   return {
     content: {
@@ -857,15 +862,16 @@ describe("prompt security and formula grounding", () => {
       orchestrationPlan: plan,
     });
     const generationText = String(generation.messages[1]?.content);
-    const taskData = JSON.parse(generationText.match(/<task_data>\n([\s\S]*?)\n<\/task_data>/u)?.[1] ?? "{}");
-    expect(taskData.selectedTopicOpportunity).toMatchObject({ id: opportunity.id, topic: opportunity.topic, gapIds: [gap.id] });
-    expect(taskData.selectedTopicOpportunity).not.toHaveProperty("relevance");
-    expect(taskData.selectedTopicOpportunity).not.toHaveProperty("rankInputSources");
-    expect(taskData.selectedTopicOpportunity).not.toHaveProperty("score");
-    expect(taskData.orchestrationPlan).not.toHaveProperty("opportunitySelectionAudit");
-    expect(taskData.orchestrationPlan.dialogueThreads.every((thread: Record<string, unknown>) =>
+    const sharedTaskData = scopedTaskData(generationText, "shared");
+    const candidateTaskData = scopedTaskData(generationText, "candidate");
+    expect(sharedTaskData.selectedTopicOpportunity).toMatchObject({ id: opportunity.id, topic: opportunity.topic, gapIds: [gap.id] });
+    expect(sharedTaskData.selectedTopicOpportunity).not.toHaveProperty("relevance");
+    expect(sharedTaskData.selectedTopicOpportunity).not.toHaveProperty("rankInputSources");
+    expect(sharedTaskData.selectedTopicOpportunity).not.toHaveProperty("score");
+    expect(candidateTaskData.orchestrationPlan).not.toHaveProperty("opportunitySelectionAudit");
+    expect(candidateTaskData.orchestrationPlan.dialogueThreads.every((thread: Record<string, unknown>) =>
       !("surfaceRoleCard" in thread) && !("conversationPlan" in thread))).toBe(true);
-    expect(taskData.orchestrationPlan.personaScenePlan.commentCast.every((role: Record<string, unknown>) =>
+    expect(candidateTaskData.orchestrationPlan.personaScenePlan.commentCast.every((role: Record<string, unknown>) =>
       "roleIndex" in role && !("lexicalCues" in role))).toBe(true);
     expect(generationText).not.toContain("OpportunityRankHeuristicV1");
     expect(generationText).not.toContain("0.987654");
@@ -955,7 +961,7 @@ describe("prompt security and formula grounding", () => {
       }],
     });
     const text = String(prompt.messages[1]?.content);
-    const taskData = JSON.parse(text.match(/<task_data>\n([\s\S]*?)\n<\/task_data>/u)?.[1] ?? "{}");
+    const taskData = scopedTaskData(text, "shared");
     expect(taskData.usableEvidenceIds).toEqual(["evidence_d1_section_scope"]);
     expect(taskData.usableEvidenceReferences).toEqual([
       expect.objectContaining({ id: "evidence_d1_section_scope", section: "范围", quote: "仅支持这一节。" }),

@@ -16,6 +16,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
+  GENERATION_CORE_OUTPUT_TOKENS,
   PROJECT_BLUEPRINT_MODULE_KEYS,
   conservativeEvidenceSupport,
   assertModelJsonComplexity,
@@ -58,7 +59,7 @@ import type { SessionPrincipal } from './models.js';
 import { AnalysisGatewayError, classifyModelFailure, modelFailureMessage } from './model-failure.js';
 import { ResourceService } from './resource.service.js';
 import { createSafeModelFetch } from './safe-model-fetch.js';
-import { SettingsService, type ResolvedProviderSettings } from './settings.service.js';
+import { modelOutputTokenLimit, SettingsService, type ResolvedProviderSettings } from './settings.service.js';
 import { readStoredFile, readStoredText } from './storage-file.js';
 import { nowIso, parseJson, requireObject, requireString, type Pagination } from './utils.js';
 
@@ -132,6 +133,24 @@ interface AnalysisCallContext {
   attempt: number;
   turnIndex?: number;
   turnKey?: string;
+}
+
+/**
+ * Transport outages may need the configured long retry window. A completed
+ * provider response that violates the output contract has already consumed
+ * model tokens, so it gets at most one correction attempt. Explicit length
+ * exhaustion is terminal here because callAnalysisMessages has already widened
+ * once to the model capability (64K normally, 384K for DeepSeek).
+ */
+function analysisRetryLimit(error: unknown, configuredAttempts: number): number {
+  const boundedAttempts = Math.max(1, configuredAttempts);
+  const failureKind = classifyModelFailure(error);
+  if (failureKind === 'unavailable') return boundedAttempts;
+  if (failureKind !== 'incomplete') return 1;
+  if (error instanceof AnalysisGatewayError
+    && (error.diagnostics.finishReason === 'length'
+      || error.diagnostics.finishReason === 'max_output_tokens')) return 1;
+  return Math.min(2, boundedAttempts);
 }
 
 interface ProjectAnalysisConversationResult {
@@ -2481,11 +2500,12 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
         if (error instanceof AnalysisClaimLostError || error instanceof HttpException) throw error;
         lastError = error;
         const failureKind = classifyModelFailure(error);
-        const retryable = failureKind === 'unavailable' || failureKind === 'incomplete';
-        if (!retryable || attempt >= this.options.modelRetryAttempts) break;
+        const retryLimit = analysisRetryLimit(error, this.options.modelRetryAttempts);
+        if (attempt >= retryLimit) break;
         const delayMs = this.options.modelRetryBaseDelayMs * 2 ** (attempt - 1);
         this.logAnalysisDiagnostic('analysis_turn_retry_scheduled', {
-          taskId, turnIndex, turnKey, attempt, maxAttempts: this.options.modelRetryAttempts,
+          taskId, turnIndex, turnKey, attempt, maxAttempts: retryLimit,
+          configuredMaxAttempts: this.options.modelRetryAttempts,
           delayMs, failureKind,
         }, true);
         if (delayMs > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
@@ -2720,23 +2740,23 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
         lastError = error;
         const status = error instanceof AnalysisGatewayError ? error.status : undefined;
         const failureKind = classifyModelFailure(error);
-        // 5xx/429/网络失败与 200 但输出截断、JSON 不完整都值得重试；
-        // 凭据错误和业务校验错误重试不会自愈，应立即返回。
-        const retryable = failureKind === 'unavailable' || failureKind === 'incomplete';
-        if (!retryable) throw error;
-        if (attempt < maxAttempts - 1) {
-          const delayMs = this.options.modelRetryBaseDelayMs * 2 ** attempt;
-          this.logAnalysisDiagnostic('analysis_retry_scheduled', {
-            taskId,
-            stage,
-            attempt: attempt + 1,
-            maxAttempts,
-            delayMs,
-            status: status ?? null,
-            failureKind,
-          }, true);
-          if (delayMs > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
-        }
+        const retryLimit = analysisRetryLimit(error, maxAttempts);
+        // Network/429/5xx failures keep the configured outage retry window. A
+        // completed malformed response gets only one correction; explicit
+        // model-capability exhaustion is terminal after the inner widening.
+        if (attempt + 1 >= retryLimit) break;
+        const delayMs = this.options.modelRetryBaseDelayMs * 2 ** attempt;
+        this.logAnalysisDiagnostic('analysis_retry_scheduled', {
+          taskId,
+          stage,
+          attempt: attempt + 1,
+          maxAttempts: retryLimit,
+          configuredMaxAttempts: maxAttempts,
+          delayMs,
+          status: status ?? null,
+          failureKind,
+        }, true);
+        if (delayMs > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
       }
     }
     throw lastError;
@@ -2811,7 +2831,8 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       : globalThis.fetch;
     const timeoutMs = Math.max(10_000, Math.min(300_000, this.options.modelRequestTimeoutMs));
 
-    for (const maxOutputTokens of [16_000, 32_000]) {
+    const maxOutputTokenLimit = modelOutputTokenLimit(settings);
+    for (const maxOutputTokens of [...new Set([GENERATION_CORE_OUTPUT_TOKENS, maxOutputTokenLimit])]) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
       const startedAt = Date.now();
@@ -2912,16 +2933,16 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
         throw new AnalysisGatewayError(`The analysis model returned HTTP ${response.status}.`, response.status, diagnostics);
       }
       if (diagnostics.finishReason === 'length') {
-        if (maxOutputTokens < 32_000) {
+        if (maxOutputTokens < maxOutputTokenLimit) {
           this.logAnalysisDiagnostic('analysis_output_budget_expanded', {
             ...context,
             fromTokens: maxOutputTokens,
-            toTokens: 32_000,
+            toTokens: maxOutputTokenLimit,
           }, true);
           continue;
         }
         throw new AnalysisGatewayError(
-          'The analysis model output was truncated at 32000 max tokens (finish_reason=length).',
+          `The analysis model output was truncated at ${maxOutputTokenLimit} max tokens (finish_reason=length).`,
           response.status,
           diagnostics,
         );

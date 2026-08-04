@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { DEEPSEEK_MAX_OUTPUT_TOKENS, GENERATION_OUTPUT_TOKENS } from "./output-budget.js";
 import {
   evaluateFormulaDefinition,
   F32_DIAGNOSTIC_CONTRACT,
@@ -372,7 +373,7 @@ const EXTRA_PARAMETERS: GenerationParameterDefinition[] = [
   },
   {
     id: "max_output_tokens", path: "model.maxOutputTokens", label: "模型输出预算", group: "operation",
-    control: { kind: "number", min: 256, max: 100000, step: 256, unit: "tokens", simpleMode: false, advanced: true }, defaultValue: 8000,
+    control: { kind: "number", min: 256, max: DEEPSEEK_MAX_OUTPUT_TOKENS, step: 256, unit: "tokens", simpleMode: false, advanced: true }, defaultValue: GENERATION_OUTPUT_TOKENS,
     noviceExplanation: "限制一次模型最多能返回多少内容，和正文目标字数不是同一个单位。",
     increaseEffect: "提高可容纳更完整JSON，也增加成本。", decreaseEffect: "降低成本，但可能截断完整内容包。",
     formulaIds: ["F01", "F25"], channels: ["H", "N.imageBrief", "N.title", "N.body", "Cref"], evidenceStatus: "operational_default", evidenceNote: "这是执行预算，不是内容效果参数。",

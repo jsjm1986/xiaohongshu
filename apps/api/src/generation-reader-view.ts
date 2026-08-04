@@ -41,6 +41,12 @@ export interface ReaderComment {
    */
   threadKind?: string;
   postingIdentity?: string;
+  /** Minimal answer-side display role needed to render staff/expert/host correctly. */
+  surfaceRoleCard?: { replyDisplayRole?: string };
+  /** Human-confirmed author facts referenced by host_reply; IDs only, never project evidence. */
+  authorFactIds?: string[];
+  /** Social-topic anchor; never a project-gap ownership claim. */
+  topicAnchorGapId?: string;
   personaRole?: string;
   stage?: string;
   gap?: string;
@@ -138,6 +144,9 @@ function readerComments(pkg: ContentPackage): ReaderComment[] {
       // 成稿线程可能缺 threadKind(旧包),规划线程里有;与其他元数据同一套回落。
       threadKind: thread.threadKind ?? plan?.threadKind,
       postingIdentity: thread.postingIdentity,
+      surfaceRoleCard: thread.surfaceRoleCard ?? plan?.surfaceRoleCard,
+      authorFactIds: thread.authorFactIds ?? plan?.authorFactIds,
+      topicAnchorGapId: thread.topicAnchorGapId ?? plan?.topicAnchorGapId,
       personaRole: thread.personaRole ?? plan?.personaRole,
       stage: thread.stage,
       gap: thread.gap,

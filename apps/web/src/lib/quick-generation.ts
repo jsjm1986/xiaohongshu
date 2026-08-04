@@ -138,7 +138,7 @@ export function quickCandidateToMarkdown(view: QuickCandidateView): string {
         continue;
       }
       parts.push(`Q: ${c.question}`);
-      parts.push(`A: ${c.answer}`);
+      parts.push(c.threadKind === 'host_reply' ? `楼主本人: ${c.answer}` : `A: ${c.answer}`);
       if (c.boundary) parts.push(`边界: ${c.boundary}`);
       if (c.nextStep) parts.push(`下一步: ${c.nextStep}`);
       for (const f of c.followUps ?? []) {
