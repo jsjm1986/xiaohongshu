@@ -3,7 +3,7 @@ import type {
   HarnessImagePlanItem, HarnessModelProvider, HarnessReviewInput, HarnessRunInput, HarnessRunResult, HarnessSoftMarketingStrategy, HarnessToolAction, HarnessToolTrace,
 } from "./types.js";
 import { publicationChecklistFor, validateHarnessCandidates, visibleCandidateText } from "./validation.js";
-import { HARNESS_BODY_LENGTH_TARGETS } from "./methods.js";
+import { DEFAULT_HARNESS_SEEDING_MODE, HARNESS_BODY_LENGTH_TARGETS } from "./methods.js";
 import type { HarnessSeedingMode } from "./methods.js";
 
 /*
@@ -599,8 +599,51 @@ function withImageEvidence(input: HarnessRunInput): HarnessEvidenceSource[] {
   }
   return [...byId.values()];
 }
-function systemPrompt(input: HarnessRunInput, expectedCount: number, targetDraft: HarnessBodyDraft): string {
+/*
+ * 评论区拓扑与 org_answer 形态两句按模式分叉。
+ *
+ * 只在末尾追加素人指引是不够的:这两句原文要求「2-3 条机构答疑」并把四段式
+ * (澄清→可核验下一步→边界→停止原因)写成无条件顺序,与素人指引正面矛盾。
+ * 更要紧的是解析器把缺省身份落到 `publisher`,提示词不点名 `author` 时模型会
+ * 全部漏填,于是 peer_seeding 下「0 条博主回复」直接撞 comment_topology ——
+ * 生产实跑比改动前更严。所以这两句本身必须分叉。
+ * brand_voice 两句逐字保留原文:换模式不该动机构口吻的既有契约。
+ */
+const COMMENT_TOPOLOGY_GUIDANCE = {
+  brand_voice: [
+    "Create 4-6 Cref threads per candidate as a small uneven comment section, not 4-6 FAQs. Mix all three threadKind values: 2-3 org_answer threads, at least 1 reader_exchange, and at least 1 organic_reaction. Give simulated readers short display-only nicknames; these names never imply real accounts.",
+    "org_answer is a residual reader question answered by an accountable publishing identity. It follows: direct answer -> optional follow-up or counterexample only when a concrete new condition appears -> clarification -> verifiable next step -> explicit stopReason. Keep the visible answer compact; audit fields may be fuller.",
+  ],
+  peer_seeding: [
+    "Create 4-6 Cref threads per candidate as a small uneven comment section, not 4-6 FAQs. Mix all three threadKind values: at least 2 org_answer threads answered by the publisher with postingIdentity 'author', at least 1 reader_exchange, and at least 1 organic_reaction. Give simulated readers short display-only nicknames; these names never imply real accounts.",
+    "org_answer is a residual reader question answered by the accountable publishing identity named in postingIdentity. When that identity is 'author' the publisher is answering their own post: give the direct answer plainly and stop there; clarification, verifiable next step and boundary are optional and should be written only when that sentence genuinely carries one. When the identity is brand/staff/expert/publisher it follows: direct answer -> optional follow-up or counterexample only when a concrete new condition appears -> clarification -> verifiable next step -> explicit stopReason. Keep the visible answer compact; audit fields may be fuller.",
+  ],
+} as const;
+
+/*
+ * 素人代发种草的写作指引。
+ *
+ * 与 brand_voice 的关键差别:博主是真人素人账号,可以第一人称讲自己的时间线;
+ * 具体参数(价格、恢复期、麻醉方式)优先留给评论区由博主回答,正文只负责处境和一个窄问题。
+ * 这套形态来自 67 篇真实对标语料的实测:博主回复 187 行里带机构口吻的只有 1 行。
+ *
+ * 最后一条不是重复禁令而是划界:放开的是「博主讲自己的经历」,模拟读者编造自己的
+ * 体验仍然是伪造第三方口碑。不写清主体,这个模式就从「代笔」滑成「谁都能编」。
+ */
+const PEER_SEEDING_GUIDANCE = [
+  "This run is peer seeding: the publishing account is a real individual, not the brand. Write N.body in that person's own first person. The publisher may state their own timeline (just finished, day three, two months in) because a real person is posting it.",
+  "Keep specific parameters out of N.body when they can be asked instead. Price, recovery time, anesthesia type, whether it can be done same-day: leave these for the comment section, answered by the publisher when a simulated reader asks. N.body establishes one situation and one narrow question.",
+  "At least 2 Cref threads must be org_answer with postingIdentity 'author' — the publisher replying as themselves. Write these as friend-to-friend replies, short and plain. Do not write them as customer-service answers: no clarification clause, no verifiable-next-step clause, no boundary clause unless it genuinely belongs in that sentence.",
+  "Threads with postingIdentity brand/staff/expert/publisher still require clarification, nextStep, boundary and stopReason. An institutional voice must carry its boundary; only the individual publisher is exempt.",
+  "Let a person's name surface through being asked rather than announced. A simulated reader may ask which doctor or which clinic, and the publisher answers. N.body does not need the full name.",
+  "Hashtags: category words and city words, not brand names.",
+  "The publisher may describe their own experience. A simulated reader still may not invent their own treatment, visit, friend case, recovery day, outcome, purchase or endorsement — that would be fabricating other people's testimony, which is different from the publisher writing their own.",
+] as const;
+
+function systemPrompt(input: WithSeedingMode<HarnessRunInput>, expectedCount: number, targetDraft: HarnessBodyDraft): string {
   const revision = input.runMode === "revision";
+  // 与校验层同一个缺省来源:提示词与校验若各自取默认,模型被要求的和被判定的会分叉。
+  const seedingMode = input.seedingMode ?? DEFAULT_HARNESS_SEEDING_MODE;
   return [
     "You are the independent Agent Harness creative runtime. Never use legacy analysis, gaps, strategies, opportunities, personas, orchestration plans, formula scores or coverage records.",
     `This run has ${expectedCount} candidate${expectedCount === 1 ? "" : "s"} overall, but this bounded packaging call must create exactly one complete Xiaohongshu package for candidate index ${targetDraft.candidateIndex}. A complete package includes cover copy, title, body, CTA, hashtags, ordered image script, owned first comment, simulated Q&A, and publishing notes.`,
@@ -628,11 +671,13 @@ function systemPrompt(input: HarnessRunInput, expectedCount: number, targetDraft
     // 到真实评论区,写在里面等于把内部标注发出去。标注改由界面与导出用固定常量呈现
     // (HARNESS_SIMULATION_NOTICE),披露照旧到达用户,只是不再是可粘贴的交付内容。
     "Cref is generated reference, not observed comments or independent social proof. ownedFirstComment is publisher-owned. Simulated threads must never impersonate successful customers. Do not write any simulation disclaimer or internal annotation into the comment text itself; that notice is presented separately outside the deliverable. Questions should sound like short platform comments; clarification, boundary and routing metadata may be fuller but must not make the visible question/answer sound like a form.",
-    "Create 4-6 Cref threads per candidate as a small uneven comment section, not 4-6 FAQs. Mix all three threadKind values: 2-3 org_answer threads, at least 1 reader_exchange, and at least 1 organic_reaction. Give simulated readers short display-only nicknames; these names never imply real accounts.",
-    "org_answer is a residual reader question answered by an accountable publishing identity. It follows: direct answer -> optional follow-up or counterexample only when a concrete new condition appears -> clarification -> verifiable next step -> explicit stopReason. Keep the visible answer compact; audit fields may be fuller.",
+    ...COMMENT_TOPOLOGY_GUIDANCE[seedingMode],
     "reader_exchange is two simulated readers naturally connecting over one word or condition already present. question is reader A's line and answer is reader B's line; set displayName and replyDisplayName. It is not an institutional answer, testimonial, or source of project facts, so clarification/nextStep/boundary may be empty and postingIdentity is ignored for display.",
     "organic_reaction is one 4-20-character floating reaction such as a brief resonance or bookmark impulse. Put it in question; answer, followUps, clarification, nextStep, boundary, replyDisplayName and evidenceIds must be empty. The publisher does not reply merely to make the tree look complete.",
     "Across the 4-6 threads, let one or two concrete话头 grow by one follow-up while the rest stop asymmetrically. Vary length, motive and social position: practical timing/location, cautious challenge, same-concern resonance, verification request, or a tiny reaction. Never invent treatment, visit, friend/colleague case, recovery day, outcome, purchase, endorsement or observed demand in any simulated reader voice.",
+    // 上一句的禁令已限定 "in any simulated reader voice",与素人指引最后一条不冲突
+    // (博主不是 simulated reader),故原句逐字保留;边界由新增那条讲清楚。
+    ...(seedingMode === "peer_seeding" ? PEER_SEEDING_GUIDANCE : []),
     "The publishing object is an aC execution plan, not deployment proof. It must include responseSla, liveQuestionRoutes with accountable owners, updateTriggers, and stopRules. Route real questions by what is being asked; do not make simulated threads look like observed demand.",
     "Publishing timing is a plan, not proof of deployment. Platform compliance and final proofreading remain manual checks. Do not claim the package has been published or platform-approved.",
     "Return only one valid JSON object matching the requested response schema. Do not wrap JSON in Markdown or add prose outside it.",
@@ -870,7 +915,17 @@ export async function reviewHarnessCandidates(input: WithSeedingMode<HarnessRevi
     mustInclude: input.task.mustInclude, forbidden: input.task.forbidden, claimAudit: audit, expectedCandidateCount: expectedCount,
     runMode, sourceCandidateIndex: input.sourceCandidate?.candidateIndex, revisionInstruction: input.revisionInstruction,
     selectedImages: input.images ?? [], bodyLength: input.task.bodyLength ?? input.task.methodProfile?.bodyLength,
-    ...(input.seedingMode ? { seedingMode: input.seedingMode } : {}),
+    /*
+     * 模式与项目名都显式传,不靠省略取默认。
+     *
+     * 这个调用点与 apps/api 里断点恢复那个调用点必须给出同一套约束:同一份候选
+     * 走两条路判出不同结果时,界面说合格、导出被拦,几乎无从排查。已经踩过一次——
+     * service 那处漏传 bodyLength,长度检查静默按 medium 判。
+     * 缺省写成 `?? DEFAULT_HARNESS_SEEDING_MODE` 而不是直接写常量:调用方显式要
+     * brand_voice 时仍要听调用方的,默认值只在没人指定时生效。
+     */
+    seedingMode: input.seedingMode ?? DEFAULT_HARNESS_SEEDING_MODE,
+    projectName: input.project.name,
   });
   const results = reconciledCandidates.map((candidate) => {
     const candidateIssues = issues.filter((issue) => issue.candidateIndex === candidate.candidateIndex || issue.candidateIndex === -1);

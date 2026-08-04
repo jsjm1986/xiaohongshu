@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import {
   AGENT_HARNESS_PROFILE,
   DEFAULT_HARNESS_METHOD_ID,
+  DEFAULT_HARNESS_SEEDING_MODE,
   getHarnessMethodProfile,
   HARNESS_SIMULATION_NOTICE,
   isHarnessMethodId,
@@ -892,6 +893,20 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
       sourceCandidateIndex: context.sourceCandidate?.candidateIndex,
       revisionInstruction: job.run_kind === 'revision' ? job.instruction : undefined,
       selectedImages: context.images,
+      /*
+       * 下面三个此前漏传,必须与 runner 生成时那处保持同一套约束。
+       *
+       * bodyLength 是既有缺陷:不传则校验器落到 medium,于是同一份候选在断点恢复
+       * 读结果时按 medium 判长度,而生成时按项目真实档位判 —— 界面显示合格、导出
+       * 却被拦,反过来也会发生,极难查。
+       * seedingMode 显式写出默认值而不是靠省略:这条路径上没有调用方能指定模式,
+       * 写出来让「按素人代发判定」在代码里可见,不必回到校验器才知道默认是什么。
+       * projectName 直接传 context.project.name,空白名交给校验器自己跳过品牌词
+       * 检查(它有 .trim() 守卫),这里不编默认值 —— 猜出来的项目名会造成误报。
+       */
+      bodyLength: context.task.bodyLength ?? context.task.methodProfile?.bodyLength,
+      seedingMode: DEFAULT_HARNESS_SEEDING_MODE,
+      projectName: context.project.name,
     });
     return checkpoint.candidates.map((candidate) => {
       const candidateIssues = issues.filter((issue) => issue.candidateIndex === candidate.candidateIndex || issue.candidateIndex === -1);
@@ -981,6 +996,9 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
           revisionInstruction: job.run_kind === 'revision' ? job.instruction : undefined,
           candidates, readEvidenceIds: parseJson<string[]>(job.read_evidence_ids_json, []),
           provider, signal: controller.signal, onProgress: (value) => this.progress(id, value),
+          // 模式显式写出而不是靠省略取默认:省略时「这条路走的是哪个模式」只能去读
+          // 校验器内部的 ?? 才知道,而它和 checkpointResults 那处必须始终是同一个值。
+          seedingMode: DEFAULT_HARNESS_SEEDING_MODE,
         });
         const priorUsage = parseJson<Record<string, number>>(job.usage_json, {});
         result = {
@@ -999,6 +1017,8 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
         result = await runAgentHarness({
           jobId: id, ...context, runMode: job.run_kind,
           revisionInstruction: job.run_kind === 'revision' ? job.instruction : undefined,
+          // 与断点恢复那条路走同一个模式,否则同一个任务两次运行的判定标准不同。
+          seedingMode: DEFAULT_HARNESS_SEEDING_MODE,
           provider, signal: controller.signal,
           onProgress: (value) => this.progress(id, value),
           onTrace: (trace) => this.recordTrace(id, trace),

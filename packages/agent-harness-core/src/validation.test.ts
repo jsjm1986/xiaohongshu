@@ -452,3 +452,103 @@ describe("标签禁品牌词", () => {
     }
   });
 });
+
+/*
+  两个调用点与提示词的一致性。这一组是源码断言:被测对象是「喂给校验器的参数」和
+  「喂给模型的常量」,单测里既跑不到 service 的运行时,也没有模型可跑。
+*/
+describe("生产路径把模式真的传下去", () => {
+  /*
+   * 只截 validateHarnessCandidates 那一次调用的参数块,不整文件 grep。
+   *
+   * 必要而非讲究:service 里 seedingMode 出现在三处(校验调用、runAgentHarness、
+   * reviewHarnessCandidates),整文件 grep 时把校验调用里那个删掉测试照旧是绿的 ——
+   * 而那正是本任务要防的分叉。断言必须落在参数块内才咬得住。
+   */
+  function validatorCallBlock(source: string): string {
+    const start = source.lastIndexOf("validateHarnessCandidates(");
+    const end = source.indexOf("});", start);
+    expect(start, "没找到 validateHarnessCandidates 的调用").toBeGreaterThan(-1);
+    expect(end, "没找到调用的参数块结尾").toBeGreaterThan(start);
+    return source.slice(start, end);
+  }
+
+  it("两个调用点都传了 seedingMode,不能只改一处", () => {
+    /*
+     * validateHarnessCandidates 有两个调用点:runner(生成时)和 service(断点恢复读结果时)。
+     * 只改一处的后果是同一份候选在两条路上判定不同——界面说合格、导出却被拦,极难查。
+     * 实测既有缺陷:service 此前漏传 bodyLength,导致长度检查静默按 medium 判。
+     */
+    const runnerSource = readFileSync(new URL("./runner.ts", import.meta.url), "utf8");
+    const serviceSource = readFileSync(
+      new URL("../../../apps/api/src/agent-harness.service.ts", import.meta.url), "utf8");
+    for (const [label, source] of [["runner", runnerSource], ["service", serviceSource]] as const) {
+      const block = validatorCallBlock(source);
+      expect(block, `${label} 的校验调用没有传 seedingMode`).toMatch(/seedingMode:/u);
+      expect(block, `${label} 的校验调用没有传 projectName`).toMatch(/projectName:/u);
+      expect(block, `${label} 的校验调用没有传 bodyLength`).toMatch(/bodyLength:/u);
+    }
+  });
+
+  it("提示词区分博主本人与模拟读者:博主可讲自己时间线,读者不许编经历", () => {
+    /*
+     * 原提示词有一句禁止模拟读者提到「治疗/到访/朋友案例/恢复天数/结果/购买」。
+     * 素人代发下博主本人恰恰要说「两个月了」「我刚做完」,所以这句必须区分主体:
+     * 博主(author)可以讲自己的时间线,模拟读者仍不许编造自己的经历。
+     * 不区分的话,这个模式会变成「谁都能编」——那是真的造假,不是代笔。
+     */
+    const source = readFileSync(new URL("./runner.ts", import.meta.url), "utf8");
+    const start = source.indexOf("const PEER_SEEDING_GUIDANCE = [");
+    expect(start, "找不到素人指引常量").toBeGreaterThan(-1);
+    /*
+     * 只截常量本身,不切到文件末尾:末尾还有一句原有指引带着 "simulated reader voice",
+     * 切到 EOF 时把素人指引最后那条划界句删掉,断言照旧能命中那句原文 —— 测试就成了假绿。
+     */
+    const peerBlock = source.slice(start, source.indexOf("] as const;", start));
+    expect(peerBlock, "素人指引没有点明博主身份").toMatch(/author/u);
+    /*
+     * 断言必须咬住「划界」本身,不能只查 "simulated reader" 出没出现过 ——
+     * 实测:这个常量里另有两条顺带提到 simulated reader(「读者问了博主再答」
+     * 「读者可以问是哪位医生」),所以把最后那条划界句整条删掉,宽泛的
+     * /simulated reader/ 照旧命中,测试假绿。变异验证就是这么发现的。
+     *
+     * 改为分别钉住两个半句:博主可以讲自己的经历、模拟读者仍不许编造自己的经历。
+     * 少了后半句,这个模式就从「代笔」滑成「谁都能编」。
+     */
+    expect(peerBlock, "素人指引没写明博主可以讲自己的经历").toMatch(/publisher may describe their own experience/u);
+    expect(peerBlock, "素人指引没把模拟读者排除在豁免之外").toMatch(/simulated reader still may not invent/u);
+  });
+
+  it("拓扑那两句按模式分叉,peer_seeding 必须点名 author 身份", () => {
+    /*
+     * 这一条盯的是本任务真正修掉的生产故障,不是文案偏好:
+     * 解析器把缺省 postingIdentity 落到 `publisher`(runner.ts 的 postingIdentity 归一),
+     * 而校验层 peer_seeding 要求 ≥2 条 `author` 回复。提示词若仍照原文要求
+     * 「2-3 条机构答疑」且从不点名 `author`,模型就会全部产出 publisher,
+     * 于是默认模式下每次实跑都因「0 条博主回复」撞 comment_topology —— 比改动前更严。
+     *
+     * 同时钉住 brand_voice 那两句逐字不变:换模式不该动机构口吻的既有契约。
+     */
+    const source = readFileSync(new URL("./runner.ts", import.meta.url), "utf8");
+    const start = source.indexOf("const COMMENT_TOPOLOGY_GUIDANCE = {");
+    expect(start, "找不到按模式分叉的拓扑指引").toBeGreaterThan(-1);
+    const block = source.slice(start, source.indexOf("} as const;", start));
+    const brandVoice = block.slice(block.indexOf("brand_voice:"), block.indexOf("peer_seeding:"));
+    const peerSeeding = block.slice(block.indexOf("peer_seeding:"));
+
+    expect(peerSeeding, "peer_seeding 的拓扑句没点名 author 身份，模型会全部漏填成 publisher")
+      .toMatch(/postingIdentity 'author'/u);
+    expect(peerSeeding, "peer_seeding 仍在要求 2-3 条机构答疑，与校验层的博主回复要求矛盾")
+      .not.toMatch(/2-3 org_answer threads,/u);
+    expect(peerSeeding, "peer_seeding 仍把四段式写成无条件必须")
+      .toMatch(/clarification, verifiable next step and boundary are optional/u);
+
+    expect(brandVoiceLinesUnchanged(brandVoice), "brand_voice 那两句必须逐字保留原文").toBe(true);
+  });
+});
+
+/** brand_voice 两句原文逐字比对。写成独立函数只为让上面的断言读起来是一句结论。 */
+function brandVoiceLinesUnchanged(brandVoiceBlock: string): boolean {
+  return brandVoiceBlock.includes("Mix all three threadKind values: 2-3 org_answer threads, at least 1 reader_exchange, and at least 1 organic_reaction.")
+    && brandVoiceBlock.includes("org_answer is a residual reader question answered by an accountable publishing identity. It follows: direct answer -> optional follow-up or counterexample only when a concrete new condition appears -> clarification -> verifiable next step -> explicit stopReason.");
+}
