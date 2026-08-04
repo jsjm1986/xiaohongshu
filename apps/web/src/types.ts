@@ -1922,6 +1922,11 @@ export interface AgentHarnessCreateInput {
   notes?: string;
   imageAssetIds?: string[];
   allowUngrounded?: boolean;
+  /**
+   * 素人代发种草模式。不传时由后端落 DEFAULT_HARNESS_SEEDING_MODE —— 前端不编第二份
+   * 默认值,否则后端改默认时两边会悄悄分叉。
+   */
+  seedingMode?: import("@content-agent/agent-harness-core/methods").HarnessSeedingMode;
 }
 
 export interface AgentHarnessCapabilities {

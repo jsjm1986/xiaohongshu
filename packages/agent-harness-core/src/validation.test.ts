@@ -589,10 +589,21 @@ describe("生产路径把模式真的传下去", () => {
       expect(block, `${label} 的校验调用没有传 projectName`).toMatch(/projectName: \w+\.project\.name/u);
       expect(block, `${label} 的校验调用没有传 bodyLength`).toMatch(/bodyLength: \w+\.task\.bodyLength/u);
       expect(block, `${label} 的校验调用没有把模式落到 DEFAULT_HARNESS_SEEDING_MODE`)
-        .toMatch(/seedingMode: (?:input\.seedingMode \?\? )?DEFAULT_HARNESS_SEEDING_MODE/u);
+        .toMatch(/seedingMode: (?:[\w.]+\.seedingMode \?\? )+DEFAULT_HARNESS_SEEDING_MODE/u);
     }
     // runner 那处要尊重调用方显式指定的模式,service 那处没有调用方可尊重。
     expect(runnerBlock, "runner 丢掉了调用方显式指定的模式").toContain("input.seedingMode ??");
+    /*
+     * service 必须读 task 上冻结的模式,不能写死常量。
+     *
+     * 断点恢复走的就是这条路:task_json 里冻结的是当初那个模式,写死
+     * DEFAULT_HARNESS_SEEDING_MODE 时一次 brand_voice 的运行恢复后会被按素人代发
+     * 重判 —— 界面说合格、导出被拦(或反过来),与 bodyLength 那次踩过的坑同形。
+     * 上面那条正则允许 `?? DEFAULT_HARNESS_SEEDING_MODE` 兜底,所以缺省仍是素人代发;
+     * 这里补钉「兜底之前先读 task」,否则去掉 `context.task.seedingMode ??` 仍是绿的。
+     */
+    expect(serviceBlock, "service 的校验调用写死了模式,没有读 task 上冻结的那个")
+      .toContain("context.task.seedingMode ??");
   });
 
   it("提示词区分博主本人与模拟读者:博主可讲自己时间线,读者不许编经历", () => {

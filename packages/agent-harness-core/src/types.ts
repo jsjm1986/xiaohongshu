@@ -1,4 +1,4 @@
-import type { HarnessMethodId, HarnessMethodProfile } from "./methods.js";
+import type { HarnessMethodId, HarnessMethodProfile, HarnessSeedingMode } from "./methods.js";
 
 export type HarnessEvidenceStatus = "observed" | "user_supplied" | "inferred" | "unknown";
 
@@ -38,6 +38,12 @@ export interface HarnessTask {
   imageAssetIds?: string[];
   /** Explicit confirmation that generic, non-project-specific output is acceptable when no evidence exists. */
   allowUngrounded?: boolean;
+  /**
+   * 素人代发种草模式。落在 task 上而不是入口参数上,因为它必须随 task_json 一起
+   * 持久化 —— 断点恢复时要用当初那个模式重判,否则一次 brand_voice 的运行恢复后
+   * 会被按 peer_seeding 判定。缺省由读取方落到 DEFAULT_HARNESS_SEEDING_MODE。
+   */
+  seedingMode?: HarnessSeedingMode;
 }
 
 export interface HarnessImageSource {

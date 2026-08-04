@@ -9,9 +9,11 @@ import type { HarnessSeedingMode } from "./methods.js";
 /*
  * 素人代发种草模式沿运行入口向下传递。
  *
- * 用交叉类型在入口处附加而非改 types.ts:HarnessRunInput/HarnessReviewInput 住在
- * types.ts,本次改动不碰那个文件。缺省由 validateHarnessCandidates 落到
- * DEFAULT_HARNESS_SEEDING_MODE(peer_seeding),所以不传的调用点行为等同默认模式。
+ * 交叉类型保留:入口参数是调用方**当次**的显式意图,优先级高于 task 上冻结的值。
+ * 真正的持久化载体是 HarnessTask.seedingMode —— 它随 task_json 落盘,断点恢复
+ * 读回来还是当初那个模式。三处读取(正文阶段、组包阶段、校验调用)都写同一条
+ * `input.seedingMode ?? input.task.seedingMode ?? DEFAULT_HARNESS_SEEDING_MODE`:
+ * 谁少一环,模型被要求的和被判定的就会分叉。
  */
 type WithSeedingMode<T> = T & { seedingMode?: HarnessSeedingMode };
 
@@ -681,7 +683,8 @@ const PEER_SEEDING_BODY_GUIDANCE = [
 function systemPrompt(input: WithSeedingMode<HarnessRunInput>, expectedCount: number, targetDraft: HarnessBodyDraft): string {
   const revision = input.runMode === "revision";
   // 与校验层同一个缺省来源:提示词与校验若各自取默认,模型被要求的和被判定的会分叉。
-  const seedingMode = input.seedingMode ?? DEFAULT_HARNESS_SEEDING_MODE;
+  // task 上那一环是持久化的模式,断点恢复时入口不再传值,只能从 task 读回。
+  const seedingMode = input.seedingMode ?? input.task.seedingMode ?? DEFAULT_HARNESS_SEEDING_MODE;
   return [
     "You are the independent Agent Harness creative runtime. Never use legacy analysis, gaps, strategies, opportunities, personas, orchestration plans, formula scores or coverage records.",
     `This run has ${expectedCount} candidate${expectedCount === 1 ? "" : "s"} overall, but this bounded packaging call must create exactly one complete Xiaohongshu package for candidate index ${targetDraft.candidateIndex}. A complete package includes cover copy, title, body, CTA, hashtags, ordered image script, owned first comment, simulated Q&A, and publishing notes.`,
@@ -728,7 +731,7 @@ function bodyDraftPrompt(input: WithSeedingMode<HarnessRunInput>, expectedCount:
   const length = input.task.bodyLength ?? input.task.methodProfile?.bodyLength ?? "short";
   const lengthTarget = HARNESS_BODY_LENGTH_TARGETS[length];
   // 与组包阶段、校验层同一个缺省来源。三处若各自取默认,写出来的和判定的就会分叉。
-  const seedingMode = input.seedingMode ?? DEFAULT_HARNESS_SEEDING_MODE;
+  const seedingMode = input.seedingMode ?? input.task.seedingMode ?? DEFAULT_HARNESS_SEEDING_MODE;
   return [
     "You are the soft-marketing editorial writer for the Agent Harness. This stage freezes the finished Xiaohongshu cover, title, body, CTA, exact copy citations and an auditable persuasion strategy. Do not plan image sequences, comments, operations or compliance notes here.",
     "This is seeding copy, not a user diary, pure education or a product manual. The accountable publisher enters through a desire or concrete hesitation already alive in the reader, changes one decision criterion, then lets one evidence-backed project difference become the natural answer. The goal is: '原来应该这样判断，这个项目的思路和我担心的点对得上，我愿意继续了解。'",
@@ -962,10 +965,11 @@ export async function reviewHarnessCandidates(input: WithSeedingMode<HarnessRevi
      * 这个调用点与 apps/api 里断点恢复那个调用点必须给出同一套约束:同一份候选
      * 走两条路判出不同结果时,界面说合格、导出被拦,几乎无从排查。已经踩过一次——
      * service 那处漏传 bodyLength,长度检查静默按 medium 判。
-     * 缺省写成 `?? DEFAULT_HARNESS_SEEDING_MODE` 而不是直接写常量:调用方显式要
-     * brand_voice 时仍要听调用方的,默认值只在没人指定时生效。
+     * 模式的优先级与两处提示词完全一致:入口参数(调用方当次显式意图)> task 上冻结
+     * 的值(随 task_json 持久化,断点恢复读回来)> 默认。直接写常量会让显式传参和
+     * 冻结值双双失效,判定与下发就分叉了。
      */
-    seedingMode: input.seedingMode ?? DEFAULT_HARNESS_SEEDING_MODE,
+    seedingMode: input.seedingMode ?? input.task.seedingMode ?? DEFAULT_HARNESS_SEEDING_MODE,
     projectName: input.project.name,
   });
   const results = reconciledCandidates.map((candidate) => {

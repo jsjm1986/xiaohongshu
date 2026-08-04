@@ -17,6 +17,7 @@ import {
   type HarnessEvidenceSource,
   type HarnessImageSource,
   type HarnessModelProvider,
+  type HarnessSeedingMode,
   type HarnessTask,
   type HarnessToolTrace,
 } from '@content-agent/agent-harness-core';
@@ -287,6 +288,17 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
       }
       bodyLength = raw.bodyLength;
     }
+    /*
+     * 模式必须在这个字段白名单里显式解析。task 对象是逐字段构造的,不是把 raw 摊开,
+     * 所以前端传了而这里不接就会被静默丢掉 —— 界面上选了机构口吻,后端照旧按素人跑。
+     */
+    let seedingMode: HarnessSeedingMode | undefined;
+    if (raw.seedingMode !== undefined) {
+      if (raw.seedingMode !== 'peer_seeding' && raw.seedingMode !== 'brand_voice') {
+        throw new BadRequestException('seedingMode 只支持 peer_seeding 或 brand_voice');
+      }
+      seedingMode = raw.seedingMode;
+    }
     const task: HarnessTask = {
       topic,
       goal: optionalText(raw.goal, 'goal', 1_000) ?? '',
@@ -302,6 +314,7 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
       entryPoint,
       ...(tone ? { tone } : {}),
       bodyLength,
+      ...(seedingMode ? { seedingMode } : {}),
       ...(accountIdentity ? { accountIdentity } : {}),
       ...(callToAction ? { callToAction } : {}),
       ...(publishingNotes ? { publishingNotes } : {}),
@@ -899,13 +912,15 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
        * bodyLength 是既有缺陷:不传则校验器落到 medium,于是同一份候选在断点恢复
        * 读结果时按 medium 判长度,而生成时按项目真实档位判 —— 界面显示合格、导出
        * 却被拦,反过来也会发生,极难查。
-       * seedingMode 显式写出默认值而不是靠省略:这条路径上没有调用方能指定模式,
-       * 写出来让「按素人代发判定」在代码里可见,不必回到校验器才知道默认是什么。
+       * seedingMode 从 task 快照读而不是写死常量:模式随 task_json 持久化,断点恢复
+       * 必须用当初那个模式重判。写死常量时,一次 brand_voice 的运行恢复后会被按
+       * peer_seeding 判定 —— 界面说合格、导出被拦,或者反过来。历史运行没有这个
+       * 字段,`?? DEFAULT_HARNESS_SEEDING_MODE` 让它们照旧按素人代发判。
        * projectName 直接传 context.project.name,空白名交给校验器自己跳过品牌词
        * 检查(它有 .trim() 守卫),这里不编默认值 —— 猜出来的项目名会造成误报。
        */
       bodyLength: context.task.bodyLength ?? context.task.methodProfile?.bodyLength,
-      seedingMode: DEFAULT_HARNESS_SEEDING_MODE,
+      seedingMode: context.task.seedingMode ?? DEFAULT_HARNESS_SEEDING_MODE,
       projectName: context.project.name,
     });
     return checkpoint.candidates.map((candidate) => {
@@ -996,9 +1011,9 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
           revisionInstruction: job.run_kind === 'revision' ? job.instruction : undefined,
           candidates, readEvidenceIds: parseJson<string[]>(job.read_evidence_ids_json, []),
           provider, signal: controller.signal, onProgress: (value) => this.progress(id, value),
-          // 模式显式写出而不是靠省略取默认:省略时「这条路走的是哪个模式」只能去读
-          // 校验器内部的 ?? 才知道,而它和 checkpointResults 那处必须始终是同一个值。
-          seedingMode: DEFAULT_HARNESS_SEEDING_MODE,
+          // 模式取 task 快照里冻结的那个,与 checkpointResults 那处同一个来源。
+          // 显式写出而不是靠 runner 自己从 task 读:这条路走的是哪个模式要在调用点可见。
+          seedingMode: context.task.seedingMode ?? DEFAULT_HARNESS_SEEDING_MODE,
         });
         const priorUsage = parseJson<Record<string, number>>(job.usage_json, {});
         result = {
@@ -1018,7 +1033,7 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
           jobId: id, ...context, runMode: job.run_kind,
           revisionInstruction: job.run_kind === 'revision' ? job.instruction : undefined,
           // 与断点恢复那条路走同一个模式,否则同一个任务两次运行的判定标准不同。
-          seedingMode: DEFAULT_HARNESS_SEEDING_MODE,
+          seedingMode: context.task.seedingMode ?? DEFAULT_HARNESS_SEEDING_MODE,
           provider, signal: controller.signal,
           onProgress: (value) => this.progress(id, value),
           onTrace: (trace) => this.recordTrace(id, trace),

@@ -625,6 +625,53 @@ describe('素人代发模式按模式下发提示词', () => {
       .toContain("does not need a doctor's or clinic's full name");
   });
 
+  it('task 上冻结的模式在入口不传时生效', async () => {
+    /*
+     * 模式住在 task 上才能随 task_json 持久化:断点恢复读回 task 后必须还是当初那个
+     * 模式,否则一次 brand_voice 的运行恢复后会被按素人代发重判。这里断言的是
+     * 「入口不传、只有 task.seedingMode」时提示词真的走了 brand_voice 分支。
+     *
+     * 断言选 brand_voice 独有的那句机构口吻原文:它在 runner.ts 里只出现一次
+     * (BODY_VOICE_GUIDANCE.brand_voice),peer_seeding 分支拿不到它,所以
+     * `input.task.seedingMode` 那一段被去掉时会落回默认 peer_seeding 而变红。
+     */
+    const calls: HarnessModelRequest[] = [];
+    await runAgentHarness({
+      ...baseInput,
+      task: { ...baseInput.task, seedingMode: 'brand_voice' },
+      provider: scriptedProvider(protocolReplies([candidate(0, '标题一'), candidate(1, '标题二'), candidate(2, '标题三')]), calls),
+    });
+    const bodyDraft = calls[1]!.messages[0]!.content;
+    const packaging = calls[2]!.messages[0]!.content;
+    expect(bodyDraft, 'task 上冻结的 brand_voice 没有到达正文阶段')
+      .toContain("Use an accountable official/publisher voice that stands inside the reader's problem");
+    expect(bodyDraft, 'task 冻结 brand_voice,正文阶段却漏进了素人指引').not.toContain('This run is peer seeding');
+    expect(packaging, 'task 上冻结的 brand_voice 没有到达组包阶段').toContain('2-3 org_answer threads');
+  });
+
+  it('入口显式指定的模式优先于 task 上冻结的模式', async () => {
+    /*
+     * 优先级 `input.seedingMode ?? input.task.seedingMode ?? 默认`:入口参数是调用方
+     * 当次的显式意图,task 是冻结值。反转成 task 优先会让显式传参失效 —— 本文件另有
+     * 4 个用例靠显式传 brand_voice 测机构口吻,那些会一起变红,这条钉的是反方向:
+     * task 是 brand_voice、入口传 peer_seeding 时,提示词必须走素人分支。
+     */
+    const calls: HarnessModelRequest[] = [];
+    await runAgentHarness({
+      ...baseInput,
+      task: { ...baseInput.task, seedingMode: 'brand_voice' },
+      seedingMode: 'peer_seeding',
+      provider: scriptedProvider(protocolReplies([candidate(0, '标题一'), candidate(1, '标题二'), candidate(2, '标题三')]), calls),
+    });
+    const bodyDraft = calls[1]!.messages[0]!.content;
+    const packaging = calls[2]!.messages[0]!.content;
+    expect(bodyDraft, '入口传的 peer_seeding 被 task 上的 brand_voice 盖掉了')
+      .toContain('This run is peer seeding');
+    expect(bodyDraft, 'peer_seeding 下仍在下发机构口吻原句')
+      .not.toContain("Use an accountable official/publisher voice that stands inside the reader's problem");
+    expect(packaging, '组包阶段仍按 brand_voice 要求机构答疑').not.toContain('2-3 org_answer threads');
+  });
+
   it('brand_voice:两个阶段都逐字保持原有契约,不漏进任何素人指引', async () => {
     /*
      * 红线:brand_voice 下每一句提示词必须与改动前一致。素人指引漏进来会让机构口吻
