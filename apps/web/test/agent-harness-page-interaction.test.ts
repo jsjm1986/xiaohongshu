@@ -7,7 +7,7 @@ const source = readFileSync(new URL('../src/pages/AgentHarnessPage.tsx', import.
 test('Agent 创建主路径默认零必填，并把文本字段收进可选精调', () => {
   assert.ok(source.includes('零必填'));
   assert.ok(source.includes('让 Agent 开始创作 3 套方案'));
-  assert.ok(source.includes("useState<HarnessIntentId>('project_value')"));
+  assert.ok(source.includes("useState<HarnessIntentId>('ask_peers')"));
   assert.ok(source.includes('<details className="harness-fine-tune">'));
   assert.ok(!source.includes('<Field label="主题" required>'));
   assert.ok(!source.includes('disabled={!projectId || !form.topic.trim()}'));

@@ -373,7 +373,7 @@ export function AgentHarnessPage() {
   const navigate = useNavigate();
   const { projectId, currentProject, setProjectId } = useProjects();
   const [form, setForm] = useState<HarnessFineTune>(INITIAL_FINE_TUNE);
-  const [intentId, setIntentId] = useState<HarnessIntentId>('project_value');
+  const [intentId, setIntentId] = useState<HarnessIntentId>('ask_peers');
   const [methodProfileId, setMethodProfileId] = useState<HarnessMethodId>(DEFAULT_HARNESS_METHOD_ID);
   const [audienceStageId, setAudienceStageId] = useState<HarnessAudienceStageId>(getHarnessMethodProfile(DEFAULT_HARNESS_METHOD_ID).audienceStage);
   const [audienceStageAdjusted, setAudienceStageAdjusted] = useState(false);

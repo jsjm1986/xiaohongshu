@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { runAgentHarness } from './runner.js';
 import { HARNESS_BODY_LENGTH_TARGETS, HARNESS_PEER_BODY_MIN } from './methods.js';
@@ -1020,6 +1021,82 @@ describe('正文阶段解析器允许素人模式留空可选字段', () => {
         ...baseInput, seedingMode: mode,
         provider: scriptedProvider(protocolReplies(values)),
       }), `${mode} 下无引用的承接应被拒绝`).rejects.toThrow(/project bridge must overlap/u);
+    }
+  });
+});
+
+/*
+  成品形状校准按模式分叉的行为测试。
+
+  走真实 runAgentHarness 取回实际发给模型的 system message,不做源码断言:
+  源码断言对「选哪一支」一无所知 —— 把两支恒取 brand_voice 时源码里两段文本都还在,
+  照旧全绿。这正是 Task 6 踩过的坑。
+
+  两个阶段都必须断言:标题与正文由 calls[1](正文阶段)产出,标签由 calls[2](组包
+  阶段)产出。只插一个阶段等于白做。
+
+  下面用到的短语已逐个核对:①在目标常量里存在;②在同模式的其他常量里不存在;
+  ③在 runner.ts 全文只出现一次。
+*/
+describe('成品形状校准按模式分叉', () => {
+  /** 跑一轮取回两个阶段的 system message。不传 seedingMode 时走默认模式。 */
+  async function shapeMessages(seedingMode?: 'peer_seeding' | 'brand_voice') {
+    const calls: HarnessModelRequest[] = [];
+    await runAgentHarness({
+      ...baseInput,
+      ...(seedingMode ? { seedingMode } : {}),
+      provider: scriptedProvider(protocolReplies([candidate(0, '标题一'), candidate(1, '标题二'), candidate(2, '标题三')]), calls),
+    });
+    return { bodyDraft: calls[1]!.messages[0]!.content, packaging: calls[2]!.messages[0]!.content };
+  }
+
+  it('默认模式:两个阶段都收到形状校准,标签形状只在组包阶段', async () => {
+    const { bodyDraft, packaging } = await shapeMessages();
+    // 标题长度是正文阶段唯一能落地的地方:组包阶段被明令逐字复制,改不动标题。
+    expect(bodyDraft, '正文阶段没收到标题长度约束,模型会照自己的默认审美写 21 字标题')
+      .toContain('about 10 characters');
+    expect(bodyDraft, '正文阶段没收到正文长度校准').toContain('about 74 characters');
+    expect(bodyDraft, '校准仍带着「仅供描述」的免责措辞,模型不会当约束')
+      .not.toContain('Style calibration is descriptive only');
+    // 组包阶段也要收到:封面叠字与标签在这一阶段产出,形状同样会漂。
+    expect(packaging, '组包阶段没收到形状校准').toContain('Shape requirements measured from 67 real reference posts');
+    expect(packaging, '组包阶段没收到标签形状指引,而标签正是这一阶段的产出')
+      .toContain('Hashtags: about 5 per post');
+    expect(packaging, '标签指引没禁行业词 —— 实跑 44% 的标签带「医美/轻医美/手术」')
+      .toContain('Never use industry-register tags');
+  });
+
+  it('brand_voice:两个阶段都不含素人形状约束,且原「仅供描述」句逐字保留', async () => {
+    /*
+     * 红线:brand_voice 下这句必须与改动前逐字一致 —— 整句比对而不是抓片段,
+     * 片段比对时句尾被改掉照旧全绿。
+     */
+    const { bodyDraft, packaging } = await shapeMessages('brand_voice');
+    expect(packaging, 'brand_voice 的风格校准原句被改动').toContain(
+      'Style calibration is descriptive only: in the non-random 70-post reference corpus, title length has median about 8 characters (observed range 1-22), body text median about 77 characters (observed range 0-267), 48 of 70 bodies are at most 120 characters, the median is about 2 paragraphs, and the median image count is 1. Use this only to favor compact shape, direct openings, colloquial rhythm, and short asymmetric comments. It is not a quality threshold, platform rule, causal claim, or source of project facts. Never copy distinctive wording, people, experiences, outcomes, places, prices, or comments from the corpus.');
+    // 正文阶段改动前本来就没有这句,加进去等于给 brand_voice 添了新指令 —— 同样是行为变更。
+    expect(bodyDraft, 'brand_voice 的正文阶段被新增了风格校准句,这是行为变更')
+      .not.toContain('Style calibration is descriptive only');
+    for (const [label, message] of [['正文', bodyDraft], ['组包', packaging]] as const) {
+      expect(message, `${label}阶段漏进了素人的标题长度约束`).not.toContain('about 10 characters');
+      expect(message, `${label}阶段漏进了素人的形状约束`)
+        .not.toContain('Shape requirements measured from 67 real reference posts');
+      expect(message, `${label}阶段漏进了素人的标签形状指引`).not.toContain('Hashtags: about 5 per post');
+    }
+  });
+
+  it('形状校准里的方法论词表与提示词、校验层是同一份', async () => {
+    /*
+     * 提示词说「不许写清单」而校验层按另一份词表判,模型被要求的和被判定的就分叉。
+     * 这里从 validation.ts 解析 PLANNING_VOCABULARY,逐词要求出现在正文阶段提示词里 ——
+     * 任一侧加减词都会红。
+     */
+    const { bodyDraft } = await shapeMessages('peer_seeding');
+    const validationSource = readFileSync(new URL('./validation.ts', import.meta.url), 'utf8');
+    const planning = validationSource.match(/const PLANNING_VOCABULARY = \/\(([^)]+)\)\/u;/u);
+    expect(planning, '没解析到 PLANNING_VOCABULARY').toBeTruthy();
+    for (const word of planning![1]!.split('|')) {
+      expect(bodyDraft, `校验层会因「${word}」提示,提示词却没告知模型`).toContain(word);
     }
   });
 });

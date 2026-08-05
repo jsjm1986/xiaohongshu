@@ -1,7 +1,22 @@
 import { DEFAULT_HARNESS_METHOD_ID, HARNESS_METHOD_PROFILES, getHarnessMethodProfile, type HarnessMethodId } from '@content-agent/agent-harness-core/methods';
 import type { AgentHarnessCreateInput } from '../types.js';
 
-export type HarnessIntentId = 'decision' | 'misunderstanding' | 'checklist' | 'project_value';
+/*
+ * 创作体裁。取自用户 67 篇真实对标语料(按笔记链接去重)的实测形态分布,
+ * 不是方法论推演出来的分类。
+ *
+ * 换掉旧四项(decision / misunderstanding / checklist / project_value)的原因:
+ * 那四项全是方法论导向 —— checklist 的 CTA 直接写着「邀请读者保存清单,并从第一项
+ * 开始核验」,而语料里「清单/核验/避坑/对照/思路」在标题与正文合计只命中 1 篇
+ * (那 1 篇是正文里的「攻略」),没有一篇是清单帖。意图本身在要求方法论,
+ * 所以下游放开多少约束都没用。
+ *
+ * 语料实测占比(按标题+正文特征归类,n=67):
+ *   求助/讨论 15%、面诊/记录 10%、劝退/被拒 7%、结果/感受 7%,其余约 60% 是日常记录。
+ * 日常记录这一档占比最大却在前一版方案里没有对应项,故单独立项 —— 否则最常见的
+ * 那种形态没有入口可选。
+ */
+export type HarnessIntentId = 'ask_peers' | 'consult_log' | 'turned_away' | 'after_feeling' | 'daily_log';
 export type HarnessAudienceStageId = 'collecting' | 'discovering' | 'comparing' | 'hesitating' | 'ready';
 
 export interface HarnessQuickOption<T extends string> {
@@ -12,10 +27,11 @@ export interface HarnessQuickOption<T extends string> {
 }
 
 export const HARNESS_INTENTS: readonly HarnessQuickOption<HarnessIntentId>[] = [
-  { id: 'decision', title: '帮读者做决定', description: '讲清影响判断的条件，让读者知道下一步先核验什么' },
-  { id: 'misunderstanding', title: '讲清一个误区', description: '从常见误解切入，给出更稳妥的判断方式' },
-  { id: 'checklist', title: '给一份行动清单', description: '把复杂问题拆成可以逐项照着做的步骤' },
-  { id: 'project_value', title: '讲出项目价值', description: '从真实资料里找一个具体特色，写成短、口语、有发布感的成品', recommended: true },
+  { id: 'ask_peers', title: '求问过来人', description: '用一个具体的窄问题起帖，答案留给评论区补', recommended: true },
+  { id: 'consult_log', title: '面诊/看诊记录', description: '记录去了哪、聊了什么、当场判断了什么' },
+  { id: 'turned_away', title: '被劝退或没做', description: '本来要做却被拦下来，用真实经过反向说明判断' },
+  { id: 'after_feeling', title: '做完的感受', description: '一个具体生活片段里的变化，不写方法不写参数' },
+  { id: 'daily_log', title: '日常记录', description: '就记一笔当天的状态或一个小场景，不给结论' },
 ] as const;
 
 export const HARNESS_AUDIENCE_STAGES: readonly HarnessQuickOption<HarnessAudienceStageId>[] = [
@@ -26,26 +42,39 @@ export const HARNESS_AUDIENCE_STAGES: readonly HarnessQuickOption<HarnessAudienc
   { id: 'ready', title: '准备采取下一步', description: '需要行动前核验路径，降低实际选择成本' },
 ] as const;
 
+/*
+ * 每个体裁的目标/语气/收尾。
+ *
+ * callToAction 一律不含「保存清单/逐项核验/对照着问」这类措辞:67 篇语料里
+ * 「清单」「核验」「对照」「避坑」「思路」「标准」出现 0 次(只有「攻略」1 次,
+ * 且在正文而非标题)。原 checklist 意图的收尾直接写着「邀请读者保存清单，并从第一项
+ * 开始核验」,那是产出读起来像策划案的直接来源之一。
+ */
 const INTENT_SETTINGS: Record<HarnessIntentId, Pick<AgentHarnessCreateInput, 'goal' | 'tone' | 'callToAction'>> = {
-  decision: {
-    goal: '帮助读者看懂会改变判断的关键条件，并知道下一步先核验什么。',
-    tone: '口语、克制、具体，不制造焦虑，不替读者下结论。',
-    callToAction: '引导读者对照自身情况，先补齐一个会改变决定的关键信息。',
+  ask_peers: {
+    goal: '用一个具体的窄问题起帖，让有经验的人在评论区把答案补出来。',
+    tone: '口语、短、像随手发的，一句话说清自己卡在哪。',
+    callToAction: '自然收尾，可以直接把问题再问一次，不引导保存或收藏。',
   },
-  misunderstanding: {
-    goal: '指出一个有资料依据的常见误区，并给出更可靠的判断方法。',
-    tone: '反常识但不夸张，先共情再纠偏，不制造对立。',
-    callToAction: '邀请读者先检查自己是否忽略了关键条件，再继续判断。',
+  consult_log: {
+    goal: '记录一次面诊或看诊的真实经过：去了哪、对方说了什么、自己当场怎么想。',
+    tone: '像发日记，按时间顺序说，细节具体但不做总结。',
+    callToAction: '停在还没决定的地方，不给行动清单。',
   },
-  checklist: {
-    goal: '把复杂问题整理成读者可以直接照着核验的行动清单。',
-    tone: '清楚、简洁、有步骤感，每一步都能执行。',
-    callToAction: '邀请读者保存清单，并从第一项开始核验。',
+  turned_away: {
+    goal: '写一次本来要做却没做成的经过，让读者自己看出判断标准。',
+    tone: '有情绪但不抱怨，讲事实不讲道理。',
+    callToAction: '停在自己也还没想明白的地方，不替读者下结论。',
   },
-  project_value: {
-    goal: '从项目真实资料中找到一个具体、有证据支持且能回应真实顾虑的价值点，写成可直接阅读的种草成品。',
-    tone: '短、口语、有现场感，先接顾虑再讲项目差异；不写说明书、论文或审核报告。',
-    callToAction: '用自然的一句话邀请读者继续了解或提出自己的具体顾虑，不使用核验清单式收尾。',
+  after_feeling: {
+    goal: '从一个具体生活片段切入，讲状态变化，不讲方法和参数。',
+    tone: '轻、具体、有画面，像随手记一笔。',
+    callToAction: '一句自然的感受收尾，不邀请咨询也不引导互动。',
+  },
+  daily_log: {
+    goal: '记一笔当天的真实状态或一个小场景，不追求完整，也不给读者结论。',
+    tone: '短、随手、有当天的具体细节，像发给熟人看的。',
+    callToAction: '写完就停，不总结也不邀请任何动作。',
   },
 };
 
@@ -91,7 +120,7 @@ export interface ResolveHarnessQuickStartInput {
 }
 
 export function resolveHarnessQuickStart(input: ResolveHarnessQuickStartInput): AgentHarnessCreateInput {
-  const intentId = input.intentId ?? 'project_value';
+  const intentId = input.intentId ?? 'ask_peers';
   const methodProfile = getHarnessMethodProfile(input.methodProfileId ?? DEFAULT_HARNESS_METHOD_ID);
   const audienceStageId = input.audienceStageId ?? methodProfile.audienceStage;
   const intent = HARNESS_INTENTS.find((item) => item.id === intentId)!;
@@ -105,7 +134,14 @@ export function resolveHarnessQuickStart(input: ResolveHarnessQuickStartInput): 
     methodProfileId: methodProfile.id,
     audienceStage: audienceStageId,
     entryPoint: methodProfile.entryPoint,
-    bodyLength: intentId === 'project_value' ? 'short' : methodProfile.bodyLength,
+    /*
+     * 五个体裁一律走 short，不再按方法档取值。
+     *
+     * 依据：67 篇语料正文（去空白后）中位 74 字，落在 short 档；
+     * 换成 medium/long 会把下限抬到 120 字以上，模型只能靠补方法论段落填满，
+     * 那恰好是本次要消掉的形状。
+     */
+    bodyLength: 'short',
     publishingNotes: '主文案必须是短、口语、有发布感的成品；SLA、证据编号、审核状态和运营规则只放审计字段，不写进标题、正文、图片叠字或 CTA。',
     ...INTENT_SETTINGS[intentId],
     ...AUDIENCE_SETTINGS[audienceStageId],
