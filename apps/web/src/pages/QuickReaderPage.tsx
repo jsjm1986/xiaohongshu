@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ChevronLeft, ChevronRight, RotateCcw } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, ChevronLeft, ChevronRight, RotateCcw } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Button, useToast } from '../components/Ui';
 import { CandidateSwitch } from '../components/quick/CandidateSwitch';
@@ -9,7 +9,6 @@ import { ReaderDetail, type ExportFormat } from '../components/quick/ReaderDetai
 import { WaitCard } from '../components/quick/WaitCard';
 import { api } from '../lib/api';
 import { clampCandidateIndex } from '../lib/note-view';
-import { readerCandidateToMarkdown } from '../lib/publish-copy';
 import { readerPath } from '../lib/quick-nav';
 import { areaPath, QUICK_HOME_PATH } from '../lib/quick-routes';
 import { failureReason } from '../lib/retry-plan';
@@ -41,6 +40,8 @@ export function QuickReaderPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [revisingId, setRevisingId] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
+  const [manualConfirmChecked, setManualConfirmChecked] = useState(false);
+  const [manualConfirming, setManualConfirming] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   /** 候选下标:预览区(NoteCard)与工作区(ReaderDetail)共用,所以归页面持有 */
   const [activeIndex, setActiveIndex] = useState(0);
@@ -135,6 +136,30 @@ export function QuickReaderPage() {
    * 文案在 revisionFailureNotice(纯函数,有测试)。
    */
   const failureNotice = revisionFailureNotice(job?.activeRevision);
+  const activeCandidate = job?.candidates?.[clampCandidateIndex(activeIndex, job.candidates.length)];
+  const publishable = activeCandidate?.validation?.valid === true;
+  const manuallyConfirmed = activeCandidate?.manualDeliveryConfirmation?.confirmed === true;
+  const deliverable = publishable || manuallyConfirmed;
+
+  useEffect(() => {
+    // 人工确认与本地勾选都只属于当前候选，切换版本时不得继承。
+    setManualConfirmChecked(false);
+  }, [activeCandidate?.id]);
+
+  const confirmManualDelivery = async () => {
+    if (!activeCandidate || publishable || manuallyConfirmed || !manualConfirmChecked || manualConfirming) return;
+    setManualConfirming(true);
+    try {
+      await api.generations.confirmManualDelivery(jobId, activeCandidate.id);
+      setJob(await api.generations.reader(jobId));
+      setManualConfirmChecked(false);
+      toast.push('已记录人工交付确认，当前候选可以复制与导出');
+    } catch (e) {
+      fail(e, '人工交付确认失败');
+    } finally {
+      setManualConfirming(false);
+    }
+  };
 
   const retry = async () => {
     if (!project || !job) return;
@@ -153,16 +178,11 @@ export function QuickReaderPage() {
   };
 
   const exportAs = (candidate: ReaderCandidate, format: ExportFormat) => {
-    if (format === 'markdown') {
-      const blob = new Blob([readerCandidateToMarkdown(candidate)], { type: 'text/markdown;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${job?.topic || '文案'}-${candidate.candidateIndex + 1}.md`;
-      a.click();
-      URL.revokeObjectURL(url);
+    if (!(candidate.validation?.valid === true || candidate.manualDeliveryConfirmation?.confirmed === true)) {
+      toast.push('请先完成人工交付确认', 'error');
       return;
     }
+    // 四种格式统一走服务端：人工确认记录与原始校验结论会进入导出审计附录。
     window.location.assign(api.generations.exportUrl(jobId, candidate.id, format));
   };
 
@@ -296,15 +316,50 @@ export function QuickReaderPage() {
 
             <NoteAlertBar
               validation={current.validation}
+              manuallyConfirmed={current.manualDeliveryConfirmation?.confirmed === true}
               onSeeDetail={() => workbenchRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
             />
 
-            <NoteCard candidate={current} job={job} projectName={project?.name} />
+            {current.validation?.valid !== true && (
+              <section className={`manual-delivery-confirmation qc-manual-delivery${current.manualDeliveryConfirmation?.confirmed ? ' is-confirmed' : ''}`} aria-label="人工交付确认">
+                <div>
+                  <strong>{current.manualDeliveryConfirmation?.confirmed ? '当前候选已由你人工确认交付' : '人工核对后允许复制与导出'}</strong>
+                  <p>自动校验结果不会改变。确认仅绑定当前用户与当前候选；改稿生成新候选后需要重新确认。</p>
+                  {current.manualDeliveryConfirmation?.confirmed && (
+                    <small>确认时间：{new Date(current.manualDeliveryConfirmation.confirmedAt).toLocaleString()}</small>
+                  )}
+                </div>
+                {!current.manualDeliveryConfirmation?.confirmed && (
+                  <div className="manual-delivery-confirmation__action">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={manualConfirmChecked}
+                        onChange={(event) => setManualConfirmChecked(event.target.checked)}
+                      />
+                      <span>我已逐条核对事实、证据、身份与风险，并承担本次人工交付决定。</span>
+                    </label>
+                    <Button
+                      variant="secondary"
+                      icon={<CheckCircle2 size={15} />}
+                      disabled={!manualConfirmChecked}
+                      loading={manualConfirming}
+                      onClick={() => void confirmManualDelivery()}
+                    >
+                      确认并解锁
+                    </Button>
+                  </div>
+                )}
+              </section>
+            )}
+
+            <NoteCard candidate={current} job={job} projectName={project?.name} copyEnabled={deliverable} />
 
             <div className="xhs-workbench" ref={workbenchRef}>
               <ReaderDetail
                 job={job}
                 activeIndex={activeIndex}
+                deliverable={deliverable}
                 onExport={exportAs}
                 onRevise={revise}
                 // 受理返回后本地 revisingId 就清了,但任务还在跑;按钮要继续锁到终态,

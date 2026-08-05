@@ -20,7 +20,7 @@ import {
   type ResolvedGenerationConfig,
 } from '@content-agent/agent-core';
 import {
-  BadRequestException, HttpException, Inject, Injectable, NotFoundException,
+  BadRequestException, HttpException, Inject, Injectable, InternalServerErrorException, NotFoundException,
   type OnModuleDestroy, type OnModuleInit,
 } from '@nestjs/common';
 import { AuditService } from './audit.service.js';
@@ -830,7 +830,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
    * 要的是判断依据(句子级标注、缺口落地台账、候选表达轴)——后者旧接口压根不返回。
    * 实测同一任务 1.10 MB → 35 KB。
    */
-  readerView(jobId: string): Record<string, unknown> {
+  readerView(jobId: string, deliveryConfirmationUserId?: string): Record<string, unknown> {
     const row = this.jobRow(jobId);
     return {
       id: row.id,
@@ -848,9 +848,13 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       activeRevision: this.revisions.activeFor(row.id) ?? this.revisions.latestFor(row.id),
       // 只有 completed 才有候选;其余状态给空数组,前端不用分支判 undefined。
       candidates: row.status === 'completed'
-        ? this.packageRows(jobId).map((item) =>
-            readerView(normalizeContentPackageForApi(parseJson<ContentPackage>(item.content_json, {} as ContentPackage))),
-          )
+        ? this.packageRows(jobId).map((item) => {
+            const content = normalizeContentPackageForApi(parseJson<ContentPackage>(item.content_json, {} as ContentPackage));
+            const confirmation = deliveryConfirmationUserId
+              ? this.manualDeliveryConfirmation(content.id, deliveryConfirmationUserId) ?? undefined
+              : undefined;
+            return readerView(content, confirmation);
+          })
         : [],
     };
   }
@@ -911,7 +915,11 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
         },
       });
     }
-    return this.get(jobId, principal.userId);
+    const confirmation = this.manualDeliveryConfirmation(content.id, principal.userId);
+    if (!confirmation) throw new InternalServerErrorException('人工交付确认未能保存');
+    // 只回最小确认结果。SaaS 极简页也能调用本端点，不能借 POST 响应取得完整
+    // GenerationJob 中的专家字段；调用方按自己的产品界面刷新 get 或 reader。
+    return { jobId, candidateId: content.candidateId, confirmation };
   }
 
   /**

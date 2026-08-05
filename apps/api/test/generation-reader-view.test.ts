@@ -135,6 +135,13 @@ test('字段集与白名单完全相等,不多不少', () => {
   assert.deepEqual(Object.keys(view).sort(), [...CANDIDATE_KEYS].sort());
 });
 
+test('当前用户的人工交付确认可进入轻量投影且不改写校验结论', () => {
+  const confirmation = { confirmed: true as const, confirmedAt: '2026-08-05T00:00:00.000Z', confirmedBy: 'user-1' };
+  const view = readerView(pkg(), confirmation);
+  assert.deepEqual(view.manualDeliveryConfirmation, confirmation);
+  assert.equal(view.validation.valid, false);
+});
+
 test('完整版专家字段一个都不出现', () => {
   const view = readerView(pkg()) as unknown as Record<string, unknown>;
   for (const key of FORBIDDEN_KEYS) {

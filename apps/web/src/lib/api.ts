@@ -1471,7 +1471,11 @@ export const api = {
         body: JSON.stringify({ candidateId, instruction }),
       }),
     confirmManualDelivery: (id: string, candidateId: string) =>
-      request<GenerationJob>(
+      request<{
+        jobId: string;
+        candidateId: string;
+        confirmation: { confirmed: true; confirmedAt: string; confirmedBy: string };
+      }>(
         `/api/generations/${encodeURIComponent(id)}/candidates/${encodeURIComponent(candidateId)}/manual-delivery-confirmation`,
         { method: "POST", body: JSON.stringify({ acknowledged: true }) },
       ),

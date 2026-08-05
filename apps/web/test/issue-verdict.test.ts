@@ -133,11 +133,12 @@ test("可发布且带建议项是主路径:advisory 不能算进 blocking", () =
   assert.equal(verdict.blocking.length, 0);
 });
 
-test("导出门槛理由:可发布返回 null,不可发布点明能先导 Markdown", () => {
+test("导出门槛理由:可发布返回 null,不可发布指向人工确认且保留自动结论", () => {
   assert.equal(exportBlockReason(issueVerdict({ valid: true, issues: [] })), null);
   const reason = exportBlockReason(
     issueVerdict({ valid: false, issues: [{ code: "ungrounded_fact", severity: "error" }] }),
   );
-  assert.match(reason ?? "", /1 项必须处理/);
-  assert.match(reason ?? "", /Markdown/);
+  assert.match(reason ?? "", /1 项必须核对/);
+  assert.match(reason ?? "", /完成人工交付确认后可复制与导出/);
+  assert.match(reason ?? "", /自动校验结论仍保留/);
 });

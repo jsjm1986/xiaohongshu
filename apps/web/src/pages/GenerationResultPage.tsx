@@ -227,8 +227,8 @@ export function GenerationResultPage() {
     if (!job || !selected || publishable || manuallyConfirmed || !manualConfirmChecked || manualConfirming) return;
     setManualConfirming(true);
     try {
-      const updated = await api.generations.confirmManualDelivery(job.id, selected.id);
-      setJob(updated);
+      await api.generations.confirmManualDelivery(job.id, selected.id);
+      setJob(await api.generations.get(job.id));
       setManualConfirmChecked(false);
       toast.push("已记录人工交付确认，当前候选可以复制与导出");
     } catch (error) {

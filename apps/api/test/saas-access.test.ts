@@ -59,6 +59,8 @@ const cases: Array<[string, string, boolean]> = [
   ['GET', '/api/generations/j1/trace', true],
   ['POST', '/api/generations/j1/trace', false],
   ['GET', '/api/generations/j1/candidates/c1/export', true],
+  ['POST', '/api/generations/j1/candidates/c1/manual-delivery-confirmation', true],
+  ['GET', '/api/generations/j1/candidates/c1/manual-delivery-confirmation', false],
   ['PATCH', '/api/generations/j1', false],
   // 批量生成只放行控制器实际提供的 GET/POST
   ['GET', '/api/generation-batches', true],

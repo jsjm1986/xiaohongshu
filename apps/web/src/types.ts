@@ -1077,6 +1077,12 @@ export interface CandidateValidation {
 
 export interface ReaderCandidate {
   id: string;
+  /** 当前用户对当前候选的人工交付确认；不改变 validation.valid。 */
+  manualDeliveryConfirmation?: {
+    confirmed: true;
+    confirmedAt: string;
+    confirmedBy: string;
+  };
   packageId: string;
   candidateIndex: number;
   seed: number;

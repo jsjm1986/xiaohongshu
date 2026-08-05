@@ -6,6 +6,8 @@ interface Props {
   validation?: VerdictInput;
   /** 点「看详情」滚到下方工作区的校验全文 */
   onSeeDetail: () => void;
+  /** 自动校验未通过，但当前用户已确认当前候选可人工交付。 */
+  manuallyConfirmed?: boolean;
 }
 
 /**
@@ -21,7 +23,7 @@ interface Props {
  * 三态而不是两态:能不能导出看 publishable,不看 warning 数。实测 229 个候选里 46 个
  * 是 valid=true 且带 warning——这些可以直接发,拿黄条写「N 项建议核对」会被读成没过校验。
  */
-export function NoteAlertBar({ validation, onSeeDetail }: Props) {
+export function NoteAlertBar({ validation, onSeeDetail, manuallyConfirmed = false }: Props) {
   const verdict = issueVerdict(validation);
   const blocking = verdict.blocking.length;
   const advisory = verdict.advisory.length;
@@ -47,7 +49,16 @@ export function NoteAlertBar({ validation, onSeeDetail }: Props) {
     );
   }
 
-  // 三态:未通过。有 error 时点明是硬门槛;没 error 也要说清导不出,别只说「建议」。
+  // 三态:自动校验未通过。人工确认只改变交付权限，不改写自动结论。
+  if (manuallyConfirmed) {
+    return (
+      <div className="xhs-alert xhs-alert--warn">
+        <Info size={13} />
+        <span>自动校验未通过 · 已人工确认，可复制与导出</span>
+        <button type="button" className="xhs-alert__link" onClick={onSeeDetail}>看详情</button>
+      </div>
+    );
+  }
   return (
     <div className={`xhs-alert xhs-alert--${blocking > 0 ? 'error' : 'warn'}`}>
       {blocking > 0 ? <AlertTriangle size={13} /> : <Info size={13} />}
