@@ -18,7 +18,7 @@ const CANDIDATE_KEYS = [
   'id', 'packageId', 'candidateIndex', 'seed',
   'title', 'body', 'tags', 'imageBrief',
   'commentDisclaimer', 'commentOwnedFirstComment', 'commentUncoveredGaps', 'comments',
-  'validation', 'reasoning', 'gapLedger', 'gapCards',
+  'validation', 'commentEditorialAssessment', 'reasoning', 'gapLedger', 'gapCards',
   'sources', 'unknowns', 'strategy', 'deploymentPlan',
 ];
 
@@ -87,7 +87,8 @@ function pkg(overrides: Record<string, unknown> = {}): ContentPackage {
     ] as unknown as ContentPackage['unknowns'],
     conflicts: [],
     diagnostics: [{ name: 'hard_constraints', status: 'pass', explanation: 'ok', score: 1 }] as unknown as ContentPackage['diagnostics'],
-    validation: { valid: false, repairAttempts: 1, issues: [{ code: 'ungrounded_fact', severity: 'error', message: 'no evidence' }] },
+    validation: { valid: false, qualityStatus: 'blocked', repairAttempts: 1, issues: [{ code: 'ungrounded_fact', severity: 'error', disposition: 'block', origin: 'deterministic', message: 'no evidence', repairable: false }] },
+    commentEditorialAssessment: { status: 'review', reasons: ['职责冲突'], summary: '仍需复核。' },
     revisions: [],
     deploymentPlan: { postingIdentity: 'author', ownedFirstComment: true } as unknown as ContentPackage['deploymentPlan'],
     dialogueThreads: [{ id: 't-1', personaRole: 'skeptical_returning_reader', simulated: true } as unknown as NonNullable<ContentPackage['dialogueThreads']>[number]],
@@ -217,6 +218,10 @@ test('校验结论原样带出,让前端自己按严重度分级', () => {
   assert.equal(view.validation.valid, false);
   assert.equal(view.validation.issues[0]!.severity, 'error');
   assert.equal(view.validation.issues[0]!.code, 'ungrounded_fact');
+  assert.equal(view.validation.qualityStatus, 'blocked');
+  assert.equal(view.validation.issues[0]!.disposition, 'block');
+  assert.equal(view.validation.issues[0]!.origin, 'deterministic');
+  assert.deepEqual(view.commentEditorialAssessment, { status: 'review', reasons: ['职责冲突'], summary: '仍需复核。' });
 });
 
 test('未知问题只带人能读的三项,不带内部 id/requiredFor', () => {

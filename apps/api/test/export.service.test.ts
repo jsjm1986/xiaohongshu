@@ -572,6 +572,37 @@ test('rejects malformed packages and unsupported formats', async () => {
   );
 });
 
+test('manual delivery confirmation exports a blocked package without changing validation truth', async () => {
+  const service = new ExportService();
+  const blocked = structuredClone(contentPackage) as any;
+  blocked.validation = {
+    valid: false,
+    qualityStatus: 'blocked',
+    repairAttempts: 2,
+    issues: [{ severity: 'error', code: 'blocked', message: 'blocked' }],
+  };
+  const confirmation = {
+    confirmed: true as const,
+    confirmedAt: '2026-08-05T12:00:00.000Z',
+    confirmedBy: 'user-1',
+    jobId: 'job-1',
+    candidateId: String(blocked.candidateId),
+  };
+  const markdown = (await service.exportPackage(blocked, 'markdown', {
+    manualDeliveryConfirmation: confirmation,
+  })).toString('utf8');
+  assert.match(markdown, /## 人工交付确认/u);
+  assert.match(markdown, /自动校验状态保持未通过/u);
+  assert.match(markdown, /不代表系统校验通过/u);
+
+  const json = JSON.parse((await service.exportPackage(blocked, 'json', {
+    manualDeliveryConfirmation: confirmation,
+  })).toString('utf8'));
+  assert.equal(json.validation.valid, false);
+  assert.equal(json.manualDeliveryConfirmation.confirmed, true);
+  assert.equal(json.manualDeliveryConfirmation.confirmedBy, 'user-1');
+});
+
 test('renders v1.1 packages in the two-part executive + audit appendix layout', async () => {
   const v11 = structuredClone(contentPackage) as any;
   v11.schemaVersion = '1.1';

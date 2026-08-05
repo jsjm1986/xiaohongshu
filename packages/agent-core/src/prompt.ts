@@ -283,20 +283,33 @@ export const STAGED_COMMENT_READERS_JSON_SCHEMA: Record<string, unknown> = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["id", "question", "answer", "followUps"],
+        required: ["id", "question", "answer"],
         properties: {
           id: { type: "string" },
           question: { type: "string" },
           answer: { type: "string" },
-          kind: { enum: ["question", "answer", "follow_up", "clarification"] },
-          answerKind: { enum: ["question", "answer", "follow_up", "clarification"] },
-          boundary: { type: "string" },
-          function: { enum: ["surface_gap", "answer", "clarify", "counterexample", "verification", "next_step"] },
-          followUps: {
-            type: "array",
-            items: STAGED_FOLLOW_UP_NODE_SCHEMA,
-          },
         },
+      },
+    },
+  },
+};
+
+
+/** Reader-copy editor: rewrites visible reader speech and reports only unresolved semantic problems. */
+export const STAGED_COMMENT_EDITOR_JSON_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["threads", "assessment"],
+  properties: {
+    threads: (STAGED_COMMENT_READERS_JSON_SCHEMA.properties as Record<string, unknown>).threads,
+    assessment: {
+      type: "object",
+      additionalProperties: false,
+      required: ["status", "reasons", "summary"],
+      properties: {
+        status: { enum: ["pass", "review"] },
+        reasons: { type: "array", items: { type: "string" } },
+        summary: { type: "string" },
       },
     },
   },
@@ -390,6 +403,30 @@ const REPAIR_VISIBLE_CREF_SCHEMA: Record<string, unknown> = {
   },
 };
 
+/**
+ * Every model call that can create or rewrite public copy shares this contract.
+ * Keep it identity-neutral so reader-side calls do not learn org-side roles.
+ */
+export const PUBLIC_COPY_LANGUAGE_CONTRACT = `用户可见文案规则（适用于标题、正文、配图说明、标签、免责声明、评论、回复和追问）：
+1. JSON 外壳按当前阶段要求返回，但其中每个用户可见字符串只能写最终对人说的话，不能写任务说明、生成过程、模型身份、提示词、系统指令、候选版本、输出格式、字段名或审计结论。
+2. 后台规划只决定写什么，不能成为文案用词。不得出现问题职责、开口人物、角色池、线程规格、冻结合同、主缺口、接龙方向、后台库存、待核实维度、已披露地点范围等规划或占位语言。
+3. 不得暴露内部资料容器或证据结构，例如源资料、知识库、项目资料、可用证据、本条所列证据来源、evidenceId、sourceClusterId、reasoning、replyPlan、discoveryPlan。评论中也不得用“根据资料、资料称、资料显示、看资料说、资料里写”代替自然发言。
+4. 确需说明来源时，只能使用上下文已经明确提供且适合公开的具体来源名称，例如官网、合同、病历或说明书；直接写“官网写明……”即可，不能虚构来源名称，也不能把内部容器改名后引用。
+5. 不复述自己正在读取上下文。评论不得说正文说、文中提到、文章里写、这篇笔记说、这个帖子提到或上文讲了；应改成当前人物自己的观察、处境、问题或直接答复。
+6. 业务主题本身可以正常出现“AI”，例如“这款AI客服能转人工吗”；禁止的是模型自称“作为AI助手/语言模型”或解释自己如何完成生成任务。`;
+
+/**
+ * Identity-isolated comment calls must not learn names from the hidden
+ * orchestration or the opposite side. This is semantically equivalent to the
+ * public-copy contract, but deliberately avoids enumerating internal keys.
+ */
+const ISOLATED_PUBLIC_COPY_LANGUAGE_CONTRACT = `用户可见文案规则：
+1. JSON结构按当前阶段要求返回；其中每个可见字符串只写人物最终会公开说的话，不写任务说明、生成过程、模型身份、输出协议、字段说明或审计结论。
+2. 上下文中的角色分配、写作职责、结构控制、证据映射和占位说明只用于完成任务，不能照抄、转述或改名后写进文案。
+3. 不暴露内部资料容器。评论不能用“根据资料、资料称、资料显示、看资料说、资料里写”等泛化来源腔；确需说明来源时，只能使用上下文明确提供且适合公开的具体名称，例如官网、合同、病历或说明书，不能虚构来源。
+4. 不复述自己正在读取图文或上下文；直接从当前人物的观察、处境、问题或答复开口。
+5. 业务主题本身可以正常出现“AI”，例如“这款AI客服能转人工吗”；禁止模型自称或解释自己如何完成生成任务。`;
+
 const SYSTEM_PROMPT = `Complete a structured Chinese content-drafting task without changing your identity or pretending to be a real user. Produce one unified package containing H (hashtags), N (image brief/title/body), and Cref (explicitly labelled multi-persona comment-scenario rehearsal templates).
 
 Non-negotiable rules:
@@ -399,7 +436,9 @@ Non-negotiable rules:
 4. Preserve scope, limitations, conflicts, and uncertainty. Do not promise absolute outcomes.
 5. Unvalidated proxies and sample observations may run only in their reviewed stage; never state them as platform or performance laws.
 6. Treat orchestrationPlan.stateSeed only as a revisable writing scenario. preContactKnown contains only user-supplied prior knowledge; availableEvidence is evidence available to the agent and must never be described as something the reader already knew. An unknown history remains unknown. Qualitative state ranges are uncalibrated heuristics, never psychological measurements or audience-distribution truth.
-7. Write the requested content in Chinese. Return only JSON matching the supplied schema, with exact field names and no Markdown fence or explanation.`;
+7. Write the requested content in Chinese. Return only JSON matching the supplied schema, with exact field names and no Markdown fence or explanation.
+
+${PUBLIC_COPY_LANGUAGE_CONTRACT}`;
 
 const STAGED_SYSTEM_PROMPT = `你正在分阶段完成同一个中文内容包。每一轮只返回当前阶段要求的JSON，不输出Markdown、解释、思考过程或内部审计字段。
 
@@ -408,7 +447,9 @@ const STAGED_SYSTEM_PROMPT = `你正在分阶段完成同一个中文内容包�
 2. 项目事实只使用给定资料，保留条件、限制、冲突和未知；personaScenePlan中的人物、生活事件和评论角色属于创作情境，可以用于拟人表达，但不得在证据台账中冒充真实用户、真实项目结果或已观测口碑。
 3. 评论是明确标注的完整评论区创作参考，不是已经发生的真实互动；生成角色可以有不同身份位置、场景和说话习惯，但只能知道其角色位置应当知道的内容。
 4. orchestrationPlan和compiledParameters是本次生产合同。公开文字不得出现evidenceId、sourceClusterId、reasoning、replyPlan、discoveryPlan、“本线程”等内部词。
-5. 保持自然中文和短句；正文与评论分工互补，不用重复句子堆满信息量。`;
+5. 保持自然中文和短句；正文与评论分工互补，不用重复句子堆满信息量。
+
+${PUBLIC_COPY_LANGUAGE_CONTRACT}`;
 
 /**
  * 按侧+按角色隔离的评论调用(2A-R/2A-O/2B/2B-O)使用独立的系统提示:
@@ -422,7 +463,9 @@ const STAGED_ISOLATED_SYSTEM_PROMPT = `你正在分阶段完成同一个中文�
 2. 项目事实只使用给定资料，保留条件、限制、冲突和未知；人物、生活事件和评论角色属于创作情境，可以用于拟人表达，但不得冒充真实用户、真实项目结果或已观测口碑。
 3. 评论是明确标注的完整评论区创作参考，不是已经发生的真实互动；生成角色只能知道其角色位置应当知道的内容。
 4. 公开文字不得出现内部字段名、资料编号、“本线程”等后台措辞。
-5. 保持自然中文和短句；评论与正文分工互补，不用重复句子堆满信息量。`;
+5. 保持自然中文和短句；评论与正文分工互补，不用重复句子堆满信息量。
+
+${ISOLATED_PUBLIC_COPY_LANGUAGE_CONTRACT}`;
 
 // 2.2.0: 评论生成改为按侧+按角色隔离调用(2A-R 读者侧 / 2A-O 机构答复 /
 // 2B 读者生长 / 2B-O 机构补答)。roleIndex 随"模型选角"一起移除——人物由
@@ -440,7 +483,10 @@ const STAGED_ISOLATED_SYSTEM_PROMPT = `你正在分阶段完成同一个中文�
 //
 // 2.4.0: 将跨候选稳定知识/公式/共享任务前缀移到候选差异之前，并加入一次
 // bounded comment-reader shape correction 合同。digest 随正式提示词布局移动。
-export const PROMPT_CONTRACT_VERSION = "2.4.0";
+//
+// 2.5.0: 所有可见文案生成/修复阶段共享前台语言合同，统一阻断模型身份、输出
+// 协议、规划字段、内部来源容器、上下文转述与占位符泄漏。
+export const PROMPT_CONTRACT_VERSION = "2.5.0";
 export const PROMPT_CONTRACT_DIGEST = createHash("sha256")
   .update(JSON.stringify({
     version: PROMPT_CONTRACT_VERSION,
@@ -745,19 +791,40 @@ function stagedCommonUser(input: GenerationPromptInput): { text: string; imagePa
 
 export function buildStagedCorePrompt(input: GenerationPromptInput): PromptBundle {
   const common = stagedCommonUser(input);
+  const authorFacts = input.config.task.authorContext.facts.map((fact) => ({
+    id: fact.id,
+    statement: fact.statement,
+    category: fact.category,
+  }));
+  const topologyContract = input.config.task.publishingTopology === "creative_scenario"
+    ? `发布视角合同：选题驱动的创作情景。
+- personaScenePlan是可见成品的第一写作合同：标题、图片、正文必须是同一个创作人物、同一个阶段和同一件事。
+- 人物、处境和表达情景由selectedTopicOpportunity、读者阶段与已审核projectBlueprint.scenarioModel自动匹配，不要求用户另填素材。
+- 这些人物细节是创作载体，不是真实用户证言或项目事实；不得虚构场景模型禁止的已完成项目历史、交易、服务、恢复、结果或他人对话。
+- 项目知识只允许在证据范围内进入，不得因创作情景而升级为真实经历。`
+    : input.config.task.publishingTopology === "institution_owned"
+      ? `发布主体硬合同：机构官方账号。
+- 标题和正文必须是明确的机构说明、条件式建议、常见问题整理或待核实表达；不得扮演消费者、体验者或“正在比较的人”。
+- 禁止使用消费者第一人称“我”的状态、打算、限制、搜索、接触、购买、服务、恢复、结果、关系或情绪；“我们/我方”只能陈述有证据的机构事实。
+- personaScenePlan只提供议题结构，不授权任何消费者生活事件。`
+      : `发布主体硬合同：已确认的真实个人作者。
+人工确认事实：${safeJson(authorFacts)}
+- 作者身份、状态、打算、限制、时间、地点、动作、关系、情绪、接触、交易、恢复和结果，只能逐项来自上述事实。
+- 可以删除或轻量口语化事实，但不得从personaScenePlan、读者阶段、预设、项目知识或常识补充任何本人信息。
+- 事实没有提供的现场保持为空；宁可写一个窄问题，也不能为了生活感编造事件。`;
   const phase = `阶段1：只写标签与图文正文，不生成评论，也不生成证据台账或内部结构。
 
-要求：
-- personaScenePlan是可见成品的第一写作合同：标题、图片、正文必须是同一个人物、同一个阶段和同一件刚发生的事。stateSeed、gapPlanningCards和公式只在后台决定信息，不得变成说明书措辞。
-- 优先落在personaScenePlan.surfaceTargets的样本形态区间，同时不得超过正文硬范围 ${input.config.content.bodyMinChars}-${input.config.content.bodyMaxChars} 字；标签 ${input.config.content.hashtagMin}-${input.config.content.hashtagMax} 个，不追无关热点。
-- 正文只完成一次最小推进：一个身份/关系线索＋一个普通事件或生活摩擦＋一个情绪余味或窄缺口。不要同时回答所有信息缺口，不要写“首先/其次/核实清单/适用边界/资料显示”。
-- 必须像当事人随手发帖，不能出现“还要明确、信息缺口、判断框架、项目说明、核验路径、根据资料”等后台总结句；必含要求要融入事件或一句自然提醒，不得另起审计尾巴。
-- 项目知识只允许以人物当下会自然说出的一个细节进入；叙述者不能突然变成全知专家、研究员或客服说明书。
-- 可创作普通动作、情绪和生活摩擦，但不得虚构 projectBlueprint.scenarioModel 禁止的已完成历史、他人对话、项目结果或具体交易细节；用户未提供的经历只能保持为当前打算、担心或未决定状态。
-- 标题优先短、具体、有现场，不把主题、风险、方案、结果和成本一次列全。
-- N.imageBrief必须落实personaScenePlan.event.imageMoment与imagePlan；素材类型只服从项目场景模块与已选图片，不从静态提示词猜测行业画面。除非表达策略明确要求，禁止默认生成三层知识信息卡。
-- 允许自然停顿、省略、半句话和轻微口语，不故意造错字、网络词或广告金句。
-- 必要的高风险边界只在确实会改变本篇判断时用一句自然语言出现；不要把同一免责声明复制到每一段。
+${topologyContract}
+
+共同要求：
+- 当前发布视角合同高于预设和行为参数；机构或真实作者模式与personaScenePlan冲突时，必须舍弃不被该模式允许的创作细节。
+- 优先落在personaScenePlan.surfaceTargets的长度区间，同时不得超过正文硬范围 ${input.config.content.bodyMinChars}-${input.config.content.bodyMaxChars} 字；标签 ${input.config.content.hashtagMin}-${input.config.content.hashtagMax} 个，不追无关热点。
+- 只完成一次最小推进，不同时回答所有信息缺口，不写“首先/其次/核实清单/适用边界/资料显示”等后台总结句。
+- 项目知识只能在证据范围内自然进入；不得把项目资料变成作者本人经历。
+- 标题优先短、具体，不把主题、风险、方案、结果和成本一次列全。
+- N.imageBrief服从imagePlan：真实素材只陈述可见事实；creative_scenario可落实已审核的创作画面，但不得把它标成真实用户现场，也不得虚构被禁止的项目历史、他人对话或结果画面。
+- 允许自然停顿、省略和轻微口语，不故意造错字、网络词或广告金句。
+- 必要的高风险边界只在确实会改变本篇判断时用一句自然语言出现。
 
 只返回：{"H":{"hashtags":[]},"N":{"imageBrief":"","title":"","body":""}}`;
   const commonContent: PromptMessage["content"] = common.imageParts.length
@@ -793,7 +860,7 @@ export function buildStagedCoreIdentityRepairPrompt(
 
 硬规则：
 - institution_owned：改成明确项目账号可承担的观察、说明或待核实表达；不得保留消费者亲历。
-- confirmed_individual_author：任何已发生的接触、购买、服务、恢复或结果细节必须逐项来自作者事实；超出范围改成当前打算、担心或未决定。
+- confirmed_individual_author：任何本人状态、打算、限制、时间、地点、动作、关系、情绪、接触、购买、服务、恢复或结果都必须逐项来自作者事实；超出范围必须删除，不得用新的“当前打算、担心或未决定”替代。
 - 不新增事实，不改主题，不写后台说明。
 
 只返回：{"H":{"hashtags":[]},"N":{"imageBrief":"","title":"","body":""}}`;
@@ -912,6 +979,7 @@ ${safeJson(readerCast)}
 - 禁讲清单：以下受控类型的具体说法读者一律不说，只能提问、同款担心或说自己打算去核实：${safeJson(forbiddenClaims)}${blueprint?.claimPolicy.prohibitedClaims.length ? `；禁止宣称：${safeJson(blueprint.claimPolicy.prohibitedClaims)}` : ""}。
 - 不得声称自己完成过这些动作（用户明确提供的除外）：${safeJson(prohibitedHistories)}。人物可以说当前限制、打算怎么问或为什么犹豫，不把创作情景伪装成历史经历。
 - 读者只说自己的处境、感受、疑问或轻反应；不说项目事实、价格数字、效果证词，也不透露只有项目方才知道的信息。
+- 已发布图文只作为理解语境，绝不能在可见评论里说“正文说/文中提到/这篇写了/上文讲了”等元叙事，也不能复述自己正在读取图文；直接从人物处境说问题。
 - 第一人称亲历：可以说自己的处境和已经做过的功课，但不得写成效果证词——不给效果数字、不做背书、不说”完成后效果如何”。真正被禁的是把创作情景当成独立口碑，不是提到自己。
 - 逐角色禁止代替的证据：每条线程的规格里给了该线程人物自己那条禁令，按它执行。
 - 转述不限：任何线程都可以说“朋友做过/我打听过了”这类转述，但必须模糊、不背书、不给数字。
@@ -996,8 +1064,7 @@ ${safeJson(specs)}
 ${hostReplyRule}
 - threadKind=reader_exchange：answer是同帖下读者B的自然接话——B只说自己的处境、感受、疑问或轻反应，范围限其permittedContribution；B同样遵守读者须知，不回答项目事实类问题。
 - 其余threadKind：answer一律输出空字符串""，留给能回答的一方后续补；其中threadKind=organic_reaction 的 question 是一条4-20字短共鸣（“姐妹我也是”“蹲一个”“码住”这类），不提问、不答题。
-- 按内容为线程标注隐藏字段：function六选一——补充或核实项目事实标verification，校准风险或过高期待标clarify，给谨慎反例标counterexample，分条件回答标answer，给核验路由标next_step，正文已覆盖信息的再次浮出标surface_gap；kind标根评论节点类型，常规为question（即使它实为经验片段或纯反应也仍标question）；该线程有明确边界时写出boundary，没有就省略该字段。
-- 本轮每条followUps必须为空数组。下一轮会看到这些根评论，再决定哪些话头真的值得继续。
+- 本轮只写 id、question、answer 三个字段。function、kind、boundary、followUps、身份和证据结构全部由程序按冻结计划装配，不得输出。
 - 评论总可见行数优先落在篇幅目标visibleCommentLines，典型单行长度落在typicalCommentChars附近，但允许少量长经验和极短反应，长短必须不齐。
 - 至少包含三种不同社会位置；至少一条人物/地点/行动路由；至少一条经验差异或谨慎反例；允许一条纯共鸣或未完全闭合的评论。
 - 先按人物说话，再考虑网感。允许短问、半句话、迟疑、轻微反对和不完整反应；禁止全员同款称呼、堆emoji、堆热词，以及为躲审核故意造错字。一人最多一处明显语域标记。
@@ -1005,8 +1072,10 @@ ${hostReplyRule}
 - 信息要相对正文新增，但单个角色只说自己位置能知道的部分。生成的经验角色属于创作参考，不能算作真实口碑。
 - 同一知识按人物换说法：先像真人聊天，再检查事实，不要出现审计或说明书口吻；相关边界在最需要的一条评论中自然出现一次即可。
 - 根question中禁止出现“你最想问什么、你最关心什么、还有什么想了解、欢迎留言咨询”等元问题和主持人口吻；角色必须直接开口，提出由人物处境决定的具体问题，或直接说自己的顾虑。
+- 根question和读者B的answer都禁止出现“正文说/文中提到/文章里写/这篇笔记说/这个帖子提到/上文讲了”等读取上下文的元叙事；即使内容来自已发布图文，也必须改成读者自己的自然观察或直接疑问。
+- 不引用内部资料容器。禁止“根据资料、资料称、资料显示、看资料说、资料里写、源资料、知识库”等来源腔；有明确公开来源时直接说“官网写明/合同里写了/病历记录”，没有就直接说自己的疑问，不能虚构来源。
 
-严格输出 ${specs.length} 个线程。只返回：{"threads":[{"id":"规格ID","question":"一条自然评论","answer":"threadKind=reader_exchange时为读者B的自然接话；其他threadKind为空字符串\"\"","kind":"question","function":"verification","boundary":"有明确边界时写出，否则省略","followUps":[]}]}`;
+严格输出 ${specs.length} 个线程。只返回：{"threads":[{"id":"规格ID","question":"一条自然评论","answer":"读者B接话；非reader_exchange线程留空"}]}`;
   const messages: PromptMessage[] = [
     { role: "system", content: STAGED_ISOLATED_SYSTEM_PROMPT },
     { role: "user", content: context },
@@ -1021,11 +1090,71 @@ ${hostReplyRule}
 }
 
 /**
+ * Editorial pass over reader-side visible copy. It edits rather than scores:
+ * frozen responsibilities and identities remain server-owned, while the agent
+ * resolves relevance, specificity, voice distinction and conversation fit.
+ */
+export function buildStagedCommentEditorPrompt(
+  input: GenerationPromptInput,
+  core: Pick<ContentPackageContent, "H" | "N">,
+  current: { threads: Array<{ id: string; question: string; answer: string }> },
+): PromptBundle {
+  const context = readerSideCommentContext(input);
+  const specs = readerThreadSpecs(input);
+  const phase = `阶段2A-E：你是评论编辑，不是评分器。通读正文、冻结线程规格和当前读者评论，直接把读者侧可见文案编辑到可用状态。
+
+冻结线程规格：
+${safeJson(specs)}
+
+当前读者评论：
+${safeJson(current)}
+
+编辑职责：
+- 逐条保留 id、数量和顺序，只改 question；仅 reader_exchange 可改非空 answer，其他线程 answer 必须为空。
+- 每条发言必须从分配人物的处境自然开口，并在其问题职责内提供具体顾虑、条件、观察、行动打算或轻反应；不要用空泛赞同、主持人口吻、说明书口吻或同义改写凑数。
+- 整组评论要有真实差异：人物知道的范围、句长、语气和互动动作可以不同；不要求整齐，不要求每条都是问句，不为覆盖指标硬塞话。
+- 不新增项目事实、价格、效果、经历、第三方口碑或身份；不改答复方，不把内部规划语言写进前台。
+- 必须删除或自然改写“正文说/文中提到/文章里写/这篇笔记说/这个帖子提到/上文讲了”等元叙事；读者不能暴露自己正在读取模型上下文，改成从自身处境直接发问。
+- 必须删除或自然改写“根据资料、资料称、资料显示、看资料说、资料里写、源资料、知识库”等内部或泛化来源腔；只有上下文明确给出可公开来源名时才可写“官网/合同/病历/说明书写明”。
+- 先直接修好所有能修的问题。assessment.status 只有在冻结职责彼此冲突、无法在不新增事实的前提下形成具体自然发言时才写 review；普通文案问题应编辑解决后写 pass。
+- assessment.reasons 只列仍未解决的问题，没有则为空数组；summary 用一句话说明编辑结果，不输出分数。
+
+只返回：{"threads":[{"id":"冻结ID","question":"编辑后的读者发言","answer":"仅读者互聊接话，否则空字符串"}],"assessment":{"status":"pass|review","reasons":[],"summary":"编辑结论"}}`;
+  return {
+    messages: [
+      { role: "system", content: STAGED_ISOLATED_SYSTEM_PROMPT },
+      { role: "user", content: context },
+      { role: "assistant", content: safeJson(core) },
+      { role: "user", content: phase },
+    ],
+    responseSchema: STAGED_COMMENT_EDITOR_JSON_SCHEMA,
+    estimatedTokens: estimateTokens(`${STAGED_ISOLATED_SYSTEM_PROMPT}
+${context}
+${safeJson(core)}
+${phase}`),
+  };
+}
+
+/**
  * One bounded correction for an HTTP-200 reader-stage response that is JSON-like
  * but violates the frozen shape. It receives no project knowledge: only the
  * original response, exact IDs and the parser error, so salvaging a paid Core
  * candidate is much cheaper than regenerating its full context.
  */
+export function buildStagedCommentReadersRegenerationPrompt(
+  original: PromptBundle,
+): PromptBundle {
+  const retryRule = `\n\n上一次调用已完成但没有返回可见 JSON。请从原始任务完整重写一次，不要修复空响应，不要解释原因。只输出原任务要求的 JSON。`;
+  return {
+    ...original,
+    messages: [
+      ...original.messages,
+      { role: "user", content: retryRule },
+    ],
+    estimatedTokens: original.estimatedTokens + estimateTokens(retryRule),
+  };
+}
+
 export function buildStagedCommentReadersCorrectionPrompt(
   originalResponse: string,
   expectedThreads: Array<{ id: string; threadKind: string }>,
@@ -1044,9 +1173,9 @@ ${boundedError}
 原始响应：
 ${boundedResponse}
 
-只返回完整 JSON：{"threads":[{"id":"冻结ID","question":"保留原意的评论","answer":"原答案或空字符串","kind":"question","function":"verification","boundary":"可选","followUps":[]}]}
+只返回完整 JSON：{"threads":[{"id":"冻结ID","question":"保留原意的评论","answer":"原答案或空字符串"}]}
 - threads 数量与顺序严格等于冻结线程。
-- 每项 id 使用对应冻结 ID；question、answer 必须是字符串；followUps 必须是空数组。
+- 每项只含 id、question、answer；三者必须是字符串。
 - threadKind=reader_exchange 时保留一条读者接话；其他 threadKind 的 answer 必须为空字符串。
 - 不输出 Markdown、说明或额外根字段。`;
   return {
@@ -1091,6 +1220,7 @@ ${safeJson(threadList)}
 - 只能复述或轻量口语化“可用作者事实”和图文已经明确写出的本人状态；不得增加项目接触、交易、服务完成、后续状态、结果、他人评价或时间细节。
 - 不回答价格、地址、预约、档期、效果、恢复、风险、适用性、资质、身份、因果或任何项目结论；也不说“我们门诊/我们项目”。
 - 不引导私信、发照片、到店或预约。每条一小句，像本人自然回复。
+- 只写本人会公开说出的答复，不复述图文、任务、字段、资料容器或后台判断过程。
 ${forbidden.length ? `- 禁止出现：${safeJson(forbidden)}。
 ` : ""}- id严格沿用清单并覆盖每条。
 
@@ -1398,6 +1528,7 @@ export function buildStagedCommentGrowthPrompt(
 - 每个followUps按它实际承担的功能标level（追问层级不是越深越好，只标不凑）：L1=补一个会改变答案的条件；L2=提出反例、冲突或对不上的说法；L3=问核验方式与下一步动作。同一线程内层级只能递进，不得回退或重复同一层。
 - 这一支自然停住时，在最后一个followUps上标stopReason：answered=已经答清；unknown_pending_evidence=证据不足只能保持未知；route_to_professional=该转专业核验。**没有新增缺口就停止**——不得为了凑层级或制造热闹感循环追问；还要继续的追问不写stopReason。
 - 下方按id列出的followUpIntent是计划好的接龙方向（隐藏写作依据）：被列出的线程优先按它生长——围绕指定延伸缺口或上句新出现的条件继续问；未列出的线程没有自然话头就保持followUps=[]。followUpIntent不得照抄成可见文字。
+- 新增的question和answer同样只写人物会公开说的话；不得出现正文说、文中提到、根据资料、资料称、资料显示、源资料、知识库、任务要求、角色职责或接龙方向等上下文/来源/规划话术。
 
 已完成根评论：
 ${safeJson(roots)}
@@ -1481,9 +1612,9 @@ export function buildStagedLedgerPrompt(
 - location与occurrence必须精确定位：评论写threadId，追问再写followUpIndex。
 - fact只能使用usableEvidenceReferences中的证据。每个sourceSpans.quote必须是对应证据quote中的逐字连续原文；不得用常识或相似意思代替原文。
 - inference、hypothesis、sample和unknown不能伪装成fact，sourceSpans留空；公开文字把未知写成确定事实时，不得靠台账洗白。
-- personaScenePlan 中的楼主人设、生活事件、即时处境和模拟评论人物统一按 hypothesis 或 sample 记账；只有知识库直接支持的项目声明才可能是 fact。创作场景连贯不等于已经真实发生。
+- personaScenePlan 中的模拟人物和模拟评论统一按 hypothesis 或 sample 记账；真实个人作者的已确认事实由系统在模型输出后绑定为 human_confirmed_author_fact，模型不得伪造 authorFactId 或 confirmationId。只有知识库直接支持的项目声明才可能是 fact。
 - 命中知识口径的项目事实声明（价格区间、人员姓名、恢复周期、地址、技术路径、保障说法等）必须记为 fact，并在 sourceSpans 挂载 usableEvidenceReferences 中对应小节的逐字原文；词组要记账，句子级声明同样要记账，不得因定位麻烦而降级为 inference 或干脆不记。
-- 只有 personaScenePlan 的创作内容（楼主人设、生活事件、模拟读者言行）按 hypothesis 或 sample 记账；拿不准一条声明的身份时按 hypothesis 记，不得伪装成 fact。
+- 只有创作情景与模拟读者言行按 hypothesis 或 sample 记账；拿不准一条声明的身份时按 hypothesis 记，不得伪装成 fact。
 - 根evidenceIds必须等于全部reasoning.sourceSpans使用的证据ID去重集合。
 - unknowns保留会影响判断但资料没有覆盖的输入；不得编造答案。
 
@@ -1773,7 +1904,7 @@ ${safeJson({ usableEvidenceIds, usableEvidenceReferences })}
 参数的证据边界：
 ${safeJson(parameterEvidenceBoundaries)}
 
-只输出 JSON patch。证据分节原文已经完整包含在 usableEvidenceReferences，不再重复注入整份知识库。不得改动未授权通道；不得为了修复而创造新事实。若修复 reasoning/sourceSpans，只能使用上面 usableEvidenceIds 中的 ID，quote 必须是对应分节证据中的逐字连续原文，事实 evidenceIds 必须等于 sourceSpans 的去重 ID，根级 evidenceIds 必须等于全部 sourceSpans ID 的去重集合。公开问题和回答中禁止出现 evidenceId、“本线程”、字段名或审计说明。修复必须保留 personaScenePlan 的同一人物、同一事件和语言习惯；评论继续是长短不齐、0—2轮接话的社会关系网，replyPlan 只作后台库存，禁止把五项全部渲染。required 缺口必须保留去向，可选缺口不必强行闭合；所有模拟字段和身份边界继续有效。随机种子：${input.seed}。`;
+只输出 JSON patch。证据分节原文已经完整包含在 usableEvidenceReferences，不再重复注入整份知识库。不得改动未授权通道；不得为了修复而创造新事实。若修复 reasoning/sourceSpans，只能使用上面 usableEvidenceIds 中的 ID，quote 必须是对应分节证据中的逐字连续原文，事实 evidenceIds 必须等于 sourceSpans 的去重 ID，根级 evidenceIds 必须等于全部 sourceSpans ID 的去重集合。公开问题和回答必须执行系统中的“用户可见文案规则”：删除模型身份、任务/输出协议、规划字段、占位符、内部资料容器、泛化来源腔和“正文说/文中提到”式上下文转述；有明确公开来源名时才可保留“官网/合同/病历/说明书写明”。修复必须保留 personaScenePlan 的同一人物、同一事件和语言习惯；评论继续是长短不齐、0—2轮接话的社会关系网，replyPlan 只作后台库存，禁止把五项全部渲染。required 缺口必须保留去向，可选缺口不必强行闭合；所有模拟字段和身份边界继续有效。随机种子：${input.seed}。`;
   const imageParts = (input.imageAnalyses ?? [])
     .filter((analysis) => Boolean(analysis.imageUrl))
     .map((analysis) => ({ type: "image_url" as const, image_url: { url: analysis.imageUrl!, detail: "auto" as const } }));

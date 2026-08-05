@@ -27,6 +27,7 @@ import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, EmptyState, Field, Modal, Skeleton, useToast } from "../components/Ui";
 import { api, ApiError } from "../lib/api";
 import { errorMessage } from "../lib/errors";
+import type { SimplePublishingTopology } from "../lib/publishing-topology";
 import { appendedCount, reconcileTimedOut, topicRefreshOutcome } from "../lib/topic-refresh-sync";
 import { GAP_SOURCE_OPTIONS, sourceForAnswer } from "../lib/gap-source";
 import { gapMetricsInput, imageQualityPayload } from "../lib/metric-payload";
@@ -204,7 +205,9 @@ interface Props {
   selectedPresetId?: string;
   selectedPreset?: ContentPreset;
   submitting: boolean;
+  publishingTopology: SimplePublishingTopology;
   onProject: (id: string) => void;
+  onPublishingTopology: (value: SimplePublishingTopology) => void;
   onPreview: (input: GenerateInput) => void;
 }
 
@@ -299,7 +302,7 @@ function OpportunityRankDisclosure({ opportunity }: { opportunity: TopicOpportun
   </section>;
 }
 
-export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, selectedPreset, submitting, onProject, onPreview }: Props) {
+export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, selectedPreset, submitting, publishingTopology, onProject, onPublishingTopology, onPreview }: Props) {
   const [intelligence, setIntelligence] = useState<ProjectIntelligence | null>(null);
   const [latestTask, setLatestTask] = useState<AnalysisTask | null>(null);
   const [blueprintModules, setBlueprintModules] = useState<ProjectBlueprintModule[]>([]);
@@ -1355,6 +1358,19 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
             <div><small>生效模板 <SettingSourceBadge source={selectedPreset ? "preset" : "project"} /></small><strong>{selectedPreset?.name || "项目默认模板"}</strong><p>{selectedPreset?.description || "未手动选择模板，将按项目与系统默认配置生成。"}</p></div>
             <Button variant="ghost" onClick={() => document.querySelector(".preset-shelf")?.scrollIntoView({ behavior: "smooth", block: "start" })}>到上方更换模板</Button>
           </div>
+          <section className="simple-publishing-choice" aria-label="选择发布视角">
+            <header><div><strong>发布视角</strong><p>简单模式只需选择谁在说话，不需要填写用户素材。</p></div><Badge tone={publishingTopology === "creative_scenario" ? "positive" : "neutral"}>{publishingTopology === "creative_scenario" ? "自动用户视角" : "机构账号"}</Badge></header>
+            <div className="simple-publishing-choice__options" role="radiogroup" aria-label="发布视角">
+              <button type="button" role="radio" aria-checked={publishingTopology === "creative_scenario"} className={publishingTopology === "creative_scenario" ? "selected" : ""} onClick={() => onPublishingTopology("creative_scenario")}>
+                <span><Sparkles size={17} /><strong>自动用户视角</strong>{publishingTopology === "creative_scenario" && <Check size={15} />}</span>
+                <small>{selectedOpportunity ? `根据“${selectedOpportunity.title}”自动匹配人物、处境和表达情景。` : "选择选题卡后自动匹配人物、处境和表达情景。"}</small>
+              </button>
+              <button type="button" role="radio" aria-checked={publishingTopology === "institution_owned"} className={publishingTopology === "institution_owned" ? "selected" : ""} onClick={() => onPublishingTopology("institution_owned")}>
+                <span><ShieldCheck size={17} /><strong>机构账号说明</strong>{publishingTopology === "institution_owned" && <Check size={15} />}</span>
+                <small>以明确机构身份说明已核验信息，不模拟用户亲历。</small>
+              </button>
+            </div>
+          </section>
 
           <div className="simple-settings-grid">
             <label className="simple-setting-field"><span><strong>读者阶段</strong><SettingSourceBadge source={resolvedSettings.audienceStage.source} /></span><select value={resolvedSettings.audienceStage.value} onChange={(event) => setSettingOverrides((current) => ({ ...current, audienceStage: event.target.value }))}>{simpleStages.map((stage) => <option key={stage.id} value={stage.id}>{stage.title}</option>)}</select><small>决定正文与评论先补哪一类决策信息。</small></label>

@@ -949,6 +949,29 @@ test('generation revalidates selected opportunity dependencies and locks its exp
     strategy.body.id,
   );
 
+  // Production regression: a still-approved opportunity can reference an
+  // approved gap from an older analysis batch. The current-batch projection
+  // omits that gap, but the explicit dependency snapshot remains valid. The
+  // frozen planning context must include both the locked opportunity and its
+  // exact verified gap, otherwise Core rejects selectedOpportunityId before the
+  // first model call.
+  const originalCurrentGapRows = service.currentGapRows.bind(service);
+  service.currentGapRows = () => [];
+  const preparedHistoricalGap = service.prepareGeneration(projectId, {
+    opportunityId: opportunity.body.id,
+  });
+  service.currentGapRows = originalCurrentGapRows;
+  assert.ok(
+    (preparedHistoricalGap.planningContext.informationGaps as Record<string, unknown>[])
+      .some((item) => item.id === gap.body.id),
+    'locked opportunity dependency gap must survive current-batch filtering',
+  );
+  assert.ok(
+    (preparedHistoricalGap.planningContext.opportunities as Record<string, unknown>[])
+      .some((item) => item.id === opportunity.body.id),
+    'locked opportunity must survive filtering when its verified dependency gap is historical',
+  );
+
   await request(`/api/projects/${projectId}/information-gaps/${gap.body.id}`, {
     method: 'PATCH',
     body: JSON.stringify({ answer: '改为先核对两项条件。' }),

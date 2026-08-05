@@ -53,12 +53,14 @@ export const AUDIT_ACTION_COPY: Record<string, AuditCopy> = {
   // 起草与合并各记一次。这是模型调用的记账,不是「写入了知识库」——
   // 真正落库的是随后的 knowledge.import。
   'knowledge.enrich.model': { label: 'AI 补充知识库(模型调用)' },
+  'author-facts.organize.model': { label: 'AI 整理叙事用户素材' },
   'formula.create': { label: '新建公式版本' },
   'formula.activate': { label: '启用公式版本' },
   'formula.auto-upgrade': { label: '公式变更后自动失效相关发布', automatic: true },
   // 项目首次需要公式时由系统建 v1,不是用户点出来的,所以是 automatic。
   'formula.bootstrap': { label: '自动创建初始公式版本', automatic: true },
   'generation.create': { label: '发起生成' },
+  'generation.manual-delivery-confirm': { label: '人工确认交付未通过候选' },
   'agent-harness.create': { label: '发起 Agent 独立创作' },
   'agent-harness.retry': { label: '重新运行 Agent 独立创作' },
   'agent-harness.revise': { label: '提交 Agent 改稿' },

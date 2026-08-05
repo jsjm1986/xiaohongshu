@@ -15,6 +15,14 @@ export type ExportFormat = 'markdown' | 'json' | 'docx' | 'pdf';
 export interface ExportOptions {
   cjkFontPath?: string;
   docxFontName?: string;
+  /** Explicit server-verified override; never accepted directly from the browser. */
+  manualDeliveryConfirmation?: {
+    confirmed: true;
+    confirmedAt: string;
+    confirmedBy: string;
+    jobId: string;
+    candidateId: string;
+  };
 }
 
 type JsonObject = Record<string, unknown>;
@@ -67,10 +75,10 @@ export class ExportService {
     format: ExportFormat,
     options: ExportOptions = {},
   ): Promise<Buffer> {
-    const contentPackage = this.validatePackage(rawPackage);
+    const contentPackage = this.validatePackage(rawPackage, options);
     switch (format) {
       case 'markdown':
-        return Buffer.from(this.toMarkdown(contentPackage), 'utf8');
+        return Buffer.from(this.toMarkdown(contentPackage, options), 'utf8');
       case 'json':
         return Buffer.from(`${JSON.stringify(contentPackage, null, 2)}\n`, 'utf8');
       case 'docx':
@@ -82,8 +90,8 @@ export class ExportService {
     }
   }
 
-  toMarkdown(rawPackage: unknown): string {
-    const pkg = this.validatePackage(rawPackage);
+  toMarkdown(rawPackage: unknown, options: ExportOptions = {}): string {
+    const pkg = this.validatePackage(rawPackage, options);
     // Cref contract v1.1 packages export in the two-part layout (executive
     // copy first, audit appendix last). Historical packages without any v1.1
     // marker keep the legacy single-flow output below byte-for-byte.
@@ -155,7 +163,7 @@ export class ExportService {
     return candidates.find((candidate) => existsSync(candidate));
   }
 
-  private validatePackage(value: unknown): JsonObject {
+  private validatePackage(value: unknown, options: ExportOptions = {}): JsonObject {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
       throw new BadRequestException('ContentPackage 必须是 JSON 对象');
     }
@@ -165,16 +173,24 @@ export class ExportService {
       throw new BadRequestException('ContentPackage 缺少 content.N');
     }
     const validation = asObject(pkg.validation);
-    if (validation.valid !== true) {
-      throw new BadRequestException('候选未通过事实、证据与信息闭合校验，禁止导出；请先修复错误或重新生成');
+    if (validation.valid !== true && options.manualDeliveryConfirmation?.confirmed !== true) {
+      throw new BadRequestException('候选未通过事实、证据与信息闭合校验，禁止导出；请先修复错误、重新生成或完成候选级人工交付确认');
     }
-    return sanitizeOrganicReactionThreads(pkg);
+    const deliverable = options.manualDeliveryConfirmation?.confirmed === true
+      ? { ...pkg, manualDeliveryConfirmation: options.manualDeliveryConfirmation }
+      : pkg;
+    return sanitizeOrganicReactionThreads(deliverable);
   }
 
   private async toDocx(pkg: JsonObject, options: ExportOptions): Promise<Buffer> {
     const docx = await loadDocxModule();
     const { Document, Packer } = docx;
-    const markdown = this.toMarkdown(pkg);
+    const markdown = this.toMarkdown(pkg, {
+      ...options,
+      manualDeliveryConfirmation: isManualDeliveryConfirmation(pkg.manualDeliveryConfirmation)
+        ? pkg.manualDeliveryConfirmation
+        : options.manualDeliveryConfirmation,
+    });
     const font = options.docxFontName ?? process.env.CONTENT_AGENT_DOCX_FONT_NAME ?? 'Microsoft YaHei';
     const children = markdown.split('\n').map((line) => markdownLineToParagraph(line, font, docx));
     const section: ISectionOptions = { properties: {}, children };
@@ -193,7 +209,12 @@ export class ExportService {
   }
 
   private async toPdf(pkg: JsonObject, options: ExportOptions): Promise<Buffer> {
-    const markdown = this.toMarkdown(pkg);
+    const markdown = this.toMarkdown(pkg, {
+      ...options,
+      manualDeliveryConfirmation: isManualDeliveryConfirmation(pkg.manualDeliveryConfirmation)
+        ? pkg.manualDeliveryConfirmation
+        : options.manualDeliveryConfirmation,
+    });
     const document = new PDFDocument({
       size: 'A4',
       margins: { top: 48, right: 48, bottom: 48, left: 48 },
@@ -515,6 +536,19 @@ function appendAuditTrail(lines: string[], pkg: JsonObject): void {
   appendOpportunityRankAudit(lines, pkg);
 
   const validation = asObject(pkg.validation);
+  const manualDeliveryConfirmation = asObject(pkg.manualDeliveryConfirmation);
+  if (manualDeliveryConfirmation.confirmed === true) {
+    lines.push(
+      '## 人工交付确认',
+      '',
+      '- 自动校验状态保持未通过；本记录不代表系统校验通过。',
+      `- 确认人：${text(manualDeliveryConfirmation.confirmedBy) || 'unknown'}`,
+      `- 确认时间：${text(manualDeliveryConfirmation.confirmedAt) || 'unknown'}`,
+      `- 候选：${text(manualDeliveryConfirmation.candidateId) || 'unknown'}`,
+      '- 确认范围：已逐条核对事实、证据、身份与风险，并承担本次人工交付决定。',
+      '',
+    );
+  }
   lines.push(
     '## 校验结果',
     '',
@@ -934,6 +968,17 @@ function auditAnswerAttribution(thread: JsonObject): { label: string; identity: 
  * Core 的 T3 合同只允许单条短反应。历史脏包即使携带 answer/followUps，也不能
  * 通过任何导出格式重新发布；在验证后统一清洗，确保 JSON 与 Markdown/DOCX/PDF 同源。
  */
+
+function isManualDeliveryConfirmation(value: unknown): value is NonNullable<ExportOptions['manualDeliveryConfirmation']> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const confirmation = value as JsonObject;
+  return confirmation.confirmed === true
+    && typeof confirmation.confirmedAt === 'string'
+    && typeof confirmation.confirmedBy === 'string'
+    && typeof confirmation.jobId === 'string'
+    && typeof confirmation.candidateId === 'string';
+}
+
 function sanitizeOrganicReactionThreads(pkg: JsonObject): JsonObject {
   const content = asObject(pkg.content);
   const cref = asObject(content.Cref);

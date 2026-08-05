@@ -413,6 +413,32 @@ export function parseStagedCommentReaders(text: string): StagedCommentReadersCop
   return { threads: parseStagedThreadArray(container, "Staged comment readers output") };
 }
 
+
+export interface StagedCommentEditorCopy extends StagedCommentReadersCopy {
+  assessment: { status: "pass" | "review"; reasons: string[]; summary: string };
+}
+
+export function parseStagedCommentEditor(text: string): StagedCommentEditorCopy {
+  const value = parseJsonObject(text);
+  const container = isRecord(value.content) ? value.content : value;
+  const assessment = container.assessment;
+  if (!isRecord(assessment)
+    || (assessment.status !== "pass" && assessment.status !== "review")
+    || !Array.isArray(assessment.reasons)
+    || !assessment.reasons.every((reason) => typeof reason === "string")
+    || typeof assessment.summary !== "string") {
+    throw new Error("Staged comment editor output must include a valid assessment.");
+  }
+  return {
+    threads: parseStagedThreadArray(container, "Staged comment editor output"),
+    assessment: {
+      status: assessment.status,
+      reasons: assessment.reasons.map((reason) => reason.trim()).filter(Boolean).slice(0, 8),
+      summary: assessment.summary.trim().slice(0, 500),
+    },
+  };
+}
+
 /** 2A-O/2B-O 机构侧输出:本角色线程(或待承接追问)的答复列表。 */
 export interface StagedOrgAnswersCopy {
   answers: Array<{
@@ -520,6 +546,10 @@ function parseContent(value: unknown): ContentPackageContent {
       replySurfaceRoleCard: surfaceRoleCard(thread.replySurfaceRoleCard),
       displayName: optionalTrimmedText(thread.displayName),
       replyDisplayName: optionalTrimmedText(thread.replyDisplayName),
+      answerIdentity: thread.answerIdentity === "simulated_reader" || thread.answerIdentity === "none"
+        || ["author", "brand", "staff", "expert", "publisher"].includes(String(thread.answerIdentity))
+        ? thread.answerIdentity as ContentPackageContent["Cref"]["threads"][number]["answerIdentity"]
+        : undefined,
       threadKind: thread.threadKind === "host_reply"
         ? "host_reply" as const
         : thread.threadKind === "reader_exchange"
@@ -701,8 +731,57 @@ function allContentText(content: ContentPackageContent): string {
     content.N.title,
     content.N.body,
     content.Cref.disclaimer,
-    ...content.Cref.threads.flatMap((thread) => [thread.question, thread.answer, ...thread.followUps.flatMap((item) => [item.question, item.answer])]),
+    content.Cref.ownedFirstComment ?? "",
+    ...content.Cref.threads.flatMap((thread) => [
+      thread.question,
+      thread.answer,
+      thread.boundary ?? "",
+      thread.nextStep ?? "",
+      ...thread.followUps.flatMap((item) => [item.question, item.answer, item.boundary ?? ""]),
+    ]),
   ].join("\n");
+}
+
+/** Public comment strings, including fields rendered outside the Q/A bubbles. */
+function visibleCommentNodes(content: ContentPackageContent): string[] {
+  return [
+    content.Cref.disclaimer,
+    content.Cref.ownedFirstComment ?? "",
+    ...content.Cref.threads.flatMap((thread) => [
+      thread.question,
+      thread.answer,
+      thread.boundary ?? "",
+      thread.nextStep ?? "",
+      ...thread.followUps.flatMap((followUp) => [
+        followUp.question,
+        followUp.answer,
+        followUp.boundary ?? "",
+      ]),
+    ]),
+  ].map((value) => value.trim()).filter(Boolean);
+}
+
+const INTERNAL_PLANNING_LANGUAGE = /\bevidence_[\w:.-]+\b|(?:sourceClusterId|reasoning|replyPlan|discoveryPlan|followUpIntent)|(?:本线程|该线程|线程内)|(?:待核实维度|已披露地点范围)[：:]|(?:问题职责|开口人物|角色池|线程规格|冻结(?:合同|职责|ID)|主缺口|接龙方向|后台库存)|\b(?:TODO|TBD)\b/iu;
+
+const MODEL_OR_OUTPUT_PROTOCOL_LANGUAGE = /(?:作为|我是|身为)(?:一名|一个)?\s*(?:AI|人工智能)\s*(?:助手|语言模型)|(?:系统|开发者)指令|提示词|system\s*prompt|(?:根据|按照)(?:当前|上述|本次|用户)?(?:的)?(?:生成|写作|内容)?任务要求|候选(?:版本)?\s*[一二三四五六七八九十\d]+|只(?:需|要)?返回(?:有效的?)?\s*JSON|(?:JSON\s*)?(?:输出格式|字段名)|(?:生成|写作|内容)任务/iu;
+
+const INTERNAL_SOURCE_CONTAINER_LANGUAGE = /(?:根据|依据|参考|来自|按照?)\s*(?:源资料|知识库|项目资料|可用证据)|(?:源资料|知识库|项目资料|可用证据)(?:中|里|显示|表明|写(?:明|着|了)?|说|提到|记载|披露)|本条所列证据来源/iu;
+
+// Only phrases that explicitly point back to the current generated artifact are
+// context narration. Generic human speech such as “看了几个帖子，说法都不一样”
+// is legitimate research context and must not be blocked.
+const COMMENT_CONTEXT_META_LANGUAGE = /(?:(?:正文|文中|上文|文章(?:里|中)?|这篇(?:笔记|帖子|内容|文章)?|这条(?:笔记|帖子|内容)|这个帖子)(?:里|中)?(?:说|提到|写(?:了|着|道)?|讲(?:了|到)?|显示|表示|说明|没(?:有)?(?:写|提|讲|说明)|未(?:写|提|讲|说明))|(?:跟|和|按)(?:这篇|这个)帖子(?:里|中)?说)/u;
+
+const GENERIC_COMMENT_SOURCE_LANGUAGE = /(?:根据|依据|按照|按|看|查(?:到|过)?|翻(?:到|过)?)?\s*(?:这些|相关|现有|手头|查到的)?资料(?:里|中)?(?:说|称|显示|表明|写(?:明|着|了)?|提到|记载|披露)/u;
+
+function exposesGenericCommentSourceLanguage(value: string): boolean {
+  if (INTERNAL_SOURCE_CONTAINER_LANGUAGE.test(value)) return true;
+  // Named public sources are legitimate provenance, not internal containers.
+  const withoutNamedPublicSources = value.replace(
+    /(?:官网|官方网站|合同|协议|病历|检查报告|说明书)(?:中|里|上)?(?:写(?:明|着|了)?|显示|记录|注明|约定|说明|提到)/gu,
+    "",
+  );
+  return GENERIC_COMMENT_SOURCE_LANGUAGE.test(withoutNamedPublicSources);
 }
 
 function visibleTextForReasoningLocation(
@@ -815,6 +894,20 @@ function meaningfulTextOverlap(left: string, right: string, threshold = 0.32): b
   const rightPairs = pairs(rightValue);
   const overlap = [...leftPairs].filter((pair) => rightPairs.has(pair)).length;
   return overlap / Math.max(1, Math.min(leftPairs.size, rightPairs.size)) >= threshold;
+}
+
+/**
+ * A confirmed author fact may be quoted verbatim or shortened, but it may not
+ * authorize extra words that could introduce another time, action or outcome.
+ */
+export function authorFactAuthorizesVisibleStatement(statement: string, factStatement: string): boolean {
+  const visible = normalizedComparable(statement);
+  const fact = normalizedComparable(factStatement);
+  if (visible.length < 2 || fact.length < 2) return false;
+  if (visible === fact) return true;
+  return fact.includes(visible)
+    && visible.length >= 4
+    && visible.length >= Math.ceil(fact.length * 0.5);
 }
 
 /**
@@ -931,23 +1024,30 @@ export function validatePublishingTopologyCopy(
 ${core.N.body}`;
   const authorFacts = config.task.authorContext?.facts ?? [];
   const historyTerms = blueprint ? prohibitedHistoryTerms(blueprint) : [];
-  const actionTerms = [...new Set([
-    ...(blueprint?.domainModel.actions ?? []),
-    ...historyTerms,
-  ].map((item) => item.trim()).filter((item) => item.length >= 2))];
   const statements = text.split(/[。！？!?；;\n]+/u).map((item) => item.trim()).filter(Boolean);
-  const experienceClaims = statements.filter((statement) => {
-    const firstPersonCompletion = claimsFirstPersonCompletion(statement);
-    const actionHit = actionTerms.some((term) => statement.includes(term));
-    const prohibitedHit = assertsProhibitedHistory(statement, historyTerms);
-    return prohibitedHit || (firstPersonCompletion && actionHit);
-  });
+  const personalFirstPerson = statements.filter((statement) => /(?:^|[^我])我(?!们|方)/u.test(statement));
+  const prohibitedHistoryClaims = statements.filter((statement) => assertsProhibitedHistory(statement, historyTerms));
   const add = (code: string, message: string): void => {
-    issues.push({ code, severity: "error", channel: "N.body", message, repairable: true });
+    issues.push({
+      code, severity: "error", channel: "N.body", message, repairable: true,
+      disposition: "block", origin: "deterministic",
+    });
   };
+
   if (config.task.publishingTopology === "institution_owned") {
-    if (experienceClaims.length) {
-      add("unsupported_narrative_history", `Institution-owned copy claims an unsupported personal project history: ${experienceClaims[0]}`);
+    const consumerClaim = personalFirstPerson[0] ?? prohibitedHistoryClaims[0];
+    if (consumerClaim) {
+      add("unsupported_narrative_history", `Institution-owned copy uses a consumer first-person or unsupported history: ${consumerClaim}`);
+    }
+    return issues;
+  }
+  // Creative scenarios may invent an ordinary carrier, but the approved scenario
+  // model's prohibited histories remain a hard boundary. A fictional carrier is
+  // never permission to invent completed contact, purchase, service, recovery or
+  // outcome events that the blueprint explicitly forbids.
+  if (config.task.publishingTopology === "creative_scenario") {
+    if (prohibitedHistoryClaims.length) {
+      add("unsupported_narrative_history", `Creative-scenario copy claims a prohibited completed project history: ${prohibitedHistoryClaims[0]}`);
     }
     return issues;
   }
@@ -958,20 +1058,17 @@ ${core.N.body}`;
   if (/(?:我们门诊|我们机构|我们项目|本店|我方)/u.test(text)) {
     add("publishing_topology_voice_mismatch", "Individual-author copy speaks as an institution-owned account.");
   }
+
   const domainActions = (blueprint?.domainModel.actions ?? [])
     .map((action) => action.trim())
     .filter((action) => action.length >= 2);
   const factAuthorizesClaim = (claim: string, fact: ResolvedGenerationConfig["task"]["authorContext"]["facts"][number]): boolean => {
-    // Shared first-person/time wording is not authorization: two different completed project actions
-    // must never authorize “我昨天已经购买”. If the claim names a project
-    // action, at least one identical action must appear in the confirmed fact.
     const claimActions = domainActions.filter((action) => claim.includes(action));
     if (claimActions.length && !claimActions.some((action) => fact.statement.includes(action))) return false;
-    return meaningfulTextOverlap(claim, fact.statement, 0.35)
-      || normalizedComparable(claim).includes(normalizedComparable(fact.statement))
-      || normalizedComparable(fact.statement).includes(normalizedComparable(claim));
+    return authorFactAuthorizesVisibleStatement(claim, fact.statement);
   };
-  const unsupported = experienceClaims.find((claim) => !authorFacts.some((fact) => factAuthorizesClaim(claim, fact)));
+  const authorClaims = [...new Set([...personalFirstPerson, ...prohibitedHistoryClaims])];
+  const unsupported = authorClaims.find((claim) => !authorFacts.some((fact) => factAuthorizesClaim(claim, fact)));
   if (unsupported) {
     add("author_fact_scope_exceeded", `Individual-author copy exceeds the confirmed author facts: ${unsupported}`);
   }
@@ -1091,7 +1188,10 @@ function bodyEvidenceRealized(draft: GenerationDraft, card: InformationGapPlanni
     && draft.content.N.body.includes(item.statement)
     && item.evidenceIds.some((id) => expectedEvidence.has(id))
     && (item.sourceSpans ?? []).some((span) => expectedEvidence.has(span.evidenceId))
-    && realizesText(item.statement, expected),
+    // A grounded natural paraphrase is valid realization. The conservative gate
+    // rejects partial mentions, polarity changes and quantity drift, so this does
+    // not turn ordinary keyword overlap into evidence.
+    && conservativeEvidenceSupport(item.statement, expected),
   );
 }
 
@@ -1134,11 +1234,11 @@ export function evaluateGapCoverageRealization(
     const actualRealizations: GapActualRealization[] = [];
 
     if (card.plannedPlacements.includes("N.body")) {
-      const answerRealized = realizesText(draft.content.N.body, expectedAnswer);
+      const evidenceRealized = bodyEvidenceRealized(draft, card);
+      const answerRealized = realizesText(draft.content.N.body, expectedAnswer) || evidenceRealized;
       // 禁止性 boundary(「不能贬低竞品」「不承诺零增项」)要求的是「不出现」,
       // 遵守它的表现就是正文里找不到它;再要求正文包含它,方向就反了。
       const conditionOrBoundaryRealized = boundaryRealized(draft.content.N.body, card.boundary);
-      const evidenceRealized = bodyEvidenceRealized(draft, card);
       // findable = 「这个缺口在正文里能不能被找到」。原来直接等于 answerRealized,
       // 于是它继承了逐字包含的判据,无法区分「正文没提这件事」与「提了但改写了」。
       // 改判缺口的 label/question 是否在正文露面(realizesVisibleGapMention 用的是
@@ -1169,7 +1269,6 @@ export function evaluateGapCoverageRealization(
           && actualThread.primaryGapId === card.gapId
           && (!actualThread.gap || actualThread.gap === card.gapId),
         );
-        const answerRealized = Boolean(actualThread && realizesText(actualThread.answer, expectedAnswer));
         const conditionRequirements = [
           plannedThread.replyPlan.condition,
           card.boundary ?? plannedThread.replyPlan.boundary,
@@ -1185,7 +1284,7 @@ export function evaluateGapCoverageRealization(
           item.status === "fact"
           && item.location === "Cref.thread"
           && actualThread.answer.includes(item.statement)
-          && realizesText(item.statement, expectedAnswer)
+          && conservativeEvidenceSupport(item.statement, expectedAnswer ?? "")
           && (item.sourceSpans ?? []).some((span) => expectedEvidence.has(span.evidenceId)),
         ));
         const evidenceRealized = Boolean(
@@ -1194,6 +1293,8 @@ export function evaluateGapCoverageRealization(
           && actualThread.evidenceIds.some((id) => expectedEvidence.has(id))
           && claimMappedToSource,
         );
+        const answerRealized = Boolean(actualThread
+          && (realizesText(actualThread.answer, expectedAnswer) || claimMappedToSource));
         const findable = primaryMatches && Boolean(actualThread?.answer.trim());
         const resolved = groundedResolution && answerRealized && conditionOrBoundaryRealized && evidenceRealized && findable;
         actualRealizations.push({
@@ -1278,11 +1379,26 @@ export function isHashtagOnlyLine(statement: string): boolean {
   return /^(?:#[^#\s]+[\s、,，]*)+$/u.test(trimmed);
 }
 
+export function issueDisposition(issue: Pick<ContentValidationIssue, "severity" | "disposition">): NonNullable<ContentValidationIssue["disposition"]> {
+  return issue.disposition ?? (issue.severity === "error" ? "block" : "advisory");
+}
+
+export function candidateQualityStatus(
+  validation: { valid?: boolean; issues: readonly ContentValidationIssue[] },
+): "passed" | "needs_review" | "blocked" {
+  if (validation.valid === false || validation.issues.some((issue) => issueDisposition(issue) === "block")) return "blocked";
+  return validation.issues.some((issue) => issueDisposition(issue) === "review") ? "needs_review" : "passed";
+}
+
 export function validateGenerationDraft(input: DraftValidationInput): ContentValidationIssue[] {
   const { draft, config, ledger } = input;
   const issues: ContentValidationIssue[] = [];
   const add = (code: string, severity: "error" | "warning", channel: ContentValidationIssue["channel"], message: string, repairable = true): void => {
-    issues.push({ code, severity, channel, message, repairable });
+    issues.push({
+      code, severity, channel, message, repairable,
+      disposition: severity === "error" ? "block" : "advisory",
+      origin: "deterministic",
+    });
   };
   if (!draft.content.N.title) add("title_required", "error", "N.title", "Title is required.");
   if (!draft.content.N.body) add("body_required", "error", "N.body", "Body is required.");
@@ -1292,14 +1408,31 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
   if (bodyLength < config.content.bodyMinChars) add("body_too_short", "error", "N.body", `Body has ${bodyLength} characters; minimum is ${config.content.bodyMinChars}.`);
   if (bodyLength > config.content.bodyMaxChars) add("body_too_long", "error", "N.body", `Body has ${bodyLength} characters; maximum is ${config.content.bodyMaxChars}.`);
   const publicText = allContentText(draft.content);
-  // 「待核实维度：」「已披露地点范围：」是规划层的内部维度标记(planning.ts 的
-  // unresolvedConstraintDimensions)。prompt 层已剥前缀,这里是兜底:实测曾原样出
-  // 现在机构答复里 ——「…不向业主加收费用。；待核实维度：方案适配条件。」
-  if (/\bevidence_[\w:.-]+\b|(?:sourceClusterId|reasoning|replyPlan|discoveryPlan)|(?:本线程|该线程|线程内)|(?:待核实维度|已披露地点范围)[：:]/iu.test(publicText)) {
+  const nonCommentPublicText = [
+    draft.content.H.hashtags.join(" "),
+    draft.content.N.imageBrief,
+    draft.content.N.title,
+    draft.content.N.body,
+  ].join("\n");
+  if (INTERNAL_PLANNING_LANGUAGE.test(publicText)) {
     add("internal_audit_artifact_visible", "error", "package", "User-visible copy contains an internal evidence ID, audit field or thread-control phrase.");
   }
-  if (/(?:只回应.{0,18}不承担.{0,8}答题|AI\s*不便|后台(?:库存|任务|参数)|内容任务|写作任务|人物设定|提示词|核验路径|按计划(?:回答|展开)|不承担完整答题)/iu.test(publicText)) {
+  if (MODEL_OR_OUTPUT_PROTOCOL_LANGUAGE.test(publicText)
+    || INTERNAL_SOURCE_CONTAINER_LANGUAGE.test(nonCommentPublicText)
+    || /(?:只回应.{0,18}不承担.{0,8}答题|AI\s*不便|后台(?:任务|参数)|人物设定|核验路径|按计划(?:回答|展开)|不承担完整答题)/iu.test(publicText)) {
     add("frontstage_instruction_leak", "error", "package", "User-visible copy contains backend instructions, model identity, or audit phrasing instead of natural human speech.");
+  }
+  const commentNodes = visibleCommentNodes(draft.content);
+  const visibleCommentText = commentNodes.join("\n");
+  // A reader may react to visible details, but must not narrate that the model was
+  // given a body/article as context. Phrases such as “正文说…” are prompt traces,
+  // not natural first-person speech, and must be repaired in the comment channel.
+  if (COMMENT_CONTEXT_META_LANGUAGE.test(visibleCommentText)) {
+    add("comment_context_meta_leak", "error", "Cref", "Reader-visible comment narrates the supplied article/body context instead of speaking naturally.");
+  }
+  const sourceLanguageLeak = commentNodes.find(exposesGenericCommentSourceLanguage);
+  if (sourceLanguageLeak) {
+    add("comment_source_language_surface_leak", "error", "Cref", `A visible comment exposes source/audit language instead of speaking naturally: ${sourceLanguageLeak}`);
   }
   const hashtagCount = draft.content.H.hashtags.length;
   if (hashtagCount < config.content.hashtagMin || hashtagCount > config.content.hashtagMax) {
@@ -1330,126 +1463,14 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
       thread.answer,
       ...thread.followUps.flatMap((followUp) => [followUp.question, followUp.answer]),
     ]).filter((value) => value.trim().length > 0);
-    const visibleCommentChars = visibleCommentNodes.reduce((total, value) => total + [...value.replace(/\s/gu, "")].length, 0);
     const [lineMin, lineMax] = surfacePlan.surfaceTargets.visibleCommentLines;
     if (visibleCommentNodes.length < lineMin || visibleCommentNodes.length > lineMax) {
       add("sample_comment_line_shape_drift", "warning", "Cref", `Visible comment nodes ${visibleCommentNodes.length} are outside the selected sample-shape target ${lineMin}-${lineMax}.`, false);
     }
-    if (visibleCommentChars > 650) {
-      add("comment_network_overexpanded", "error", "Cref", `Visible comment text has ${visibleCommentChars} characters; the reference-corpus p75 is about 155 and max is 482, so this is still an article/FAQ rather than a comment network.`);
-    } else if (visibleCommentChars > 360) {
-      add("comment_network_length_drift", "warning", "Cref", `Visible comment text has ${visibleCommentChars} characters and is much denser than the reference-corpus median of about 107.`, false);
-    }
-    const surfaceCopyText = [
-      draft.content.H.hashtags.join(" "),
-      draft.content.N.title,
-      draft.content.N.body,
-      ...draft.content.Cref.threads.flatMap((thread) => [thread.question, thread.answer, ...thread.followUps.flatMap((item) => [item.question, item.answer])]),
-    ].join("\n");
-    const visibleAuditTerms = surfaceCopyText.match(/(?:核实|边界|资料(?:未覆盖|显示|里)|不能下结论|适用条件|证据来源|判断框架|判断口径|有效报价单|项目说明)/gu)?.length ?? 0;
-    if (visibleAuditTerms >= 7) {
-      add("audit_language_surface_leak", "error", "package", `Visible copy repeats audit/formula language ${visibleAuditTerms} times; internal reasoning has leaked into the product surface.`);
-    } else if (visibleAuditTerms >= 4) {
-      add("audit_language_surface_drift", "warning", "package", `Visible copy uses audit/formula language ${visibleAuditTerms} times; rewrite it into role-specific everyday speech before publishing.`, false);
-    }
-    // P4-20: coverage check instead of a flat "at least three roles" floor —
-    // the cast should cover min(4, threadCount) distinct visible positions and
-    // the same position should not repeat on adjacent threads.
-    //
-    // 滑杆挂钩(软校验):地板由 comment_role_diversity 推导,让滑杆真的改变期望
-    // ——没有这一层时调 95 与调 50 对产物的要求完全相同(实测齐禾 #6/#7 就是
-    // role_diversity 95/88 却全员同一身份,校验层一声不响)。
-    //
-    // 但严重度**恒为 warning 且 repairable=false**:角色是否真的丰富是语义判断,
-    // 交给带完整上下文的 agent;校验层只负责诚实告知,不阻断、不触发 repair 重写。
-    const displayRoles = draft.content.Cref.threads
-      .map((thread) => thread.surfaceRoleCard?.displayRole)
-      .filter((role): role is string => Boolean(role));
-    const distinctRoles = new Set(displayRoles).size;
-    const adjacentRoleRepeat = displayRoles.some((role, index) => index > 0 && role === displayRoles[index - 1]);
-    const roleDiversity = config.parameters?.commentRoleDiversity ?? 85;
-    // 期望值按滑杆分档,但**必须夹到规划层真的能提供的角色数**:退化蓝图的
-    // fallbackCommentCast 只有 3 个角色(其中仅 2 个读者侧),此时要求 4 种社会位
-    // 置是不可能满足的,警告会在每一篇上无条件出现,变成纯噪声。可用供给以本篇
-    // commentCast 的实际规模为准,拿不到计划时退回观测到的 distinctRoles。
-    // 注意:供给未知时不能回退成 distinctRoles ——那是被检查的量本身,
-    // 拿它当上限会让条件恒不成立,检查静默失效。未知时按线程数(既有行为)。
-    const castSupply = new Set(
-      (surfacePlan.commentCast ?? []).map((role) => role.displayRole).filter(Boolean),
-    ).size;
-    const availableRoles = castSupply > 0 ? castSupply : threadCount;
-    const requestedDistinctRoles = roleDiversity >= 75 ? 4 : roleDiversity >= 40 ? 2 : 1;
-    const requiredDistinctRoles = Math.max(1, Math.min(requestedDistinctRoles, threadCount, availableRoles));
-    const rolesFlat = distinctRoles < requiredDistinctRoles || adjacentRoleRepeat;
-    if (threadCount >= 2 && rolesFlat) {
-      add(
-        "comment_surface_roles_flat",
-        "warning",
-        "Cref",
-        `Only ${distinctRoles} distinct visible social position(s) across ${threadCount} threads${adjacentRoleRepeat ? ", with the same position repeating on adjacent threads" : ""}; comment_role_diversity is ${roleDiversity}, which expects at least ${requiredDistinctRoles}. The comments may still sound like one FAQ author.`,
-        false,
-      );
-    }
-    const metaQuestionPattern = /(?:你最想问什么|你最关心(?:哪一点|什么)|还有什么想了解(?:的)?|有什么问题(?:都)?可以问|欢迎(?:留言|评论|私信)(?:咨询|提问)?)/u;
-    const metaQuestion = visibleCommentNodes.find((node) => metaQuestionPattern.test(node));
-    if (metaQuestion) {
-      add("comment_host_meta_question", "error", "Cref", `A visible comment uses host/interviewer wording instead of speaking from a real social position: ${metaQuestion}`);
-    }
-    const [targetGrowingMin, targetGrowingMax] = surfacePlan.commentNetwork.multiTurnTarget;
-    // The engine caps follow-up lines at the sample-shape surface capacity
-    // (planning.ts visibleLineCapacity), so a target minimum above that
-    // capacity is unsatisfiable; the honest expectation floor is the
-    // capacity-clamped target, matching what the planner itself scheduled.
-    const followUpLineCapacity = Math.max(0, Math.floor((surfacePlan.surfaceTargets.visibleCommentLines[1] - threadCount * 2) / 2));
-    // 读者互动层:T3 漂浮短反应按设计不生长(followUps 恒为空),生长下限只
-    // 落在可生长的线程(T1/T2)上;这是与行数容量同类的诚实下限收敛。
-    const growableThreadCount = draft.content.Cref.threads
-      .filter((thread) => commentThreadKindOf(thread) !== "organic_reaction")
-      .length;
-    const effectiveGrowingMin = Math.min(growableThreadCount, targetGrowingMin, followUpLineCapacity);
-    const effectiveGrowingMax = Math.min(growableThreadCount, Math.max(effectiveGrowingMin, targetGrowingMax));
-    const actualGrowingThreads = draft.content.Cref.threads.filter((thread) => thread.followUps.length > 0).length;
-    if (actualGrowingThreads < effectiveGrowingMin) {
-      // 软校验:欠生长恒为 warning 且不可 repair。multiTurnTarget 是**整片评论区
-      // 的分布期望**,不是逐条配额——"上一句没有可接的具体话头就不接"是正确行
-      // 为,判 error 会把模型逼去机械凑数,生成硬凑的追问,反而降低质量。接话是
-      // 否自然属语义判断,交给带完整上下文的 agent;校验层只做诚实告知。
-      add("comment_network_under_grown", "warning", "Cref", `The comment-network distribution expected ${effectiveGrowingMin}-${effectiveGrowingMax} naturally growing roots, but only ${actualGrowingThreads} grew. Do not fill a quota mechanically; review whether useful triggers were missed.`, false);
-    } else if (actualGrowingThreads > effectiveGrowingMax) {
-      add("comment_network_over_grown", "warning", "Cref", `The comment-network distribution expected ${effectiveGrowingMin}-${effectiveGrowingMax} naturally growing roots, but ${actualGrowingThreads} grew. Review whether every continuation is actually triggered by the previous line.`, false);
-    }
-    const optionalRegisterTerms = input.projectBlueprint?.surfaceLanguage.optionalColloquialisms ?? [];
-    const overloadedRegisterNode = visibleCommentNodes.find((node) =>
-      optionalRegisterTerms.filter((term) => term && node.includes(term)).length >= 3,
-    );
-    if (overloadedRegisterNode) {
-      add("comment_platform_register_overloaded", "warning", "Cref", `One comment stacks too many platform-register markers and may sound performed: ${overloadedRegisterNode}`, false);
-    }
-    const rootQuestions = draft.content.Cref.threads.map((thread) => thread.question.trim()).filter(Boolean);
-    // P4-20: a network with any follow-up depth is exempt — the FAQ look only
-    // matters when every thread is also a flat single exchange.
-    const networkHasDepth = draft.content.Cref.threads.some((thread) => thread.followUps.length > 0);
-    if (rootQuestions.length >= 3 && rootQuestions.every((question) => /[？?]$/u.test(question)) && !networkHasDepth) {
-      add("comment_network_all_questions", "warning", "Cref", "Every root node is formatted as a question; add a reaction, experience fragment, observation or disagreement so the section does not read as an FAQ.", false);
-    }
-    const answerOpenings = draft.content.Cref.threads.map((thread) => [...thread.answer.replace(/^[，。！？\s]+/u, "")].slice(0, 4).join(""));
-    const repeatedAnswerOpening = answerOpenings.find((opening) => opening && answerOpenings.filter((item) => item === opening).length >= 3);
-    if (repeatedAnswerOpening) {
-      // P4-20: three or more identical openings across four or more threads is
-      // a heavy single-voice signal and escalates to an error.
-      const severe = threadCount >= 4;
-      add("comment_reply_voice_repetition", severe ? "error" : "warning", "Cref", `At least three replies begin with “${repeatedAnswerOpening}”; the characters may still share one model voice.`, severe);
-    }
-    const rootLengths = draft.content.Cref.threads.map((thread) => [...thread.question.replace(/\s/gu, "")].length);
-    const answerLengths = draft.content.Cref.threads.map((thread) => [...thread.answer.replace(/\s/gu, "")].length);
-    const narrowSpread = (values: number[], tolerance: number) => values.length >= 4 && Math.max(...values) - Math.min(...values) <= tolerance;
-    if (narrowSpread(rootLengths, 2) && narrowSpread(answerLengths, 2)) {
-      // P4-20: a length spread of two characters or less on BOTH sides is
-      // slot-filling, not a warning-level drift.
-      add("comment_network_symmetric_shape", "error", "Cref", "Root comments and replies are nearly identical in length (spread <= 2) across the whole section; this indicates slot-filling rather than independent social voices.");
-    } else if (narrowSpread(rootLengths, 4) && narrowSpread(answerLengths, 4)) {
-      add("comment_network_symmetric_shape", "warning", "Cref", "Root comments and replies are nearly identical in length across the whole section; this often indicates slot-filling rather than independent social voices.", false);
-    }
+    // Reader-side relevance, specificity, voice distinction and conversational
+    // naturalness are handled by the editorial agent. The deterministic validator
+    // intentionally does not infer quality from vocabulary counts, punctuation,
+    // role quotas, line-length symmetry or reply openings.
     if (/信息卡|判断框架|适用边界|核心问题.{0,8}判断框架/u.test(draft.content.N.imageBrief)
       && !["narrow_request", "option_comparison"].includes(surfacePlan.prototype)) {
       add("image_product_shape_drift", "error", "N.imageBrief", `The ${surfacePlan.prototype} prototype requires a lived scene/image moment, but the brief fell back to an information card.`);
@@ -1494,6 +1515,20 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
         add("reasoning_location_missing", "error", "package", `Reasoning item has no visible location: ${item.statement}`);
       } else if (!item.statement.trim() || !visibleTextForReasoningEntry(draft.content, item)?.includes(item.statement)) {
         add("reasoning_statement_not_visible", "error", "package", `Reasoning statement is not an exact substring of ${item.location}: ${item.statement}`);
+      }
+      if (item.status === "human_confirmed_author_fact") {
+        const authorFact = config.task.authorContext.facts.find((fact) => fact.id === item.authorFactId);
+        if (config.task.publishingTopology !== "confirmed_individual_author" || !authorFact) {
+          add("author_fact_reference_invalid", "error", "package", `Author-fact ledger row references an unavailable fact: ${item.statement}`);
+        } else if (item.confirmationId !== authorFact.confirmationId) {
+          add("author_fact_confirmation_mismatch", "error", "package", `Author-fact confirmation does not match the frozen snapshot: ${item.statement}`);
+        } else if (!authorFactAuthorizesVisibleStatement(item.statement, authorFact.statement)) {
+          add("author_fact_statement_mismatch", "error", "package", `Author-fact ledger row exceeds its confirmed statement: ${item.statement}`);
+        }
+        if (item.evidenceIds.length || sourceSpans.length) {
+          add("author_fact_project_evidence_mixed", "error", "package", `Author facts must not masquerade as project evidence: ${item.statement}`);
+        }
+        continue;
       }
       if (item.status === "fact" && (item.location === "Cref.thread" || item.location === "Cref.followUp") && !item.occurrence) {
         add("comment_reasoning_occurrence_missing", "error", "Cref", `Comment fact must identify its exact thread and field occurrence: ${item.statement}`);
@@ -1598,7 +1633,6 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
   }
   const seenQuestions = new Map<string, string>();
   const seenAnswers = new Map<string, string>();
-  const bodyComparable = normalizedComparable(draft.content.N.body);
   if ((config.parameters?.commentInferenceEffort ?? 35) > 70) {
     add("comment_inference_effort_high", "warning", "Cref", "Comment inference effort is above 70; keep difficulty moderate and reduce every discovery to one easy inference step.");
   }
@@ -1642,12 +1676,13 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     const threadKind = commentThreadKindOf(thread);
     const missingThreadFields = [
       !thread.stage ? "Stage" : "",
-      !thread.gap ? "Gap" : "",
+      threadKind === "org_answer" && !thread.gap ? "Gap" : "",
       !thread.function ? "Function" : "",
       !thread.question ? "Q" : "",
-      // T3 漂浮短反应无回答需求:answer 为空、无下一步属正常形态,不算缺漏。
+      // T2/T3 are social nodes, not project-answer units: neither owns a
+      // publisher next-step contract. T3 also has no answer by design.
       threadKind !== "organic_reaction" && !thread.answer ? "A" : "",
-      threadKind !== "organic_reaction" && threadKind !== "host_reply" && !thread.nextStep ? "Next" : "",
+      threadKind === "org_answer" && !thread.nextStep ? "Next" : "",
       !thread.postingIdentity ? "Role" : "",
     ].filter(Boolean);
     if (missingThreadFields.length) {
@@ -1683,6 +1718,12 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     }
     if (threadKind === "organic_reaction" && thread.answer.trim()) {
       add("organic_reaction_answer_violation", "error", "Cref", `Thread ${thread.id} organic_reaction must not contain an answer.`);
+    }
+    const expectedAnswerIdentity = threadKind === "reader_exchange"
+      ? "simulated_reader"
+      : threadKind === "organic_reaction" ? "none" : thread.postingIdentity;
+    if (thread.answerIdentity && thread.answerIdentity !== expectedAnswerIdentity) {
+      add("comment_answer_identity_mismatch", "error", "Cref", `Thread ${thread.id} answerIdentity "${thread.answerIdentity}" does not match ${threadKind} semantics (expected "${expectedAnswerIdentity}").`, false);
     }
     if (threadKind === "host_reply") {
       if (config.task.publishingTopology !== "confirmed_individual_author" || config.task.authorContext.status !== "confirmed") {
@@ -1897,12 +1938,12 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     // still audited for consistency (comment_density_proxy_mismatch); the real structural
     // constraint (缺口多路复用上限, comment_gap_multiplexing_exceeded) is retained.
     const hasDensityContract = Boolean(thread.roleCard || thread.primaryGapId);
-    if (!thread.replyPlan) {
+    if (threadKind === "org_answer" && !thread.replyPlan) {
       add("comment_reply_plan_missing", "warning", "Cref", `Thread ${thread.id} has no structured replyPlan; historical content remains readable but cannot be fully audited.`);
     }
-    if (!thread.discoveryPlan) {
-      add("comment_discovery_plan_missing", "warning", "Cref", `Thread ${thread.id} has no same-thread discoveryPlan; historical content remains readable but cannot be audited for timely reveal.`);
-    } else {
+    if (threadKind === "org_answer" && !thread.discoveryPlan) {
+      add("comment_discovery_plan_missing", "warning", "Cref", `Thread ${thread.id} has no same-thread discoveryPlan; historical content remains readable but cannot be fully audited.`);
+    } else if (thread.discoveryPlan) {
       // M7: discoveryPlan is now optional/streamlined, so its scaffolding fields may be
       // absent. The three safety checks below are RETAINED at `error` level and stay
       // correct on streamlined plans — absent optional fields fold to "" and simply do
@@ -1961,33 +2002,24 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
         if (unsafeConstraint) {
           add("comment_role_constraint_ungrounded", "error", "Cref", `Thread ${thread.id} contains a role constraint that is neither disclosed nor marked for verification: ${unsafeConstraint}`);
         }
-        // The compression target comes from surfaceRoleCard or the now-optional densityProxy;
-        // when neither is present this warning is simply skipped.
-        const actualQuestionTarget = thread.surfaceRoleCard?.targetChars[1] ?? thread.densityProxy?.questionTargetChars;
-        if (actualQuestionTarget !== undefined && [...thread.question].length > actualQuestionTarget * 1.5) {
-          add("comment_question_not_compressed", "warning", "Cref", `Thread ${thread.id} question exceeds its explainable compression target.`, false);
-        }
       }
-    }
-    const questionFragments = thread.question.split(/[、，,\/|]/u).map((item) => item.trim()).filter(Boolean);
-    if (questionFragments.length >= 4 && !/(?:怎么|怎样|什么|哪些|是否|能否|该不该|要不要|会不会|如何|判断|核实|比较)/u.test(thread.question)) {
-      add("comment_keyword_pile", "error", "Cref", `Thread ${thread.id} piles keywords instead of asking one natural primary-gap question.`);
     }
     const comparableQuestion = normalizedComparable(thread.question);
     const comparableAnswer = normalizedComparable(thread.answer);
     const priorQuestion = seenQuestions.get(comparableQuestion);
     const priorAnswer = seenAnswers.get(comparableAnswer);
-    const priorSemanticAnswer = [...seenAnswers.entries()].find(([answer]) => meaningfulTextOverlap(comparableAnswer, answer, 0.92));
     if (comparableQuestion.length >= 6 && priorQuestion) add("duplicate_comment_question", "error", "Cref", `Thread ${thread.id} repeats the question from ${priorQuestion}.`);
     if (comparableAnswer.length >= 12 && priorAnswer) add("duplicate_comment_answer", "error", "Cref", `Thread ${thread.id} repeats the answer from ${priorAnswer}.`);
-    else if (comparableAnswer.length >= 20 && priorSemanticAnswer) add("near_duplicate_comment_answer", "error", "Cref", `Thread ${thread.id} is semantically too close to ${priorSemanticAnswer[1]} and does not add enough information.`);
     if (comparableQuestion) seenQuestions.set(comparableQuestion, thread.id);
     if (comparableAnswer) seenAnswers.set(comparableAnswer, thread.id);
-    if (hasDensityContract && comparableAnswer.length >= 12 && bodyComparable.includes(comparableAnswer)) {
-      add("comment_repeats_body", "error", "Cref", `Thread ${thread.id} repeats body information instead of adding a conditional answer.`);
-    }
-    const visibleNodes = [thread.question, thread.answer, ...thread.followUps.flatMap((item) => [item.question, item.answer])];
-    const leakedPlan = visibleNodes.find((node) => /(?:像.{1,16}(?:一样|那样)[，,]?(?:只|先)|先指出.{0,24}(?:细节|可见)|用一句.{0,24}提醒|只问[“"][^”"]+[”"]里|顺势问[“"])/u.test(node));
+    const visibleNodes = [
+      thread.question,
+      thread.answer,
+      thread.boundary ?? "",
+      thread.nextStep ?? "",
+      ...thread.followUps.flatMap((item) => [item.question, item.answer, item.boundary ?? ""]),
+    ];
+    const leakedPlan = visibleNodes.find((node) => /(?:主问题原文|只可改成|不得增加其他主题|表达方式|像.{1,16}(?:一样|那样)[，,]?(?:只|先)|先指出.{0,24}(?:细节|可见)|用一句.{0,24}提醒|只问[“"][^”"]+[”"]里|顺势问[“"])/u.test(node));
     if (leakedPlan) {
       add("comment_plan_language_surface_leak", "error", "Cref", `A visible comment renders a writing instruction instead of a person speaking: ${leakedPlan}`);
     }
@@ -2061,10 +2093,6 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     const testimonialShape = visibleNodes.find((node) => testimonialPattern.test(node));
     if (testimonialShape) {
       add("fabricated_operational_experience", "error", "Cref", `A visible comment states a first-person experience as an outcome testimonial (independent word-of-mouth, not a situation): ${testimonialShape}`);
-    }
-    const auditLeak = visibleNodes.find((node) => /(?:源资料|资料参考|参考资料|可用证据|知识库里|项目资料里)/u.test(node));
-    if (auditLeak) {
-      add("comment_source_language_surface_leak", "error", "Cref", `A visible comment exposes source/audit language instead of speaking naturally: ${auditLeak}`);
     }
   }
   // P4-21: an answer that substantially overlaps disclosed knowledge but has
@@ -2170,7 +2198,7 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
           entry.required ? "error" : "warning",
           entry.plannedPlacements.includes("N.body") ? "N.body" : "Cref",
           `Gap ${entry.gapId} was planned as resolved but the final visible output is missing: ${missing.join(", ") || "verified realization"}.`,
-          false,
+          entry.required,
         );
       }
       if (entry.status === "body_resolved" && !entry.actualRealizations.some((item) => item.channel === "N.body" && item.resolved)) {
@@ -2443,6 +2471,12 @@ export function mergeCrefPatchById(
 
 export function applyGenerationPatch(current: GenerationDraft, patch: GenerationDraftPatch): GenerationDraft {
   return {
+    // Repair patches may change only the fields declared by GenerationDraftPatch.
+    // Preserve side-channel audit artifacts (for example the comment editor's
+    // assessment) across a focused copy repair. Claim judgments are safe to carry
+    // here because the engine reruns the judge after every repair; that pass clears
+    // stale judgments before recomputing them against the new visible statements.
+    ...current,
     content: {
       H: patch.H ?? current.content.H,
       N: { ...current.content.N, ...patch.N },

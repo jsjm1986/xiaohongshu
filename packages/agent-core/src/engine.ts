@@ -2,8 +2,11 @@ import { createHash } from "node:crypto";
 
 import {
   applyGenerationPatch,
+  authorFactAuthorizesVisibleStatement,
+  candidateQualityStatus,
   channelsForIssues,
   commentThreadFunction,
+  issueDisposition,
   diagnosticsFromValidation,
   evaluateGapCoverageRealization,
   mergeCrefPatchById,
@@ -11,6 +14,7 @@ import {
   parseGenerationPatch,
   parseJsonObject,
   parseStagedCommentCopy,
+  parseStagedCommentEditor,
   parseStagedCommentReaders,
   parseStagedCoreCopy,
   parseStagedOrgAnswers,
@@ -65,8 +69,10 @@ import {
   buildKnowledgeAnchorReviewPrompt,
   buildRepairPrompt,
   buildStagedCommentGrowthPrompt,
+  buildStagedCommentEditorPrompt,
   buildStagedCommentReadersCorrectionPrompt,
   buildStagedCommentReadersPrompt,
+  buildStagedCommentReadersRegenerationPrompt,
   buildStagedCorePrompt,
   buildStagedCoreIdentityRepairPrompt,
   buildStagedHostAnswersPrompt,
@@ -84,6 +90,8 @@ import type {
   GenerationDraft,
   GenerationInput,
   GenerationResult,
+  GenerationTelemetryEvent,
+  GenerationValidationTelemetrySummary,
   ImageAssetAnalysis,
   InformationGap,
   KnowledgeContextSelection,
@@ -831,11 +839,11 @@ function sanitizeText(value: string, forbidden: string[]): string {
 
 function fitBody(fragments: string[], config: ResolvedGenerationConfig): string {
   const useful = fragments.filter(Boolean).map((fragment) => sanitizeText(fragment, config.task.forbidden));
-  const supporting = [
-    "这事我也是最近才开始认真看。",
-    "主要还是怕影响平时的安排，越刷越拿不准。",
-    "有了解的说说真实情况吧。",
-  ];
+  const supporting = config.task.publishingTopology === "institution_owned"
+    ? ["本次只说明已有依据与适用条件。", "尚未核实的信息保持未知，不替读者作个人结论。", "具体判断应结合已披露条件继续核实。"]
+    : config.task.publishingTopology === "confirmed_individual_author"
+      ? ["其余个人情况不作补充。", "未确认的时间、地点、动作和结果保持未知。", "项目事实由可追责机构身份另行说明。"]
+      : ["这事我也是最近才开始认真看。", "主要还是怕影响平时的安排，越刷越拿不准。", "有了解的说说真实情况吧。"];
   let source = [...useful];
   let preview = source.join("\n\n");
   for (const sentence of supporting) {
@@ -848,7 +856,11 @@ function fitBody(fragments: string[], config: ResolvedGenerationConfig): string 
   const buckets = Array.from({ length: bucketCount }, () => [] as string[]);
   source.forEach((fragment, index) => buckets[Math.min(bucketCount - 1, Math.floor(index * bucketCount / source.length))]?.push(fragment));
   let body = buckets.map((bucket) => bucket.join(" ")).filter(Boolean).join("\n\n");
-  const closing = "有了解的也可以说说。";
+  const closing = config.task.publishingTopology === "institution_owned"
+    ? "尚未核实的信息保持未知。"
+    : config.task.publishingTopology === "confirmed_individual_author"
+      ? "其余个人情况不作补充。"
+      : "有了解的也可以说说。";
   while ([...body].length < config.content.bodyMinChars) body = `${body}${body ? "\n\n" : ""}${closing}`;
   if ([...body].length > config.content.bodyMaxChars) body = [...body].slice(0, config.content.bodyMaxChars).join("").trimEnd();
   return body;
@@ -910,17 +922,34 @@ function deterministicDraft(
   const host = personaScene?.host;
   const event = personaScene?.event;
   const primaryGap = bodyGapCards[0]?.question ?? gaps[0] ?? `关于${topic}到底该先看什么？`;
+  const openQuestion = primaryGap.replace(/[。！!]+$/u, "").replace(/^[：:]/u, "");
+  const individualAuthor = config.task.publishingTopology === "confirmed_individual_author";
+  const institutionOwned = config.task.publishingTopology === "institution_owned";
+  const authorFactStatements = config.task.authorContext.facts.map((fact) => fact.statement.trim()).filter(Boolean);
+  const requiredOpenGap = bodyGapCards.find((card) => card.required && !((card.answer || card.framework) && card.evidenceIds.length));
+  const institutionFocus = [
+    "先说明已有依据与未知边界",
+    "按同一组条件整理比较口径",
+    "把最影响判断的一项单独说清",
+  ][candidateIndex]!;
+  const institutionFragments = [
+    `${config.project.name}官方账号就“${topic}”整理一项说明：${institutionFocus}。`,
+    requiredOpenGap ? `${requiredOpenGap.label}目前仍待核实。` : "",
+    decisionText,
+    factText,
+    boundaryText,
+  ];
+  const authorFragments = [
+    ...authorFactStatements,
+    `关于“${topic}”，本次只保留一个问题：${openQuestion}`,
+    "其余个人情况不作补充。",
+  ];
   const rawHostLead = host?.identityCue ?? ["上班族", "第一次认真做功课的人", "最近一直在刷相关内容的人"][candidateIndex]!;
-  // Blueprint identity cues written as metadata ("用户直接问价") must not be
-  // narrated as the host's self-description in the demo body.
   const hostLead = /^(?:用户|客户|读者|目标人群)/u.test(rawHostLead) ? "最近一直在刷相关内容的人" : rawHostLead;
   const sceneLead = event?.setting ?? "最近刷内容的时候";
   const friction = host?.immediateConstraint ?? event?.friction ?? "怕影响平时安排";
-  const openQuestion = primaryGap.replace(/[。！!]+$/u, "").replace(/^[：:]/u, "");
   const factWhisper = facts[0] && method.decisionInformationDepth >= 85 ? `我目前只确认到${facts[0]}。` : "";
-  const requiredOpenGap = bodyGapCards.find((card) => card.required && !((card.answer || card.framework) && card.evidenceIds.length));
-  const requiredOpenLine = requiredOpenGap ? `关于${requiredOpenGap.label}我还没问明白，得再确认具体情况。` : "";
-  const bodyByPrototype: Record<string, string[]> = {
+  const creativeBodyByPrototype: Record<string, string[]> = {
     narrow_request: [`${hostLead}，${friction}。${openQuestion}`],
     live_moment: [`${event?.timeAnchor ?? "刚刚"}${sceneLead}，${event?.observableAction ?? "顺手记了一条"}。`, `${event?.friction ?? friction}，等会儿再看具体怎么说。`],
     expectation_reversal: [`本来都按${topic}安排好了，结果新得到的信息跟我想的不一样。`, `${event?.emotionalAftertaste ?? "现在还有点没反应过来"}，${openQuestion}`],
@@ -928,15 +957,19 @@ function deterministicDraft(
     outcome_observation: [`${sceneLead}${event?.observableAction ?? "突然多留意了一下"}，${event?.emotionalAftertaste ?? "感受和以前有点不同"}。`],
     retrospective_update: [`${event?.timeAnchor ?? "隔了一段时间"}才想起来说说，${event?.observableAction ?? "翻到以前的记录"}。`, `${event?.friction ?? "平时状态也会有起伏"}，只说我现在看到的。`],
     relationship_moment: [`${hostLead}，以前${event?.friction ?? "在同一个场景总会犹豫一下"}。`, `今天${event?.observableAction ?? "做了一个以前不会做的小动作"}，${event?.emotionalAftertaste ?? "心里轻松了一点"}。`],
-    option_comparison: [`最近看${topic}的信息看得有点乱，已经比较到一半，还是卡在${friction}。`, `${openQuestion}`],
+    option_comparison: [`最近看${topic}的信息看得有点乱，已经比较到一半，还是卡在${friction}。`, openQuestion],
   };
-  const bodyFragments = [
-    mustMention ? `${mustMention}。` : "",
-    requiredOpenLine,
-    ...(bodyByPrototype[personaScene?.prototype ?? "narrow_request"] ?? bodyByPrototype.narrow_request!),
+  const creativeSceneFragments = [
+    requiredOpenGap ? `关于${requiredOpenGap.label}我还没问明白，得再确认具体情况。` : "",
+    ...(creativeBodyByPrototype[personaScene?.prototype ?? "narrow_request"] ?? creativeBodyByPrototype.narrow_request!),
     factWhisper,
   ];
+  const bodyFragments = [
+    mustMention ? `${mustMention}。` : "",
+    ...(institutionOwned ? institutionFragments : individualAuthor ? authorFragments : creativeSceneFragments),
+  ];
   const body = fitBody(bodyFragments, config);
+
 
   const hashtagPool = [topic, ...(topicOpportunity?.tags ?? []), config.project.domain, config.task.city, config.task.doctor, "信息补全", "选择参考"]
     .filter((item): item is string => Boolean(item))
@@ -1100,6 +1133,9 @@ function deterministicDraft(
       answerKind: "answer" as const,
       boundary: planned?.replyPlan?.boundary,
       postingIdentity: planned?.postingIdentity ?? "publisher" as const,
+      answerIdentity: threadKind === "reader_exchange"
+        ? "simulated_reader" as const
+        : threadKind === "organic_reaction" ? "none" as const : (planned?.postingIdentity ?? "publisher" as const),
       sourceClusterIds: [],
       evidenceIds: [],
       nextStep: planned?.nextStep ?? "按真实新问题继续接话",
@@ -1273,6 +1309,9 @@ function deterministicDraft(
         simulationLabel: "模拟潜在读者追问",
       })) : [],
       postingIdentity: planned?.postingIdentity ?? "publisher" as const,
+      answerIdentity: threadKind === "reader_exchange"
+        ? "simulated_reader" as const
+        : threadKind === "organic_reaction" ? "none" as const : (planned?.postingIdentity ?? "publisher" as const),
       sourceClusterIds: planned?.sourceClusterIds.length ? planned.sourceClusterIds : context.selectedDocumentIds.slice(0, 3),
       evidenceIds: planned?.evidenceIds.length ? planned.evidenceIds : primaryEvidence ? [primaryEvidence] : [],
       nextStep: planned?.nextStep ?? (primaryEvidence ? "记录自己的条件，并按来源逐项核实。" : "补充可信来源后再形成结论。"),
@@ -1324,10 +1363,13 @@ function deterministicDraft(
     relationship_moment: [short(event?.setting, "一个普通瞬间", 12), `${topic}被人问起`, short(event?.emotionalAftertaste, "突然有点感触", 12)],
     option_comparison: [`${topic}真的难选`, `${topic}差别在哪`, "两种说法对不上"],
   };
-  const surfaceTitle = personaScene
+  const surfaceTitle = personaScene && !institutionOwned && !individualAuthor
     ? surfaceTitles[personaScene.prototype]?.[candidateIndex % (surfaceTitles[personaScene.prototype]?.length || 1)]
     : undefined;
-  const rawTitle = surfaceTitle ?? (orchestrationPlan?.strategy.openingMode.includes("misconception")
+  const topologyTitle = institutionOwned
+    ? [`${topic}官方说明`, `${topic}条件说明`, `${topic}待核实项`][candidateIndex]
+    : individualAuthor ? [`${topic}先问一件事`, `${topic}还在确认`, `${topic}一个问题`][candidateIndex] : undefined;
+  const rawTitle = topologyTitle ?? surfaceTitle ?? (orchestrationPlan?.strategy.openingMode.includes("misconception")
     ? misconceptionTitles[candidateIndex]!
     : orchestrationPlan?.strategy.openingMode.includes("verification")
       ? verificationTitles[candidateIndex]!
@@ -1430,9 +1472,17 @@ function deterministicDraft(
  * T2 读者互聊由读者 B 接话。模块级函数:bindDialogueProvenance 的缺文案兜
  * 底与 2A-O 机构答复失败/缺 id 时的回落共用同一套口径。
  */
+function safeVisibleQuestionFromPlan(planned: OrchestrationPlan["dialogueThreads"][number]): string {
+  const task = planned.roleCard.decisionTask.trim().replace(/[？?。！!]+$/u, "");
+  const hook = planned.surfaceRoleCard?.interactionHook?.trim();
+  if (planned.threadKind === "organic_reaction") return hook ? `${hook}这点先蹲一个` : "这点先蹲一个";
+  if (planned.threadKind === "reader_exchange") return hook ? `${hook}这点我也在纠结` : "这点我也在纠结";
+  return task ? `${task}？` : "这件事具体要看什么条件？";
+}
+
 function answerFromPlan(planned: OrchestrationPlan["dialogueThreads"][number]): string {
   if (planned.threadKind === "organic_reaction") return "";
-  if (planned.threadKind === "host_reply") return "我现在只说正文里已经写明的情况，其他还没定。";
+  if (planned.threadKind === "host_reply") return "";
   // T2 的 answer 本就是读者 B 接话,路人腔在这里是正确的。
   if (planned.threadKind === "reader_exchange") return "姐妹我也是，还在纠结要不要去问问";
   // T1(org_answer)是可追责答复位:三档身份都是发布方,不是路人。此前这里按
@@ -1488,7 +1538,7 @@ function bindDialogueProvenance(
     const fallbackId = planned.id;
     const base = existing ?? {
       id: fallbackId,
-      question: planned.questionIntent.replace(/[？?]+$/u, "") + "？",
+      question: safeVisibleQuestionFromPlan(planned),
       answer: answerFromPlan(planned),
       followUps: [],
       postingIdentity: planned.postingIdentity,
@@ -1501,11 +1551,11 @@ function bindDialogueProvenance(
     // not user-facing prose and may contain audit IDs or intentionally verbose
     // planning language that must never overwrite a natural question/answer.
     const existingQuestion = cleanVisibleText(base.question);
-    const compactQuestion = cleanVisibleText(planned.questionIntent);
+    const safeFallbackQuestion = safeVisibleQuestionFromPlan(planned);
     // Extremely short comments such as “同问” or “蹲” are legitimate social
     // nodes in the reference corpus; never expand them merely for being short.
     const question = !existingQuestion
-      ? compactQuestion
+      ? safeFallbackQuestion
       : existingQuestion;
     const existingAnswer = cleanVisibleText(base.answer);
     const answer = existingAnswer || answerFromPlan(planned);
@@ -1562,6 +1612,9 @@ function bindDialogueProvenance(
       answerKind: base.answerKind ?? "answer" as const,
       boundary: ownsPrimaryGap ? (base.boundary ?? planned.replyPlan?.boundary) : undefined,
       postingIdentity: planned.postingIdentity,
+      answerIdentity: threadKind === "reader_exchange"
+        ? "simulated_reader" as const
+        : threadKind === "organic_reaction" ? "none" as const : planned.postingIdentity,
       sourceClusterIds: ownsPrimaryGap ? [...planned.sourceClusterIds] : [],
       evidenceIds: ownsPrimaryGap ? evidenceIds : [],
       followUps: threadKind === "host_reply" || threadKind === "organic_reaction" ? [] : followUps,
@@ -1702,6 +1755,69 @@ function groundedVisibleSegments(draft: GenerationDraft): Array<{
     });
   }
   return result;
+}
+
+/**
+ * Bind visible real-author copy to the server-frozen author-fact ledger.
+ * This is deterministic and never asks the model to invent confirmation metadata.
+ */
+export function attachConfirmedAuthorFactReasoning(
+  draft: GenerationDraft,
+  config: ResolvedGenerationConfig,
+): GenerationDraft {
+  if (config.task.publishingTopology !== "confirmed_individual_author"
+    || config.task.authorContext.status !== "confirmed") return draft;
+
+  const candidates: Array<{
+    statement: string;
+    location: NonNullable<GenerationDraft["reasoning"][number]["location"]>;
+    occurrence: NonNullable<GenerationDraft["reasoning"][number]["occurrence"]>;
+  }> = [];
+  const addText = (
+    text: string,
+    location: NonNullable<GenerationDraft["reasoning"][number]["location"]>,
+    occurrence: NonNullable<GenerationDraft["reasoning"][number]["occurrence"]>,
+  ): void => {
+    text.split(/(?<=[。！？!?；;])|\n+/u).map((item) => item.trim()).filter(Boolean)
+      .forEach((statement) => candidates.push({ statement, location, occurrence }));
+  };
+  addText(draft.content.N.title, "N.title", { field: "title" });
+  addText(draft.content.N.body, "N.body", { field: "body" });
+  for (const thread of draft.content.Cref.threads) {
+    if (thread.threadKind === "host_reply" || thread.postingIdentity === "author") {
+      addText(thread.answer, "Cref.thread", { field: "answer", threadId: thread.id });
+    }
+  }
+
+  let reasoning = [...draft.reasoning];
+  for (const candidate of candidates) {
+    const fact = config.task.authorContext.facts.find((item) => authorFactAuthorizesVisibleStatement(candidate.statement, item.statement));
+    if (!fact) continue;
+    reasoning = reasoning.filter((item) => !(item.location === candidate.location
+      && item.occurrence?.field === candidate.occurrence.field
+      && item.occurrence?.threadId === candidate.occurrence.threadId
+      && item.occurrence?.followUpIndex === candidate.occurrence.followUpIndex
+      && item.status !== "fact"
+      && (item.statement === candidate.statement
+        || item.statement.includes(candidate.statement)
+        || candidate.statement.includes(item.statement))));
+    if (reasoning.some((item) => item.status === "human_confirmed_author_fact"
+      && item.location === candidate.location
+      && item.occurrence?.field === candidate.occurrence.field
+      && item.occurrence?.threadId === candidate.occurrence.threadId
+      && item.statement === candidate.statement)) continue;
+    reasoning.push({
+      statement: candidate.statement,
+      location: candidate.location,
+      occurrence: candidate.occurrence,
+      status: "human_confirmed_author_fact",
+      authorFactId: fact.id,
+      ...(fact.confirmationId ? { confirmationId: fact.confirmationId } : {}),
+      evidenceIds: [],
+      sourceSpans: [],
+    });
+  }
+  return { ...draft, reasoning };
 }
 
 function reconcileReasoningEvidence(
@@ -1904,6 +2020,8 @@ function recordClaimJudgeFailure(stageIssues: ContentValidationIssue[], error: u
     code: "model_claim_judge_failed",
     severity: "warning",
     channel: "package",
+    disposition: "advisory",
+    origin: "infrastructure",
     message: `受控声明的语义裁决未完成，敏感声明改按词面命中判定（可能偏严）：${error instanceof Error ? error.message : String(error)}`,
     repairable: false,
   });
@@ -1921,15 +2039,71 @@ function uniqueUnknowns(ledger: KnowledgeLedger, draft: GenerationDraft): Genera
   return [...new Map([...ledger.unknowns, ...draft.unknowns].map((item) => [item.id, item])).values()];
 }
 
-/** Only completed HTTP-200 responses may receive one bounded shape correction. */
-export function shouldCorrectCommentReadersFailure(error: unknown): boolean {
-  return error instanceof ModelProviderError && error.status === 200 && error.retryable === false;
+function completeIssueMetadata(issues: readonly ContentValidationIssue[]): ContentValidationIssue[] {
+  return issues.map((issue) => ({
+    ...issue,
+    disposition: issue.disposition ?? (issue.severity === "error" ? "block" : "advisory"),
+    origin: issue.origin ?? (issue.code.startsWith("model_") ? "infrastructure" : "deterministic"),
+  }));
+}
+
+/** The editor returned valid JSON but attempted to renegotiate a server-owned contract. */
+class CommentEditorContractError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CommentEditorContractError";
+  }
+}
+
+/** Completed HTTP-200 responses with no visible content require one full regeneration.
+ * They are not malformed JSON and must never enter the shape-correction prompt. */
+export function shouldRegenerateCommentReadersFailure(error: unknown): boolean {
+  if (!(error instanceof ModelProviderError) || error.status !== 200 || error.retryable !== false) return false;
+  const diagnostics = error.responseDiagnostics;
+  if (diagnostics?.emptyOutputRecoveryAttempted) return false;
+  return diagnostics?.contentKind === "missing"
+    || diagnostics?.contentChars === 0
+    || /did not contain output text/iu.test(error.message);
+}
+
+/** Shape correction is only for non-empty model text that failed local parsing. */
+export function shouldCorrectCommentReadersFailure(error: unknown, originalResponse = ""): boolean {
+  return originalResponse.trim().length > 0 && !(error instanceof ModelProviderError);
 }
 
 /** A patch cannot make a candidate publishable while any terminal hard error remains. */
 export function shouldAttemptGenerationRepair(issues: readonly ContentValidationIssue[]): boolean {
-  return issues.some((item) => item.severity === "error" && item.repairable)
-    && !issues.some((item) => item.severity === "error" && !item.repairable);
+  return issues.some((item) => issueDisposition(item) === "block" && item.repairable)
+    && !issues.some((item) => issueDisposition(item) === "block" && !item.repairable);
+}
+
+function validationTelemetrySummary(
+  issues: readonly ContentValidationIssue[],
+): GenerationValidationTelemetrySummary {
+  const dispositions = issues.map((issue) => issueDisposition(issue));
+  const origins = issues.map((issue) => issue.origin
+    ?? (issue.code.startsWith("model_") ? "infrastructure" : "deterministic"));
+  return {
+    issueCount: issues.length,
+    errorCount: issues.filter((issue) => issue.severity === "error").length,
+    warningCount: issues.filter((issue) => issue.severity === "warning").length,
+    blockingCount: dispositions.filter((value) => value === "block").length,
+    reviewCount: dispositions.filter((value) => value === "review").length,
+    advisoryCount: dispositions.filter((value) => value === "advisory").length,
+    repairableBlockingCount: issues.filter((issue) => issueDisposition(issue) === "block" && issue.repairable).length,
+    terminalBlockingCount: issues.filter((issue) => issueDisposition(issue) === "block" && !issue.repairable).length,
+    issueCodes: [...new Set(issues.map((issue) => issue.code))].sort(),
+    channels: [...new Set(issues.map((issue) => issue.channel))].sort(),
+    origins: [...new Set(origins)].sort(),
+  };
+}
+
+function emitGenerationTelemetry(input: GenerationInput, event: GenerationTelemetryEvent): void {
+  try {
+    input.onTelemetry?.(event);
+  } catch {
+    // Observability must never change generated content or job outcome.
+  }
 }
 
 function cloneConfig(config: ResolvedGenerationConfig): ResolvedGenerationConfig {
@@ -1991,6 +2165,14 @@ export class ContentGenerationAgent implements GenerationEngine {
     const degradedCandidates = candidateResults.flatMap((result, candidateIndex) => result.status === "rejected"
       ? [{ candidateIndex, reason: result.reason instanceof Error ? result.reason.message : String(result.reason) }]
       : []);
+    candidateResults.forEach((result, candidateIndex) => {
+      if (result.status !== "rejected") return;
+      emitGenerationTelemetry(effectiveInput, {
+        type: "candidate_failed",
+        candidateIndex,
+        errorName: result.reason instanceof Error ? result.reason.name.slice(0, 80) : "UnknownError",
+      });
+    });
     const candidates = candidateResults.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
     if (!candidates.length) {
       throw new Error(
@@ -2096,7 +2278,10 @@ export class ContentGenerationAgent implements GenerationEngine {
       // 存量蓝图的可追责身份体检:审批层校验只挡新模块,已批准的不合规
       // role_model 会让答复展示名静默回落到通用兜底名。这里显性记 warning。
       for (const message of diagnoseAccountableIdentities(input.planningContext?.projectBlueprint)) {
-        stageIssues.push({ code: "accountable_identity_incomplete", severity: "warning", channel: "Cref", message, repairable: false });
+        stageIssues.push({
+          code: "accountable_identity_incomplete", severity: "warning", channel: "Cref", message, repairable: false,
+          disposition: "review", origin: "deterministic",
+        });
       }
       // 阶段2A-R 生成读者侧可见问题。每条线程的 gap、问题职责、答复身份与展示
       // 角色均已由规划器冻结；模型必须在合同内措辞，不能通过改写问题来换答复人。
@@ -2113,34 +2298,69 @@ export class ContentGenerationAgent implements GenerationEngine {
           || actualIds.some((id, index) => id !== expectedReaderIds[index])) {
           throw new Error(`Staged comment output IDs ${JSON.stringify(actualIds)} did not match expected ${JSON.stringify(expectedReaderIds)}.`);
         }
+        parsed.threads.forEach((thread, index) => {
+          const expected = expectedReaderThreads[index]!;
+          if (!thread.question.trim()) throw new Error(`Staged comment thread ${thread.id} has an empty visible question.`);
+          if (expected.threadKind === "reader_exchange" && !thread.answer.trim()) {
+            throw new Error(`Staged reader-exchange thread ${thread.id} has an empty reader-B reply.`);
+          }
+          if (expected.threadKind !== "reader_exchange") thread.answer = "";
+        });
         return parsed;
       };
-      let initialReaderText = "";
-      let initialReaderError: unknown;
-      try {
-        const readersResponse = await this.provider.generate({
-          messages: readersPrompt.messages,
-          responseSchema: readersPrompt.responseSchema,
+      const generateReaders = async (
+        prompt: typeof readersPrompt,
+        purpose: "generate_comment_readers" | "regenerate_comment_readers",
+        retrySeed: number,
+        stage: number,
+      ): Promise<string> => {
+        const response = await this.provider!.generate({
+          messages: prompt.messages,
+          responseSchema: prompt.responseSchema,
           schemaName: "content_candidate_comment_readers",
           model: input.config.model.model,
-          seed: seed + 1,
-          temperature: input.config.model.temperature,
+          seed: retrySeed,
+          temperature: purpose === "regenerate_comment_readers"
+            ? Math.min(input.config.model.temperature, 0.35)
+            : input.config.model.temperature,
           maxOutputTokens: input.config.model.maxOutputTokens,
-          metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_comment_readers", stage: 2 },
+          metadata: { jobId: input.jobId, candidateIndex, purpose, stage, ...(purpose === "regenerate_comment_readers" ? { attempt: 1 } : {}) },
         });
-        initialReaderText = readersResponse.text;
+        return response.text;
+      };
+      let initialReaderText = "";
+      try {
+        initialReaderText = await generateReaders(readersPrompt, "generate_comment_readers", seed + 1, 2);
       } catch (error) {
-        // Only a completed HTTP-200 response may use the one bounded correction.
-        // Transport, 429/5xx, auth and cancellation errors preserve their normal
-        // retry/failure semantics and are never disguised as shape drift.
-        if (!shouldCorrectCommentReadersFailure(error)) throw error;
-        initialReaderError = error;
+        if (!shouldRegenerateCommentReadersFailure(error)) throw error;
+        stageIssues.push({
+          code: "model_comment_readers_regenerated",
+          severity: "warning",
+          disposition: "advisory",
+          origin: "infrastructure",
+          channel: "Cref",
+          message: "读者评论阶段首次返回没有可见正文，已使用完整原任务重新生成一次；该候选需要人工复核评论自然度。",
+          repairable: false,
+        });
+        const regenerationPrompt = buildStagedCommentReadersRegenerationPrompt(readersPrompt);
+        // A second empty response is terminal for this candidate. Never fabricate
+        // comments from planning instructions or route it through shape correction.
+        initialReaderText = await generateReaders(regenerationPrompt, "regenerate_comment_readers", seed + 101, 2.02);
       }
       let parsedReaderSide: ReturnType<typeof parseStagedCommentReaders>;
       try {
-        if (initialReaderError) throw initialReaderError;
         parsedReaderSide = parseReaders(initialReaderText);
       } catch (error) {
+        if (!shouldCorrectCommentReadersFailure(error, initialReaderText)) throw error;
+        stageIssues.push({
+          code: "model_comment_readers_corrected",
+          severity: "warning",
+          disposition: "advisory",
+          origin: "infrastructure",
+          channel: "Cref",
+          message: "读者评论有可见原文但 JSON 结构不符合冻结合同，已做一次仅修结构的校正；该候选需要人工复核。",
+          repairable: false,
+        });
         const correctionPrompt = buildStagedCommentReadersCorrectionPrompt(
           initialReaderText,
           expectedReaderThreads,
@@ -2151,7 +2371,7 @@ export class ContentGenerationAgent implements GenerationEngine {
           responseSchema: correctionPrompt.responseSchema,
           schemaName: "content_candidate_comment_readers_correction",
           model: input.config.model.model,
-          seed: seed + 101,
+          seed: seed + 102,
           temperature: Math.min(input.config.model.temperature, 0.2),
           maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_SHORT_OUTPUT_TOKENS),
           metadata: { jobId: input.jobId, candidateIndex, purpose: "repair_comment_readers", stage: 2.01, attempt: 1 },
@@ -2160,7 +2380,7 @@ export class ContentGenerationAgent implements GenerationEngine {
       }
       const gapCardById = new Map((orchestrationPlan.gapPlanningCards ?? []).map((card) => [card.gapId, card]));
       const claimRules = input.planningContext?.projectBlueprint?.claimPolicy.rules ?? [];
-      const readerSide = {
+      let readerSide = {
         ...parsedReaderSide,
         threads: parsedReaderSide.threads.map((thread, index) => {
           const planned = orchestrationPlan.dialogueThreads[index]!;
@@ -2188,12 +2408,82 @@ export class ContentGenerationAgent implements GenerationEngine {
             code: "reader_question_plan_drift",
             severity: "warning",
             channel: "Cref",
-            message: `线程 ${planned.id} 的读者问题偏离冻结主问题，已回退为规划期问题原文；答复身份保持 ${planned.postingIdentity} 不变。`,
+            message: `线程 ${planned.id} 的读者问题偏离冻结主问题，已回退为带主缺口锚点的自然问法；答复身份保持 ${planned.postingIdentity} 不变。`,
             repairable: false,
           });
-          return { ...thread, question: gap.question.trim() || planned.roleCard.decisionTask.trim() };
+          const label = gap.label.trim() || "这件事";
+          return { ...thread, question: `关于${label}，具体要看什么条件？` };
         }),
       };
+
+      // Editorial agent: directly improve reader-side semantic quality before any
+      // accountable responder sees the questions. It cannot change IDs, duties,
+      // identities, evidence or institutional answers. A failed editorial call is
+      // non-blocking infrastructure telemetry; deterministic gates still run later.
+      try {
+        const editorPrompt = buildStagedCommentEditorPrompt(promptInput, core, readerSide);
+        const editorResponse = await this.provider.generate({
+          messages: editorPrompt.messages,
+          responseSchema: editorPrompt.responseSchema,
+          schemaName: "content_candidate_comment_editor",
+          model: input.config.model.model,
+          seed: seed + 103,
+          temperature: Math.min(input.config.model.temperature, 0.45),
+          maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_SHORT_OUTPUT_TOKENS),
+          metadata: { jobId: input.jobId, candidateIndex, purpose: "edit_comment_readers", stage: 2.04 },
+        });
+        const edited = parseStagedCommentEditor(editorResponse.text);
+        const parsedEdited = parseReaders(JSON.stringify({ threads: edited.threads }));
+        // The editor may improve wording, never renegotiate the frozen question
+        // responsibility or responder. Reject the whole edit atomically when any
+        // org-answer question crosses its planned gap or routes to another identity.
+        for (const [index, thread] of parsedEdited.threads.entries()) {
+          const planned = orchestrationPlan.dialogueThreads[index]!;
+          const threadKind = planned.threadKind ?? "org_answer";
+          if (threadKind === "host_reply") {
+            if (guardedReplyIdentitiesForQuestion(thread.question, claimRules).size > 0) {
+              throw new CommentEditorContractError(`Comment editor moved host thread ${planned.id} into a project-controlled question.`);
+            }
+            continue;
+          }
+          if (threadKind !== "org_answer") continue;
+          const gap = gapCardById.get(planned.primaryGapId);
+          if (!gap || !questionMatchesPlannedGap(thread.question, gap)) {
+            throw new CommentEditorContractError(`Comment editor changed the frozen primary responsibility of thread ${planned.id}.`);
+          }
+          const guarded = guardedReplyIdentitiesForQuestion(thread.question, claimRules);
+          if ([...guarded].some((identity) => identity !== planned.postingIdentity)) {
+            throw new CommentEditorContractError(`Comment editor changed the frozen responder of thread ${planned.id}.`);
+          }
+        }
+        readerSide = { threads: parsedEdited.threads };
+        if (edited.assessment.status === "review") {
+          stageIssues.push({
+            code: "comment_editor_review",
+            severity: "warning",
+            channel: "Cref",
+            message: edited.assessment.summary || edited.assessment.reasons.join("；") || "评论编辑仍发现无法在冻结职责内解决的语义问题。",
+            repairable: false,
+            disposition: "review",
+            origin: "agent",
+          });
+        }
+        // Persist the assessment later with the draft; no issue is emitted on pass.
+        (readerSide as typeof readerSide & { assessment?: typeof edited.assessment }).assessment = edited.assessment;
+      } catch (error) {
+        const contractRejected = error instanceof CommentEditorContractError;
+        stageIssues.push({
+          code: contractRejected ? "comment_editor_contract_rejected" : "comment_editor_unavailable",
+          severity: "warning",
+          channel: "Cref",
+          message: contractRejected
+            ? `评论编辑稿越过冻结职责，已原子拒收并保留原始读者文案：${error.message}`
+            : `评论编辑增强阶段未完成，保留原始读者文案：${error instanceof Error ? error.message : String(error)}`,
+          repairable: false,
+          disposition: "advisory",
+          origin: contractRejected ? "deterministic" : "infrastructure",
+        });
+      }
 
       // postingIdentity、replyDisplayRole 与 routingReason 已在线程规划时冻结。
       // 读者模型只负责在该线程 questionIntent / gap 职责内写可见问题；这里不再
@@ -2551,6 +2841,9 @@ export class ContentGenerationAgent implements GenerationEngine {
       draft = {
         ...deterministicBase,
         content: stagedContent,
+        ...((readerSide as typeof readerSide & { assessment?: import("./types.js").CommentEditorialAssessment }).assessment
+          ? { commentEditorialAssessment: (readerSide as typeof readerSide & { assessment: import("./types.js").CommentEditorialAssessment }).assessment }
+          : {}),
       };
       const ledgerPrompt = buildStagedLedgerPrompt(promptInput, stagedContent);
       try {
@@ -2584,6 +2877,8 @@ export class ContentGenerationAgent implements GenerationEngine {
         stageIssues.push({
           code: "model_ledger_failed",
           severity: "warning",
+          disposition: "review",
+          origin: "infrastructure",
           channel: "package",
           message: `模型可见文案已保留，但事实台账阶段失败，事实锚定与证据引用可能不完整，发布前需人工复核：${error instanceof Error ? error.message : String(error)}`,
           repairable: false,
@@ -2621,6 +2916,7 @@ export class ContentGenerationAgent implements GenerationEngine {
         onFailure: (error) => recordClaimJudgeFailure(stageIssues, error),
       });
     }
+    draft = attachConfirmedAuthorFactReasoning(draft, input.config);
     draft = refreshCreativeScenarioIdentities(draft);
     let issues = [
       ...suppressGrowthWarningsAfterGrowthFailure(
@@ -2629,7 +2925,25 @@ export class ContentGenerationAgent implements GenerationEngine {
       ),
       ...stageIssues,
     ];
+    emitGenerationTelemetry(input, {
+      type: "candidate_validation",
+      candidateIndex,
+      phase: "initial",
+      repairAttempt: 0,
+      summary: validationTelemetrySummary(issues),
+    });
     let repairAttempts = 0;
+    if (issues.some((item) => issueDisposition(item) === "block")
+      && !shouldAttemptGenerationRepair(issues)) {
+      emitGenerationTelemetry(input, {
+        type: "candidate_repair_skipped",
+        candidateIndex,
+        reason: issues.some((item) => issueDisposition(item) === "block" && !item.repairable)
+          ? "terminal_blocker"
+          : "repair_disabled",
+        summary: validationTelemetrySummary(issues),
+      });
+    }
     // A model patch cannot make a candidate publishable while any terminal hard
     // error remains. Skip expensive repairs instead of spending tens of thousands
     // of tokens on a candidate that must still be reviewed.
@@ -2638,6 +2952,13 @@ export class ContentGenerationAgent implements GenerationEngine {
       repairAttempts += 1;
       const channels = channelsForIssues(issues);
       if (!channels.length) break;
+      emitGenerationTelemetry(input, {
+        type: "candidate_repair_started",
+        candidateIndex,
+        repairAttempt: repairAttempts,
+        channels,
+        before: validationTelemetrySummary(issues),
+      });
       if (!this.provider || !useProvider) {
         const replacement = deterministicDraft(input.config, context, ledger, candidateIndex, variation, impactReport, orchestrationPlan, planning.opportunity, evidenceSources);
         draft = { ...replacement, content: mergeContentByChannels(draft.content, replacement.content, channels) };
@@ -2675,6 +2996,12 @@ export class ContentGenerationAgent implements GenerationEngine {
           }
           draft = applyGenerationPatch(draft, patch);
         } catch (error) {
+          emitGenerationTelemetry(input, {
+            type: "candidate_repair_failed",
+            candidateIndex,
+            repairAttempt: repairAttempts,
+            errorName: error instanceof Error ? error.name.slice(0, 80) : "UnknownError",
+          });
           // P4-22: a failed repair never fails the whole candidate. Record one
           // issue (terminal attempts are repairable:false), keep the channel's
           // original issues and the pre-repair draft; the candidate survives
@@ -2717,6 +3044,7 @@ export class ContentGenerationAgent implements GenerationEngine {
           onFailure: (error) => recordClaimJudgeFailure(stageIssues, error),
         });
       }
+      draft = attachConfirmedAuthorFactReasoning(draft, input.config);
       draft = refreshCreativeScenarioIdentities(draft);
       issues = [
         ...suppressGrowthWarningsAfterGrowthFailure(
@@ -2725,7 +3053,24 @@ export class ContentGenerationAgent implements GenerationEngine {
         ),
         ...stageIssues,
       ];
+      emitGenerationTelemetry(input, {
+        type: "candidate_validation",
+        candidateIndex,
+        phase: "after_repair",
+        repairAttempt: repairAttempts,
+        summary: validationTelemetrySummary(issues),
+      });
     }
+
+    issues = completeIssueMetadata(issues);
+    const finalQualityStatus = candidateQualityStatus({ issues });
+    emitGenerationTelemetry(input, {
+      type: "candidate_completed",
+      candidateIndex,
+      qualityStatus: finalQualityStatus,
+      repairAttempts,
+      summary: validationTelemetrySummary(issues),
+    });
 
     const realizedPlanWithoutArtifacts: OrchestrationPlan = {
       ...orchestrationPlan,
@@ -2782,12 +3127,15 @@ export class ContentGenerationAgent implements GenerationEngine {
       // content.ts 的敏感声明校验里确实被消费)。落库后才能回答「敏感声明报错
       // 里判官覆盖了多少、判了多少 unsupported」。不改变任何判定行为。
       ...(draft.claimJudgments?.length ? { claimJudgments: draft.claimJudgments } : {}),
+      ...(draft.commentEditorialAssessment ? { commentEditorialAssessment: draft.commentEditorialAssessment } : {}),
       unknowns: uniqueUnknowns(ledger, draft),
       conflicts: ledger.conflicts,
       diagnostics: [...diagnosticsFromValidation(issues), ...buildParameterDiagnostics(impactReport)],
       resolutionSnapshot,
       impactReport,
-      validation: { valid: !issues.some((item) => item.severity === "error"), repairAttempts, issues },
+      validation: (() => {
+        return { valid: finalQualityStatus !== "blocked", qualityStatus: finalQualityStatus, repairAttempts, issues };
+      })(),
       revisions: [],
     };
   }
@@ -2831,6 +3179,7 @@ export class ContentGenerationAgent implements GenerationEngine {
       evidenceIds: input.package.evidence.map((item) => item.id),
       reasoning: input.package.reasoning,
       unknowns: input.package.unknowns,
+      commentEditorialAssessment: input.package.commentEditorialAssessment,
     };
     let revised = current;
     if (this.provider) {
@@ -2915,7 +3264,7 @@ export class ContentGenerationAgent implements GenerationEngine {
       }
       revised = refreshCreativeScenarioIdentities(revised);
     }
-    const issues = validateGenerationDraft({ draft: revised, config, ledger, allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, orchestrationPlan: input.package.orchestrationSnapshot, projectBlueprint: input.planningContext?.projectBlueprint });
+    const issues = completeIssueMetadata(validateGenerationDraft({ draft: revised, config, ledger, allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, orchestrationPlan: input.package.orchestrationSnapshot, projectBlueprint: input.planningContext?.projectBlueprint }));
     const now = this.now().toISOString();
     const revision: RevisionRecord = {
       id: `rev_${createHash("sha256").update(`${input.package.id}:${input.instruction}:${input.package.revisions.length}`).digest("hex").slice(0, 16)}`,
@@ -2960,13 +3309,17 @@ export class ContentGenerationAgent implements GenerationEngine {
       },
       evidence: revisedEvidence,
       reasoning: revised.reasoning,
+      commentEditorialAssessment: revised.commentEditorialAssessment,
       unknowns: uniqueUnknowns(ledger, revised),
       conflicts: ledger.conflicts,
       diagnostics: [...diagnosticsFromValidation(issues), ...buildParameterDiagnostics(impactReport)],
       configSnapshot: cloneConfig(config),
       resolutionSnapshot: compilation.resolutionSnapshot,
       impactReport,
-      validation: { valid: !issues.some((item) => item.severity === "error"), repairAttempts: 0, issues },
+      validation: (() => {
+        const qualityStatus = candidateQualityStatus({ issues });
+        return { valid: qualityStatus !== "blocked", qualityStatus, repairAttempts: 0, issues };
+      })(),
       revisions: [...input.package.revisions, revision],
     };
     return { package: revisedPackage, dependency };

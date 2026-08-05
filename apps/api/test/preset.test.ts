@@ -390,6 +390,85 @@ test('reader scenario fields are normalized, remain optional, and support expert
   assert.match(String(invalid.body.message), /preContactKnown/u);
 });
 
+test('omitted publishing topology resolves to the selection-driven creative scenario', async () => {
+  const resolved = await request(`/api/projects/${projectId}/resolve-config`, {
+    method: 'POST',
+    body: JSON.stringify({ topic: 'automatic persona from selected opportunity' }),
+  });
+  assert.equal(resolved.response.status, 201, JSON.stringify(resolved.body));
+  assert.equal(resolved.body.resolvedConfig.task.publishingTopology, 'creative_scenario');
+  assert.deepEqual(resolved.body.resolvedConfig.task.authorContext, { status: 'not_provided', facts: [] });
+});
+
+test('individual-author facts are atomically validated and frozen by the server principal', async () => {
+  const me = await request('/api/auth/me');
+  assert.equal(me.response.status, 200, JSON.stringify(me.body));
+  const before = Date.now();
+  const resolved = await request(`/api/projects/${projectId}/resolve-config`, {
+    method: 'POST',
+    body: JSON.stringify({
+      topic: 'author truth contract',
+      publishingTopology: 'confirmed_individual_author',
+      authorFactsConfirmed: true,
+      authorFacts: [
+        {
+          id: 'af-state',
+          statement: '我目前还没决定',
+          category: 'current_state',
+          confirmedBy: 'forged-user',
+          confirmedAt: '1999-01-01T00:00:00.000Z',
+          confirmationId: 'forged-confirmation',
+        },
+        { id: 'af-constraint', statement: '我只能周末安排', category: 'constraint' },
+      ],
+    }),
+  });
+  assert.equal(resolved.response.status, 201, JSON.stringify(resolved.body));
+  const facts = resolved.body.resolvedConfig.task.authorContext.facts;
+  assert.equal(facts.length, 2);
+  assert.ok(facts.every((fact: any) => fact.confirmedBy === me.body.user.id));
+  assert.ok(facts.every((fact: any) => Date.parse(fact.confirmedAt) >= before));
+  assert.ok(facts.every((fact: any) => typeof fact.confirmationId === 'string' && fact.confirmationId !== 'forged-confirmation'));
+  assert.equal(new Set(facts.map((fact: any) => fact.confirmationId)).size, 2);
+});
+
+test('individual-author requests require confirmation and reject non-atomic or mismatched facts', async () => {
+  const missingConfirmation = await request(`/api/projects/${projectId}/resolve-config`, {
+    method: 'POST',
+    body: JSON.stringify({
+      topic: 'missing confirmation',
+      publishingTopology: 'confirmed_individual_author',
+      authorFacts: [{ id: 'af1', statement: '我还没决定', category: 'current_state' }],
+    }),
+  });
+  assert.equal(missingConfirmation.response.status, 400, JSON.stringify(missingConfirmation.body));
+  assert.match(String(missingConfirmation.body.message), /确认/u);
+
+  const multipleSentences = await request(`/api/projects/${projectId}/resolve-config`, {
+    method: 'POST',
+    body: JSON.stringify({
+      topic: 'non atomic',
+      publishingTopology: 'confirmed_individual_author',
+      authorFactsConfirmed: true,
+      authorFacts: [{ id: 'af1', statement: '我已经面诊；我已经购买', category: 'project_contact' }],
+    }),
+  });
+  assert.equal(multipleSentences.response.status, 400, JSON.stringify(multipleSentences.body));
+  assert.match(String(multipleSentences.body.message), /atomic|原子|split/u);
+
+  const categoryMismatch = await request(`/api/projects/${projectId}/resolve-config`, {
+    method: 'POST',
+    body: JSON.stringify({
+      topic: 'category mismatch',
+      publishingTopology: 'confirmed_individual_author',
+      authorFactsConfirmed: true,
+      authorFacts: [{ id: 'af1', statement: '我昨天已经购买', category: 'current_state' }],
+    }),
+  });
+  assert.equal(categoryMismatch.response.status, 400, JSON.stringify(categoryMismatch.body));
+  assert.match(String(categoryMismatch.body.message), /category/u);
+});
+
 test('legacy advanced request fields map to bottom-level config and generation stores snapshots', async () => {
   const legacy = await request(`/api/projects/${projectId}/resolve-config`, {
     method: 'POST',

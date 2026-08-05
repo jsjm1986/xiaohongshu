@@ -219,28 +219,20 @@ test('生产默认退避窗口达到分钟级，足以跨过实测错误簇', as
   assert.ok(total >= 60_000, `累计退避 ${total}ms 跨不过中位 20 秒、长尾百秒级的错误簇`);
 });
 
-/**
- * 质量状态要能区分「内容有问题」和「中继抖动」。
- *
- * 改这条之前判定只看「有无 error」,而台账失败判 error,于是中继一抖动整批就归零:
- * 实测 18 篇产出零 passed 全由台账那一条决定。台账降为 warning 后不能无声通过,
- * 所以「锚定受损」显式并入 needs_review。
- */
-test('deriveQualityStatus：完全正常才 passed，锚定受损并入 needs_review', () => {
-  const clean = { validation: { valid: true, issues: [] } };
-  const anchoringDegraded = { validation: { valid: true, issues: [{ code: 'model_ledger_failed' }] } };
-  const contentBroken = { validation: { valid: false, issues: [{ code: 'forbidden_phrase' }] } };
+/** 任务级质量取最佳可交付候选，不合并三份候选的告警。 */
+test('deriveQualityStatus：存在 passed 候选即通过，全部不可直发才需复核', () => {
+  const clean = { validation: { valid: true, qualityStatus: 'passed' as const, issues: [] } };
+  const advisory = { validation: { valid: true, qualityStatus: 'passed' as const, issues: [{ severity: 'warning' as const, disposition: 'advisory' as const }] } };
+  const review = { validation: { valid: true, qualityStatus: 'needs_review' as const, issues: [{ severity: 'warning' as const, disposition: 'review' as const }] } };
+  const blocked = { validation: { valid: false, qualityStatus: 'blocked' as const, issues: [{ severity: 'error' as const, disposition: 'block' as const }] } };
 
   assert.equal(deriveQualityStatus([clean]), 'passed');
-  assert.equal(deriveQualityStatus([clean, clean]), 'passed');
-  // 台账降级后 valid 仍为 true，但锚定不完整必须留下人工复核信号。
-  assert.equal(deriveQualityStatus([anchoringDegraded]), 'needs_review');
-  // 有一个候选锚定受损就整单标记：审计层缺失不该被其他候选掩盖。
-  assert.equal(deriveQualityStatus([clean, anchoringDegraded]), 'needs_review');
-  // 内容真有问题仍是 needs_review。
-  assert.equal(deriveQualityStatus([contentBroken]), 'needs_review');
-  // 混合时只要有一个干净候选且无锚定受损即 passed。
-  assert.equal(deriveQualityStatus([contentBroken, clean]), 'passed');
+  assert.equal(deriveQualityStatus([advisory]), 'passed');
+  assert.equal(deriveQualityStatus([review]), 'needs_review');
+  assert.equal(deriveQualityStatus([blocked]), 'needs_review');
+  assert.equal(deriveQualityStatus([review, clean]), 'passed');
+  assert.equal(deriveQualityStatus([blocked, clean]), 'passed');
+  assert.equal(deriveQualityStatus([review, blocked]), 'needs_review');
 });
 
 /** 上限从 5 放宽到 8,以便按需覆盖长尾簇(实测最长 410 秒)。 */

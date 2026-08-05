@@ -74,12 +74,13 @@ async function cloneProductionData(): Promise<void> {
 }
 
 function principalFrom(database: DatabaseService): SessionPrincipal {
-  const user = database.prepare("SELECT id,username,system_role,must_change_password FROM users WHERE disabled_at IS NULL ORDER BY created_at LIMIT 1").get() as JsonObject;
+  const user = database.prepare("SELECT id,username,system_role,user_kind,must_change_password FROM users WHERE disabled_at IS NULL ORDER BY created_at LIMIT 1").get() as JsonObject;
   return {
     kind: 'session',
     userId: String(user.id),
     username: String(user.username),
     systemRole: user.system_role === 'admin' ? 'admin' : 'user',
+    userKind: user.user_kind === 'saas' ? 'saas' : 'research',
     mustChangePassword: Boolean(user.must_change_password),
     tokenHash: 'isolated-smoke-token',
     csrfHash: 'isolated-smoke-csrf',
@@ -90,7 +91,14 @@ function allNumbersKnown(value: JsonObject, keys: string[]): boolean {
   return keys.every((key) => typeof value[key] === 'number' && Number.isFinite(value[key]));
 }
 
-async function waitForJob(generation: GenerationService, id: string, timeoutMs = 12 * 60_000): Promise<JsonObject> {
+async function waitForJob(
+  generation: GenerationService,
+  id: string,
+  timeoutMs = Number.parseInt(process.env.SMOKE_JOB_TIMEOUT_MS ?? String(12 * 60_000), 10),
+): Promise<JsonObject> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 60_000) {
+    throw new Error('SMOKE_JOB_TIMEOUT_MS must be a finite integer of at least 60000.');
+  }
   const started = Date.now();
   let job = generation.get(id);
   while (!['completed', 'failed'].includes(String(job.status))) {
@@ -99,6 +107,31 @@ async function waitForJob(generation: GenerationService, id: string, timeoutMs =
     job = generation.get(id);
   }
   return job;
+}
+
+function existingApprovedPlanning(
+  intelligence: IntelligenceService,
+  projectId: string,
+): { opportunity?: JsonObject; rejected: Array<{ id: string; title?: string; reason: string }> } {
+  const rejected: Array<{ id: string; title?: string; reason: string }> = [];
+  const approved = intelligence.listOpportunities(projectId)
+    .filter((opportunity) => opportunity.status === 'approved');
+  for (const opportunity of approved) {
+    try {
+      // Reuse only a resource that passes the same production preparation gate as
+      // generation. This validates current gap, blueprint and strategy revisions;
+      // no approval or dependency state is mutated by the smoke harness.
+      intelligence.prepareGeneration(projectId, { opportunityId: opportunity.id });
+      return { opportunity, rejected };
+    } catch (error) {
+      rejected.push({
+        id: String(opportunity.id),
+        title: typeof opportunity.title === 'string' ? opportunity.title : undefined,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return { rejected };
 }
 
 async function approvePlanningResources(
@@ -113,7 +146,7 @@ async function approvePlanningResources(
     throw new Error(`Project analysis returned ${blueprintModules.length} blueprint modules; seven are required.`);
   }
   for (const module of blueprintModules) {
-    const approved = intelligence.approveBlueprintModule(projectId, module.id, { status: 'approved' }, principal);
+    const approved = await intelligence.approveBlueprintModule(projectId, module.id, { status: 'approved' }, principal);
     approval.blueprintModules.push({ id: approved.id, moduleKey: approved.moduleKey, version: approved.version });
   }
   if (analysis.intelligence?.id) {
@@ -231,7 +264,30 @@ async function main(): Promise<void> {
   const intelligence = app.get(IntelligenceService);
   const generation = app.get(GenerationService);
   const principal = principalFrom(database);
-  const project = database.prepare("SELECT id,name,workspace_id FROM projects WHERE deleted_at IS NULL ORDER BY created_at LIMIT 1").get() as JsonObject;
+  const requestedProjectId = process.env.SMOKE_PROJECT_ID?.trim();
+  const requestedProjectName = process.env.SMOKE_PROJECT_NAME?.trim();
+  if (requestedProjectId && requestedProjectName) {
+    throw new Error('Set only one of SMOKE_PROJECT_ID or SMOKE_PROJECT_NAME.');
+  }
+  const projects = database.prepare(
+    `SELECT id,name,workspace_id FROM projects
+     WHERE deleted_at IS NULL
+       AND (? IS NULL OR id = ?)
+       AND (? IS NULL OR name = ?)
+     ORDER BY created_at`,
+  ).all(
+    requestedProjectId || null,
+    requestedProjectId || null,
+    requestedProjectName || null,
+    requestedProjectName || null,
+  ) as JsonObject[];
+  if (projects.length === 0) {
+    throw new Error(`Smoke project not found: ${requestedProjectId ?? requestedProjectName ?? '(first active project)'}`);
+  }
+  if ((requestedProjectId || requestedProjectName) && projects.length !== 1) {
+    throw new Error(`Smoke project selector matched ${projects.length} projects; use SMOKE_PROJECT_ID.`);
+  }
+  const project = projects[0]!;
   const providerOverride = process.env.SMOKE_PROVIDER
     ?? (process.env.SMOKE_PROVIDER_COMPATIBLE === 'true' ? 'openai-compatible' : undefined);
   const modelOverride = process.env.SMOKE_MODEL;
@@ -258,12 +314,25 @@ async function main(): Promise<void> {
   try {
     const analysisStarted = Date.now();
     let analysis: JsonObject = { informationGaps: [], expressionStrategies: [], topicOpportunities: [] };
-    if (process.env.SMOKE_SKIP_PROJECT_ANALYSIS === 'true') {
+    const reusable = existingApprovedPlanning(intelligence, project.id);
+    let approvals: JsonObject;
+    let opportunity: JsonObject;
+    if (reusable.opportunity) {
+      opportunity = reusable.opportunity;
+      approvals = {
+        reusedApprovedPlanning: true,
+        selectedOpportunity: opportunity,
+        rejectedApprovedOpportunities: reusable.rejected,
+      };
       report.analysis = {
-        status: 'skipped_after_confirmed_failure',
-        reason: 'A prior isolated run made three HTTP-200 attempts; SSE was coalesced, but every model output was incomplete JSON.',
+        status: 'reused_approved_planning',
+        elapsedMs: Date.now() - analysisStarted,
+        note: 'An existing approved opportunity passed the production prepareGeneration dependency gate; no analysis or approval resource was mutated.',
       };
     } else {
+      if (process.env.SMOKE_SKIP_PROJECT_ANALYSIS === 'true') {
+        throw new Error(`No existing approved opportunity passed generation preparation: ${JSON.stringify(reusable.rejected)}`);
+      }
       try {
         analysis = await intelligence.analyzeProject(project.id, principal, true);
         report.analysis = {
@@ -281,6 +350,7 @@ async function main(): Promise<void> {
             expressionStrategies: analysis.expressionStrategies,
             topicOpportunities: analysis.topicOpportunities,
           },
+          rejectedApprovedOpportunities: reusable.rejected,
         };
       } catch (error) {
         report.analysis = {
@@ -288,10 +358,44 @@ async function main(): Promise<void> {
           error: error instanceof Error ? error.message : String(error),
         };
       }
+      approvals = await approvePlanningResources(intelligence, project.id, analysis, principal);
+      opportunity = approvals.selectedOpportunity as JsonObject;
     }
-    const approvals = await approvePlanningResources(intelligence, project.id, analysis, principal);
+    const requestedOpportunityIds = (process.env.SMOKE_OPPORTUNITY_IDS ?? '')
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean);
+    const selectedOpportunities: JsonObject[] = [];
+    if (requestedOpportunityIds.length) {
+      if (new Set(requestedOpportunityIds).size !== requestedOpportunityIds.length) {
+        throw new Error('SMOKE_OPPORTUNITY_IDS must contain distinct IDs.');
+      }
+      for (const opportunityId of requestedOpportunityIds) {
+        const current = intelligence.listOpportunities(project.id)
+          .find((item) => item.id === opportunityId) as JsonObject | undefined;
+        if (!current) throw new Error(`Smoke opportunity not found: ${opportunityId}`);
+        const selected = current.status === 'approved'
+          ? current
+          : await Promise.resolve(intelligence.approveOpportunity(
+            project.id,
+            opportunityId,
+            { status: 'approved' },
+            principal,
+          )) as JsonObject;
+        intelligence.prepareGeneration(project.id, { opportunityId });
+        selectedOpportunities.push(selected);
+      }
+      approvals = {
+        ...approvals,
+        smokeRequestedOpportunityIds: requestedOpportunityIds,
+        smokeSelectedOpportunities: selectedOpportunities,
+        note: 'Non-approved requested opportunities were approved only inside the isolated smoke database clone.',
+      };
+      opportunity = selectedOpportunities[0]!;
+    } else {
+      selectedOpportunities.push(opportunity);
+    }
     report.approvals = approvals;
-    const opportunity = approvals.selectedOpportunity as JsonObject;
     const domainModule = analysis.blueprintModules?.find((module: JsonObject) => module.moduleKey === 'domain_model');
     const projectNoun = String(domainModule?.data?.projectNoun ?? project.name);
     const decisionTasks = Array.isArray(domainModule?.data?.decisionTasks)
@@ -299,7 +403,7 @@ async function main(): Promise<void> {
       : [];
 
     const scenarioFilter = process.env.SMOKE_SCENARIO;
-    const scenarios = [
+    const defaultScenarios = [
       {
         name: 'simple-first-research',
         input: {
@@ -334,7 +438,26 @@ async function main(): Promise<void> {
           seed: 2026071402,
         },
       },
-    ].filter((scenario) => !scenarioFilter || scenario.name === scenarioFilter);
+    ];
+    const angleScenarios = requestedOpportunityIds.length
+      ? selectedOpportunities.map((selectedOpportunity, index) => ({
+        name: `real-angle-${index + 1}`,
+        input: {
+          projectId: project.id,
+          mode: 'simple',
+          opportunityId: selectedOpportunity.id,
+          topic: selectedOpportunity.topic ?? selectedOpportunity.title,
+          goal: `围绕“${selectedOpportunity.title ?? selectedOpportunity.topic}”生成一套可直接审阅的完整图文与评论参考。`,
+          audienceStage: selectedOpportunity.audienceStage ?? 'collecting',
+          entryPoint: selectedOpportunity.entry ?? 'search',
+          presetId: 'first_research',
+          mustInclude: decisionTasks.join('、'),
+          forbidden: '伪造亲历、伪造口碑、无证据的绝对承诺',
+          seed: 2026080501 + index,
+        },
+      }))
+      : defaultScenarios;
+    const scenarios = angleScenarios.filter((scenario) => !scenarioFilter || scenario.name === scenarioFilter);
 
     if (scenarios.length === 0) {
       throw new Error(`Unknown SMOKE_SCENARIO: ${scenarioFilter}`);
@@ -343,7 +466,7 @@ async function main(): Promise<void> {
     report.generations = [];
     for (const scenario of scenarios) {
       const started = Date.now();
-      const created = generation.create(scenario.input as JsonObject, principal);
+      const created = await generation.create(scenario.input as JsonObject, principal);
       const completed = await waitForJob(generation, String(created.id));
       report.generations.push({ name: scenario.name, elapsedMs: Date.now() - started, input: scenario.input, job: completed });
     }
@@ -361,12 +484,46 @@ async function main(): Promise<void> {
     report.error = error instanceof Error ? { message: error.message, stack: error.stack } : String(error);
     throw error;
   } finally {
-    report.modelCalls = capture;
+    const generatedJobIds = Array.isArray(report.generations)
+      ? report.generations.map((item: JsonObject) => item?.job?.id).filter((id: unknown): id is string => typeof id === 'string')
+      : [];
+    const modelUsageEvents = generatedJobIds.length
+      ? database.prepare(
+        `SELECT job_id,details_json,created_at FROM generation_events
+         WHERE event='model_usage' AND job_id IN (${generatedJobIds.map(() => '?').join(',')})
+         ORDER BY id`,
+      ).all(...generatedJobIds).map((row: JsonObject) => {
+        let details: JsonObject = {};
+        try { details = JSON.parse(String(row.details_json ?? '{}')); } catch { /* keep empty */ }
+        return {
+          jobId: row.job_id,
+          createdAt: row.created_at,
+          purpose: details.purpose,
+          candidateIndex: details.candidateIndex,
+          outcome: details.outcome,
+          elapsedMs: details.elapsedMs,
+          inputTokens: details.inputTokens,
+          outputTokens: details.outputTokens,
+          status: details.status,
+          failureKind: details.failureKind,
+          responseDiagnostics: details.responseDiagnostics,
+        };
+      })
+      : [];
+    // Some BYOK transports use a pinned dispatcher and do not pass through the
+    // global fetch hook. Database model_usage events are the authoritative call
+    // audit; captured transport payloads remain available only for harness debug.
+    report.modelCalls = modelUsageEvents;
+    report.capturedTransportCalls = capture;
     await writeFile(join(runDir, 'smoke-result.json'), JSON.stringify(report, null, 2), 'utf8');
     await writeFile(join(runDir, 'captured-prompts.json'), JSON.stringify(capture, null, 2), 'utf8');
     await app.close();
     globalThis.fetch = originalFetch;
-    console.log(JSON.stringify({ runDir, report: join(runDir, 'smoke-result.json'), calls: capture.map(({ operation, status, promptChars, responseChars }) => ({ operation, status, promptChars, responseChars })) }, null, 2));
+    console.log(JSON.stringify({
+      runDir,
+      report: join(runDir, 'smoke-result.json'),
+      calls: modelUsageEvents.map(({ purpose, candidateIndex, outcome, elapsedMs }) => ({ purpose, candidateIndex, outcome, elapsedMs })),
+    }, null, 2));
   }
 }
 

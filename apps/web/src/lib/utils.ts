@@ -42,9 +42,22 @@ export const downloadText = (filename: string, content: string, type = 'text/pla
 export const candidateToMarkdown = (candidate: Candidate) => {
   // Cref contract v1.1 candidates copy in the two-part executive + audit
   // appendix layout (same policy as the API export); historical candidates
-  // keep the legacy single-flow markdown byte-for-byte.
-  if (isCrefV11Candidate(candidate)) return candidateToV11TwoPartMarkdown(candidate);
-  return legacyCandidateToMarkdown(candidate);
+  // keep the legacy single-flow markdown byte-for-byte unless this candidate
+  // was manually released after a failed automatic validation.
+  const markdown = isCrefV11Candidate(candidate)
+    ? candidateToV11TwoPartMarkdown(candidate)
+    : legacyCandidateToMarkdown(candidate);
+  if (candidate.manualDeliveryConfirmation?.confirmed !== true) return markdown;
+  return `${markdown.trimEnd()}
+
+---
+
+## 人工交付确认
+
+- 自动校验状态保持未通过；本记录不代表系统校验通过。
+- 确认时间：${candidate.manualDeliveryConfirmation.confirmedAt}
+- 确认范围：已逐条核对事实、证据、身份与风险，并承担本次人工交付决定。
+`;
 };
 
 /**

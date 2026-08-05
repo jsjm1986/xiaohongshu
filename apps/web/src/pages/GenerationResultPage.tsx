@@ -61,7 +61,6 @@ import { resolveProductionArtifactView } from "../lib/image-production";
 import { resolveOpportunitySelectionAuditView } from "../lib/opportunity-rank";
 import { resolveReaderStateView } from "../lib/reader-state";
 import { generationProgressValue } from "../lib/quick-progress";
-import { generationDeliveryState } from "../lib/generation-delivery";
 import { resolveHistoricalTrendFitSnapshot } from "../lib/trend-fit";
 import { candidateToMarkdown, formatDate } from "../lib/utils";
 import { validationIssueLabel } from "../lib/validation-labels";
@@ -82,6 +81,8 @@ export function GenerationResultPage() {
   const [selectedId, setSelectedId] = useState("");
   const [revision, setRevision] = useState("");
   const [detailsOpen, setDetailsOpen] = useState(true);
+  const [manualConfirmChecked, setManualConfirmChecked] = useState(false);
+  const [manualConfirming, setManualConfirming] = useState(false);
   const toast = useToast();
   const navigate = useNavigate();
 
@@ -140,8 +141,14 @@ export function GenerationResultPage() {
       job?.candidates?.[0],
     [job, selectedId],
   );
+  useEffect(() => {
+    // Acknowledgement is candidate-scoped. Never carry an unchecked server
+    // decision or a local checkbox across candidate switches.
+    setManualConfirmChecked(false);
+  }, [selected?.id]);
   const publishable = selected?.validation?.valid === true;
-  const deliveryState = useMemo(() => generationDeliveryState(job?.candidates), [job?.candidates]);
+  const manuallyConfirmed = selected?.manualDeliveryConfirmation?.confirmed === true;
+  const deliverable = publishable || manuallyConfirmed;
   const impactDetails = useMemo(
     () => {
       const normalized = normalizeImpactReport(
@@ -208,12 +215,27 @@ export function GenerationResultPage() {
 
   const copyContent = async () => {
     if (!selected) return;
-    if (!publishable) {
-      toast.push("该候选未通过事实、证据或闭合校验，暂不能复制发布");
+    if (!deliverable) {
+      toast.push("该候选未通过自动校验，请先逐条核对并完成人工交付确认");
       return;
     }
     await navigator.clipboard.writeText(candidateToMarkdown(selected));
-    toast.push("完整内容已复制");
+    toast.push(manuallyConfirmed ? "完整内容已复制（人工确认交付）" : "完整内容已复制");
+  };
+
+  const confirmManualDelivery = async () => {
+    if (!job || !selected || publishable || manuallyConfirmed || !manualConfirmChecked || manualConfirming) return;
+    setManualConfirming(true);
+    try {
+      const updated = await api.generations.confirmManualDelivery(job.id, selected.id);
+      setJob(updated);
+      setManualConfirmChecked(false);
+      toast.push("已记录人工交付确认，当前候选可以复制与导出");
+    } catch (error) {
+      toast.push(errorMessage(error, "人工交付确认失败"), "error");
+    } finally {
+      setManualConfirming(false);
+    }
   };
 
   const revisionBox = revisionBoxState(job, selected?.id);
@@ -269,19 +291,21 @@ export function GenerationResultPage() {
     return <GenerationRunning job={job} />;
   if (job.status === "failed")
     return (
-      <EmptyState
-        icon={<TriangleAlert size={25} />}
-        title="本次生成没有完成"
-        description={job.error || "模型请求或内容验证失败。"}
-        action={
-          <Button
-            onClick={() => navigate("/generate")}
-            icon={<RefreshCcw size={16} />}
-          >
-            重新设置
-          </Button>
-        }
-      />
+      <div className="page result-page result-page--failed">
+        <EmptyState
+          icon={<TriangleAlert size={25} />}
+          title="本次生成没有完成"
+          description={job.error || "模型请求或内容验证失败。"}
+          action={
+            <Button
+              onClick={() => navigate("/generate")}
+              icon={<RefreshCcw size={16} />}
+            >
+              重新设置
+            </Button>
+          }
+        />
+      </div>
     );
   if (!selected)
     return (
@@ -290,50 +314,6 @@ export function GenerationResultPage() {
         description="任务已完成，但没有可用的内容包。"
       />
     );
-  if (deliveryState.allRejected)
-    return (
-      <div className="page result-page">
-        <Link to="/history" className="v2-back-link">
-          <ArrowLeft size={15} /> 返回历史
-        </Link>
-        <V2Hero
-          status={<>{job.projectName} · {job.mode === "simple" ? "简单模式" : "设置模式"} · {formatDate(job.completedAt, true)} · 选题方向:{job.topic}</>}
-          title="本次没有可交付候选"
-          actions={<Button onClick={() => navigate("/generate")} icon={<RefreshCcw size={16} />}>调整后重新生成</Button>}
-        />
-        <div className="generation-fallback-notice" role="alert">
-          <TriangleAlert size={18} />
-          <div>
-            <strong>3 个候选均未通过自动校验，仅保留诊断</strong>
-            <p>失败草稿的标题、正文和评论区不会作为成品展示，也不能复制或导出。请选择候选查看阻断原因，修正知识口径、角色配置或生成设置后重新生成。</p>
-          </div>
-        </div>
-        <section className="candidate-compare" aria-label="失败候选诊断">
-          <header>
-            <div><h2>候选诊断</h2><p>随机种子 {job.seed || "—"} · 草稿内容已隐藏</p></div>
-            <Badge tone="warning"><TriangleAlert size={13} />0 个候选可交付</Badge>
-          </header>
-          <div className="candidate-grid">
-            {job.candidates?.map((candidate, index) => {
-              const errors = candidate.validation?.issues.filter((issue) => issue.severity === "error").length ?? 0;
-              const warnings = candidate.validation?.issues.filter((issue) => issue.severity === "warning").length ?? 0;
-              return <button
-                type="button"
-                key={candidate.id}
-                className={`candidate-card ${candidate.id === selected.id ? "selected" : ""}`}
-                onClick={() => setSelectedId(candidate.id)}
-              >
-                <div className="candidate-card__top"><span>0{index + 1}</span><Badge tone="warning">未通过</Badge>{candidate.id === selected.id && <i><Check size={13} /></i>}</div>
-                <h3>候选 0{index + 1} · 诊断记录</h3>
-                <p>{errors} 个必须处理的问题 · {warnings} 个复核提醒</p>
-              </button>;
-            })}
-          </div>
-        </section>
-        {selected.validation && <ValidationSummaryCard candidate={selected} />}
-      </div>
-    );
-
   return (
     <div className="page result-page">
       <Link to="/history" className="v2-back-link">
@@ -350,36 +330,36 @@ export function GenerationResultPage() {
               </Badge>
             )}
             {!publishable && (
-              <Badge tone="danger">
-                <TriangleAlert size={13} /> 未通过校验，禁止复制与导出
+              <Badge tone={manuallyConfirmed ? "warning" : "danger"}>
+                <TriangleAlert size={13} /> {manuallyConfirmed ? "自动校验未通过 · 已人工确认交付" : "自动校验未通过 · 确认后可复制与导出"}
               </Badge>
             )}
             <Button
               variant="secondary"
               icon={<Clipboard size={16} />}
               onClick={copyContent}
-              disabled={!publishable}
+              disabled={!deliverable}
             >
               复制全部
             </Button>
             <div className="export-menu">
-              <Button icon={<Download size={16} />} disabled={!publishable}>
+              <Button icon={<Download size={16} />} disabled={!deliverable}>
                 导出 <ChevronDown size={14} />
               </Button>
               <div className="export-menu__dropdown">
-                <button type="button" disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "markdown"))}>
+                <button type="button" disabled={!deliverable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "markdown"))}>
                   <FileText size={16} />
                   Markdown
                 </button>
-                <button type="button" disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "json"))}>
+                <button type="button" disabled={!deliverable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "json"))}>
                   <FileJson size={16} />
                   JSON
                 </button>
-                <button type="button" disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "docx"))}>
+                <button type="button" disabled={!deliverable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "docx"))}>
                   <FileText size={16} />
                   DOCX
                 </button>
-                <button type="button" disabled={!publishable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "pdf"))}>
+                <button type="button" disabled={!deliverable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "pdf"))}>
                   <FileText size={16} />
                   PDF
                 </button>
@@ -393,12 +373,45 @@ export function GenerationResultPage() {
         <ValidationSummaryCard candidate={selected} />
       )}
 
+      {!publishable && (
+        <section className={`manual-delivery-confirmation${manuallyConfirmed ? " is-confirmed" : ""}`} aria-label="人工交付确认">
+          <div>
+            <strong>{manuallyConfirmed ? "当前候选已由你人工确认交付" : "人工核对后允许复制与导出"}</strong>
+            <p>自动校验结果不会改变。确认仅绑定当前用户与当前候选；改稿生成新候选后需要重新确认。</p>
+            {manuallyConfirmed && selected.manualDeliveryConfirmation && (
+              <small>确认时间：{formatDate(selected.manualDeliveryConfirmation.confirmedAt, true)}</small>
+            )}
+          </div>
+          {!manuallyConfirmed && (
+            <div className="manual-delivery-confirmation__action">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={manualConfirmChecked}
+                  onChange={(event) => setManualConfirmChecked(event.target.checked)}
+                />
+                <span>我已逐条核对事实、证据、身份与风险，并承担本次人工交付决定。</span>
+              </label>
+              <Button
+                variant="secondary"
+                icon={<CheckCircle2 size={15} />}
+                disabled={!manualConfirmChecked}
+                loading={manualConfirming}
+                onClick={() => void confirmManualDelivery()}
+              >
+                确认并解锁
+              </Button>
+            </div>
+          )}
+        </section>
+      )}
+
       {job.qualityStatus === "needs_review" && (
         <div className="generation-fallback-notice" role="status">
           <TriangleAlert size={18} />
           <div>
             <strong>没有候选通过自动校验，可以怎么用</strong>
-            <p>请逐条查看下方「校验与一般诊断」中的问题项：若是事实或身份类错误，建议调整知识口径或设置后重新生成；若只是形态提醒，可人工复核候选后酌情使用。未通过校验的候选不能导出，这是系统保留的底线。</p>
+            <p>请逐条查看下方「校验与一般诊断」中的问题项：若是事实或身份类错误，建议调整知识口径或设置后重新生成；若只是形态提醒，可人工复核候选后酌情使用。逐条核对并完成人工交付确认后，可复制与导出；自动校验结论仍保留。</p>
           </div>
         </div>
       )}
@@ -957,6 +970,7 @@ export function GenerationResultPage() {
   );
 }
 
+
 function readerStates(candidate: Candidate) {
   const snapshot = candidate.orchestrationSnapshot;
   if (snapshot?.stateSeed) return [snapshot.stateSeed];
@@ -1135,7 +1149,7 @@ function ValidationSummaryCard({ candidate }: { candidate: Candidate }) {
       <header>
         <TriangleAlert size={18} />
         <div>
-          <strong>本候选未通过校验,暂不能复制与导出</strong>
+          <strong>本候选未通过自动校验</strong>
           <p>
             {errorCount > 0 ? `${errorCount} 个必须处理的问题` : ""}
             {errorCount > 0 && warnCount > 0 ? " · " : ""}

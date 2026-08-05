@@ -54,6 +54,18 @@ export interface OpenAICompatibleClientOptions {
   fetch?: typeof globalThis.fetch;
 }
 
+export interface ModelResponseDiagnostics {
+  /** Shape-only diagnostics. Never contains model text, prompts, credentials or headers. */
+  topLevelKeys: string[];
+  choiceMessageKeys?: string[];
+  contentKind?: "missing" | "string" | "array" | "other";
+  contentChars?: number;
+  reasoningContentChars?: number;
+  outputItemTypes?: string[];
+  /** The client already made its single correction request for a reasoning-only response. */
+  emptyOutputRecoveryAttempted?: boolean;
+}
+
 export class ModelProviderError extends Error {
   constructor(
     message: string,
@@ -65,6 +77,8 @@ export class ModelProviderError extends Error {
     public readonly finishReason?: string,
     /** Usage already spent by a completed response, including a controlled length expansion. */
     public readonly usage?: ModelGenerationResponse['usage'],
+    /** Safe response-shape telemetry for completed responses with no visible output. */
+    public readonly responseDiagnostics?: ModelResponseDiagnostics,
   ) {
     super(message);
     this.name = "ModelProviderError";
@@ -201,6 +215,33 @@ function chatContent(content: string | PromptContentPart[]): string | Record<str
     : { type: "image_url", image_url: { ...part.image_url } });
 }
 
+export function modelResponseDiagnostics(payload: unknown): ModelResponseDiagnostics {
+  if (!isRecord(payload)) return { topLevelKeys: [] };
+  const diagnostics: ModelResponseDiagnostics = {
+    topLevelKeys: Object.keys(payload).sort().slice(0, 30),
+  };
+  if (Array.isArray(payload.output)) {
+    diagnostics.outputItemTypes = [...new Set(payload.output.flatMap((item) =>
+      isRecord(item) && typeof item.type === "string" ? [item.type] : []))].slice(0, 20);
+  }
+  const choice = Array.isArray(payload.choices) && isRecord(payload.choices[0]) ? payload.choices[0] : undefined;
+  const message = choice && isRecord(choice.message) ? choice.message : undefined;
+  if (message) {
+    diagnostics.choiceMessageKeys = Object.keys(message).sort().slice(0, 30);
+    const content = message.content;
+    diagnostics.contentKind = content === undefined || content === null
+      ? "missing"
+      : typeof content === "string" ? "string" : Array.isArray(content) ? "array" : "other";
+    diagnostics.contentChars = typeof content === "string"
+      ? content.length
+      : Array.isArray(content)
+        ? content.reduce((sum, part) => sum + (isRecord(part) && typeof part.text === "string" ? part.text.length : 0), 0)
+        : 0;
+    diagnostics.reasoningContentChars = typeof message.reasoning_content === "string" ? message.reasoning_content.length : 0;
+  }
+  return diagnostics;
+}
+
 export function extractModelText(payload: unknown): string {
   if (!isRecord(payload)) throw new ModelProviderError("Model response was not a JSON object.");
   if (typeof payload.output_text === "string" && payload.output_text.trim()) return payload.output_text;
@@ -279,8 +320,13 @@ export class OpenAICompatibleClient implements ModelProvider {
     const model = request.model ?? this.options.model;
     if (!model) throw new Error("No model was configured for this generation request.");
     const endpoint = this.transport === "responses" ? "/responses" : "/chat/completions";
-    const attempt = async (maxOutputTokens: number | undefined): Promise<ModelGenerationResponse> => {
-      const effectiveRequest = maxOutputTokens === undefined ? request : { ...request, maxOutputTokens };
+    const attempt = async (
+      maxOutputTokens: number | undefined,
+      attemptRequest: ModelGenerationRequest = request,
+    ): Promise<ModelGenerationResponse> => {
+      const effectiveRequest = maxOutputTokens === undefined
+        ? attemptRequest
+        : { ...attemptRequest, maxOutputTokens };
       const body = this.transport === "responses"
         ? this.responsesBody(model, effectiveRequest)
         : this.chatBody(model, effectiveRequest);
@@ -366,7 +412,7 @@ export class OpenAICompatibleClient implements ModelProvider {
           // Preserve the completed response metadata below; generate() decides whether
           // this is the single controlled length expansion or a terminal empty output.
         } else if (error instanceof ModelProviderError) {
-          throw new ModelProviderError(error.message, response.status, requestId, false, finishReason);
+          throw new ModelProviderError(error.message, response.status, requestId, false, finishReason, undefined, modelResponseDiagnostics(payload));
         } else {
           throw error;
         }
@@ -375,6 +421,12 @@ export class OpenAICompatibleClient implements ModelProvider {
     };
 
     const isLengthFinish = (value?: string): boolean => value === "length" || value === "max_output_tokens";
+    const isReasoningOnlyStop = (result: ModelGenerationResponse): boolean => {
+      if (result.finishReason !== "stop" || result.text.trim()) return false;
+      const diagnostics = modelResponseDiagnostics(result.raw);
+      return (diagnostics.contentKind === "missing" || diagnostics.contentChars === 0)
+        && (diagnostics.reasoningContentChars ?? 0) > 0;
+    };
     const incompleteOutputError = (tokens: number | undefined, result: ModelGenerationResponse): ModelProviderError =>
       new ModelProviderError(
         isLengthFinish(result.finishReason)
@@ -385,6 +437,7 @@ export class OpenAICompatibleClient implements ModelProvider {
         false,
         result.finishReason,
         result.usage,
+        modelResponseDiagnostics(result.raw),
       );
 
     const result = await attempt(request.maxOutputTokens);
@@ -404,6 +457,46 @@ export class OpenAICompatibleClient implements ModelProvider {
         throw incompleteOutputError(widened, { ...retried, usage: combinedUsage });
       }
       return { ...retried, usage: combinedUsage };
+    }
+    if (isReasoningOnlyStop(result)) {
+      // Some reasoning-compatible gateways occasionally return only private reasoning
+      // and then stop normally. Retry the same frozen task once with an appended delivery
+      // instruction. The original prompt remains an exact prefix for provider caching,
+      // and private reasoning is neither persisted nor sent back to the model.
+      const requiresJson = this.structuredOutput === "json_object"
+        || (this.structuredOutput === "json_schema" && request.responseSchema !== undefined);
+      const recoveryRequest: ModelGenerationRequest = {
+        ...request,
+        messages: [
+          ...request.messages,
+          {
+            role: "user",
+            content: requiresJson
+              ? "The previous attempt stopped after internal reasoning without a visible answer. Return only the final answer now, following the required JSON structure exactly. Do not include reasoning or explanation."
+              : "The previous attempt stopped after internal reasoning without a visible answer. Return only the final answer now. Do not include reasoning or explanation.",
+          },
+        ],
+        ...(typeof request.seed === "number" ? { seed: request.seed + 1 } : {}),
+        ...(typeof request.temperature === "number" ? { temperature: Math.min(request.temperature, 0.35) } : {}),
+      };
+      const recovered = await attempt(request.maxOutputTokens, recoveryRequest);
+      const combinedUsage = mergeUsage(result.usage, recovered.usage);
+      if (!recovered.text.trim() || isLengthFinish(recovered.finishReason)) {
+        const diagnostics = modelResponseDiagnostics(recovered.raw);
+        diagnostics.emptyOutputRecoveryAttempted = true;
+        throw new ModelProviderError(
+          isLengthFinish(recovered.finishReason)
+            ? `Model output was truncated${request.maxOutputTokens ? ` at ${request.maxOutputTokens} max tokens` : ""} (finish_reason=${recovered.finishReason}) after empty-output recovery.`
+            : "Model response did not contain output text after one empty-output recovery attempt.",
+          200,
+          recovered.requestId,
+          false,
+          recovered.finishReason,
+          combinedUsage,
+          diagnostics,
+        );
+      }
+      return { ...recovered, usage: combinedUsage };
     }
     if (!result.text.trim()) throw incompleteOutputError(request.maxOutputTokens, result);
     return result;

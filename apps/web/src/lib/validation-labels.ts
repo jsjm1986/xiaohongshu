@@ -22,6 +22,7 @@ export function validationIssueLabel(code?: string) {
     audit_language_surface_drift: "可见文案带有审计/公式腔",
     comment_plan_language_surface_leak: "评论里出现写作指令而非真人说话",
     comment_source_language_surface_leak: "评论暴露了源资料/审计语言",
+    comment_context_meta_leak: "评论出现“正文说/文中提到”等提示词痕迹",
     // 样本形态
     sample_title_shape_drift: "标题长度偏离样本形态目标",
     sample_body_shape_drift: "正文长度偏离样本形态目标",

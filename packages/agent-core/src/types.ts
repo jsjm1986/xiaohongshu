@@ -13,7 +13,7 @@ export type KnowledgeKind =
 export type EvidenceStatus = "observed" | "user_supplied" | "inferred" | "unknown";
 
 /** Frozen account topology for one traditional-generation job. */
-export type PublishingTopology = "institution_owned" | "confirmed_individual_author";
+export type PublishingTopology = "creative_scenario" | "institution_owned" | "confirmed_individual_author";
 
 export type ConfirmedAuthorFactCategory =
   | "current_state"
@@ -31,6 +31,8 @@ export interface ConfirmedAuthorFact {
   category: ConfirmedAuthorFactCategory;
   confirmedBy: string;
   confirmedAt: string;
+  /** Server-issued confirmation record for this frozen job snapshot. */
+  confirmationId?: string;
 }
 
 export interface AuthorContext {
@@ -426,7 +428,7 @@ export interface ResolvedGenerationConfig {
     readerHistory?: string[];
     /** Reader-side constraints supplied for this scenario, not project rules. */
     readerConstraints: string[];
-    /** Frozen per-job publishing topology. Historical configs default to institution_owned. */
+    /** Frozen per-job publishing topology. Omitted configs resolve to creative_scenario. */
     publishingTopology: PublishingTopology;
     /** Human-confirmed author facts. Project knowledge and scenario hypotheses never populate this. */
     authorContext: AuthorContext;
@@ -818,7 +820,7 @@ export interface NarrativePersonaPlan {
   voiceTraits: string[];
   speechMarkers: string[];
   knowledgeBoundary: string;
-  status: "creative_scenario";
+  status: "creative_scenario" | "institution_owned" | "confirmed_author_facts";
 }
 
 /** One ordinary, time-bound event that gives the short caption a reason to exist now. */
@@ -1035,6 +1037,8 @@ export interface CommentReferenceThread extends CommentScenarioMetadata {
   answer: string;
   followUps: CommentFollowUp[];
   postingIdentity: "author" | "brand" | "staff" | "expert" | "reader_question_template" | "publisher";
+  /** Actual visible answer speaker. Reader exchanges do not inherit the future publisher route. */
+  answerIdentity?: "simulated_reader" | "none" | "author" | "brand" | "staff" | "expert" | "publisher";
   sourceClusterIds: string[];
   evidenceIds: string[];
   /** Dialogic kind of the root question node; positional default `question`. */
@@ -1916,12 +1920,21 @@ export interface PlanningContext {
   orchestrationOptionsSource?: OpportunityRankInputProvenance;
 }
 
+export type ContentIssueDisposition = "block" | "review" | "advisory";
+export type ContentIssueOrigin = "deterministic" | "agent" | "infrastructure";
+export type CandidateQualityStatus = "passed" | "needs_review" | "blocked";
+
 export interface ContentValidationIssue {
   code: string;
+  /** Legacy presentation level. Publication decisions use disposition. */
   severity: "error" | "warning";
   channel: ContentChannel | "package";
   message: string;
   repairable: boolean;
+  /** New packages state the action explicitly; historical issues derive error=block, warning=advisory. */
+  disposition?: ContentIssueDisposition;
+  /** Identifies who made the judgment without pretending heuristic signals are hard constraints. */
+  origin?: ContentIssueOrigin;
 }
 
 export interface ContentDiagnostic {
@@ -1968,10 +1981,19 @@ export interface ClaimSourceSpan {
   quote: string;
 }
 
+export interface CommentEditorialAssessment {
+  status: "pass" | "review";
+  reasons: string[];
+  summary: string;
+}
+
 export interface ContentReasoningEntry {
   statement: string;
-  status: "fact" | "sample" | "inference" | "hypothesis" | "unknown";
+  status: "fact" | "human_confirmed_author_fact" | "sample" | "inference" | "hypothesis" | "unknown";
   evidenceIds: string[];
+  /** Human-confirmed author facts use this instead of a project-evidence source span. */
+  authorFactId?: string;
+  confirmationId?: string;
   /** Optional only so historical packages remain readable; new drafts require it. */
   location?: ReasoningLocation;
   /** Pin a claim to one visible occurrence so identical text cannot be reused across threads. */
@@ -2033,6 +2055,8 @@ export interface ContentPackage {
    * 「sensitive_claim_without_evidence 是判官判了 unsupported」还是「判官没覆盖到」。
    */
   claimJudgments?: ClaimJudgment[];
+  /** Agent editorial result for reader-side semantic quality; absent on historical packages. */
+  commentEditorialAssessment?: CommentEditorialAssessment;
   unknowns: UnknownItem[];
   conflicts: KnowledgeConflict[];
   diagnostics: ContentDiagnostic[];
@@ -2040,6 +2064,8 @@ export interface ContentPackage {
   impactReport?: ParameterImpactReport;
   validation: {
     valid: boolean;
+    /** Candidate-level result; optional for historical packages. */
+    qualityStatus?: CandidateQualityStatus;
     repairAttempts: number;
     issues: ContentValidationIssue[];
   };
@@ -2094,7 +2120,67 @@ export interface GenerationDraft {
   unknowns: UnknownItem[];
   /** AI 判官裁决旁路;无裁决(未调用/调用失败)时缺省,校验层走词面旧逻辑。 */
   claimJudgments?: ClaimJudgment[];
+  /** Reader-copy editor result. It records semantic review without becoming evidence. */
+  commentEditorialAssessment?: CommentEditorialAssessment;
 }
+
+export interface GenerationValidationTelemetrySummary {
+  issueCount: number;
+  errorCount: number;
+  warningCount: number;
+  blockingCount: number;
+  reviewCount: number;
+  advisoryCount: number;
+  repairableBlockingCount: number;
+  terminalBlockingCount: number;
+  issueCodes: string[];
+  channels: string[];
+  origins: string[];
+}
+
+/**
+ * Safe, metadata-only observability emitted by the traditional generation
+ * engine. It intentionally excludes prompts, visible copy and model output.
+ */
+export type GenerationTelemetryEvent =
+  | {
+    type: "candidate_validation";
+    candidateIndex: number;
+    phase: "initial" | "after_repair";
+    repairAttempt: number;
+    summary: GenerationValidationTelemetrySummary;
+  }
+  | {
+    type: "candidate_repair_started";
+    candidateIndex: number;
+    repairAttempt: number;
+    channels: string[];
+    before: GenerationValidationTelemetrySummary;
+  }
+  | {
+    type: "candidate_repair_failed";
+    candidateIndex: number;
+    repairAttempt: number;
+    errorName: string;
+  }
+  | {
+    type: "candidate_repair_skipped";
+    candidateIndex: number;
+    reason: "terminal_blocker" | "repair_disabled";
+    summary: GenerationValidationTelemetrySummary;
+  }
+  | {
+    type: "candidate_completed";
+    candidateIndex: number;
+    qualityStatus: CandidateQualityStatus;
+    repairAttempts: number;
+    summary: GenerationValidationTelemetrySummary;
+  }
+  | {
+    type: "candidate_failed";
+    candidateIndex: number;
+    errorName: string;
+  };
 
 export interface GenerationInput {
   jobId: string;
@@ -2105,6 +2191,8 @@ export interface GenerationInput {
   unknowns?: UnknownItem[];
   parameterSelection?: GenerationParameterSelection;
   planningContext?: PlanningContext;
+  /** Optional metadata-only telemetry sink. Failures in the sink are ignored. */
+  onTelemetry?: (event: GenerationTelemetryEvent) => void;
 }
 
 export interface GenerationResult {

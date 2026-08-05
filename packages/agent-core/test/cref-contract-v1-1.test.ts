@@ -413,8 +413,8 @@ describe("Cref contract v1.1 parse compatibility", () => {
 
 describe("Cref contract v1.1 prompt contract", () => {
   it("bumps the prompt contract version and exposes the new optional staged-schema fields", () => {
-    // 2.4.0: stable cross-candidate prefix + one bounded reader-shape correction.
-    expect(PROMPT_CONTRACT_VERSION).toBe("2.4.0");
+    // 2.5.0: all public-copy stages share the same anti-leak language contract.
+    expect(PROMPT_CONTRACT_VERSION).toBe("2.5.0");
     const properties = STAGED_COMMENTS_JSON_SCHEMA.properties as Record<string, any>;
     expect(STAGED_COMMENTS_JSON_SCHEMA.required).toEqual(["disclaimer", "threads"]);
     expect(properties.ownedFirstComment).toEqual({ type: "string" });
@@ -436,7 +436,7 @@ describe("Cref contract v1.1 prompt contract", () => {
     const readersProperties = STAGED_COMMENT_READERS_JSON_SCHEMA.properties as Record<string, any>;
     expect(STAGED_COMMENT_READERS_JSON_SCHEMA.required).toEqual(["threads"]);
     expect(readersProperties.disclaimer).toBeUndefined();
-    expect(readersProperties.threads.items.required).toEqual(["id", "question", "answer", "followUps"]);
+    expect(readersProperties.threads.items.required).toEqual(["id", "question", "answer"]);
     expect(readersProperties.threads.items.properties.roleIndex).toBeUndefined();
     expect(readersProperties.threads.items.properties.answer).toEqual({ type: "string" });
     // 机构侧 schema:答复列表 + 可选首评。
@@ -599,12 +599,12 @@ describe("Cref contract v1.1 staged prompt text", () => {
     expect(phase).toContain("permittedContribution");
     expect(phase).toContain("organic_reaction");
     expect(phase).toContain("空字符串");
-    // Per-thread function/kind/boundary annotation duties.
-    expect(phase).toContain("function六选一");
-    expect(phase).toContain("surface_gap");
-    expect(phase).toContain("boundary");
-    // The no-followUps rule survives the rewrite.
-    expect(phase).toContain("followUps必须为空数组");
+    // The reader model writes visible speech only. Structural metadata is
+    // deterministically attached from the frozen plan after generation.
+    expect(phase).toContain("只写 id、question、answer 三个字段");
+    expect(phase).toContain("function、kind、boundary、followUps、身份和证据结构全部由程序");
+    expect(phase).not.toContain("function六选一");
+    expect(phase).not.toContain("followUps必须为空数组");
   });
 
   it("2A-O publisher binds an explicit project identity, the three reply paths and the optional first comment", () => {

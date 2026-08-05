@@ -78,10 +78,13 @@ import type {
   ResolvedConfigPreview,
 } from "../types";
 import { IntelligentSimpleFlow } from "./IntelligentSimpleFlow";
+import { PublishingTopologyControl } from "../components/generation/PublishingTopologyControl";
 import {
   applyPublishingTopology,
-  DEFAULT_PUBLISHING_TOPOLOGY_DRAFT,
+  createDefaultPublishingTopologyDraft,
+  createSimplePublishingTopologyDraft,
   type PublishingTopologyDraft,
+  type SimplePublishingTopology,
 } from "../lib/publishing-topology";
 
 interface GenerationFormState {
@@ -140,7 +143,8 @@ export function GeneratorPage() {
   const { projects, projectId, setProjectId, currentProject } = useProjects();
   const [mode, setMode] = useState<"simple" | "advanced">("simple");
   const [form, setForm] = useState<GenerationFormState>(defaultForm);
-  const [publishingTopology, setPublishingTopology] = useState<PublishingTopologyDraft>({ ...DEFAULT_PUBLISHING_TOPOLOGY_DRAFT });
+  const [publishingTopology, setPublishingTopology] = useState<PublishingTopologyDraft>(() => createDefaultPublishingTopologyDraft());
+  const [simplePublishingTopology, setSimplePublishingTopology] = useState<SimplePublishingTopology>("creative_scenario");
   const [advanced, setAdvanced] = useState<AdvancedGenerationConfig>(defaultAdvanced);
   const [parameterOverrides, setParameterOverrides] = useState<Record<string, unknown>>({});
   const [advancedOverrides, setAdvancedOverrides] = useState("{}");
@@ -166,6 +170,17 @@ export function GeneratorPage() {
   const toast = useToast();
 
   const presets = useMemo(() => mergePresetShelf(projectPresets), [projectPresets]);
+
+  // Publishing truth is project-scoped. Never carry an author or confirmation
+  // from one project into another, including project changes made outside this page.
+  useEffect(() => {
+    setPublishingTopology(createDefaultPublishingTopologyDraft());
+    setSimplePublishingTopology("creative_scenario");
+    setPreviewInput(null);
+    setPreview(null);
+    setPreviewError(null);
+    setPreviewOpen(false);
+  }, [projectId]);
 
   useEffect(() => {
     if (!projectId) {
@@ -447,7 +462,9 @@ export function GeneratorPage() {
   const prepareInputPreview = async (rawInput: GenerateInput) => {
     let input: GenerateInput;
     try {
-      input = applyPublishingTopology(rawInput, publishingTopology);
+      input = applyPublishingTopology(rawInput, rawInput.mode === "simple"
+        ? createSimplePublishingTopologyDraft(simplePublishingTopology)
+        : publishingTopology);
     } catch (error) {
       toast.push(errorMessage(error, "发布账号信息不完整"), "error");
       return;
@@ -492,7 +509,8 @@ export function GeneratorPage() {
     setAdvanced(defaultAdvanced);
     setParameterOverrides({});
     setForm((current) => ({ ...current, goal: "", mustInclude: "" }));
-    setPublishingTopology({ ...DEFAULT_PUBLISHING_TOPOLOGY_DRAFT });
+    setPublishingTopology(createDefaultPublishingTopologyDraft());
+    setSimplePublishingTopology("creative_scenario");
     setSelectedPresetId("");
     toast.push("参数已恢复为系统默认", "info");
   };
@@ -535,8 +553,6 @@ export function GeneratorPage() {
 
       {schemaWarning && <div className="inline-load-error" role="alert"><AlertTriangle size={17} /><span><strong>生成参数暂未从服务端加载</strong><small>{schemaWarning}。当前只显示界面默认值，配置预览仍须由服务端确认。</small></span><Button variant="ghost" onClick={() => setResourceReload((value) => value + 1)}>重试</Button></div>}
 
-      <PublishingTopologyPanel value={publishingTopology} onChange={setPublishingTopology} />
-
       {mode === "simple" ? (
         <IntelligentSimpleFlow
           projects={projects}
@@ -545,6 +561,8 @@ export function GeneratorPage() {
           selectedPresetId={selectedPresetId || undefined}
           selectedPreset={selectedPreset || presets.find((preset) => preset.isDefault)}
           onProject={setProjectId}
+          publishingTopology={simplePublishingTopology}
+          onPublishingTopology={setSimplePublishingTopology}
           onPreview={(input) => void prepareInputPreview(input)}
         />
       ) : (
@@ -563,7 +581,7 @@ export function GeneratorPage() {
 
           <div className="advanced-layout">
             <div className="advanced-main">
-              <TaskPanel projects={projects} projectId={projectId} form={form} onProject={setProjectId} onForm={setForm} />
+              <TaskPanel projects={projects} projectId={projectId} form={form} publishingTopology={publishingTopology} onProject={setProjectId} onForm={setForm} onPublishingTopology={setPublishingTopology} />
               {schemaLoading ? <section className="settings-panel"><Skeleton lines={8} /></section> : advancedView === "goal" ? (
                 <GoalParameterView schema={schema} getValue={getParameterValue} setValue={setParameterValue} />
               ) : (
@@ -610,7 +628,7 @@ export function GeneratorPage() {
         open={savePresetOpen}
         onClose={() => { if (!savingPreset) setSavePresetOpen(false); }}
         title="保存为项目预设"
-        description="预设会保存当前可视化参数和任务倾向，不会保存本次主题、地点或关键对象。"
+        description="预设只保存写作方法和参数，不保存发布主体、作者事实、确认记录、主题、地点或关键对象。"
         footer={<><Button variant="ghost" disabled={savingPreset} onClick={() => setSavePresetOpen(false)}>取消</Button><Button loading={savingPreset} disabled={!presetDraft.name.trim()} onClick={savePreset} icon={<BookmarkPlus size={16} />}>保存预设</Button></>}
       >
         <div className="form-stack">
@@ -671,57 +689,20 @@ function PresetShelf({ presets, selectedId, loading, error, compact, onApply, on
   </section>;
 }
 
-const authorFactCategoryOptions: Array<{ value: PublishingTopologyDraft["factCategory"]; label: string }> = [
-  { value: "current_state", label: "当前状态" },
-  { value: "intent", label: "本人打算" },
-  { value: "constraint", label: "现实限制" },
-  { value: "project_contact", label: "已发生项目接触" },
-  { value: "purchase", label: "已购买" },
-  { value: "service_completion", label: "已完成服务" },
-  { value: "recovery", label: "恢复经历" },
-  { value: "outcome", label: "结果经历" },
-];
-
-function PublishingTopologyPanel({ value, onChange }: {
-  value: PublishingTopologyDraft;
-  onChange: (value: PublishingTopologyDraft) => void;
-}) {
-  const individual = value.topology === "confirmed_individual_author";
-  return <section className="settings-panel publishing-topology-panel">
-    <header><div><ShieldCheck size={19} /><span><h2>发布账号与作者事实</h2><p>本次任务先冻结谁在发帖；项目资料不能自动变成个人经历</p></span></div><Badge tone={individual ? "warning" : "positive"}>{individual ? "个人作者" : "机构账号"}</Badge></header>
-    <div className="settings-panel__body form-stack">
-      <Field label="发布账号类型" required hint="默认使用机构自有账号。只有确有真实个人作者且事实已人工确认时，才选择个人作者。">
-        <select value={value.topology} onChange={(event) => onChange({ ...value, topology: event.target.value as PublishingTopologyDraft["topology"] })}>
-          <option value="institution_owned">机构自有账号（默认）</option>
-          <option value="confirmed_individual_author">已确认的真实个人作者</option>
-        </select>
-      </Field>
-      {individual && <>
-        <Field label="已确认作者事实" required hint="只填一条本次可公开使用的真实事实；不要从项目知识库复制或推断个人经历。">
-          <textarea rows={3} value={value.factStatement} onChange={(event) => onChange({ ...value, factStatement: event.target.value })} placeholder="例如：我目前还没决定，只是在比较方案" />
-        </Field>
-        <div className="field-grid field-grid--three">
-          <Field label="事实类别" required><select value={value.factCategory} onChange={(event) => onChange({ ...value, factCategory: event.target.value as PublishingTopologyDraft["factCategory"] })}>{authorFactCategoryOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></Field>
-          <Field label="确认人" required><input value={value.confirmedBy} onChange={(event) => onChange({ ...value, confirmedBy: event.target.value })} placeholder="负责人姓名或工号" /></Field>
-          <Field label="确认时间" required><input type="datetime-local" value={value.confirmedAt} onChange={(event) => onChange({ ...value, confirmedAt: event.target.value })} /></Field>
-        </div>
-        <div className="trendfit-settings-boundary"><Info size={17} /><div><strong>个人作者只回答本人事实</strong><p>楼主回复不会承接价格、地址、预约、效果、恢复结论、适用性或其他项目事实；这些问题仍由机构可追责身份回答。</p></div></div>
-      </>}
-    </div>
-  </section>;
-}
-
-function TaskPanel({ projects, projectId, form, onProject, onForm }: {
+function TaskPanel({ projects, projectId, form, publishingTopology, onProject, onForm, onPublishingTopology }: {
   projects: ReturnType<typeof useProjects>["projects"];
   projectId: string;
   form: GenerationFormState;
+  publishingTopology: PublishingTopologyDraft;
   onProject: (id: string) => void;
   onForm: (form: GenerationFormState) => void;
+  onPublishingTopology: (value: PublishingTopologyDraft) => void;
 }) {
   return <section className="settings-panel"><header><div><FileText size={19} /><span><h2>任务、读者与入口</h2><p>定义本次内容要为谁解决什么问题</p></span></div><Badge tone="positive">必填</Badge></header><div className="settings-panel__body form-stack">
     <div className="field-grid field-grid--two"><Field label="项目"><select value={projectId} onChange={(event) => onProject(event.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></Field><Field label="内容入口"><select value={form.entryPoint} onChange={(event) => onForm({ ...form, entryPoint: event.target.value })}>{entryPoints.map((entry) => <option value={entry.id} key={entry.id}>{entry.title}</option>)}</select></Field></div>
     <Field label="内容主题" required><textarea rows={3} value={form.topic} onChange={(event) => onForm({ ...form, topic: event.target.value })} placeholder="写清具体问题与场景" /></Field>
     <div className="field-grid field-grid--two"><Field label="读者阶段"><select value={form.audienceStage} onChange={(event) => onForm({ ...form, audienceStage: event.target.value })}>{stages.map((stage) => <option value={stage.id} key={stage.id}>{stage.title}</option>)}</select></Field><Field label="地点 / 关键对象"><div className="inline-fields"><input value={form.city} onChange={(event) => onForm({ ...form, city: event.target.value })} placeholder="地点" /><input value={form.doctor} onChange={(event) => onForm({ ...form, doctor: event.target.value })} placeholder="人物或对象" /></div></Field></div>
+    <PublishingTopologyControl projectId={projectId} value={publishingTopology} onChange={onPublishingTopology} />
   </div></section>;
 }
 

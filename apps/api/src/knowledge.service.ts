@@ -534,7 +534,15 @@ export class KnowledgeService {
          LIMIT 1`,
       )
       .get(projectId) as { status?: string } | undefined;
-    const analysis = analysisStateFrom(intelligenceRow?.status);
+    let analysis = analysisStateFrom(intelligenceRow?.status);
+    if (analysis === 'approved') {
+      try {
+        await this.intelligence.preflightGenerationSource(projectId);
+      } catch (error) {
+        analysis = 'stale';
+        warnings.push(error instanceof Error ? error.message : '当前批准分析与现有知识库不一致，请重新分析。');
+      }
+    }
 
     return { ...summarize(gaps, analysis), gaps, warnings, note: PREFLIGHT_NOTE };
   }

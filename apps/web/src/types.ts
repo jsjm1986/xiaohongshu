@@ -670,6 +670,7 @@ export interface CommentThread extends CommentScenarioMetadata {
   /** Thread-level boundary (Cref contract v1.1). */
   boundary?: string;
   postingIdentity?: "author" | "brand" | "staff" | "expert" | "reader_question_template" | string;
+  answerIdentity?: "simulated_reader" | "none" | "author" | "brand" | "staff" | "expert" | "publisher" | string;
   sourceClusterIds?: string[];
   evidenceIds?: string[];
   function?: "surface_gap" | "answer" | "clarify" | "counterexample" | "verification" | "next_step" | string;
@@ -1011,6 +1012,7 @@ export interface ReaderComment {
   /** 线程互动形态:只有 org_answer 的 answer 出自可追责身份,其余是模拟读者接话。 */
   threadKind?: "org_answer" | "reader_exchange" | "organic_reaction" | string;
   postingIdentity?: string;
+  answerIdentity?: "simulated_reader" | "none" | "author" | "brand" | "staff" | "expert" | "publisher" | string;
   /** 最终机构答复展示角色；创作区仿真预览也使用，避免统一署成项目账号。 */
   surfaceRoleCard?: Pick<CommentSurfaceRoleCard, "replyDisplayRole">;
   personaRole?: string;
@@ -1046,6 +1048,33 @@ export interface ReaderGapLedgerEntry {
   realizations: Array<{ channel: string; threadId?: string; resolved: boolean; missing: string[] }>;
 }
 
+export type ContentIssueDisposition = "block" | "review" | "advisory";
+export type ContentIssueOrigin = "deterministic" | "agent" | "infrastructure";
+export type CandidateQualityStatus = "passed" | "needs_review" | "blocked";
+
+export interface CommentEditorialAssessment {
+  status: "pass" | "review";
+  reasons: string[];
+  summary: string;
+}
+
+export interface CandidateValidationIssue {
+  code?: string;
+  severity: "error" | "warning";
+  channel?: string;
+  message: string;
+  repairable?: boolean;
+  disposition?: ContentIssueDisposition;
+  origin?: ContentIssueOrigin;
+}
+
+export interface CandidateValidation {
+  valid: boolean;
+  qualityStatus?: CandidateQualityStatus;
+  repairAttempts: number;
+  issues: CandidateValidationIssue[];
+}
+
 export interface ReaderCandidate {
   id: string;
   packageId: string;
@@ -1059,11 +1088,8 @@ export interface ReaderCandidate {
   commentOwnedFirstComment?: string;
   commentUncoveredGaps?: string[];
   comments: ReaderComment[];
-  validation?: {
-    valid: boolean;
-    repairAttempts: number;
-    issues: Array<{ code?: string; severity: "error" | "warning"; channel?: string; message: string }>;
-  };
+  validation?: CandidateValidation;
+  commentEditorialAssessment?: CommentEditorialAssessment;
   reasoning: ReaderReasoningEntry[];
   gapLedger?: { entries: ReaderGapLedgerEntry[]; realizationStatus?: string };
   gapCards: Array<{
@@ -1102,6 +1128,12 @@ export interface ReaderJob {
 export interface Candidate {
   id: string;
   label?: string;
+  /** Current user's candidate-scoped manual delivery confirmation. Does not change validation.valid. */
+  manualDeliveryConfirmation?: {
+    confirmed: true;
+    confirmedAt: string;
+    confirmedBy: string;
+  };
   title: string;
   body: string;
   tags: string[];
@@ -1985,8 +2017,15 @@ export interface GenerateInput {
   mustInclude?: string;
   forbidden?: string;
   /** Frozen account topology for this generation job. */
-  publishingTopology?: "institution_owned" | "confirmed_individual_author";
-  /** Human-confirmed author facts; project knowledge must never populate this field. */
+  publishingTopology?: "creative_scenario" | "institution_owned" | "confirmed_individual_author";
+  /** New requests submit atomic drafts; the server supplies confirmation identity and time. */
+  authorFacts?: Array<{
+    id: string;
+    statement: string;
+    category: "current_state" | "intent" | "constraint" | "project_contact" | "purchase" | "service_completion" | "recovery" | "outcome";
+  }>;
+  authorFactsConfirmed?: boolean;
+  /** Legacy/expert request shape and resolved snapshot shape. */
   authorContext?: {
     status: "not_provided" | "confirmed";
     facts: Array<{
@@ -1995,6 +2034,7 @@ export interface GenerateInput {
       category: "current_state" | "intent" | "constraint" | "project_contact" | "purchase" | "service_completion" | "recovery" | "outcome";
       confirmedBy: string;
       confirmedAt: string;
+      confirmationId?: string;
     }>;
   };
   config?: AdvancedGenerationConfig;
@@ -2135,6 +2175,19 @@ export interface GenerationImpactReport {
     constraints?: string[];
   }>;
   warnings?: string[];
+}
+
+export interface AuthorFactOrganizationResult {
+  sourceText: string;
+  facts: Array<{
+    id: string;
+    statement: string;
+    sourceQuote: string;
+    category: NonNullable<GenerateInput["authorFacts"]>[number]["category"];
+    needsReview: boolean;
+    reviewReason?: string;
+  }>;
+  warnings: string[];
 }
 
 export interface ResolvedConfigPreview {

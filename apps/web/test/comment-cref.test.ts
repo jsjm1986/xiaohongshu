@@ -104,6 +104,27 @@ const baseCandidate: Candidate = {
   ],
 };
 
+
+test("candidate markdown preserves failed validation truth after manual delivery confirmation", () => {
+  const markdown = candidateToMarkdown({
+    ...baseCandidate,
+    validation: {
+      valid: false,
+      repairAttempts: 2,
+      issues: [{ severity: "error", message: "缺少证据" }],
+    },
+    manualDeliveryConfirmation: {
+      confirmed: true,
+      confirmedAt: "2026-08-05T12:00:00.000Z",
+      confirmedBy: "user-1",
+    },
+  });
+  assert.match(markdown, /## 人工交付确认/u);
+  assert.match(markdown, /自动校验状态保持未通过/u);
+  assert.match(markdown, /不代表系统校验通过/u);
+  assert.match(markdown, /已逐条核对事实、证据、身份与风险/u);
+});
+
 test("candidate markdown renders v1.1 Cref and aC fields when present", () => {
   const candidate: Candidate = {
     ...baseCandidate,

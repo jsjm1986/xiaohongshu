@@ -48,7 +48,7 @@ export function createDefaultGenerationConfig(
       entry: "search",
       preContactKnown: [],
       readerConstraints: [],
-      publishingTopology: "institution_owned",
+      publishingTopology: "creative_scenario",
       authorContext: { status: "not_provided", facts: [] },
       mustMention: [],
       forbidden: [],

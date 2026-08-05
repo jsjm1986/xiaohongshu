@@ -49,6 +49,12 @@ import {
   type AnalysisEvidenceEntry,
 } from './analysis-evidence.js';
 import { AuditService } from './audit.service.js';
+import {
+  authorFactOrganizationPrompt,
+  normalizeAuthorNarrative,
+  sanitizeOrganizedAuthorFacts,
+  type OrganizedAuthorFactsResult,
+} from './author-fact-organizer.js';
 import { APP_OPTIONS, type ApiOptions } from './config.js';
 import { DatabaseService } from './database.service.js';
 import {
@@ -125,6 +131,7 @@ type AnalysisStage =
   | 'image-analysis'
   | 'knowledge-enrichment-draft'
   | 'knowledge-enrichment-merge'
+  | 'author-fact-organization'
   | 'unspecified';
 
 interface AnalysisCallContext {
@@ -247,6 +254,16 @@ export interface PreparedPlanningContext {
   opportunitySnapshot: Record<string, unknown>;
   planningContext: Record<string, unknown>;
   imageContext: Array<Record<string, unknown>>;
+}
+
+export interface GenerationSourceSnapshot {
+  projectId: string;
+  revision: string;
+  formalAnalysisId?: string;
+  sourceFingerprint?: string;
+  /** Stable identity of the approved blueprint rows validated with this analysis. */
+  blueprintRevision?: string;
+  availableEvidenceIds: ReadonlySet<string>;
 }
 
 /*
@@ -1509,6 +1526,52 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * 将营销人员提供的真实用户素材整理成叙事用户事实草稿。
+   * 模型可以规范化为一人称表达，但每条都必须携带可逐字定位的来源片段；
+   * 超出来源的数字、时间和事件会被过滤。最终核对仍由生成表单完成。
+   */
+  async organizeAuthorFacts(
+    projectId: string,
+    principal: SessionPrincipal,
+    narrative: unknown,
+  ): Promise<OrganizedAuthorFactsResult> {
+    const project = this.resources.projectRow(projectId);
+    const sourceText = normalizeAuthorNarrative(narrative);
+    const task = this.createTask(
+      projectId,
+      'project',
+      null,
+      `author-facts:${randomUUID()}`,
+      principal,
+    );
+    try {
+      const payload = await this.analyzeWithCurrentModel(
+        project,
+        principal,
+        authorFactOrganizationPrompt(sourceText),
+        [],
+        task.id,
+        'author-fact-organization',
+        0.1,
+      );
+      const organized = sanitizeOrganizedAuthorFacts(sourceText, payload);
+      return this.database.transaction(() => {
+        const currentProject = this.resources.projectRow(projectId);
+        this.assertOwnedTask(task.id, projectId, 'project', null);
+        this.completeTask(task.id, null, nowIso());
+        this.record(currentProject, principal, 'author-facts.organize.model', 'analysis_task', task.id, {
+          projectId,
+          factCount: organized.facts.length,
+          warningCount: organized.warnings.length,
+        });
+        return organized;
+      });
+    } catch (error) {
+      this.throwFailedTask(task.id, error);
+    }
+  }
+
+  /**
    * 给知识库补充功能用的模型入口。
    *
    * 为什么不让 enrich 服务自己调模型:analyzeWithCurrentModel 依赖一条真实的
@@ -1677,7 +1740,26 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestException('An approved project analysis is required before formal generation.');
     }
     const projectBlueprint = this.approvedProjectBlueprint(projectId, intelligence);
-    const gaps = this.currentGapRows(projectId).filter((row) => row.status === 'approved').map((row) => {
+    const gapRows = this.currentGapRows(projectId).filter((row) => row.status === 'approved');
+    if (selectedOpportunityRow) {
+      // An explicitly locked opportunity may legitimately reference an approved
+      // gap from an older analysis batch. assertOpportunityDependenciesCurrent
+      // already verified the exact approval snapshot above; include only those
+      // verified dependency rows so the frozen selectedOpportunityId cannot be
+      // filtered out of its own planning context.
+      const presentGapIds = new Set(gapRows.map((row) => String(row.id)));
+      const dependencyGapIds = uniqueStrings(opportunitySnapshot.gapIds)
+        .filter((gapId) => !presentGapIds.has(gapId));
+      if (dependencyGapIds.length) {
+        const dependencyRows = this.database.prepare(
+          `SELECT * FROM information_gaps
+           WHERE project_id=? AND status='approved' AND deleted_at IS NULL
+             AND id IN (${dependencyGapIds.map(() => '?').join(',')})`,
+        ).all(projectId, ...dependencyGapIds) as unknown as Record<string, unknown>[];
+        gapRows.push(...dependencyRows);
+      }
+    }
+    const gaps = gapRows.map((row) => {
       assertResourceMetricsReady('information_gaps', row);
       return normalizeGap(row);
     }).filter((item) => item.enabled !== false);
@@ -2000,7 +2082,10 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     return 'user_supplied';
   }
 
-  private async projectAnalysisSource(project: Record<string, unknown>): Promise<ProjectAnalysisSource> {
+  private async projectAnalysisSource(
+    project: Record<string, unknown>,
+    options: { validatePromptBudget?: boolean } = {},
+  ): Promise<ProjectAnalysisSource> {
     const currentProject = this.resources.projectRow(String(project.id));
     const revisionBefore = this.projectAnalysisRevision(String(currentProject.id));
     const knowledgeRows = this.database.prepare(
@@ -2163,7 +2248,9 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     const sourceJson = JSON.stringify(source);
     // Stage 1 has the largest fixed instruction block. Validate it here so a
     // prompt-limit failure occurs before an analysis task or quota entry exists.
-    this.assertAnalysisPromptBudget(projectConversationFirstPrompt(sourceJson), '项目分析');
+    if (options.validatePromptBudget !== false) {
+      this.assertAnalysisPromptBudget(projectConversationFirstPrompt(sourceJson), '项目分析');
+    }
     const revision = this.projectAnalysisRevision(String(currentProject.id));
     if (revision !== revisionBefore) {
       throw new ConflictException('项目资料在读取期间发生了变化，请重新开始分析。');
@@ -2180,6 +2267,148 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   private async currentAnalysisEvidence(projectId: string): Promise<AnalysisEvidenceEntry[]> {
     const project = this.resources.projectRow(projectId);
     return (await this.projectAnalysisSource(project)).evidence;
+  }
+
+  /**
+   * Freeze the current project source before generation accepts a job.
+   *
+   * Hand-authored/test contracts have no completed analysis task and retain the
+   * legacy behavior. A formal model analysis is fail-closed: its fingerprint and
+   * every persisted knowledge/image evidence handle must still match the current
+   * source. This prevents an old approved map/blueprint from surviving deleted or
+   * replaced knowledge and being injected even when the writer context is empty.
+   */
+  async preflightGenerationSource(projectId: string): Promise<GenerationSourceSnapshot> {
+    const project = this.resources.projectRow(projectId);
+    const revision = this.projectAnalysisRevision(projectId);
+    const intelligence = this.database.prepare(
+      `SELECT * FROM project_intelligence
+       WHERE project_id=? AND status='approved' AND deleted_at IS NULL
+       ORDER BY version DESC, created_at DESC, id DESC LIMIT 1`,
+    ).get(projectId) as Record<string, unknown> | undefined;
+    if (!intelligence) {
+      return { projectId, revision, availableEvidenceIds: new Set<string>() };
+    }
+    const formalTask = this.database.prepare(
+      `SELECT id FROM analysis_tasks
+       WHERE project_id=? AND kind='project' AND status='completed' AND result_id=? AND deleted_at IS NULL
+       ORDER BY completed_at DESC, id DESC LIMIT 1`,
+    ).get(projectId, String(intelligence.id)) as { id: string } | undefined;
+    if (!formalTask) {
+      return { projectId, revision, availableEvidenceIds: new Set<string>() };
+    }
+
+    const source = await this.projectAnalysisSource(project, { validatePromptBudget: false });
+    const sourceFingerprint = String(intelligence.source_fingerprint);
+    if (sourceFingerprint !== source.fingerprint) {
+      throw new BadRequestException({
+        message: '项目资料已变动，当前批准的分析不再对应现有知识库。请重新分析并确认后再生成。',
+        code: 'ANALYSIS_SOURCE_STALE',
+      });
+    }
+    const moduleRows = this.database.prepare(
+      `SELECT id, module_key, version, source_fingerprint, content_revision, data_json
+       FROM project_blueprint_modules
+       WHERE project_id=? AND intelligence_id=? AND status='approved' AND deleted_at IS NULL
+       ORDER BY module_key, version, id`,
+    ).all(projectId, String(intelligence.id)) as Array<{
+      id: string;
+      module_key: string;
+      version: number;
+      source_fingerprint: string;
+      content_revision: string;
+      data_json: string;
+    }>;
+    if (moduleRows.some((row) => row.source_fingerprint !== sourceFingerprint)) {
+      throw new BadRequestException({
+        message: '项目创作蓝图与当前批准分析不一致。请重新分析并确认全部蓝图后再生成。',
+        code: 'ANALYSIS_SOURCE_STALE',
+      });
+    }
+
+    const availableEvidenceIds = new Set(source.evidence.map((item) => item.id));
+    const referencedEvidenceIds = new Set<string>();
+    const collectEvidenceIds = (value: unknown): void => {
+      if (Array.isArray(value)) {
+        for (const item of value) collectEvidenceIds(item);
+        return;
+      }
+      if (!isRecord(value)) return;
+      for (const [key, item] of Object.entries(value)) {
+        if (key === 'evidenceIds' && Array.isArray(item)) {
+          for (const id of uniqueStrings(item)) {
+            if (id.startsWith('evidence_section_') || id.startsWith('evidence_image_')) {
+              referencedEvidenceIds.add(id);
+            }
+          }
+        } else {
+          collectEvidenceIds(item);
+        }
+      }
+    };
+    collectEvidenceIds(parseJson(String(intelligence.map_json), {}));
+    for (const row of moduleRows) collectEvidenceIds(parseJson(row.data_json, {}));
+    const missingEvidenceIds = [...referencedEvidenceIds].filter((id) => !availableEvidenceIds.has(id));
+    if (missingEvidenceIds.length) {
+      throw new BadRequestException({
+        message: `当前批准分析引用了 ${missingEvidenceIds.length} 条已失效证据。请重新分析并确认后再生成。`,
+        code: 'ANALYSIS_EVIDENCE_STALE',
+      });
+    }
+    return {
+      projectId,
+      revision: source.revision,
+      formalAnalysisId: String(intelligence.id),
+      sourceFingerprint,
+      blueprintRevision: this.fingerprint(moduleRows.map((row) => ({
+        id: row.id,
+        moduleKey: row.module_key,
+        version: Number(row.version),
+        sourceFingerprint: row.source_fingerprint,
+        contentRevision: row.content_revision,
+      }))),
+      availableEvidenceIds,
+    };
+  }
+
+  assertGenerationSourceSnapshotCurrent(snapshot: GenerationSourceSnapshot): void {
+    if (this.projectAnalysisRevision(snapshot.projectId) !== snapshot.revision) {
+      throw new ConflictException('项目资料在生成任务创建期间发生了变化，请重新提交。');
+    }
+    if (!snapshot.formalAnalysisId) return;
+    const current = this.database.prepare(
+      `SELECT id, source_fingerprint FROM project_intelligence
+       WHERE project_id=? AND status='approved' AND deleted_at IS NULL
+       ORDER BY version DESC, created_at DESC, id DESC LIMIT 1`,
+    ).get(snapshot.projectId) as { id: string; source_fingerprint: string } | undefined;
+    const moduleRows = this.database.prepare(
+      `SELECT id, module_key, version, source_fingerprint, content_revision
+       FROM project_blueprint_modules
+       WHERE project_id=? AND intelligence_id=? AND status='approved' AND deleted_at IS NULL
+       ORDER BY module_key, version, id`,
+    ).all(snapshot.projectId, snapshot.formalAnalysisId) as Array<{
+      id: string;
+      module_key: string;
+      version: number;
+      source_fingerprint: string;
+      content_revision: string;
+    }>;
+    const blueprintRevision = this.fingerprint(moduleRows.map((row) => ({
+      id: row.id,
+      moduleKey: row.module_key,
+      version: Number(row.version),
+      sourceFingerprint: row.source_fingerprint,
+      contentRevision: row.content_revision,
+    })));
+    if (!current
+      || current.id !== snapshot.formalAnalysisId
+      || current.source_fingerprint !== snapshot.sourceFingerprint
+      || blueprintRevision !== snapshot.blueprintRevision) {
+      throw new BadRequestException({
+        message: '项目分析或创作蓝图状态已变化，请重新检查知识库后再生成。',
+        code: 'ANALYSIS_SOURCE_STALE',
+      });
+    }
   }
 
   private validateAnalyzedGapEvidence(

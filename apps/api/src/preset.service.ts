@@ -476,7 +476,7 @@ export class PresetService {
     }
     applyDirectTaskTextOverrides(config, raw);
     applyDirectReaderTaskOverrides(config, raw);
-    normalizeReaderTaskFields(config);
+    normalizeReaderTaskFields(config, raw, principal);
     validateResolved(config, conflicts, warnings);
 
     for (const [id, source] of Object.entries(compiled.resolutionSnapshot.sourceByParameter)) {
@@ -864,40 +864,85 @@ function normalizedReaderTaskList(value: unknown, field: string): string[] {
   return result;
 }
 
-function normalizeReaderTaskFields(config: ResolvedGenerationConfig): void {
+function normalizeReaderTaskFields(
+  config: ResolvedGenerationConfig,
+  raw: Record<string, unknown>,
+  principal: SessionPrincipal,
+): void {
   const task = config.task as unknown as Record<string, unknown>;
   task.preContactKnown = normalizedReaderTaskList(task.preContactKnown ?? [], 'preContactKnown');
   task.readerConstraints = normalizedReaderTaskList(task.readerConstraints ?? [], 'readerConstraints');
   if (task.readerHistory === undefined || task.readerHistory === null) delete task.readerHistory;
   else task.readerHistory = normalizedReaderTaskList(task.readerHistory, 'readerHistory');
 
-  const topology = task.publishingTopology ?? 'institution_owned';
-  if (topology !== 'institution_owned' && topology !== 'confirmed_individual_author') {
-    throw new BadRequestException('publishingTopology must be institution_owned or confirmed_individual_author.');
+  const topology = task.publishingTopology ?? 'creative_scenario';
+  if (topology !== 'creative_scenario' && topology !== 'institution_owned' && topology !== 'confirmed_individual_author') {
+    throw new BadRequestException('publishingTopology must be creative_scenario, institution_owned or confirmed_individual_author.');
   }
   task.publishingTopology = topology;
-  const rawContext = isRecord(task.authorContext) ? task.authorContext : { status: 'not_provided', facts: [] };
-  const rawFacts = Array.isArray(rawContext.facts) ? rawContext.facts : [];
+  if (topology !== 'confirmed_individual_author') {
+    task.authorContext = { status: 'not_provided', facts: [] };
+    return;
+  }
+
+  const hasNewFacts = Object.prototype.hasOwnProperty.call(raw, 'authorFacts');
+  const rawLegacyContext = isRecord(raw.authorContext) ? raw.authorContext : undefined;
+  const inheritedContext = isRecord(task.authorContext) ? task.authorContext : undefined;
+  const rawFacts = hasNewFacts
+    ? raw.authorFacts
+    : rawLegacyContext?.facts ?? inheritedContext?.facts;
+  if (!Array.isArray(rawFacts) || rawFacts.length === 0) {
+    throw new BadRequestException('真实个人作者至少需要一条已确认的原子作者事实。');
+  }
+  if (rawFacts.length > 20) throw new BadRequestException('作者事实最多可填写 20 条。');
+  const explicitlyConfirmed = hasNewFacts
+    ? raw.authorFactsConfirmed === true
+    : rawLegacyContext?.status === 'confirmed' || inheritedContext?.status === 'confirmed';
+  if (!explicitlyConfirmed) throw new BadRequestException('请确认作者事实真实且可公开使用。');
+
   const allowedCategories = new Set(['current_state', 'intent', 'constraint', 'project_contact', 'purchase', 'service_completion', 'recovery', 'outcome']);
+  const confirmedAt = nowIso();
   const facts = rawFacts.map((item, index) => {
-    if (!isRecord(item)) throw new BadRequestException(`authorContext.facts[${index}] must be an object.`);
-    const id = typeof item.id === 'string' ? item.id.trim() : '';
+    if (!isRecord(item)) throw new BadRequestException(`authorFacts[${index}] must be an object.`);
+    const id = typeof item.id === 'string' && item.id.trim() ? item.id.trim() : `author_fact_${index + 1}`;
     const statement = typeof item.statement === 'string' ? item.statement.trim() : '';
     const category = typeof item.category === 'string' ? item.category : '';
-    const confirmedBy = typeof item.confirmedBy === 'string' ? item.confirmedBy.trim() : '';
-    const confirmedAt = typeof item.confirmedAt === 'string' ? item.confirmedAt.trim() : '';
-    if (!id || !statement || !allowedCategories.has(category) || !confirmedBy || !confirmedAt || !Number.isFinite(Date.parse(confirmedAt))) {
-      throw new BadRequestException(`authorContext.facts[${index}] is incomplete or invalid.`);
+    if (!statement || statement.length > 300 || !allowedCategories.has(category)) {
+      throw new BadRequestException(`authorFacts[${index}] is incomplete or invalid.`);
     }
-    return { id, statement, category, confirmedBy, confirmedAt };
+    const sentenceParts = statement.split(/[。！？!?；;\n]+/u).map((part) => part.trim()).filter(Boolean);
+    if (sentenceParts.length > 1) {
+      throw new BadRequestException(`authorFacts[${index}] must contain one atomic statement; split multiple sentences into separate facts.`);
+    }
+    const detectedCategories = new Set<string>();
+    const completed = (action: RegExp): boolean =>
+      /(?:已经|已|曾经|曾|上周|昨天|之前|刚刚)/u.test(statement) && action.test(statement)
+      || action.test(statement) && /(?:过|完成|结束|第\d+天)/u.test(statement);
+    if (completed(/(?:咨询|面诊|到店|接触|沟通)/u)) detectedCategories.add('project_contact');
+    if (completed(/(?:购买|支付|付款|下单|成交|订购)/u)) detectedCategories.add('purchase');
+    if (completed(/(?:服务|项目|流程)/u) && /(?:完成|结束|做完)/u.test(statement)) detectedCategories.add('service_completion');
+    if (/(?:恢复|康复).{0,6}(?:期|第\d+天|中|完成)|(?:术后|服务后).{0,6}(?:第\d+天|恢复)/u.test(statement)) detectedCategories.add('recovery');
+    if (completed(/(?:结果|效果|改善|变化)/u)) detectedCategories.add('outcome');
+    if (detectedCategories.size > 1) {
+      throw new BadRequestException(`authorFacts[${index}] contains multiple fact categories; split it into atomic facts.`);
+    }
+    const detectedCategory = [...detectedCategories][0];
+    if (detectedCategory && detectedCategory !== category) {
+      throw new BadRequestException(`authorFacts[${index}] category does not match the completed event in its statement.`);
+    }
+    return {
+      id,
+      statement,
+      category,
+      confirmedBy: principal.userId,
+      confirmedAt,
+      confirmationId: randomUUID(),
+    };
   });
   if (new Set(facts.map((fact) => fact.id)).size !== facts.length) {
-    throw new BadRequestException('authorContext fact ids must be unique.');
+    throw new BadRequestException('author fact ids must be unique.');
   }
-  if (topology === 'confirmed_individual_author' && facts.length === 0) {
-    throw new BadRequestException('confirmed_individual_author requires at least one human-confirmed author fact.');
-  }
-  task.authorContext = facts.length ? { status: 'confirmed', facts } : { status: 'not_provided', facts: [] };
+  task.authorContext = { status: 'confirmed', facts };
 }
 
 function taskLayer(raw: Record<string, unknown>, current: ResolvedGenerationConfig): Record<string, unknown> {
@@ -960,6 +1005,21 @@ function validateResolved(
   }
   if (config.content.bodyMaxChars <= 170 && config.informationWindow.gaps.length >= 5 && config.content.commentThreadMax <= 1) {
     warnings.push('正文较短、信息缺口较多且评论窗口很小，部分信息可能没有可见承载位置。');
+  }
+  const individualAuthor = config.task.publishingTopology === 'confirmed_individual_author';
+  const authorCategories = new Set(config.task.authorContext.facts.map((fact) => fact.category));
+  const experienceStrength = config.parameters?.experienceInformationStrength ?? 0;
+  if (individualAuthor && experienceStrength >= 70) {
+    warnings.push('真实个人作者已启用：生活事件强度只影响已确认事实的表达密度，不会自动新增时间、地点、动作、关系或情绪经历。');
+  }
+  if (individualAuthor && experienceStrength >= 85
+    && !['project_contact', 'purchase', 'service_completion', 'recovery', 'outcome'].some((category) => authorCategories.has(category as never))) {
+    conflicts.push({
+      severity: 'warning',
+      code: 'AUTHOR_FACT_PRESET_LIMITED',
+      title: '所选预设的经历能力已受限',
+      message: '当前作者事实只支持状态、打算或限制；系统将禁用接触、购买、服务、恢复和结果情景。',
+    });
   }
 }
 

@@ -56,6 +56,8 @@ const cases: Array<[string, string, boolean]> = [
   ['PATCH', '/api/knowledge/k1', true],
   ['POST', '/api/generations', true],
   ['POST', '/api/generations/j1/revise', true],
+  ['GET', '/api/generations/j1/trace', true],
+  ['POST', '/api/generations/j1/trace', false],
   ['GET', '/api/generations/j1/candidates/c1/export', true],
   ['PATCH', '/api/generations/j1', false],
   // 批量生成只放行控制器实际提供的 GET/POST

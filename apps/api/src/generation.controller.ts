@@ -29,7 +29,18 @@ export class GenerationController {
   get(@Req() request: Request, @Param('id') id: string) {
     const job = this.generations.jobRow(id);
     this.assert(request, job.project_id, 'project.read');
-    return this.generations.get(id);
+    return this.generations.get(id, this.principal(request).userId);
+  }
+
+  /**
+   * 传统生成的安全执行轨迹。只返回服务端白名单投影后的阶段、耗时、
+   * Token、重试与校验/修复元数据，不返回 Prompt、正文或模型原始响应。
+   */
+  @Get(':id/trace')
+  trace(@Req() request: Request, @Param('id') id: string) {
+    const job = this.generations.jobRow(id);
+    this.assert(request, job.project_id, 'project.read');
+    return this.generations.trace(id);
   }
 
   /**
@@ -70,6 +81,20 @@ export class GenerationController {
     const job = this.generations.jobRow(id);
     this.assert(request, job.project_id, 'generation.edit');
     return this.generations.restore(id);
+  }
+
+  @Post(':id/candidates/:candidateId/manual-delivery-confirmation')
+  confirmManualDelivery(
+    @Req() request: Request,
+    @Param('id') id: string,
+    @Param('candidateId') candidateId: string,
+    @Body() rawBody: unknown,
+  ) {
+    const body = requireObject(rawBody);
+    if (body.acknowledged !== true) throw new BadRequestException('必须明确确认已逐条核对事实、证据、身份与风险');
+    const job = this.generations.jobRow(id);
+    this.assert(request, job.project_id, 'generation.export');
+    return this.generations.confirmManualDelivery(id, candidateId, this.principal(request));
   }
 
   /**

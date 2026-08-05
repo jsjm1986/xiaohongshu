@@ -82,6 +82,7 @@ export interface ReaderCandidate {
   commentUncoveredGaps?: string[];
   comments: ReaderComment[];
   validation: ContentPackage['validation'];
+  commentEditorialAssessment?: ContentPackage['commentEditorialAssessment'];
   reasoning: ReaderReasoningEntry[];
   gapLedger?: {
     entries: Array<{
@@ -221,6 +222,7 @@ export function readerView(pkg: ContentPackage): ReaderCandidate {
     commentUncoveredGaps: pkg.content?.Cref?.uncoveredGaps,
     comments: readerComments(pkg),
     validation: pkg.validation,
+    commentEditorialAssessment: pkg.commentEditorialAssessment,
     reasoning: readerReasoning(pkg),
     gapLedger: readerGapLedger(pkg),
     gapCards: (pkg.orchestrationSnapshot?.gapPlanningCards ?? []).map((card) =>

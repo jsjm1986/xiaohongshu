@@ -1,57 +1,84 @@
 import type { GenerateInput } from "../types";
 
-export type PublishingTopologyDraft = {
-  topology: "institution_owned" | "confirmed_individual_author";
-  factStatement: string;
-  factCategory: NonNullable<GenerateInput["authorContext"]>["facts"][number]["category"];
-  confirmedBy: string;
-  confirmedAt: string;
+export type AuthorFactCategory = NonNullable<GenerateInput["authorFacts"]>[number]["category"];
+
+export type AuthorFactDraft = {
+  id: string;
+  statement: string;
+  category: AuthorFactCategory;
+  /** AI 整理时保留的原始素材片段；不进入生成请求。 */
+  sourceQuote?: string;
+  needsReview?: boolean;
+  reviewReason?: string;
 };
 
-export const DEFAULT_PUBLISHING_TOPOLOGY_DRAFT: PublishingTopologyDraft = {
-  topology: "institution_owned",
-  factStatement: "",
-  factCategory: "current_state",
-  confirmedBy: "",
-  confirmedAt: "",
+export type SimplePublishingTopology = "creative_scenario" | "institution_owned";
+
+export type PublishingTopologyDraft = {
+  topology: "creative_scenario" | "institution_owned" | "confirmed_individual_author";
+  /** Natural-language source owned by the user. It is never submitted as a fact. */
+  narrative: string;
+  facts: AuthorFactDraft[];
+  confirmed: boolean;
+  /** AI 整理提示，仅用于当前表单，不进入生成请求。 */
+  warnings?: string[];
 };
+
+export const emptyAuthorFact = (index = 0): AuthorFactDraft => ({
+  id: `author_fact_${index + 1}`,
+  statement: "",
+  category: "current_state",
+});
+
+export const createDefaultPublishingTopologyDraft = (): PublishingTopologyDraft => ({
+  topology: "creative_scenario",
+  narrative: "",
+  facts: [],
+  confirmed: false,
+});
+
+export const DEFAULT_PUBLISHING_TOPOLOGY_DRAFT = createDefaultPublishingTopologyDraft();
+
+export const createSimplePublishingTopologyDraft = (
+  topology: SimplePublishingTopology,
+): PublishingTopologyDraft => ({
+  ...createDefaultPublishingTopologyDraft(),
+  topology,
+});
 
 /**
- * Freeze the task-level account topology before config preview or generation.
- * Project knowledge never populates authorContext: individual-author mode only
- * accepts the human-entered fact carried by this form.
+ * Build the request-side truth contract. Confirmation identity and time are
+ * intentionally absent: the API freezes those from the authenticated principal.
  */
 export function applyPublishingTopology(
   input: GenerateInput,
   draft: PublishingTopologyDraft,
 ): GenerateInput {
-  if (draft.topology === "institution_owned") {
+  if (draft.topology !== "confirmed_individual_author") {
     return {
       ...input,
-      publishingTopology: "institution_owned",
-      authorContext: { status: "not_provided", facts: [] },
+      publishingTopology: draft.topology,
+      authorFacts: [],
+      authorFactsConfirmed: false,
+      authorContext: undefined,
     };
   }
 
-  const statement = draft.factStatement.trim();
-  const confirmedBy = draft.confirmedBy.trim();
-  const timestamp = Date.parse(draft.confirmedAt);
-  if (!statement) throw new Error("个人作者模式必须填写一条已确认的作者事实");
-  if (!confirmedBy) throw new Error("个人作者模式必须填写确认人");
-  if (!draft.confirmedAt || !Number.isFinite(timestamp)) throw new Error("个人作者模式必须填写有效的确认时间");
+  const facts = draft.facts.map((fact, index) => ({
+    id: fact.id.trim() || `author_fact_${index + 1}`,
+    statement: fact.statement.trim(),
+    category: fact.category,
+  })).filter((fact) => fact.statement);
+  if (!facts.length) throw new Error("个人作者模式必须至少填写一条原子作者事实");
+  if (facts.length !== draft.facts.length) throw new Error("请删除空白作者事实，或填写完整后再确认");
+  if (new Set(facts.map((fact) => fact.id)).size !== facts.length) throw new Error("作者事实编号不能重复");
+  if (!draft.confirmed) throw new Error("请确认这些事实真实且可公开使用");
 
   return {
     ...input,
     publishingTopology: "confirmed_individual_author",
-    authorContext: {
-      status: "confirmed",
-      facts: [{
-        id: "author_fact_1",
-        statement,
-        category: draft.factCategory,
-        confirmedBy,
-        confirmedAt: new Date(timestamp).toISOString(),
-      }],
-    },
+    authorFacts: facts,
+    authorFactsConfirmed: true,
+    authorContext: undefined,
   };
 }

@@ -127,11 +127,15 @@ describe("structured output parsing and validation", () => {
 
   it("applies only supplied repair fields", () => {
     const current = parseGenerationDraft(JSON.stringify(validDraftJson()));
+    current.commentEditorialAssessment = { status: "pass", reasons: [], summary: "评论已编辑。" };
+    current.claimJudgments = [{ statement: "待复核声明", classification: "hedge" }];
     const patch = parseGenerationPatch(JSON.stringify({ N: { title: "新标题" } }));
     const result = applyGenerationPatch(current, patch);
     expect(result.content.N.title).toBe("新标题");
     expect(result.content.N.body).toBe(current.content.N.body);
     expect(result.content.Cref).toEqual(current.content.Cref);
+    expect(result.commentEditorialAssessment).toEqual(current.commentEditorialAssessment);
+    expect(result.claimJudgments).toEqual(current.claimJudgments);
   });
 
   it("detects count, grounding, forbidden and comment-reference safety failures", () => {
@@ -159,6 +163,98 @@ describe("structured output parsing and validation", () => {
     const draft = parseGenerationDraft(JSON.stringify(validDraftJson("请回到 evidence_private_1 核对，本线程再补充。")));
     const issues = validateGenerationDraft({ draft, config, ledger: buildKnowledgeLedger([]), allowedEvidenceIds: ["evidence_private_1"] });
     expect(issues).toContainEqual(expect.objectContaining({ code: "internal_audit_artifact_visible", severity: "error" }));
+  });
+
+  it("blocks reader comments that narrate the supplied body context", () => {
+    const config = createDefaultGenerationConfig(project, DEFAULT_FORMULA_VERSION);
+    config.content.bodyMinChars = 1;
+    config.content.bodyMaxChars = 500;
+    config.content.hashtagMin = 0;
+    config.content.commentThreadMin = 1;
+    const value = validDraftJson();
+    value.content.Cref.threads[0]!.question = "正文说会分区看泪沟断层，我泪沟明显，想先查下机构。";
+    const draft = parseGenerationDraft(JSON.stringify(value));
+    const issues = validateGenerationDraft({ draft, config, ledger: buildKnowledgeLedger([]), allowedEvidenceIds: ["evidence_d1"] });
+    expect(issues).toContainEqual(expect.objectContaining({
+      code: "comment_context_meta_leak", severity: "error", channel: "Cref", repairable: true,
+    }));
+
+    draft.content.Cref.threads[0]!.question = "我泪沟明显，想先查下机构，全称是不是不能公开？";
+    expect(validateGenerationDraft({ draft, config, ledger: buildKnowledgeLedger([]), allowedEvidenceIds: ["evidence_d1"] })
+      .map((issue) => issue.code)).not.toContain("comment_context_meta_leak");
+
+
+    draft.content.Cref.threads[0]!.question = "看了几个帖子，说法都不一样，我该先问哪一点？";
+    const naturalResearchCodes = validateGenerationDraft({
+      draft, config, ledger: buildKnowledgeLedger([]), allowedEvidenceIds: ["evidence_d1"],
+    }).map((issue) => issue.code);
+    expect(naturalResearchCodes).not.toContain("comment_context_meta_leak");
+  });
+
+  it("classifies public-copy prompt leaks without blocking legitimate business AI or named sources", () => {
+    const config = createDefaultGenerationConfig(project, DEFAULT_FORMULA_VERSION);
+    config.content.bodyMinChars = 1;
+    config.content.bodyMaxChars = 500;
+    config.content.hashtagMin = 0;
+    config.content.commentThreadMin = 1;
+    const issueCodesFor = (body: string, question = "这个要怎么判断？") => {
+      const value = validDraftJson(body);
+      value.content.Cref.threads[0]!.question = question;
+      return validateGenerationDraft({
+        draft: parseGenerationDraft(JSON.stringify(value)),
+        config,
+        ledger: buildKnowledgeLedger([]),
+        allowedEvidenceIds: ["evidence_d1"],
+      }).map((issue) => issue.code);
+    };
+
+    for (const leaked of [
+      "根据任务要求，我先给出结论。",
+      "作为 AI 助手，我建议先核实。",
+      "候选 2 的表达更自然。",
+      "只返回 JSON，字段名不要修改。",
+      "问题职责是确认价格。",
+      "待核实维度：方案适配条件。",
+      "本条所列证据来源可以支持这个结论。",
+      "根据知识库，这项服务可以预约。",
+    ]) {
+      expect(issueCodesFor(leaked), leaked).toEqual(expect.arrayContaining([
+        expect.stringMatching(/^(?:frontstage_instruction_leak|internal_audit_artifact_visible)$/u),
+      ]));
+    }
+
+    for (const natural of [
+      "这款 AI 客服能转人工吗？",
+      "官网写明周末可以预约。",
+      "合同里写了退款条件。",
+      "病历上记录了过敏史。",
+      "说明书注明要避光保存。",
+    ]) {
+      const codes = issueCodesFor("先把公开条件问清楚。", natural);
+      expect(codes, natural).not.toContain("frontstage_instruction_leak");
+      expect(codes, natural).not.toContain("internal_audit_artifact_visible");
+      expect(codes, natural).not.toContain("comment_source_language_surface_leak");
+      expect(codes, natural).not.toContain("comment_context_meta_leak");
+    }
+  });
+
+  it("blocks generic source language and context traces in all rendered comment fields", () => {
+    const config = createDefaultGenerationConfig(project, DEFAULT_FORMULA_VERSION);
+    config.content.bodyMinChars = 1;
+    config.content.bodyMaxChars = 500;
+    config.content.hashtagMin = 0;
+    config.content.commentThreadMin = 1;
+    const value = validDraftJson();
+    (value.content.Cref as any).ownedFirstComment = "资料称周末能约。";
+    (value.content.Cref.threads[0] as any).nextStep = "这篇笔记说要先面诊。";
+    const codes = validateGenerationDraft({
+      draft: parseGenerationDraft(JSON.stringify(value)),
+      config,
+      ledger: buildKnowledgeLedger([]),
+      allowedEvidenceIds: ["evidence_d1"],
+    }).map((issue) => issue.code);
+    expect(codes).toContain("comment_source_language_surface_leak");
+    expect(codes).toContain("comment_context_meta_leak");
   });
 
   it("requires every factual ledger item to map a visible claim to an exact disclosed source span", () => {
@@ -407,7 +503,8 @@ describe("structured output parsing and validation", () => {
     parsed.content.Cref.threads[0]!.question = "时间、地点、风险、价格？";
     parsed.content.Cref.threads[0]!.answer = parsed.content.N.body;
     const invalidIssues = validateGenerationDraft({ draft: parsed, config, ledger: buildKnowledgeLedger([]), allowedEvidenceIds: ["evidence_d1"] });
-    expect(invalidIssues.map((item) => item.code)).toEqual(expect.arrayContaining(["comment_keyword_pile", "comment_repeats_body"]));
+    expect(invalidIssues.map((item) => item.code)).toContain("duplicate_channel_information");
+    expect(invalidIssues.map((item) => item.code)).not.toContain("comment_keyword_pile");
   });
 
   it("treats densityProxy as an optional audit field and keeps gap multiplexing enforced (M7)", () => {
@@ -668,6 +765,78 @@ describe("structured output parsing and validation", () => {
     expect(missing.entries[0]).toMatchObject({ status: "realization_failed" });
     const issues = validateGenerationDraft({ draft: answerRemoved, config, ledger: buildKnowledgeLedger([]), allowedEvidenceIds: ["evidence_d1"], evidenceSources: { evidence_d1: gap.answer! }, orchestrationPlan: plan });
     expect(issues).toContainEqual(expect.objectContaining({ code: "gap_resolution_not_realized", severity: "error", channel: "N.body" }));
+  });
+
+  it("accepts an evidence-bound natural paraphrase but rejects partial or polarity-reversed gap copy", () => {
+    const config = createDefaultGenerationConfig(project, DEFAULT_FORMULA_VERSION);
+    config.task.theme = "机构信息";
+    config.content.bodyMinChars = 1;
+    config.content.bodyMaxChars = 500;
+    config.content.hashtagMin = 0;
+    config.content.hashtagMax = 10;
+    config.content.commentThreadMin = 0;
+    config.content.commentThreadMax = 0;
+    config.expressionWindow.channels = config.expressionWindow.channels.filter((channel) => channel !== "comments");
+    const expected = "机构类型为门诊，专注眼周年轻化，地址在成都锦江区锦华万达附近；机构全称不对外公开。";
+    const paraphrase = "地址在成都锦江区锦华万达附近，机构是专注眼周年轻化的门诊，机构全称不对外公开。";
+    const gap: InformationGap = {
+      id: "institution",
+      label: "机构信息",
+      question: "机构全称是否公开？",
+      category: "boundary",
+      audienceStages: ["ready"],
+      importance: 0.8,
+      decisionLeverage: 0.5,
+      proofability: 0.9,
+      answer: expected,
+      boundary: "不得公开机构全称，可公开地址和门诊类型。",
+      evidenceIds: ["evidence_d1"],
+      required: true,
+    };
+    const opportunity: TopicOpportunity = {
+      id: "institution-copy",
+      topic: "机构信息",
+      angle: "先核实机构信息",
+      gapIds: [gap.id],
+      audienceStage: "ready",
+      entry: "profile",
+      relevance: 0.9,
+      importance: 0.8,
+      proofability: 0.9,
+      novelty: 0.4,
+      decisionLeverage: 0.5,
+      cognitiveCost: 0.2,
+      risk: 0.2,
+      evidenceIds: ["evidence_d1"],
+      boundaries: [gap.boundary!],
+      tags: [],
+      imageAssetIds: [],
+      status: "eligible",
+    };
+    const plan = planTopicOrchestrations({ opportunity, gaps: [gap], config, seed: 31 })[0];
+    const draftFor = (body: string): GenerationDraft => ({
+      content: {
+        H: { hashtags: [] },
+        N: { imageBrief: "机构信息清单", title: "先核实", body },
+        Cref: { disclaimer: "以下为模拟情景问答参考模板，不代表真实评论。", threads: [] },
+      },
+      evidenceIds: ["evidence_d1"],
+      reasoning: [{
+        statement: body,
+        location: "N.body",
+        status: "fact",
+        evidenceIds: ["evidence_d1"],
+        sourceSpans: [{ evidenceId: "evidence_d1", quote: expected }],
+      }],
+      unknowns: [],
+    });
+
+    expect(evaluateGapCoverageRealization(draftFor(paraphrase), plan).entries[0])
+      .toMatchObject({ status: "body_resolved" });
+    expect(evaluateGapCoverageRealization(draftFor("地址在成都锦江区锦华万达附近。"), plan).entries[0])
+      .toMatchObject({ status: "realization_failed" });
+    expect(evaluateGapCoverageRealization(draftFor("机构全称对外公开，地址在成都锦江区锦华万达附近，机构是专注眼周年轻化的门诊。"), plan).entries[0])
+      .toMatchObject({ status: "realization_failed" });
   });
 
   it("rejects a planned thread id when the final thread is bound to the wrong primary gap", () => {

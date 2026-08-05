@@ -831,7 +831,20 @@ function buildPersonaScenePlan(
   seed: number,
   blueprint?: ProjectCreativeBlueprint,
 ): PersonaScenePlan {
-  const prototype = inferPrototype(strategy, config, seed);
+  const inferredPrototype = inferPrototype(strategy, config, seed);
+  const individualAuthor = config.task.publishingTopology === "confirmed_individual_author";
+  const authorFacts = config.task.authorContext.facts;
+  const authorCategories = new Set(authorFacts.map((fact) => fact.category));
+  const hasHistoricalAuthorFact = ["project_contact", "purchase", "service_completion", "recovery", "outcome"]
+    .some((category) => authorCategories.has(category as typeof authorFacts[number]["category"]));
+  // Account topology is a harder contract than a writing preset. Institution-owned
+  // posts never inherit a consumer scene; confirmed authors only receive a scene
+  // shape that their atomic facts can support.
+  const prototype: PersonaScenePlan["prototype"] = config.task.publishingTopology === "institution_owned"
+    ? (config.task.audienceStage === "comparing" ? "option_comparison" : "narrow_request")
+    : individualAuthor && !hasHistoricalAuthorFact
+      ? (authorCategories.has("current_state") || authorCategories.has("intent") ? "narrow_request" : "option_comparison")
+      : inferredPrototype;
   const constraints = config.task.readerConstraints ?? [];
   const stageText: Record<TopicOpportunity["audienceStage"], string> = {
     discovering: "刚发现问题，第一次认真看相关内容",
@@ -880,13 +893,13 @@ function buildPersonaScenePlan(
     return values[Math.floor(hashUnit(seed, salt) * values.length)] ?? fallback;
   };
   const identityPool = selectedFamily?.hostIdentityCues.length ? selectedFamily.hostIdentityCues : identityByPrototype[prototype];
-  const identityCue = identityPool[Math.floor(hashUnit(seed, "host-identity") * identityPool.length)]!;
+  const creativeIdentityCue = identityPool[Math.floor(hashUnit(seed, "host-identity") * identityPool.length)]!;
   const relationships = blueprint?.roleModel.roles.map((role) => role.relationToHost).filter(Boolean).length
     ? blueprint.roleModel.roles.map((role) => role.relationToHost).filter(Boolean)
     : ["与处境相近的读者", "熟悉自己的关系对象", "正在比较的其他人"];
-  const relationshipAnchor = relationships[Math.floor(hashUnit(seed, "host-relation") * relationships.length)]!;
+  const creativeRelationshipAnchor = relationships[Math.floor(hashUnit(seed, "host-relation") * relationships.length)]!;
   const fallbackEvent = eventByPrototype[prototype];
-  const event: Omit<PersonaScenePlan["event"], "openLoop"> = {
+  const creativeEvent: Omit<PersonaScenePlan["event"], "openLoop"> = {
     timeAnchor: pick(selectedFamily?.timeAnchors, "event-time", fallbackEvent.timeAnchor),
     setting: pick(selectedFamily?.settings, "event-setting", fallbackEvent.setting),
     trigger: pick(selectedFamily?.triggers, "event-trigger", fallbackEvent.trigger),
@@ -895,6 +908,34 @@ function buildPersonaScenePlan(
     emotionalAftertaste: pick(selectedFamily?.emotionalAftertastes, "event-affect", fallbackEvent.emotionalAftertaste),
     imageMoment: pick(selectedFamily?.imageMoments, "event-image", fallbackEvent.imageMoment),
   };
+  const firstAuthorFact = authorFacts[0]?.statement ?? "";
+  const constraintFact = authorFacts.find((fact) => fact.category === "constraint")?.statement;
+  const intentFact = authorFacts.find((fact) => fact.category === "intent" || fact.category === "current_state")?.statement;
+  const institutionOwned = config.task.publishingTopology === "institution_owned";
+  const identityCue = institutionOwned ? "明确署名的机构官方账号" : individualAuthor ? "已确认的真实个人作者" : creativeIdentityCue;
+  const relationshipAnchor = institutionOwned
+    ? "机构与读者的信息服务关系"
+    : individualAuthor ? "不补充作者事实中未确认的关系" : creativeRelationshipAnchor;
+  const event: Omit<PersonaScenePlan["event"], "openLoop"> = institutionOwned ? {
+    // Preserve the approved project scene as topic context, not as a consumer
+    // biography. The institution remains the visible speaker and none of the
+    // creative action/affect fields authorize a first-person customer event.
+    timeAnchor: "本次发布",
+    setting: creativeEvent.setting,
+    trigger: `围绕“${opportunity.topic}”整理一个明确问题`,
+    observableAction: "以机构身份给出说明、条件或待核实项",
+    friction: "避免把未知信息写成确定结论",
+    emotionalAftertaste: "保持清楚、克制，不模拟消费者情绪",
+    imageMoment: "只使用已批准项目素材或中性说明画面",
+  } : individualAuthor ? {
+    timeAnchor: "仅使用作者事实中明确写出的时间，不自动补充",
+    setting: "仅使用作者事实中明确写出的地点或场景，不自动补充",
+    trigger: firstAuthorFact,
+    observableAction: intentFact ?? firstAuthorFact,
+    friction: constraintFact ?? "不补充未确认的现实限制",
+    emotionalAftertaste: "不补充作者事实中没有的情绪",
+    imageMoment: "只使用已选且已批准的源素材，不虚构作者现场",
+  } : creativeEvent;
   const topicQuestion = opportunity.angle || opportunity.topic;
   const registerStrength = config.parameters?.commentPlatformRegister ?? 68;
   const conversationRate = config.parameters?.commentConversationRate ?? 48;
@@ -966,10 +1007,14 @@ function buildPersonaScenePlan(
     prototype,
     host: {
       identityCue,
-      lifeContext: pick(selectedFamily?.lifeContexts, "life-context", lifeByPrototype[prototype]),
-      localityCue: config.task.city ? `地点线索只使用已提供的${config.task.city}` : "没有地点输入时不硬编地点",
-      currentStage: stageText[opportunity.audienceStage],
-      immediateConstraint: constraints[0] ?? event.friction,
+      lifeContext: institutionOwned
+        ? "机构官方账号围绕项目议题提供信息，不扮演消费者"
+        : individualAuthor ? authorFacts.map((fact) => fact.statement).join("；") : pick(selectedFamily?.lifeContexts, "life-context", lifeByPrototype[prototype]),
+      localityCue: institutionOwned
+        ? (config.task.city ? `机构可使用任务已提供地点 ${config.task.city}` : "未提供地点时不补充")
+        : individualAuthor ? "作者地点只能来自已确认作者事实" : config.task.city ? `地点线索只使用已提供的${config.task.city}` : "没有地点输入时不硬编地点",
+      currentStage: individualAuthor ? (intentFact ?? firstAuthorFact) : institutionOwned ? "机构信息说明" : stageText[opportunity.audienceStage],
+      immediateConstraint: individualAuthor ? (constraintFact ?? "不补充未确认限制") : institutionOwned ? "只说明有依据的信息" : constraints[0] ?? event.friction,
       relationshipAnchor,
       affect: event.emotionalAftertaste,
       motive: `围绕“${topicQuestion}”只推进一步`,
@@ -977,18 +1022,24 @@ function buildPersonaScenePlan(
       // hostVoiceTraits/hostSpeechMarkers（真实项目中含“发照片评估、终身保障、
       // 满意后付款”等机构话术）灌进生活记录正文，造成角色串台。机构语言只进入
       // staff/expert/publisher 的独立答复提示词；叙事人物只取策略与场景语言。
-      voiceTraits: [strategy.voice, "像手机上顺手发的", "允许半句话和自然停顿", "不写论文式总结"],
-      speechMarkers: ["具体时间或动作", "一个现实摩擦", "有限观察", "未完问题"],
-      knowledgeBoundary: blueprint?.audienceModel.states.find((state) => state.stages.includes(opportunity.audienceStage))?.knowledgeState
-        ?? "叙述者只知道当前场景与项目资料允许的内容，不突然变成全知讲解者",
-      status: "creative_scenario",
+      voiceTraits: institutionOwned
+        ? [strategy.voice, "明确机构身份", "使用说明、条件式或待核实表达", "不模拟消费者第一人称"]
+        : individualAuthor ? [strategy.voice, "只轻量口语化已确认作者事实", "不新增时间地点动作关系或情绪"] : [strategy.voice, "像手机上顺手发的", "允许半句话和自然停顿", "不写论文式总结"],
+      speechMarkers: institutionOwned ? ["机构说明", "适用条件", "未知边界"] : individualAuthor ? ["已确认作者事实", "未完问题"] : ["具体时间或动作", "一个现实摩擦", "有限观察", "未完问题"],
+      knowledgeBoundary: institutionOwned
+        ? "机构账号只使用已核验项目知识，未知保持未知"
+        : individualAuthor ? `作者本人事实仅限：${authorFacts.map((fact) => fact.statement).join("；")}` : blueprint?.audienceModel.states.find((state) => state.stages.includes(opportunity.audienceStage))?.knowledgeState
+          ?? "叙述者只知道当前场景与项目资料允许的内容，不突然变成全知讲解者",
+      status: institutionOwned ? "institution_owned" : individualAuthor ? "confirmed_author_facts" : "creative_scenario",
     },
     event: { ...event, openLoop: `把“${topicQuestion}”留下一个可以在评论里自然接住的窄分支` },
     commentCast,
     commentNetwork,
     surfaceTargets: surfaceTargets(prototype, config.content.commentMultiTurnGrowthEnabled === true),
     crossChannelRules: [
-      "图片、标题和正文必须属于同一个叙事人物；评论答复由另行署名的机构身份承担，不得继承叙事人物身份。",
+      institutionOwned
+        ? "图片、标题和正文必须保持明确机构官方账号身份，不得出现消费者第一人称。"
+        : individualAuthor ? "图片、标题和正文只能使用已确认作者事实，不得由场景模型补充个人经历。" : "图片、标题和正文必须属于同一个叙事人物；评论答复由另行署名的机构身份承担，不得继承叙事人物身份。",
       "内部Stage/Gap/Evidence标签不得出现在可见文字里。",
       "评论角色只说其位置能够知道的部分，不把每个人都写成完整专家。",
       "允许短反应、未回复评论和条件冲突；不要把所有线程写成对称FAQ。",
@@ -1035,6 +1086,17 @@ function buildImagePlan(
     relationship_moment: ["能体现关系与生活身份的素材", "关系和动作比项目字样更重要"],
     option_comparison: ["候选记录或真实素材", "只放一个核心纠结，不堆检查清单"],
   };
+  const identityStatus = personaScenePlan.host.status;
+  const frames = identityStatus === "institution_owned"
+    ? ["只使用已批准项目素材", "没有素材时使用中性机构说明画面"]
+    : identityStatus === "confirmed_author_facts"
+      ? ["只使用已选且已批准的源素材", "不得生成或暗示未确认的作者现场"]
+      : frameByPrototype[personaScenePlan.prototype];
+  const fallbackComposition = identityStatus === "institution_owned"
+    ? `使用中性机构说明画面，不模拟消费者、体验者或生活现场；表达方式：${strategy.label}。`
+    : identityStatus === "confirmed_author_facts"
+      ? "没有可用源素材时不虚构作者现场；仅制作不含个人经历暗示的中性画面。"
+      : `${personaScenePlan.event.imageMoment}。保持手机随手记录感、普通光线和生活环境；不要自动排成信息海报、行业示意图或夸张前后对比。`;
   return {
     sourceAssetId: asset?.assetId,
     primaryAssetId: asset?.assetId,
@@ -1042,10 +1104,10 @@ function buildImagePlan(
     coverText: personaScenePlan.prototype === "narrow_request" || personaScenePlan.prototype === "option_comparison"
       ? opportunity.topic
       : undefined,
-    frames: frameByPrototype[personaScenePlan.prototype],
+    frames,
     composition: asset
       ? `以素材 ${asset.assetId} 为主视觉，只把 observedFacts 当作可见事实。`
-      : `${personaScenePlan.event.imageMoment}。保持手机随手记录感、普通光线和生活环境；不要自动排成信息海报、行业示意图或夸张前后对比。`,
+      : fallbackComposition,
     altText: asset?.altText ?? `${opportunity.topic}：${strategy.label}`,
     evidenceIds: [...new Set([...(asset?.evidenceIds ?? []), ...opportunity.evidenceIds])],
     boundaries: [...new Set([...opportunity.boundaries, ...(asset?.unknowns ?? []), ...(asset?.safetyFlags ?? [])])],
@@ -2221,17 +2283,21 @@ export function planTopicOrchestrations(input: PlanTopicOrchestrationsInput): [O
     const primaryGapIds = gapPlanningCards
       .filter((card) => card.plannedPlacements.includes("Cref"))
       .map((card) => card.gapId);
-    const commentSpan = Math.max(0, input.config.content.commentThreadMax - input.config.content.commentThreadMin);
-    const desiredThreadCount = commentsEnabled
-      ? Math.min(5, input.config.content.commentThreadMin + Math.round(commentSpan * (input.config.parameters?.commentExpansion ?? 70) / 100))
-      : 0;
+    const commentExpansion = input.config.parameters?.commentExpansion ?? 70;
     const individualAuthor = input.config.task.publishingTopology === "confirmed_individual_author";
     if (individualAuthor && (input.config.task.authorContext.status !== "confirmed" || input.config.task.authorContext.facts.length === 0)) {
       throw new Error("confirmed_individual_author requires at least one human-confirmed author fact.");
     }
     const requiredSocialSlots = commentsEnabled ? (individualAuthor ? 2 : 1) : 0;
     const minimumThreadTarget = primaryGapIds.length + requiredSocialSlots;
-    const effectiveThreadTarget = commentsEnabled ? Math.max(desiredThreadCount, minimumThreadTarget) : 0;
+    // Comment capacity follows distinct conversational responsibilities, not a
+    // configured minimum or expansion percentage in isolation. One project-gap
+    // seat answers one distinguishable question; one social seat makes the
+    // section feel inhabited. Only a topic with at least three distinct gaps and
+    // very high expansion earns one extra social angle. This prevents two facts
+    // from being padded into five variants of the same question.
+    const optionalDiversitySlots = commentsEnabled && primaryGapIds.length >= 3 && commentExpansion >= 85 ? 1 : 0;
+    const effectiveThreadTarget = commentsEnabled ? minimumThreadTarget + optionalDiversitySlots : 0;
     const COMMENT_THREAD_HARD_MAX = 8;
     if (effectiveThreadTarget > COMMENT_THREAD_HARD_MAX) {
       throw new Error(`comment_capacity_hard_limit_exceeded: ${primaryGapIds.length} project-gap seats + ${requiredSocialSlots} social seats exceed ${COMMENT_THREAD_HARD_MAX}; split the topic.`);
