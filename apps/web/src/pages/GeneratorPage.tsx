@@ -78,6 +78,14 @@ import type {
   ResolvedConfigPreview,
 } from "../types";
 import { IntelligentSimpleFlow } from "./IntelligentSimpleFlow";
+import { PublishingTopologyControl } from "../components/generation/PublishingTopologyControl";
+import {
+  applyPublishingTopology,
+  createDefaultPublishingTopologyDraft,
+  createSimplePublishingTopologyDraft,
+  type PublishingTopologyDraft,
+  type SimplePublishingTopology,
+} from "../lib/publishing-topology";
 
 interface GenerationFormState {
   topic: string;
@@ -135,6 +143,8 @@ export function GeneratorPage() {
   const { projects, projectId, setProjectId, currentProject } = useProjects();
   const [mode, setMode] = useState<"simple" | "advanced">("simple");
   const [form, setForm] = useState<GenerationFormState>(defaultForm);
+  const [publishingTopology, setPublishingTopology] = useState<PublishingTopologyDraft>(() => createDefaultPublishingTopologyDraft());
+  const [simplePublishingTopology, setSimplePublishingTopology] = useState<SimplePublishingTopology>("creative_scenario");
   const [advanced, setAdvanced] = useState<AdvancedGenerationConfig>(defaultAdvanced);
   const [parameterOverrides, setParameterOverrides] = useState<Record<string, unknown>>({});
   const [advancedOverrides, setAdvancedOverrides] = useState("{}");
@@ -160,6 +170,17 @@ export function GeneratorPage() {
   const toast = useToast();
 
   const presets = useMemo(() => mergePresetShelf(projectPresets), [projectPresets]);
+
+  // Publishing truth is project-scoped. Never carry an author or confirmation
+  // from one project into another, including project changes made outside this page.
+  useEffect(() => {
+    setPublishingTopology(createDefaultPublishingTopologyDraft());
+    setSimplePublishingTopology("creative_scenario");
+    setPreviewInput(null);
+    setPreview(null);
+    setPreviewError(null);
+    setPreviewOpen(false);
+  }, [projectId]);
 
   useEffect(() => {
     if (!projectId) {
@@ -438,7 +459,16 @@ export function GeneratorPage() {
     await prepareInputPreview(input);
   };
 
-  const prepareInputPreview = async (input: GenerateInput) => {
+  const prepareInputPreview = async (rawInput: GenerateInput) => {
+    let input: GenerateInput;
+    try {
+      input = applyPublishingTopology(rawInput, rawInput.mode === "simple"
+        ? createSimplePublishingTopologyDraft(simplePublishingTopology)
+        : publishingTopology);
+    } catch (error) {
+      toast.push(errorMessage(error, "发布账号信息不完整"), "error");
+      return;
+    }
     setPreviewOpen(true);
     setPreviewLoading(true);
     setPreviewInput(input);
@@ -479,6 +509,8 @@ export function GeneratorPage() {
     setAdvanced(defaultAdvanced);
     setParameterOverrides({});
     setForm((current) => ({ ...current, goal: "", mustInclude: "" }));
+    setPublishingTopology(createDefaultPublishingTopologyDraft());
+    setSimplePublishingTopology("creative_scenario");
     setSelectedPresetId("");
     toast.push("参数已恢复为系统默认", "info");
   };
@@ -529,6 +561,8 @@ export function GeneratorPage() {
           selectedPresetId={selectedPresetId || undefined}
           selectedPreset={selectedPreset || presets.find((preset) => preset.isDefault)}
           onProject={setProjectId}
+          publishingTopology={simplePublishingTopology}
+          onPublishingTopology={setSimplePublishingTopology}
           onPreview={(input) => void prepareInputPreview(input)}
         />
       ) : (
@@ -547,7 +581,7 @@ export function GeneratorPage() {
 
           <div className="advanced-layout">
             <div className="advanced-main">
-              <TaskPanel projects={projects} projectId={projectId} form={form} onProject={setProjectId} onForm={setForm} />
+              <TaskPanel projects={projects} projectId={projectId} form={form} publishingTopology={publishingTopology} onProject={setProjectId} onForm={setForm} onPublishingTopology={setPublishingTopology} />
               {schemaLoading ? <section className="settings-panel"><Skeleton lines={8} /></section> : advancedView === "goal" ? (
                 <GoalParameterView schema={schema} getValue={getParameterValue} setValue={setParameterValue} />
               ) : (
@@ -594,7 +628,7 @@ export function GeneratorPage() {
         open={savePresetOpen}
         onClose={() => { if (!savingPreset) setSavePresetOpen(false); }}
         title="保存为项目预设"
-        description="预设会保存当前可视化参数和任务倾向，不会保存本次主题、地点或关键对象。"
+        description="预设只保存写作方法和参数，不保存发布主体、作者事实、确认记录、主题、地点或关键对象。"
         footer={<><Button variant="ghost" disabled={savingPreset} onClick={() => setSavePresetOpen(false)}>取消</Button><Button loading={savingPreset} disabled={!presetDraft.name.trim()} onClick={savePreset} icon={<BookmarkPlus size={16} />}>保存预设</Button></>}
       >
         <div className="form-stack">
@@ -655,17 +689,20 @@ function PresetShelf({ presets, selectedId, loading, error, compact, onApply, on
   </section>;
 }
 
-function TaskPanel({ projects, projectId, form, onProject, onForm }: {
+function TaskPanel({ projects, projectId, form, publishingTopology, onProject, onForm, onPublishingTopology }: {
   projects: ReturnType<typeof useProjects>["projects"];
   projectId: string;
   form: GenerationFormState;
+  publishingTopology: PublishingTopologyDraft;
   onProject: (id: string) => void;
   onForm: (form: GenerationFormState) => void;
+  onPublishingTopology: (value: PublishingTopologyDraft) => void;
 }) {
   return <section className="settings-panel"><header><div><FileText size={19} /><span><h2>任务、读者与入口</h2><p>定义本次内容要为谁解决什么问题</p></span></div><Badge tone="positive">必填</Badge></header><div className="settings-panel__body form-stack">
     <div className="field-grid field-grid--two"><Field label="项目"><select value={projectId} onChange={(event) => onProject(event.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></Field><Field label="内容入口"><select value={form.entryPoint} onChange={(event) => onForm({ ...form, entryPoint: event.target.value })}>{entryPoints.map((entry) => <option value={entry.id} key={entry.id}>{entry.title}</option>)}</select></Field></div>
     <Field label="内容主题" required><textarea rows={3} value={form.topic} onChange={(event) => onForm({ ...form, topic: event.target.value })} placeholder="写清具体问题与场景" /></Field>
     <div className="field-grid field-grid--two"><Field label="读者阶段"><select value={form.audienceStage} onChange={(event) => onForm({ ...form, audienceStage: event.target.value })}>{stages.map((stage) => <option value={stage.id} key={stage.id}>{stage.title}</option>)}</select></Field><Field label="地点 / 关键对象"><div className="inline-fields"><input value={form.city} onChange={(event) => onForm({ ...form, city: event.target.value })} placeholder="地点" /><input value={form.doctor} onChange={(event) => onForm({ ...form, doctor: event.target.value })} placeholder="人物或对象" /></div></Field></div>
+    <PublishingTopologyControl projectId={projectId} value={publishingTopology} onChange={onPublishingTopology} />
   </div></section>;
 }
 
@@ -845,7 +882,7 @@ function localPreview(input: GenerateInput, advanced: AdvancedGenerationConfig, 
     })
     .filter((item): item is ParameterImpact => Boolean(item));
   return {
-    resolvedConfig: { schemaVersion: "1.0", task: { theme: input.topic || "由选题卡决定", goal: input.goal || "根据选题卡补全决策信息", audienceStage: input.audienceStage, entry: input.entryPoint, city: input.city || undefined, doctor: input.doctor || undefined, mustMention: must, forbidden }, opportunityId: input.opportunityId, imageAssetIds: input.imageAssetIds, parameters: inputParameterOverrides(input), legacyConfig: advanced, presetId: input.presetId },
+    resolvedConfig: { schemaVersion: "1.0", task: { theme: input.topic || "由选题卡决定", goal: input.goal || "根据选题卡补全决策信息", audienceStage: input.audienceStage, entry: input.entryPoint, city: input.city || undefined, doctor: input.doctor || undefined, publishingTopology: input.publishingTopology, authorContext: input.authorContext, mustMention: must, forbidden }, opportunityId: input.opportunityId, imageAssetIds: input.imageAssetIds, parameters: inputParameterOverrides(input), legacyConfig: advanced, presetId: input.presetId },
     conflicts,
     warnings: [],
     impacts,

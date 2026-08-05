@@ -670,6 +670,7 @@ export interface CommentThread extends CommentScenarioMetadata {
   /** Thread-level boundary (Cref contract v1.1). */
   boundary?: string;
   postingIdentity?: "author" | "brand" | "staff" | "expert" | "reader_question_template" | string;
+  answerIdentity?: "simulated_reader" | "none" | "author" | "brand" | "staff" | "expert" | "publisher" | string;
   sourceClusterIds?: string[];
   evidenceIds?: string[];
   function?: "surface_gap" | "answer" | "clarify" | "counterexample" | "verification" | "next_step" | string;
@@ -1011,6 +1012,9 @@ export interface ReaderComment {
   /** 线程互动形态:只有 org_answer 的 answer 出自可追责身份,其余是模拟读者接话。 */
   threadKind?: "org_answer" | "reader_exchange" | "organic_reaction" | string;
   postingIdentity?: string;
+  answerIdentity?: "simulated_reader" | "none" | "author" | "brand" | "staff" | "expert" | "publisher" | string;
+  /** 最终机构答复展示角色；创作区仿真预览也使用，避免统一署成项目账号。 */
+  surfaceRoleCard?: Pick<CommentSurfaceRoleCard, "replyDisplayRole">;
   personaRole?: string;
   stage?: string;
   gap?: string;
@@ -1044,6 +1048,33 @@ export interface ReaderGapLedgerEntry {
   realizations: Array<{ channel: string; threadId?: string; resolved: boolean; missing: string[] }>;
 }
 
+export type ContentIssueDisposition = "block" | "review" | "advisory";
+export type ContentIssueOrigin = "deterministic" | "agent" | "infrastructure";
+export type CandidateQualityStatus = "passed" | "needs_review" | "blocked";
+
+export interface CommentEditorialAssessment {
+  status: "pass" | "review";
+  reasons: string[];
+  summary: string;
+}
+
+export interface CandidateValidationIssue {
+  code?: string;
+  severity: "error" | "warning";
+  channel?: string;
+  message: string;
+  repairable?: boolean;
+  disposition?: ContentIssueDisposition;
+  origin?: ContentIssueOrigin;
+}
+
+export interface CandidateValidation {
+  valid: boolean;
+  qualityStatus?: CandidateQualityStatus;
+  repairAttempts: number;
+  issues: CandidateValidationIssue[];
+}
+
 export interface ReaderCandidate {
   id: string;
   packageId: string;
@@ -1057,11 +1088,8 @@ export interface ReaderCandidate {
   commentOwnedFirstComment?: string;
   commentUncoveredGaps?: string[];
   comments: ReaderComment[];
-  validation?: {
-    valid: boolean;
-    repairAttempts: number;
-    issues: Array<{ code?: string; severity: "error" | "warning"; channel?: string; message: string }>;
-  };
+  validation?: CandidateValidation;
+  commentEditorialAssessment?: CommentEditorialAssessment;
   reasoning: ReaderReasoningEntry[];
   gapLedger?: { entries: ReaderGapLedgerEntry[]; realizationStatus?: string };
   gapCards: Array<{
@@ -1100,6 +1128,12 @@ export interface ReaderJob {
 export interface Candidate {
   id: string;
   label?: string;
+  /** Current user's candidate-scoped manual delivery confirmation. Does not change validation.valid. */
+  manualDeliveryConfirmation?: {
+    confirmed: true;
+    confirmedAt: string;
+    confirmedBy: string;
+  };
   title: string;
   body: string;
   tags: string[];
@@ -1738,6 +1772,19 @@ export interface AgentHarnessCandidate {
   id: string;
   candidateIndex: 0 | 1 | 2;
   concept: string;
+  marketingStrategy?: {
+    narrativePath?: "tension_first" | "observation_first" | "question_first";
+    readerDesire: string;
+    hiddenTension: string;
+    oldJudgment: string;
+    newJudgment: string;
+    projectBridge: string;
+    lowPressureNextStep: string;
+    tensionAnchor: string;
+    reframeAnchor: string;
+    projectBridgeAnchor: string;
+    openLoopAnchor: string;
+  };
   content: {
     H: { hashtags: string[] };
     N: {
@@ -1758,10 +1805,14 @@ export interface AgentHarnessCandidate {
       callToAction: string;
     };
     Cref: {
-      disclaimer: string;
+      // disclaimer 不再是交付字段:模拟标注由 HARNESS_SIMULATION_NOTICE 常量提供,
+      // 界面与导出固定携带,不再混进用户要粘贴到评论区的内容里。
       ownedFirstComment: string;
       threads: Array<{
         id: string;
+        threadKind?: "org_answer" | "reader_exchange" | "organic_reaction";
+        displayName?: string;
+        replyDisplayName?: string;
         question: string;
         answer: string;
         followUps: Array<{ kind?: "follow_up" | "counterexample"; question: string; answer: string }>;
@@ -1801,7 +1852,7 @@ export interface AgentHarnessCandidate {
   selfReview: string;
   revisionNotes: { instructionApplied: string[]; preservedElements: string[] };
   publicationChecklist: Array<{
-    key: "evidence" | "simulation_disclosure" | "execution_plan" | "asset_authorization" | "platform_compliance" | "final_proofread";
+    key: "soft_marketing" | "evidence" | "simulation_disclosure" | "execution_plan" | "asset_authorization" | "platform_compliance" | "final_proofread";
     status: "ready" | "blocked" | "manual_review";
     note: string;
   }>;
@@ -1903,6 +1954,11 @@ export interface AgentHarnessCreateInput {
   notes?: string;
   imageAssetIds?: string[];
   allowUngrounded?: boolean;
+  /**
+   * 素人代发种草模式。不传时由后端落 DEFAULT_HARNESS_SEEDING_MODE —— 前端不编第二份
+   * 默认值,否则后端改默认时两边会悄悄分叉。
+   */
+  seedingMode?: import("@content-agent/agent-harness-core/methods").HarnessSeedingMode;
 }
 
 export interface AgentHarnessCapabilities {
@@ -1960,6 +2016,27 @@ export interface GenerateInput {
   doctor?: string;
   mustInclude?: string;
   forbidden?: string;
+  /** Frozen account topology for this generation job. */
+  publishingTopology?: "creative_scenario" | "institution_owned" | "confirmed_individual_author";
+  /** New requests submit atomic drafts; the server supplies confirmation identity and time. */
+  authorFacts?: Array<{
+    id: string;
+    statement: string;
+    category: "current_state" | "intent" | "constraint" | "project_contact" | "purchase" | "service_completion" | "recovery" | "outcome";
+  }>;
+  authorFactsConfirmed?: boolean;
+  /** Legacy/expert request shape and resolved snapshot shape. */
+  authorContext?: {
+    status: "not_provided" | "confirmed";
+    facts: Array<{
+      id: string;
+      statement: string;
+      category: "current_state" | "intent" | "constraint" | "project_contact" | "purchase" | "service_completion" | "recovery" | "outcome";
+      confirmedBy: string;
+      confirmedAt: string;
+      confirmationId?: string;
+    }>;
+  };
   config?: AdvancedGenerationConfig;
   presetId?: string;
   overrides?: Record<string, unknown>;
@@ -2098,6 +2175,19 @@ export interface GenerationImpactReport {
     constraints?: string[];
   }>;
   warnings?: string[];
+}
+
+export interface AuthorFactOrganizationResult {
+  sourceText: string;
+  facts: Array<{
+    id: string;
+    statement: string;
+    sourceQuote: string;
+    category: NonNullable<GenerateInput["authorFacts"]>[number]["category"];
+    needsReview: boolean;
+    reviewReason?: string;
+  }>;
+  warnings: string[];
 }
 
 export interface ResolvedConfigPreview {

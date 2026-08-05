@@ -55,7 +55,7 @@ export function isSaasApiAllowed(method: string, path: string): boolean {
 
     { methods: ['GET', 'POST'], route: /^\/api\/generations$/u },
     { methods: ['GET', 'DELETE'], route: new RegExp(`^/api/generations/${segment}$`, 'u') },
-    { methods: ['GET'], route: new RegExp(`^/api/generations/${segment}/reader$`, 'u') },
+    { methods: ['GET'], route: new RegExp(`^/api/generations/${segment}/(?:reader|trace)$`, 'u') },
     { methods: ['POST'], route: new RegExp(`^/api/generations/${segment}/(?:revise|restore)$`, 'u') },
     { methods: ['GET'], route: new RegExp(`^/api/generations/${segment}/candidates/${segment}/export$`, 'u') },
 

@@ -161,6 +161,85 @@ describe("P4 comment identity and host-state validators", () => {
     }
   });
 
+  it("解析后仍硬拦机构 publisher 冒充楼主（真实问题原句回归）", () => {
+    const dirty = thread({
+      postingIdentity: "publisher",
+      question: "我周日做完第二天能开会吗？",
+      answer: "我们是门诊，先发照片过来评估。",
+      surfaceRoleCard: { ...surfaceRole("怕恢复期影响社交的上班族"), replyDisplayRole: "楼主" },
+    });
+    const parsed = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [dirty])));
+    // 这里同时守 parseGenerationDraft：若解析器再次丢 surfaceRoleCard，门禁会被绕过。
+    expect(parsed.content.Cref.threads[0]?.surfaceRoleCard?.replyDisplayRole).toBe("楼主");
+    expect(validate(parsed)).toContainEqual(expect.objectContaining({
+      code: "publisher_narrative_identity_alias", severity: "error", channel: "Cref",
+    }));
+
+    const explicit = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [
+      thread({
+        postingIdentity: "publisher",
+        answer: "这里由项目方按已核验口径说明。",
+        surfaceRoleCard: { ...surfaceRole("谨慎比较者"), replyDisplayRole: "项目发布账号" },
+      }),
+    ])));
+    expect(codes(validate(explicit))).not.toContain("publisher_narrative_identity_alias");
+  });
+
+  it("成稿身份和展示角色必须与生成前冻结计划完全一致", () => {
+    const frozenRole = { ...surfaceRole("咨询中的读者"), replyDisplayRole: "项目助理" };
+    const plan = commentNetworkPlan(1, [0, 0]);
+    plan.dialogueThreads = [{
+      id: "t1",
+      postingIdentity: "staff",
+      surfaceRoleCard: frozenRole,
+    }];
+
+    const clean = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({
+      postingIdentity: "staff",
+      surfaceRoleCard: frozenRole,
+    })])));
+    expect(codes(validate(clean, validationConfig(), { orchestrationPlan: plan })))
+      .not.toEqual(expect.arrayContaining(["reply_identity_plan_drift", "reply_display_role_plan_drift"]));
+
+    const identityDrift = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({
+      postingIdentity: "expert",
+      surfaceRoleCard: frozenRole,
+    })])));
+    expect(validate(identityDrift, validationConfig(), { orchestrationPlan: plan })).toContainEqual(expect.objectContaining({
+      code: "reply_identity_plan_drift", severity: "error", channel: "Cref",
+    }));
+
+    const roleDrift = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({
+      postingIdentity: "staff",
+      surfaceRoleCard: { ...frozenRole, replyDisplayRole: "机构 IP" },
+    })])));
+    expect(validate(roleDrift, validationConfig(), { orchestrationPlan: plan })).toContainEqual(expect.objectContaining({
+      code: "reply_display_role_plan_drift", severity: "error", channel: "Cref",
+    }));
+  });
+
+  it("硬拦最终问题偏离规划期主 gap，即使身份和展示角色字段没有漂移", () => {
+    const plannedSurface = { ...surfaceRole("到院信息核实者"), replyDisplayRole: "项目助理" };
+    const plan = {
+      ...commentNetworkPlan(1, [0, 0]),
+      gapPlanningCards: [{ gapId: "location_gap", label: "到院信息", question: "具体位置和预约方式是什么？", category: "location" }],
+      dialogueThreads: [{
+        id: "t1", primaryGapId: "location_gap", postingIdentity: "staff",
+        surfaceRoleCard: plannedSurface,
+      }],
+    } as any;
+    const drifted = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({
+      id: "t1", postingIdentity: "staff", question: "做的时候疼不疼？",
+      surfaceRoleCard: plannedSurface,
+    })])));
+    const issues = validate(drifted, validationConfig(), { orchestrationPlan: plan });
+    expect(issues).toContainEqual(expect.objectContaining({
+      code: "reply_question_plan_drift", severity: "error", channel: "Cref",
+    }));
+    expect(codes(issues)).not.toContain("reply_identity_plan_drift");
+    expect(codes(issues)).not.toContain("reply_display_role_plan_drift");
+  });
+
   it("flags a completed first-person publisher answer while the body only declares intent", () => {
     const config = validationConfig();
     const completionAnswer = "我之前已经问过了，按当期口径看。";
@@ -296,138 +375,41 @@ describe("P4 comment identity and host-state validators", () => {
   });
 });
 
-describe("P4 comment network shape and growth levels", () => {
-  it("欠生长一律只是 warning:接话是否自然发生属语义判断,不阻断也不触发 repair", () => {
+describe("P4 deterministic validation boundary", () => {
+  it("does not infer comment quality from growth quotas, punctuation, length symmetry or repeated openings", () => {
     const config = validationConfig();
     config.content.commentMultiTurnGrowthEnabled = true;
-    const fourFlatThreads = [1, 2, 3, 4].map((index) => thread({ id: `t${index}`, question: `第${index}项怎么选？` }));
-    const draft = parseGenerationDraft(JSON.stringify(draftJson(plainBody, fourFlatThreads)));
-    const plan = commentNetworkPlan(4, [2, 3]);
-
-    // 开关打开 + 目标非零:仍然只是 warning。multiTurnTarget 是分布期望,
-    // 「没有可接的话头就不接」是正确行为,判 error 会逼模型机械凑配额。
-    const withGrowth = validate(draft, config, { orchestrationPlan: plan });
-    expect(withGrowth).toContainEqual(expect.objectContaining({ code: "comment_network_under_grown", severity: "warning", repairable: false }));
-    expect(channelsForIssues(withGrowth.filter((issue) => issue.code === "comment_network_under_grown"))).toEqual([]);
-
-    config.content.commentMultiTurnGrowthEnabled = false;
-    const warningOnly = validate(draft, config, { orchestrationPlan: plan });
-    expect(warningOnly).toContainEqual(expect.objectContaining({ code: "comment_network_under_grown", severity: "warning" }));
-
-    // Switch off with a [0,0] target: never fires.
-    const offTarget = validate(draft, config, { orchestrationPlan: commentNetworkPlan(4, [0, 0]) });
-    expect(codes(offTarget)).not.toContain("comment_network_under_grown");
-
-    // Switch on and the target satisfied by actual follow-ups: no issue.
-    config.content.commentMultiTurnGrowthEnabled = true;
-    const grown = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [
-      thread({ id: "t1", question: "第一项怎么选？", followUps: [{ question: "那第二点呢？", answer: "也一样先看情况。", evidenceIds: [] }] }),
-      thread({ id: "t2", question: "第二项怎么选？", followUps: [{ question: "还有吗？", answer: "看完情况再定。", evidenceIds: [] }] }),
-      thread({ id: "t3", question: "第三项怎么选？" }),
-      thread({ id: "t4", question: "第四项怎么选？" }),
-    ])));
-    const satisfied = validate(grown, config, { orchestrationPlan: plan });
-    expect(codes(satisfied)).not.toContain("comment_network_under_grown");
-
-    // A target minimum above the sample-shape line capacity is clamped to the
-    // achievable floor instead of producing an unsatisfiable error.
-    const clamped = validate(grown, config, { orchestrationPlan: commentNetworkPlan(4, [3, 4]) });
-    expect(codes(clamped)).not.toContain("comment_network_under_grown");
-  });
-
-  it("escalates heavy reply-voice repetition and symmetric shapes to error", () => {
-    const config = validationConfig();
-    const plan4 = commentNetworkPlan(4, [0, 0]);
-    const repeated = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [
+    const draft = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [
       thread({ id: "t1", question: "第一项怎么选？", answer: "对啊，先看情况。" }),
-      thread({ id: "t2", question: "第二项差别在哪？", answer: "对啊，先别急着定。" }),
-      thread({ id: "t3", question: "第三项要问什么？", answer: "对啊，先问清楚。" }),
-      thread({ id: "t4", question: "第四项看什么？", answer: "再想想也行。" }),
+      thread({ id: "t2", question: "第二项怎么选？", answer: "对啊，先别急。" }),
+      thread({ id: "t3", question: "第三项怎么选？", answer: "对啊，先问清。" }),
+      thread({ id: "t4", question: "第四项怎么选？", answer: "对啊，再想想。" }),
     ])));
-    const severe = validate(repeated, config, { orchestrationPlan: plan4 });
-    expect(severe).toContainEqual(expect.objectContaining({ code: "comment_reply_voice_repetition", severity: "error" }));
-
-    const threeThreads = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [
-      thread({ id: "t1", question: "第一项怎么选？", answer: "对啊，先看情况。" }),
-      thread({ id: "t2", question: "第二项差别在哪？", answer: "对啊，先别急着定。" }),
-      thread({ id: "t3", question: "第三项要问什么？", answer: "对啊，先问清楚。" }),
-    ])));
-    const mild = validate(threeThreads, config, { orchestrationPlan: commentNetworkPlan(3, [0, 0], 8) });
-    expect(mild).toContainEqual(expect.objectContaining({ code: "comment_reply_voice_repetition", severity: "warning" }));
-
-    const symmetric = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [
-      thread({ id: "t1", question: "怎么选？", answer: "先看自己情况。" }),
-      thread({ id: "t2", question: "选哪个？", answer: "先看具体条件。" }),
-      thread({ id: "t3", question: "看啥呢？", answer: "先问清楚再说。" }),
-      thread({ id: "t4", question: "能选吗？", answer: "先别想太多啦。" }),
-    ])));
-    const symmetricIssues = validate(symmetric, config, { orchestrationPlan: plan4 });
-    expect(symmetricIssues).toContainEqual(expect.objectContaining({ code: "comment_network_symmetric_shape", severity: "error" }));
-
-    const loose = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [
-      thread({ id: "t1", question: "怎么选？", answer: "先看情况。" }),
-      thread({ id: "t2", question: "选哪个？", answer: "先看自己的条件。" }),
-      thread({ id: "t3", question: "看啥呢？", answer: "先问清楚再决定吧。" }),
-      thread({ id: "t4", question: "能选吗？", answer: "先别急着定。" }),
-    ])));
-    const looseIssues = validate(loose, config, { orchestrationPlan: plan4 });
-    expect(looseIssues).toContainEqual(expect.objectContaining({ code: "comment_network_symmetric_shape", severity: "warning" }));
+    const issueCodes = codes(validate(draft, config, { orchestrationPlan: commentNetworkPlan(4, [2, 3]) }));
+    expect(issueCodes).not.toEqual(expect.arrayContaining([
+      "comment_network_under_grown",
+      "comment_network_all_questions",
+      "comment_reply_voice_repetition",
+      "comment_network_symmetric_shape",
+    ]));
   });
 
-  it("checks role coverage instead of a flat floor and flags adjacent repeats", () => {
-    const config = validationConfig();
-    const plan = (count: number) => commentNetworkPlan(count, [0, 0], Math.max(8, count * 2));
-    const withRoles = (roles: string[]) => {
-      const threads = roles.map((role, index) => thread({ id: `t${index + 1}`, question: `第${index + 1}项怎么选？` }));
-      const draft = parseGenerationDraft(JSON.stringify(draftJson(plainBody, threads)));
-      draft.content.Cref.threads.forEach((item, index) => {
-        item.surfaceRoleCard = surfaceRole(roles[index]!);
-      });
-      return validate(draft, config, { orchestrationPlan: plan(roles.length) });
-    };
-    expect(codes(withRoles(["谨慎比较者", "首次功课者", "谨慎比较者", "同城行动者"]))).toContain("comment_surface_roles_flat");
-    expect(codes(withRoles(["谨慎比较者", "首次功课者", "同城行动者", "蹲反馈者"]))).not.toContain("comment_surface_roles_flat");
-    expect(codes(withRoles(["谨慎比较者", "首次功课者", "同城行动者", "蹲反馈者", "蹲反馈者"]))).toContain("comment_surface_roles_flat");
-    expect(codes(withRoles(["谨慎比较者", "首次功课者", "同城行动者", "蹲反馈者", "谨慎比较者"]))).not.toContain("comment_surface_roles_flat");
-  });
-
-  /**
-   * 滑杆挂钩(软校验):comment_role_diversity 决定"期望覆盖几种社会位置",地板随
-   * 滑杆分档,但**任何档位都只报 warning、不触发 repair**。滑杆调高只表示期望更
-   * 丰富,不构成阻断理由——角色是否真的丰富属于语义判断,交给带完整上下文的
-   * agent,校验层只做诚实告知(蓝图角色谱数据也仍在补齐)。
-   */
-  it("按 comment_role_diversity 分档:地板随滑杆变化,但一律只是 warning", () => {
-    const plan = (count: number) => commentNetworkPlan(count, [0, 0], Math.max(8, count * 2));
-    const issueAt = (roleDiversity: number, roles: string[]) => {
+  it("does not turn role-count parameters into a deterministic quality floor", () => {
+    const validateAt = (roleDiversity: number) => {
       const config = validationConfig();
       config.parameters!.commentRoleDiversity = roleDiversity;
-      const threads = roles.map((role, index) => thread({ id: `t${index + 1}`, question: `第${index + 1}项怎么选？` }));
-      const draft = parseGenerationDraft(JSON.stringify(draftJson(plainBody, threads)));
-      draft.content.Cref.threads.forEach((item, index) => {
-        item.surfaceRoleCard = surfaceRole(roles[index]!);
-      });
-      return validate(draft, config, { orchestrationPlan: plan(roles.length) })
-        .find((issue) => issue.code === "comment_surface_roles_flat");
+      const roles = ["谨慎比较者", "谨慎比较者", "谨慎比较者", "谨慎比较者"];
+      const draft = parseGenerationDraft(JSON.stringify(draftJson(plainBody,
+        roles.map((role, index) => thread({ id: `t${index + 1}`, question: `第${index + 1}项怎么选？` })),
+      )));
+      draft.content.Cref.threads.forEach((item, index) => { item.surfaceRoleCard = surfaceRole(roles[index]!); });
+      return codes(validate(draft, config, { orchestrationPlan: commentNetworkPlan(4, [0, 0], 8) }));
     };
-    // 4 线程只有 2 种社会位置:高档位期望 min(4,4)=4 种,提示但不阻断。
-    const twoPositions = ["谨慎比较者", "首次功课者", "谨慎比较者", "首次功课者"];
-    expect(issueAt(95, twoPositions)).toMatchObject({ severity: "warning", repairable: false });
-    // 同一份输入在低档位是合规的——50 只期望 2 种,不该无端提示。
-    expect(issueAt(50, twoPositions)).toBeUndefined();
-    // 全员同一个人:任何档位都会提示,同样只是 warning。
-    const onePosition = ["谨慎比较者", "谨慎比较者", "谨慎比较者", "谨慎比较者"];
-    expect(issueAt(50, onePosition)).toMatchObject({ severity: "warning", repairable: false });
-    expect(issueAt(95, onePosition)).toMatchObject({ severity: "warning", repairable: false });
-    // 软校验的硬保证:该码永远不会进入 repair 通道。
-    expect(channelsForIssues([issueAt(95, onePosition)!])).toEqual([]);
+    expect(validateAt(50)).not.toContain("comment_surface_roles_flat");
+    expect(validateAt(95)).not.toContain("comment_surface_roles_flat");
   });
 
-  /**
-   * 兜底护栏:内部维度标记若真的漏到可见文案,必须判 error。
-   * 已在 prompt 层剥掉前缀(buildOrgThreadScope),但模型仍可能从别处照抄,
-   * 所以校验层也要拦 —— 这类后台措辞出现在成品里是硬缺陷,不是风格问题。
-   */
+  /** Internal markers are deterministic frontstage leaks, not style judgments. */
   it("可见文案出现「待核实维度：」等内部标记时判 error", () => {
     const config = validationConfig();
     const draft = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [
@@ -435,40 +417,6 @@ describe("P4 comment network shape and growth levels", () => {
       thread({ id: "t2", question: "谁来认定？" }),
     ])));
     expect(codes(validate(draft, config))).toContain("internal_audit_artifact_visible");
-  });
-
-  it("期望值夹到规划层实际角色供给,不产生无条件警告", () => {
-    // 退化蓝图的 commentCast 只有 3 个角色。若期望值不夹到供给,高档位会要求 4
-    // 种社会位置——每一篇都必然报警,警告退化成噪声。
-    const config = validationConfig();
-    config.parameters!.commentRoleDiversity = 95;
-    const roles = ["处境相近者", "谨慎比较者", "可追责信息提供者", "处境相近者"];
-    const threads = roles.map((_, index) => thread({ id: `t${index + 1}`, question: `第${index + 1}项怎么选？` }));
-    const draft = parseGenerationDraft(JSON.stringify(draftJson(plainBody, threads)));
-    draft.content.Cref.threads.forEach((item, index) => {
-      item.surfaceRoleCard = surfaceRole(roles[index]!);
-    });
-    const plan = commentNetworkPlan(roles.length, [0, 0], 12);
-    // 供给恰好 3 种,产出也是 3 种且无相邻重复 → 已用尽可用角色,不该报警。
-    plan.personaScenePlan.commentCast = ["处境相近者", "谨慎比较者", "可追责信息提供者"].map(surfaceRole);
-    expect(codes(validate(draft, config, { orchestrationPlan: plan }))).not.toContain("comment_surface_roles_flat");
-  });
-
-  it("exempts all-question networks that have follow-up depth", () => {
-    const config = validationConfig();
-    const flat = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [
-      thread({ id: "t1", question: "第一项怎么选？" }),
-      thread({ id: "t2", question: "第二项怎么选？" }),
-      thread({ id: "t3", question: "第三项怎么选？" }),
-    ])));
-    expect(codes(validate(flat, config, { orchestrationPlan: commentNetworkPlan(3, [0, 0], 8) }))).toContain("comment_network_all_questions");
-
-    const deep = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [
-      thread({ id: "t1", question: "第一项怎么选？", followUps: [{ question: "那第二点呢？", answer: "也一样先看情况。", evidenceIds: [] }] }),
-      thread({ id: "t2", question: "第二项怎么选？" }),
-      thread({ id: "t3", question: "第三项怎么选？" }),
-    ])));
-    expect(codes(validate(deep, config, { orchestrationPlan: commentNetworkPlan(3, [0, 0]) }))).not.toContain("comment_network_all_questions");
   });
 });
 
@@ -677,8 +625,8 @@ describe("P4 repair loop end-to-end", () => {
   });
 
   it("repairs via a fenced full-width patch and merges out-of-order threads by id", async () => {
-    const brokenBody = "先核对手头的说法，再决定下一步。细节我还在整理，确认后再补充。";
-    const fixedBody = "先核实适用边界，再决定下一步。细节我还在整理，确认后再补充。";
+    const brokenBody = "先核对手头的说法，再决定下一步。细节仍在整理，确认后再补充。";
+    const fixedBody = "先核实适用边界，再决定下一步。细节仍在整理，确认后再补充。";
     const provider: ModelProvider = {
       async generate(request) {
         const purpose = String(request.metadata?.purpose);
@@ -701,7 +649,7 @@ describe("P4 repair loop end-to-end", () => {
           const rawPatch = [
             "修复结果：",
             "```json",
-            `{“N”：{“body”：“${fixedBody}”}，“Cref”：{“disclaimer”：“以下为模拟情景问答参考模板，不代表真实评论。”，“threads”：[{“id”：“${second}”，“question”：“第二项怎么选才稳？”，“answer”：“先看自己的情况。”，“followUps”：[]}，{“id”：“${first}”，“question”：“第一项还要确认什么？”，“answer”：“多问一句再定。”，“followUps”：[]}]}}`,
+            `{“N”：{“body”：“${fixedBody}”}，“Cref”：{“disclaimer”：“以下为模拟情景问答参考模板，不代表真实评论。”，“threads”：[{“id”：“${second}”，“question”：“不同做法具体按哪些点比较？”，“answer”：“先看自己的情况。”，“followUps”：[]}，{“id”：“${first}”，“question”：“哪些条件会影响适用性？”，“answer”：“多问一句再定。”，“followUps”：[]}]}}`,
             "```",
           ].join("\n");
           return { text: rawPatch, raw: {} };
@@ -718,13 +666,13 @@ describe("P4 repair loop end-to-end", () => {
       expect(finalCodes).not.toContain("missing_required_phrase");
       expect(pkg.content.N.body).toBe(fixedBody);
       // Out-of-order patch merged by id: original order, new prose.
-      expect(pkg.content.Cref.threads.map((item) => item.question)).toEqual(["第一项还要确认什么？", "第二项怎么选才稳？"]);
+      expect(pkg.content.Cref.threads.map((item) => item.question)).toEqual(["哪些条件会影响适用性？", "不同做法具体按哪些点比较？"]);
       expect(pkg.validation.valid).toBe(true);
     }
   });
 
   it("keeps the candidate alive for review when repair fails terminally", async () => {
-    const brokenBody = "先核对手头的说法，再决定下一步。细节我还在整理，确认后再补充。";
+    const brokenBody = "先核对手头的说法，再决定下一步。细节仍在整理，确认后再补充。";
     const provider: ModelProvider = {
       async generate(request) {
         const purpose = String(request.metadata?.purpose);

@@ -12,10 +12,10 @@ export interface HarnessQuickOption<T extends string> {
 }
 
 export const HARNESS_INTENTS: readonly HarnessQuickOption<HarnessIntentId>[] = [
-  { id: 'decision', title: '帮读者做决定', description: '讲清影响判断的条件，让读者知道下一步先核验什么', recommended: true },
+  { id: 'decision', title: '帮读者做决定', description: '讲清影响判断的条件，让读者知道下一步先核验什么' },
   { id: 'misunderstanding', title: '讲清一个误区', description: '从常见误解切入，给出更稳妥的判断方式' },
   { id: 'checklist', title: '给一份行动清单', description: '把复杂问题拆成可以逐项照着做的步骤' },
-  { id: 'project_value', title: '讲出项目价值', description: '从真实资料里找一个具体特色，不写空泛宣传' },
+  { id: 'project_value', title: '讲出项目价值', description: '从真实资料里找一个具体特色，写成短、口语、有发布感的成品', recommended: true },
 ] as const;
 
 export const HARNESS_AUDIENCE_STAGES: readonly HarnessQuickOption<HarnessAudienceStageId>[] = [
@@ -43,9 +43,9 @@ const INTENT_SETTINGS: Record<HarnessIntentId, Pick<AgentHarnessCreateInput, 'go
     callToAction: '邀请读者保存清单，并从第一项开始核验。',
   },
   project_value: {
-    goal: '从项目真实资料中找到一个具体、有证据支持且对读者有用的价值点。',
-    tone: '真实、具体、少形容词，不写无法证明的优势或效果。',
-    callToAction: '引导读者围绕这个价值点提出自己的具体条件或问题。',
+    goal: '从项目真实资料中找到一个具体、有证据支持且能回应真实顾虑的价值点，写成可直接阅读的种草成品。',
+    tone: '短、口语、有现场感，先接顾虑再讲项目差异；不写说明书、论文或审核报告。',
+    callToAction: '用自然的一句话邀请读者继续了解或提出自己的具体顾虑，不使用核验清单式收尾。',
   },
 };
 
@@ -91,7 +91,7 @@ export interface ResolveHarnessQuickStartInput {
 }
 
 export function resolveHarnessQuickStart(input: ResolveHarnessQuickStartInput): AgentHarnessCreateInput {
-  const intentId = input.intentId ?? 'decision';
+  const intentId = input.intentId ?? 'project_value';
   const methodProfile = getHarnessMethodProfile(input.methodProfileId ?? DEFAULT_HARNESS_METHOD_ID);
   const audienceStageId = input.audienceStageId ?? methodProfile.audienceStage;
   const intent = HARNESS_INTENTS.find((item) => item.id === intentId)!;
@@ -105,8 +105,8 @@ export function resolveHarnessQuickStart(input: ResolveHarnessQuickStartInput): 
     methodProfileId: methodProfile.id,
     audienceStage: audienceStageId,
     entryPoint: methodProfile.entryPoint,
-    bodyLength: methodProfile.bodyLength,
-    publishingNotes: '优先形成一个无需额外解释即可审阅的完整发布包；平台合规与终稿校对保留人工复核。',
+    bodyLength: intentId === 'project_value' ? 'short' : methodProfile.bodyLength,
+    publishingNotes: '主文案必须是短、口语、有发布感的成品；SLA、证据编号、审核状态和运营规则只放审计字段，不写进标题、正文、图片叠字或 CTA。',
     ...INTENT_SETTINGS[intentId],
     ...AUDIENCE_SETTINGS[audienceStageId],
     imageAssetIds: input.useApprovedImages === false ? [] : [...(input.approvedImageAssetIds ?? [])].slice(0, 12),

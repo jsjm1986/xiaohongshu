@@ -12,7 +12,11 @@ import { DatabaseService } from '../src/database.service.js';
 
 const PASSWORD = 'Harness-bootstrap-123!';
 const NEW_PASSWORD = 'Harness-updated-456!';
-const FACT = '项目资料要求先核验明确条件。';
+const FACT = '行动前要先核验明确条件。';
+const TENSION = '想把安排做稳，又怕只听一个答案就选错。';
+const REFRAME = '真正该先看的，不是哪个说法最省事，而是哪项条件会改变答案。';
+const BRIDGE = '这套核验清单把会改变答案的条件放到一起看。';
+const OPEN_LOOP = '先说清自己最不能调整的一项，再决定要不要继续了解。';
 const LEGACY_TABLES = [
   'analysis_tasks', 'project_intelligence', 'project_blueprint_modules',
   'information_gaps', 'expression_strategies', 'topic_opportunities',
@@ -54,6 +58,19 @@ function candidate(index: 0 | 1 | 2, evidenceId: string, imageEvidenceId: string
   return {
     candidateIndex: index,
     concept: ['请假核验清单', '反常识判断框架', '行动前问答'][index],
+    marketingStrategy: {
+      narrativePath: (["tension_first", "observation_first", "question_first"] as const)[index],
+      readerDesire: '在不打乱现实安排的前提下做稳妥判断',
+      hiddenTension: '担心一个省事答案漏掉会改变结论的条件',
+      oldJudgment: '先找一个统一答案',
+      newJudgment: '先找出会改变答案的具体条件',
+      projectBridge: '用核验清单把会改变答案的条件放到一起看',
+      lowPressureNextStep: '先补充一个最不能调整的条件',
+      tensionAnchor: TENSION,
+      reframeAnchor: REFRAME,
+      projectBridgeAnchor: FACT,
+      openLoopAnchor: OPEN_LOOP,
+    },
     content: {
       H: { hashtags: [`核验角度${index + 1}`, '项目决策'] },
       N: {
@@ -70,23 +87,68 @@ function candidate(index: 0 | 1 | 2, evidenceId: string, imageEvidenceId: string
           evidenceIds: [imageEvidenceId],
         }],
         title: `先核验，再决定 ${index + 1}`,
-        body: `这是第${index + 1}套独立构思。${FACT}未提供的具体结果保持未知。`,
+        body: `${TENSION}${REFRAME}${BRIDGE}${FACT}${OPEN_LOOP}`,
         callToAction: '先把自己的条件列出来，再逐项核验。',
       },
       Cref: {
         disclaimer: '以下为模拟问答参考模板，不代表真实用户互动。',
         ownedFirstComment: '账号补充：具体个人结果未知，请按自己的条件逐项确认。',
         threads: [{
-          id: `thread_${index + 1}`,
+          id: `thread_${index + 1}_question`,
+          threadKind: 'org_answer',
+          displayName: `先把条件问清${index + 1}`,
+          replyDisplayName: '',
           question: '行动前应该先核验什么？',
-          answer: '先核验资料中明确列出的条件，个人结论仍需结合实际情况确认。',
-          followUps: [],
+          answer: '先核验明确条件，个人结论仍需结合实际情况确认。',
+          followUps: [{ kind: 'follow_up', question: '工作时间也要提前说吗？', answer: '要，时间限制可能改变安排，建议一开始就说明。' }],
           clarification: '不同答案取决于实际条件，不能用单条互动替代核验。',
-          nextStep: '补充自己的条件，并由可追责账号按资料核验。',
+          nextStep: '补充自己的条件，并由可追责账号核验。',
           stopReason: 'evidence_boundary',
-          postingIdentity: 'publisher',
+          postingIdentity: 'author',
           evidenceIds: [evidenceId],
           boundary: '不替代个体判断',
+        }, {
+          id: `thread_${index + 1}_practical`,
+          threadKind: 'org_answer',
+          displayName: `日历排不开${index + 1}`,
+          replyDisplayName: '',
+          question: '时间很紧，先确认哪一项？',
+          answer: '先说清不能调整的时间，再确认安排是否匹配。',
+          followUps: [],
+          clarification: '没有个人时间条件时不能给统一安排。',
+          nextStep: '列出不可调整的日期后再确认。',
+          stopReason: 'answered',
+          postingIdentity: 'author',
+          evidenceIds: [evidenceId],
+          boundary: '实际安排以正式确认为准',
+        }, {
+          id: `thread_${index + 1}_exchange`,
+          threadKind: 'reader_exchange',
+          displayName: `先收藏再说${index + 1}`,
+          replyDisplayName: `日历空一格${index + 1}`,
+          question: '我卡住的也是工作时间。',
+          answer: '对，我准备先把不能调整的日期列出来。',
+          followUps: [],
+          clarification: '',
+          nextStep: '',
+          stopReason: 'no_new_gap',
+          postingIdentity: 'publisher',
+          evidenceIds: [],
+          boundary: '',
+        }, {
+          id: `thread_${index + 1}_reaction`,
+          threadKind: 'organic_reaction',
+          displayName: `慢慢看${index + 1}`,
+          replyDisplayName: '',
+          question: '先码住，晚点细看',
+          answer: '',
+          followUps: [],
+          clarification: '',
+          nextStep: '',
+          stopReason: 'no_new_gap',
+          postingIdentity: 'publisher',
+          evidenceIds: [],
+          boundary: '',
         }],
       },
       publishing: {
@@ -113,6 +175,11 @@ function candidate(index: 0 | 1 | 2, evidenceId: string, imageEvidenceId: string
       ? { instructionApplied: ['正文改为更口语的表达'], preservedElements: ['事实边界', '核验清单结构'] }
       : { instructionApplied: [], preservedElements: [] },
   };
+}
+
+function packageCandidatePayload(value: ReturnType<typeof candidate>) {
+  const { marketingStrategy: _marketingStrategy, ...payload } = structuredClone(value);
+  return payload;
 }
 
 async function request(path: string, init: RequestInit = {}) {
@@ -168,48 +235,103 @@ before(async () => {
     const schemaName = String(body.response_format?.json_schema?.name ?? body.text?.format?.name ?? '');
     const messages = Array.isArray(body.messages) ? body.messages : [];
     const prompt = messages.map((message: any) => typeof message.content === 'string' ? message.content : JSON.stringify(message.content)).join('\n');
-    const evidenceId = prompt.match(/evidence_section_[0-9a-f]{20}/u)?.[0] ?? '';
-    const imageEvidenceId = prompt.match(/evidence_image_[0-9a-f]{20}/u)?.[0] ?? '';
+    const parsedMessages = messages.flatMap((message: any) => {
+      if (typeof message.content !== 'string' || !message.content.trim().startsWith('{')) return [];
+      try { return [JSON.parse(message.content) as Record<string, any>]; } catch { return []; }
+    });
+    const stagePayload = parsedMessages.find((value: any) => value.readEvidence || value.publicCandidates);
+    const readEvidenceItems = Array.isArray(stagePayload?.readEvidence?.evidence)
+      ? stagePayload.readEvidence.evidence
+      : Array.isArray(stagePayload?.readEvidence) ? stagePayload.readEvidence : [];
+    const knowledgeRef = String(readEvidenceItems.find((item: any) => item.sourceType !== 'approved_image_observation')?.evidenceRef
+      ?? stagePayload?.publicCandidates?.[0]?.citations?.[0]?.evidenceIds?.[0] ?? '');
+    const imageRef = String(readEvidenceItems.find((item: any) => item.sourceType === 'approved_image_observation')?.evidenceRef ?? '');
     const revision = prompt.includes('"runMode":"revision"');
     let output: Record<string, unknown>;
     if (schemaName === 'agent_harness_search') {
+      assert.doesNotMatch(prompt, /evidence_(?:section|image)_[0-9a-f]{20}/u, '搜索阶段不得向模型暴露真实 evidence id');
       output = { query: '核验 条件', rationale: '先定位项目明确资料。' };
-    } else if (schemaName === 'agent_harness_read') {
-      assert.ok(evidenceId, '证据选择阶段应能读取搜索结果中的 evidence id');
-      output = { evidenceIds: [evidenceId, ...(imageEvidenceId ? [imageEvidenceId] : [])], rationale: '读取知识与已选图片观察后再形成发布包。' };
-    } else if (schemaName === 'agent_harness_submit') {
-      assert.match(prompt, /output responsibility contract/u, '方法合同必须进入候选生成系统约束');
+    } else if (schemaName === 'agent_harness_body_draft') {
+      assert.ok(knowledgeRef, '正文起草前应携带短证据别名');
+      assert.doesNotMatch(prompt, /evidence_(?:section|image)_[0-9a-f]{20}/u, '正文阶段不得向模型暴露真实 evidence id');
+      const indexes = revision ? [0] : [0, 1, 2];
+      output = {
+        drafts: indexes.map((candidateIndex) => {
+          const value = candidate(candidateIndex as 0 | 1 | 2, knowledgeRef, imageRef || 'unused-image-ref', revision);
+          return {
+            candidateIndex,
+            postingIntent: revision ? '按用户要求改写所选正文' : `独立发帖动机 ${candidateIndex + 1}`,
+            marketingStrategy: value.marketingStrategy,
+            coverHeadline: value.content.N.coverHeadline,
+            coverSubheadline: value.content.N.coverSubheadline,
+            title: value.content.N.title,
+            body: value.content.N.body,
+            callToAction: value.content.N.callToAction,
+            citations: value.citations,
+          };
+        }),
+        editorialSummary: revision ? '完成一篇定向正文改稿。' : '先完成三篇可独立阅读的正文原稿。',
+      };
+    } else if (schemaName === 'agent_harness_package_candidate') {
+      assert.match(prompt, /output responsibility contract/u, '方法合同必须进入逐候选组包约束');
       assert.match(prompt, /bodyRole/u, '方法合同必须包含正文职责');
       assert.match(prompt, /commentRole/u, '方法合同必须包含评论职责');
       assert.match(prompt, /boundaryPolicy/u, '方法合同必须包含方法边界');
-      assert.ok(evidenceId, '提交候选前应携带已读 evidence id');
-      const buildCandidate = (index: 0 | 1 | 2, isRevision = false) => {
-        const value = candidate(index, evidenceId, imageEvidenceId || 'unused-image-evidence', isRevision);
-        if (!imageEvidenceId) {
-          value.content.N.imageSequence = [{ sequence: 1, source: 'new_design', assetId: '', role: '封面', overlayText: '先核验，再决定', direction: '按文字证据制作简洁封面。', evidenceIds: [evidenceId] }];
-          value.assetDecisions = [];
-        }
-        return value;
+      assert.match(prompt, /frozenBodyDraft/u, '逐候选组包必须收到当前冻结正文');
+      assert.doesNotMatch(prompt, /frozenBodyDrafts/u, '逐候选组包不得收到其他候选正文');
+      assert.ok(knowledgeRef, '组包前应携带短证据别名');
+      assert.doesNotMatch(prompt, /evidence_(?:section|image)_[0-9a-f]{20}/u, '组包阶段不得向模型暴露真实 evidence id');
+      const frozenMessage = messages.find((message: any) =>
+        typeof message.content === 'string' && message.content.includes('"frozenBodyDraft"'),
+      );
+      assert.ok(frozenMessage, '逐候选组包必须有携带当前冻结正文的用户消息');
+      const payload = JSON.parse(String(frozenMessage.content)) as {
+        targetCandidateIndex: 0 | 1 | 2;
+        frozenBodyDraft: {
+          candidateIndex: 0 | 1 | 2;
+          coverHeadline: string;
+          coverSubheadline: string;
+          title: string;
+          body: string;
+          callToAction: string;
+          citations: Array<{ statement: string; evidenceIds: string[] }>;
+        };
       };
+      const index = payload.targetCandidateIndex;
+      assert.equal(payload.frozenBodyDraft.candidateIndex, index);
+      assert.ok(payload.frozenBodyDraft.citations.every((citation) => citation.evidenceIds.every((id) => /^E\d+$/u.test(id))), '冻结正文引用回投组包时必须保持短别名');
+      const value = candidate(index, knowledgeRef, imageRef || 'unused-image-ref', revision);
+      value.content.N.coverHeadline = payload.frozenBodyDraft.coverHeadline;
+      value.content.N.coverSubheadline = payload.frozenBodyDraft.coverSubheadline;
+      value.content.N.title = payload.frozenBodyDraft.title;
+      value.content.N.body = payload.frozenBodyDraft.body;
+      value.content.N.callToAction = payload.frozenBodyDraft.callToAction;
+      value.citations = payload.frozenBodyDraft.citations;
+      if (!imageRef) {
+        value.content.N.imageSequence = [{ sequence: 1, source: 'new_design', assetId: '', role: '封面', overlayText: '先核验，再决定', direction: '按文字证据制作简洁封面。', evidenceIds: [] }];
+        value.assetDecisions = [];
+      }
       output = {
-        decisionSummary: revision ? '只对所选候选执行定向改稿。' : '围绕同一事实边界形成三套不同表达。',
-        candidates: revision
-          ? [buildCandidate(0, true)]
-          : [buildCandidate(0), buildCandidate(1), buildCandidate(2)],
+        decisionSummary: revision ? '完成所选候选的定向组包。' : `完成候选 ${index + 1} 的独立组包。`,
+        candidate: packageCandidatePayload(value),
       };
     } else if (schemaName === 'agent_harness_final_review') {
       if (modelMode === 'empty-review') {
         response.statusCode = 200;
         response.setHeader('content-type', 'application/json');
-        response.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: '' } }], usage: { prompt_tokens: 120, completion_tokens: 0, total_tokens: 120 } }));
+        response.end(JSON.stringify({
+          choices: [{ finish_reason: 'stop', message: { content: '' } }],
+          usage: { prompt_tokens: 120, completion_tokens: 0, total_tokens: 120 },
+        }));
         return;
       }
-      assert.ok(evidenceId, '合并复核应收到本轮已读证据');
+      assert.ok(knowledgeRef, '合并复核应收到短证据别名');
+      assert.doesNotMatch(prompt, /evidence_(?:section|image)_[0-9a-f]{20}/u, '最终复核不得向模型暴露真实 evidence id');
       output = {
         complete: true,
         summary: revision ? '定向改稿已逐项复核。' : '已逐项盘点本轮候选中的项目事实。',
         claims: (revision ? [0] : [0, 1, 2]).map((candidateIndex) => ({
-          candidateIndex, statement: FACT, evidenceIds: [evidenceId], classification: 'project_fact',
+          candidateIndex, statement: FACT, evidenceIds: [knowledgeRef], classification: 'project_fact',
         })),
       };
     } else {
@@ -263,7 +385,7 @@ before(async () => {
     body: JSON.stringify({
       projectId,
       filename: '项目事实.md',
-      content: '# 决策条件\n项目资料要求先核验明确条件。具体个人结果没有提供。',
+      content: '# 决策条件\n行动前要先核验明确条件。具体个人结果没有提供。',
       category: 'general',
       evidenceStatus: 'observed',
     }),
@@ -410,17 +532,26 @@ test('Agent Harness 完整生命周期走独立表，不写旧分析、规划或
   });
   assert.equal(created.response.status, 201, JSON.stringify(created.body));
   const originalId = String(created.body.id);
+  const frozenEvidence = JSON.parse(String((database.prepare(
+    'SELECT evidence_snapshot_json FROM agent_harness_jobs WHERE id=?',
+  ).get(originalId) as { evidence_snapshot_json: string }).evidence_snapshot_json)) as Array<{ evidenceStatus?: string }>;
+  assert.ok(frozenEvidence.some((item) => item.evidenceStatus === 'observed'), '中文“已知事实”必须冻结为可引用 observed 证据');
   const original = await waitForJob(originalId);
 
   assert.equal(original.status, 'completed', original.error ?? JSON.stringify(original));
-  assert.equal(modelCalls, 4);
+  assert.equal(modelCalls, 6);
   assert.equal(original.runKind, 'original');
   assert.equal(original.channel, 'agent_harness');
   assert.equal(original.task.topicMode, 'agent_discovery');
   assert.equal(original.task.creativeIntent, 'decision');
   assert.match(original.topic, /Agent 从项目资料中自主发现选题/u);
   assert.equal(original.candidates.length, 3);
-  assert.ok(original.candidates.every((item: any) => item.validation.valid));
+  assert.ok(
+    original.candidates.every((item: any) => item.validation.valid),
+    JSON.stringify(original.candidates.map((item: any) => item.validation.issues)),
+  );
+  assert.ok(original.candidates.every((item: any) => item.marketingStrategy?.readerDesire));
+  assert.ok(original.candidates.every((item: any) => item.publicationChecklist.some((check: any) => check.key === 'soft_marketing' && check.status === 'ready')));
   assert.ok(original.candidates.every((item: any) => item.claimAudit.length === 1));
   assert.ok(original.candidates.every((item: any) => item.content.N.imageSequence.length === 1));
   assert.ok(original.candidates.every((item: any) => item.assetDecisions[0].assetId === imageAssetId));
@@ -429,6 +560,10 @@ test('Agent Harness 完整生命周期走独立表，不写旧分析、规划或
   assert.ok(original.candidates.every((item: any) => item.content.Cref.threads[0].clarification));
   assert.ok(original.candidates.every((item: any) => item.content.Cref.threads[0].nextStep));
   assert.ok(original.candidates.every((item: any) => item.content.Cref.threads[0].stopReason === 'evidence_boundary'));
+  assert.ok(original.candidates.every((item: any) => item.content.Cref.threads.length === 4));
+  assert.ok(original.candidates.every((item: any) => item.content.Cref.threads.filter((thread: any) => thread.threadKind === 'org_answer').length === 2));
+  assert.ok(original.candidates.every((item: any) => item.content.Cref.threads.some((thread: any) => thread.threadKind === 'reader_exchange' && thread.replyDisplayName)));
+  assert.ok(original.candidates.every((item: any) => item.content.Cref.threads.some((thread: any) => thread.threadKind === 'organic_reaction' && !thread.answer)));
   assert.ok(original.candidates.every((item: any) => item.content.publishing.responseSla));
   assert.ok(original.candidates.every((item: any) => item.content.publishing.liveQuestionRoutes.length === 1));
   assert.ok(original.candidates.every((item: any) => item.content.publishing.updateTriggers.length === 1));
@@ -467,13 +602,21 @@ test('Agent Harness 完整生命周期走独立表，不写旧分析、规划或
   assert.match(markdown.response.headers.get('content-type') ?? '', /text\/markdown/u);
   assert.match(markdown.text, /先核验，再决定 1/u);
   assert.match(markdown.text, /本次冻结的创作合同/u);
+  assert.match(markdown.text, /软营销心智链/u);
+  assert.match(markdown.text, /认知翻转/u);
+  assert.match(markdown.text, /叙事路径：顾虑切入/u);
   assert.match(markdown.text, /真实问题承接计划/u);
   assert.match(markdown.text, /停止原因/u);
+  assert.match(markdown.text, /读者接话/u);
+  assert.match(markdown.text, /短反应/u);
+  assert.doesNotMatch(markdown.text, /慢慢看1.*发布账号答复/su);
   const json = await request(`/api/agent-harness/${originalId}/candidates/${candidateId}/export?format=json`);
   assert.equal(json.response.status, 200, json.text);
   assert.equal(json.body.validation.valid, true);
-  assert.equal(json.body.taskContract.methodProfileId, 'balanced_information');
-  assert.match(String(json.body.runtimeContract.version), /^2\.3\./u);
+  assert.equal(json.body.taskContract.methodProfileId, 'state_experience_entry');
+  assert.match(String(json.body.runtimeContract.version), /^2\.11\./u);
+  assert.ok(json.body.marketingStrategy?.projectBridge);
+  assert.equal(json.body.marketingStrategy?.narrativePath, 'tension_first');
   assert.equal(json.body.content.Cref.threads[0].stopReason, 'evidence_boundary');
   const runMarkdown = await request(`/api/agent-harness/${originalId}/export?format=markdown`);
   assert.equal(runMarkdown.response.status, 200, runMarkdown.text);
@@ -510,7 +653,7 @@ test('Agent Harness 完整生命周期走独立表，不写旧分析、规划或
   assert.equal(revisionResult.candidates.length, 1, '定向改稿只能落一套，不得重新生成三套');
   assert.equal(revisionResult.candidates[0].candidateIndex, 0);
   assert.ok(revisionResult.candidates[0].revisionNotes.instructionApplied.length > 0);
-  assert.equal(modelCalls, 12);
+  assert.equal(modelCalls, 16);
 
   // A failed directed revision must retry with the same one-candidate semantics,
   // original source candidate and instruction rather than becoming a 3-way retry.
@@ -529,7 +672,7 @@ test('Agent Harness 完整生命周期走独立表，不写旧分析、规划或
   assert.equal(revisionRetryResult.sourceCandidateId, candidateId);
   assert.equal(revisionRetryResult.candidates.length, 1);
   assert.match(revisionRetryResult.instruction, /更口语/u);
-  assert.equal(modelCalls, 16);
+  assert.equal(modelCalls, 20);
 
   const originalWithChildren = await request(`/api/agent-harness/${originalId}`);
   assert.equal(originalWithChildren.response.status, 200);
@@ -595,7 +738,7 @@ test('最终复核空正文时保留候选，单独重试复核只增加一次�
   assert.equal(created.response.status, 201, JSON.stringify(created.body));
   const id = String(created.body.id);
   const blocked = await waitForJob(id);
-  assert.equal(modelCalls - callsBefore, 4, '生成链固定为搜索、选证据、提交候选、合并复核四次调用');
+  assert.equal(modelCalls - callsBefore, 6, '原始生成固定为搜索、确定性读证据、正文起草、三次逐候选组包、合并复核六次模型调用');
   assert.equal(blocked.status, 'completed');
   assert.equal(blocked.reviewStatus, 'blocked');
   assert.ok(blocked.candidateCheckpointAt, '候选必须在复核前留下持久化检查点');
@@ -620,11 +763,14 @@ test('最终复核空正文时保留候选，单独重试复核只增加一次�
   assert.equal(counts(database, ['agent_harness_jobs']).agent_harness_jobs, jobsBefore + 1);
   assert.equal(recovered.reviewStatus, 'completed');
   assert.equal(recovered.reviewError, undefined);
-  assert.ok(recovered.candidates.every((item: any) => item.validation.valid));
+  assert.ok(
+    recovered.candidates.every((item: any) => item.validation.valid),
+    JSON.stringify(recovered.candidates.map((item: any) => item.validation.issues)),
+  );
   assert.deepEqual(recovered.candidates.map((item: any) => item.id), candidateIds, '复核升级不得替换候选记录身份');
   assert.equal(recovered.traces.length, traceCount, '独立复核不得重跑或追加检索、读证据、生成轨迹');
-  assert.equal(recovered.usage.modelCalls, 4, '逻辑运行用量只统计成功响应；供应商尝试另由 partialUsage 审计');
-  assert.ok((recovered.partialUsage?.modelCalls ?? 0) >= 5, '供应商尝试计数必须保留首次失败复核与恢复复核');
+  assert.equal(recovered.usage.modelCalls, 6, '逻辑运行用量包含正文、三次逐候选组包与复核；确定性读证据不调用模型');
+  assert.ok((recovered.partialUsage?.modelCalls ?? 0) >= 7, '供应商尝试计数必须保留首次失败复核与恢复复核');
 });
 
 test('无项目证据必须显式确认，回收站记录可永久删除', async () => {

@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { BadRequestException, ForbiddenException, Inject, Injectable } from '@nestjs/common';
+import { DEEPSEEK_MAX_OUTPUT_TOKENS, GENERATION_OUTPUT_TOKENS } from '@content-agent/agent-core';
 import { APP_OPTIONS, isUsableMasterEncryptionKey, type ApiOptions } from './config.js';
 import { AuditService } from './audit.service.js';
 import { DatabaseService } from './database.service.js';
@@ -24,6 +25,22 @@ interface SettingsRow {
   default_temperature: number;
   config_json: string;
   updated_at: string;
+}
+
+export const DEFAULT_MODEL_MAX_OUTPUT_TOKENS = GENERATION_OUTPUT_TOKENS;
+export { DEEPSEEK_MAX_OUTPUT_TOKENS };
+
+/**
+ * Output capability is separate from the normal per-stage budget. It is used
+ * only for the client's single controlled retry after an explicit length stop.
+ */
+export function modelOutputTokenLimit(
+  settings: Pick<ResolvedProviderSettings, 'provider' | 'model' | 'baseUrl'>,
+): number {
+  const identity = `${settings.provider} ${settings.model} ${settings.baseUrl}`.toLowerCase();
+  return identity.includes('deepseek')
+    ? DEEPSEEK_MAX_OUTPUT_TOKENS
+    : DEFAULT_MODEL_MAX_OUTPUT_TOKENS;
 }
 
 export interface ResolvedProviderSettings {

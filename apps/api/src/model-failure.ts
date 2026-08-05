@@ -66,7 +66,7 @@ function modelGatewayStatus(error: unknown): {
     };
   }
   if (error instanceof ModelProviderError) {
-    return { gateway: true, status: error.status, message: error.message };
+    return { gateway: true, status: error.status, message: error.message, finishReason: error.finishReason };
   }
   return { gateway: false, message: error instanceof Error ? error.message : String(error) };
 }

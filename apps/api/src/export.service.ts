@@ -15,6 +15,14 @@ export type ExportFormat = 'markdown' | 'json' | 'docx' | 'pdf';
 export interface ExportOptions {
   cjkFontPath?: string;
   docxFontName?: string;
+  /** Explicit server-verified override; never accepted directly from the browser. */
+  manualDeliveryConfirmation?: {
+    confirmed: true;
+    confirmedAt: string;
+    confirmedBy: string;
+    jobId: string;
+    candidateId: string;
+  };
 }
 
 type JsonObject = Record<string, unknown>;
@@ -67,10 +75,10 @@ export class ExportService {
     format: ExportFormat,
     options: ExportOptions = {},
   ): Promise<Buffer> {
-    const contentPackage = this.validatePackage(rawPackage);
+    const contentPackage = this.validatePackage(rawPackage, options);
     switch (format) {
       case 'markdown':
-        return Buffer.from(this.toMarkdown(contentPackage), 'utf8');
+        return Buffer.from(this.toMarkdown(contentPackage, options), 'utf8');
       case 'json':
         return Buffer.from(`${JSON.stringify(contentPackage, null, 2)}\n`, 'utf8');
       case 'docx':
@@ -82,8 +90,8 @@ export class ExportService {
     }
   }
 
-  toMarkdown(rawPackage: unknown): string {
-    const pkg = this.validatePackage(rawPackage);
+  toMarkdown(rawPackage: unknown, options: ExportOptions = {}): string {
+    const pkg = this.validatePackage(rawPackage, options);
     // Cref contract v1.1 packages export in the two-part layout (executive
     // copy first, audit appendix last). Historical packages without any v1.1
     // marker keep the legacy single-flow output below byte-for-byte.
@@ -155,7 +163,7 @@ export class ExportService {
     return candidates.find((candidate) => existsSync(candidate));
   }
 
-  private validatePackage(value: unknown): JsonObject {
+  private validatePackage(value: unknown, options: ExportOptions = {}): JsonObject {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
       throw new BadRequestException('ContentPackage 必须是 JSON 对象');
     }
@@ -165,16 +173,24 @@ export class ExportService {
       throw new BadRequestException('ContentPackage 缺少 content.N');
     }
     const validation = asObject(pkg.validation);
-    if (validation.valid !== true) {
-      throw new BadRequestException('候选未通过事实、证据与信息闭合校验，禁止导出；请先修复错误或重新生成');
+    if (validation.valid !== true && options.manualDeliveryConfirmation?.confirmed !== true) {
+      throw new BadRequestException('候选未通过事实、证据与信息闭合校验，禁止导出；请先修复错误、重新生成或完成候选级人工交付确认');
     }
-    return sanitizeOrganicReactionThreads(pkg);
+    const deliverable = options.manualDeliveryConfirmation?.confirmed === true
+      ? { ...pkg, manualDeliveryConfirmation: options.manualDeliveryConfirmation }
+      : pkg;
+    return sanitizeOrganicReactionThreads(deliverable);
   }
 
   private async toDocx(pkg: JsonObject, options: ExportOptions): Promise<Buffer> {
     const docx = await loadDocxModule();
     const { Document, Packer } = docx;
-    const markdown = this.toMarkdown(pkg);
+    const markdown = this.toMarkdown(pkg, {
+      ...options,
+      manualDeliveryConfirmation: isManualDeliveryConfirmation(pkg.manualDeliveryConfirmation)
+        ? pkg.manualDeliveryConfirmation
+        : options.manualDeliveryConfirmation,
+    });
     const font = options.docxFontName ?? process.env.CONTENT_AGENT_DOCX_FONT_NAME ?? 'Microsoft YaHei';
     const children = markdown.split('\n').map((line) => markdownLineToParagraph(line, font, docx));
     const section: ISectionOptions = { properties: {}, children };
@@ -193,7 +209,12 @@ export class ExportService {
   }
 
   private async toPdf(pkg: JsonObject, options: ExportOptions): Promise<Buffer> {
-    const markdown = this.toMarkdown(pkg);
+    const markdown = this.toMarkdown(pkg, {
+      ...options,
+      manualDeliveryConfirmation: isManualDeliveryConfirmation(pkg.manualDeliveryConfirmation)
+        ? pkg.manualDeliveryConfirmation
+        : options.manualDeliveryConfirmation,
+    });
     const document = new PDFDocument({
       size: 'A4',
       margins: { top: 48, right: 48, bottom: 48, left: 48 },
@@ -334,6 +355,14 @@ function renderCrefV11TwoPartMarkdown(pkg: JsonObject): string {
           `- 漂浮反应：${commentNicknamePrefix(thread.displayName)}${text(thread.question) || '未提供'}`,
           '- 无需机构回复（4-20 字短共鸣，机构不出现）',
         );
+      } else if (threadKind === 'host_reply') {
+        lines.push(
+          `### 话术 ${index + 1}（楼主回复）`,
+          '',
+          `- 提问：${commentNicknamePrefix(thread.displayName)}${text(thread.question) || '未提供'}`,
+          `- 楼主本人回复：${text(thread.answer) || '未提供'}`,
+          '- 身份说明：已确认个人作者；只承接作者事实，不承担项目事实',
+        );
       } else if (threadKind === 'reader_exchange') {
         lines.push(
           `### 话术 ${index + 1}（读者互聊）`,
@@ -394,6 +423,7 @@ function appendCommentThreadAudit(lines: string[], threads: JsonObject[], dialog
     const replyPlan = asObject(metadata('replyPlan'));
     const discoveryPlan = asObject(metadata('discoveryPlan'));
     const isOrganicReaction = text(thread.threadKind) === 'organic_reaction';
+    const isHostReply = text(thread.threadKind) === 'host_reply';
     const attribution = auditAnswerAttribution(thread);
     lines.push(
       `### 模拟问答 ${index + 1}`,
@@ -419,17 +449,17 @@ function appendCommentThreadAudit(lines: string[], threads: JsonObject[], dialog
     if (text(thread.boundary)) lines.push(`- 答复边界：${text(thread.boundary)}`);
     if (stringArray(thread.evidenceIds).length) lines.push(`- 证据引用：${stringArray(thread.evidenceIds).join('、')}`);
     if (text(thread.nextStep)) lines.push(`- 下一步：${text(thread.nextStep)}`);
-    if (Object.keys(roleCard).length) lines.push(
+    if (!isHostReply && Object.keys(roleCard).length) lines.push(
       `- 动态角色卡：阶段=${text(roleCard.stage) || '未标注'}；知识=${stringArray(roleCard.knowledge).join('、') || '未标注'}；约束=${stringArray(roleCard.constraints).join('、') || '无'}；任务=${text(roleCard.decisionTask) || '未标注'}；证据态度=${text(roleCard.evidenceStance) || '未标注'}`,
       `- 缺口结构：主缺口=${text(metadata('primaryGapId')) || '未标注'}；辅助缺口=${stringArray(metadata('auxiliaryGapIds')).join('、') || '无'}`,
     );
-    if (Object.keys(density).length) lines.push(
+    if (!isHostReply && Object.keys(density).length) lines.push(
       `- 信息密度代理：角色维度=${text(density.roleDimensionCount) || '0'}；现实约束=${text(density.constraintCount) || '0'}；辅助维度=${text(density.auxiliaryDimensionCount) || '0'}；短问软目标≈${text(density.questionTargetChars) || '未标注'}字（非效果分）`,
     );
-    if (Object.keys(replyPlan).length) lines.push(
+    if (!isHostReply && Object.keys(replyPlan).length) lines.push(
       `- 隐藏答复计划：直接回答=${text(replyPlan.directAnswer)}；条件=${text(replyPlan.condition)}；边界=${text(replyPlan.boundary)}；未知=${text(replyPlan.unknown)}；下一问=${text(replyPlan.nextQuestion)}`,
     );
-    if (Object.keys(discoveryPlan).length) lines.push(
+    if (!isHostReply && Object.keys(discoveryPlan).length) lines.push(
       `- 发现式路径：线索=${text(discoveryPlan.cue)}；一步推断=${text(discoveryPlan.inferencePrompt)}；同线程揭示=${text(discoveryPlan.reveal)}；自检=${text(discoveryPlan.selfCheck)}；边界=${text(discoveryPlan.boundary)}；难度=${text(discoveryPlan.difficulty)}`,
     );
     const followUps = isOrganicReaction ? [] : objectArray(thread.followUps);
@@ -506,6 +536,19 @@ function appendAuditTrail(lines: string[], pkg: JsonObject): void {
   appendOpportunityRankAudit(lines, pkg);
 
   const validation = asObject(pkg.validation);
+  const manualDeliveryConfirmation = asObject(pkg.manualDeliveryConfirmation);
+  if (manualDeliveryConfirmation.confirmed === true) {
+    lines.push(
+      '## 人工交付确认',
+      '',
+      '- 自动校验状态保持未通过；本记录不代表系统校验通过。',
+      `- 确认人：${text(manualDeliveryConfirmation.confirmedBy) || 'unknown'}`,
+      `- 确认时间：${text(manualDeliveryConfirmation.confirmedAt) || 'unknown'}`,
+      `- 候选：${text(manualDeliveryConfirmation.candidateId) || 'unknown'}`,
+      '- 确认范围：已逐条核对事实、证据、身份与风险，并承担本次人工交付决定。',
+      '',
+    );
+  }
   lines.push(
     '## 校验结果',
     '',
@@ -842,6 +885,7 @@ function commentKindText(value: string): string {
 function commentThreadKindText(value: string): string {
   const labels: Record<string, string> = {
     org_answer: '机构问答',
+    host_reply: '楼主回复',
     reader_exchange: '读者互聊',
     organic_reaction: '漂浮短反应',
   };
@@ -875,9 +919,13 @@ function commentNicknamePrefix(value: unknown): string {
  */
 function commentReplyOrgName(thread: JsonObject): string {
   const raw = text(asObject(thread.surfaceRoleCard).replyDisplayRole).trim();
-  if (!raw) return '';
-  if (/^[a-z][a-z0-9_]*$/.test(raw)) return text(thread.postingIdentity) === 'staff' ? '机构助理' : '机构 IP';
-  return raw;
+  const invalid = !raw || /^[a-z][a-z0-9_]*$/u.test(raw)
+    || /^(?:楼主|楼主本人|博主|博主本人|作者本人)$/u.test(raw);
+  if (!invalid) return raw;
+  const identity = text(thread.postingIdentity);
+  return identity === 'staff' ? '机构助理'
+    : identity === 'expert' ? '机构 IP'
+      : identity === 'publisher' ? '项目发布账号' : '';
 }
 
 /**
@@ -897,6 +945,12 @@ function auditAnswerAttribution(thread: JsonObject): { label: string; identity: 
       identity: '不适用（漂浮短反应，机构不出现）',
     };
   }
+  if (kind === 'host_reply') {
+    return {
+      label: '楼主本人回复',
+      identity: '作者本人（人工确认）',
+    };
+  }
   if (kind === 'reader_exchange') {
     const nickname = text(thread.replyDisplayName).trim();
     return {
@@ -905,8 +959,8 @@ function auditAnswerAttribution(thread: JsonObject): { label: string; identity: 
     };
   }
   return {
-    label: '回复',
-    identity: postingIdentityText(thread.postingIdentity) || '未标注',
+    label: '机构可追责身份回复',
+    identity: postingIdentityText(thread.postingIdentity) || '可追责发布者',
   };
 }
 
@@ -914,6 +968,17 @@ function auditAnswerAttribution(thread: JsonObject): { label: string; identity: 
  * Core 的 T3 合同只允许单条短反应。历史脏包即使携带 answer/followUps，也不能
  * 通过任何导出格式重新发布；在验证后统一清洗，确保 JSON 与 Markdown/DOCX/PDF 同源。
  */
+
+function isManualDeliveryConfirmation(value: unknown): value is NonNullable<ExportOptions['manualDeliveryConfirmation']> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const confirmation = value as JsonObject;
+  return confirmation.confirmed === true
+    && typeof confirmation.confirmedAt === 'string'
+    && typeof confirmation.confirmedBy === 'string'
+    && typeof confirmation.jobId === 'string'
+    && typeof confirmation.candidateId === 'string';
+}
+
 function sanitizeOrganicReactionThreads(pkg: JsonObject): JsonObject {
   const content = asObject(pkg.content);
   const cref = asObject(content.Cref);

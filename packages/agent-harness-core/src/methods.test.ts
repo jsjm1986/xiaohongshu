@@ -25,8 +25,8 @@ describe("Agent Harness method profiles", () => {
     }
   });
 
-  it("只有均衡信息补全是默认推荐，未知方法不能进入合同", () => {
-    expect(DEFAULT_HARNESS_METHOD_ID).toBe("balanced_information");
+  it("默认推荐状态经历入口，未知方法不能进入合同", () => {
+    expect(DEFAULT_HARNESS_METHOD_ID).toBe("state_experience_entry");
     expect(HARNESS_METHOD_PROFILES.filter((item) => item.recommended).map((item) => item.id)).toEqual([DEFAULT_HARNESS_METHOD_ID]);
     expect(isHarnessMethodId("comparison_framework")).toBe(true);
     expect(isHarnessMethodId("invented_method")).toBe(false);

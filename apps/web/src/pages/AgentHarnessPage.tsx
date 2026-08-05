@@ -34,6 +34,7 @@ import { type FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState }
 import {
   DEFAULT_HARNESS_METHOD_ID,
   HARNESS_METHOD_PROFILES,
+  HARNESS_SIMULATION_NOTICE,
   getHarnessMethodProfile,
   type HarnessMethodId,
 } from '@content-agent/agent-harness-core/methods';
@@ -71,6 +72,8 @@ interface HarnessFineTune {
   entryPoint: string;
   tone: string;
   bodyLength: '' | 'short' | 'medium' | 'long';
+  /** 空串 = 不传,让后端落默认。前端不存第二份默认值。 */
+  seedingMode: '' | 'peer_seeding' | 'brand_voice';
   accountIdentity: string;
   callToAction: string;
   publishingNotes: string;
@@ -86,13 +89,25 @@ const HARNESS_RUN_PAGE_SIZE = 30;
 const HARNESS_IMAGE_LIMIT = 12;
 
 const INITIAL_FINE_TUNE: HarnessFineTune = {
-  topic: '', goal: '', audience: '', entryPoint: '', tone: '', bodyLength: '',
+  topic: '', goal: '', audience: '', entryPoint: '', tone: '', bodyLength: '', seedingMode: '',
   accountIdentity: '', callToAction: '', publishingNotes: '', mustInclude: '', forbidden: '', notes: '',
   imageAssetIds: [],
 };
 
 function lines(value: string): string[] {
   return [...new Set(value.split(/[\n,，]/u).map((item) => item.trim()).filter(Boolean))];
+}
+
+/*
+ * 内容形态的显示名。缺字段一律按素人代发显示,不写「旧运行未记录」。
+ *
+ * 本次改动之前的运行 task_json 里没有 seedingMode,但它们实际就是按素人代发跑的
+ * (后端 DEFAULT_HARNESS_SEEDING_MODE)。说「未记录」会让人以为不知道,而我们知道。
+ * 显式判 brand_voice 而不是直接回显后端字符串:task 是快照 JSON,窄化在这里做完,
+ * 界面就不会因为将来多出第三种模式而显示出未知值。
+ */
+function harnessSeedingModeLabel(value: unknown): string {
+  return value === 'brand_voice' ? '机构口吻' : '素人代发';
 }
 
 function statusLabel(job: AgentHarnessJob): string {
@@ -118,6 +133,7 @@ function traceLabel(action: string): string {
 
 function publicationCheckLabel(key: AgentHarnessCandidate['publicationChecklist'][number]['key']): string {
   return {
+    soft_marketing: '软营销心智链',
     evidence: '事实与证据',
     simulation_disclosure: '模拟互动披露',
     execution_plan: '真实问题承接',
@@ -130,6 +146,18 @@ function publicationCheckLabel(key: AgentHarnessCandidate['publicationChecklist'
 function publicationCheckStatus(status: AgentHarnessCandidate['publicationChecklist'][number]['status']): string {
   return { ready: '已就绪', blocked: '阻断', manual_review: '人工复核' }[status];
 }
+
+type HarnessNarrativePath = NonNullable<AgentHarnessCandidate['marketingStrategy']>['narrativePath'];
+
+function narrativePathLabel(value?: HarnessNarrativePath): string {
+  const labels: Record<NonNullable<HarnessNarrativePath>, string> = {
+    tension_first: '顾虑切入',
+    observation_first: '观察切入',
+    question_first: '问题切入',
+  };
+  return value ? labels[value] : '旧运行未记录';
+}
+
 
 function postingIdentityLabel(value: AgentHarnessCandidate['content']['Cref']['threads'][number]['postingIdentity']): string {
   return { author: '作者本人', brand: '品牌账号', staff: '项目人员', expert: '专业人员', publisher: '发布账号' }[value];
@@ -148,10 +176,48 @@ function routeOwnerLabel(value: 'publisher' | 'staff' | 'expert'): string {
   return { publisher: '发布账号', staff: '项目人员', expert: '专业人员' }[value];
 }
 
+type AgentHarnessThread = AgentHarnessCandidate['content']['Cref']['threads'][number];
+
+function harnessThreadKind(thread: AgentHarnessThread): 'org_answer' | 'reader_exchange' | 'organic_reaction' {
+  return thread.threadKind ?? 'org_answer';
+}
+
+function harnessThreadMarkdown(thread: AgentHarnessThread): string[] {
+  const kind = harnessThreadKind(thread);
+  if (kind === 'organic_reaction') {
+    return ['', `**短反应 · ${thread.displayName || '模拟读者'}**`, thread.question];
+  }
+  if (kind === 'reader_exchange') {
+    return [
+      '', `**读者接话 · ${thread.displayName || '模拟读者 A'}**`, thread.question,
+      `${thread.replyDisplayName || '模拟读者 B'}：${thread.answer}`,
+      ...thread.followUps.flatMap((followUp) => [`${followUp.kind === 'counterexample' ? '反例' : '接着聊'}：${followUp.question}`, `${followUp.answer}`]),
+    ];
+  }
+  return [
+    '', `**${thread.displayName || '模拟读者'}问：${thread.question}**`, `${postingIdentityLabel(thread.postingIdentity)}答：${thread.answer}`,
+    ...thread.followUps.flatMap((followUp) => [`${followUp.kind === 'counterexample' ? '反例' : '追问'}：${followUp.question}`, `答：${followUp.answer}`]),
+    ...(thread.clarification ? [`澄清：${thread.clarification}`] : []),
+    ...(thread.nextStep ? [`下一步：${thread.nextStep}`] : []),
+    ...(thread.boundary ? [`边界：${thread.boundary}`] : []),
+    `停止原因：${threadStopReasonLabel(thread.stopReason)}`,
+    `证据：${thread.evidenceIds.join('、') || '无'}`,
+  ];
+}
+
 function candidateMarkdown(candidate: AgentHarnessCandidate): string {
   const { N, H, Cref, publishing } = candidate.content;
   return [
     `# ${N.title}`, '', `> 创意命题：${candidate.concept}`, '',
+    ...(candidate.marketingStrategy ? [
+      '## 软营销心智链',
+      `叙事路径：${narrativePathLabel(candidate.marketingStrategy.narrativePath)}`,
+      `用户欲望：${candidate.marketingStrategy.readerDesire}`,
+      `隐藏卡点：${candidate.marketingStrategy.hiddenTension}`,
+      `认知翻转：${candidate.marketingStrategy.oldJudgment} → ${candidate.marketingStrategy.newJudgment}`,
+      `项目承接：${candidate.marketingStrategy.projectBridge}`,
+      `低压力下一步：${candidate.marketingStrategy.lowPressureNextStep}`, '',
+    ] : []),
     '## 封面', `主文案：${N.coverHeadline}`, `副文案：${N.coverSubheadline}`, '',
     '## 逐图脚本', `总任务：${N.imageBrief}`,
     ...N.imageSequence.flatMap((item) => [
@@ -161,16 +227,8 @@ function candidateMarkdown(candidate: AgentHarnessCandidate): string {
       `证据：${item.evidenceIds.join('、') || '无'}`,
     ]),
     '', '## 发布正文', N.body, '', `行动引导：${N.callToAction}`, '', H.hashtags.join(' '),
-    '', '## 账号首评', Cref.ownedFirstComment, '', '## 模拟问答参考', Cref.disclaimer,
-    ...Cref.threads.flatMap((thread) => [
-      '', `**模拟读者问：${thread.question}**`, `${postingIdentityLabel(thread.postingIdentity)}答：${thread.answer}`,
-      ...thread.followUps.flatMap((followUp) => [`${followUp.kind === 'counterexample' ? '反例' : '追问'}：${followUp.question}`, `答：${followUp.answer}`]),
-      ...(thread.clarification ? [`澄清：${thread.clarification}`] : []),
-      ...(thread.nextStep ? [`下一步：${thread.nextStep}`] : []),
-      ...(thread.boundary ? [`边界：${thread.boundary}`] : []),
-      `停止原因：${threadStopReasonLabel(thread.stopReason)}`,
-      `证据：${thread.evidenceIds.join('、') || '无'}`,
-    ]),
+    '', '## 账号首评', Cref.ownedFirstComment, '', '## 模拟评论区参考', HARNESS_SIMULATION_NOTICE,
+    ...Cref.threads.flatMap(harnessThreadMarkdown),
     '', '## 发布说明', `入口：${publishing.entryPoint}`, `发布身份：${publishing.accountIdentity}`,
     `时机说明：${publishing.timingNote}`, `互动目标：${publishing.interactionGoal}`,
     '', '## aC · 真实问题承接计划（计划，非已执行）',
@@ -241,6 +299,15 @@ function CandidateCard({
       <section><small>行动引导</small><p>{N.callToAction}</p><div className="harness-tags">{H.hashtags.map((tag) => <span key={tag}>{tag.startsWith('#') ? tag : `#${tag}`}</span>)}</div></section>
     </div>
     <section className="harness-copy-section"><small>正文</small><p className="harness-body">{N.body}</p></section>
+    {candidate.marketingStrategy && <section className="harness-marketing-strategy" aria-label="软营销心智链">
+      <header><div><span className="v2-lab-id">MINDSET PATH</span><h4>这篇如何自然种草</h4></div><Badge tone="blue">{narrativePathLabel(candidate.marketingStrategy.narrativePath)} · 可审阅策略</Badge></header>
+      <div>
+        <article><small>1 · 用户欲望</small><strong>{candidate.marketingStrategy.readerDesire}</strong><p>{candidate.marketingStrategy.hiddenTension}</p></article>
+        <article><small>2 · 认知翻转</small><del>{candidate.marketingStrategy.oldJudgment}</del><strong>{candidate.marketingStrategy.newJudgment}</strong></article>
+        <article><small>3 · 项目承接</small><strong>{candidate.marketingStrategy.projectBridge}</strong></article>
+        <article><small>4 · 低压力下一步</small><strong>{candidate.marketingStrategy.lowPressureNextStep}</strong></article>
+      </div>
+    </section>}
     <details className="harness-images" open>
       <summary><Images size={15} />逐图脚本 · {N.imageSequence.length} 张</summary>
       <p className="harness-disclaimer">{N.imageBrief}</p>
@@ -252,14 +319,31 @@ function CandidateCard({
     <details className="harness-comments" open>
       <summary><MessageCircleMore size={15} />首评与模拟问答 · {Cref.threads.length} 条线程</summary>
       <div className="harness-owned-comment"><small>账号首评</small><p>{Cref.ownedFirstComment}</p></div>
-      <p className="harness-disclaimer">{Cref.disclaimer}</p>
-      {Cref.threads.map((thread) => <article className="harness-thread" key={thread.id}>
-        <div className="harness-thread__meta"><Badge tone="warning">模拟读者提问</Badge><Badge tone="blue">{postingIdentityLabel(thread.postingIdentity)}答复</Badge><span>证据 {thread.evidenceIds.length} 项</span></div>
-        <strong>问：{thread.question}</strong><p>答：{thread.answer}</p>
-        {thread.followUps.map((followUp, index) => <div className="harness-thread__follow-up" key={`${thread.id}-${index}`}><b>{followUp.kind === 'counterexample' ? '反例' : '追问'}：{followUp.question}</b><span>{followUp.answer}</span></div>)}
-        <div className="harness-thread__resolution"><p><b>澄清</b>{thread.clarification || '旧运行未记录'}</p><p><b>下一步</b>{thread.nextStep || '旧运行未记录'}</p><p><b>停止原因</b>{threadStopReasonLabel(thread.stopReason)}</p></div>
-        {thread.boundary && <small>边界：{thread.boundary}</small>}
-      </article>)}
+      {/*
+        模拟标注取常量,不再取 Cref.disclaimer:这句话的读者是操盘手,不是小红书用户,
+        留在交付字段里会被一起粘贴到真实评论区。改成常量后界面固定显示,也不会因为
+        模型这次漏写就消失——披露反而比原来更稳。
+      */}
+      <p className="harness-disclaimer">{HARNESS_SIMULATION_NOTICE}</p>
+      {Cref.threads.map((thread) => {
+        const kind = harnessThreadKind(thread);
+        return <article className={`harness-thread harness-thread--${kind}`} key={thread.id}>
+          <div className="harness-thread__meta">
+            <Badge tone="warning">{kind === 'org_answer' ? '机构答疑' : kind === 'reader_exchange' ? '读者接话' : '短反应'}</Badge>
+            {kind === 'org_answer' && <Badge tone="blue">{postingIdentityLabel(thread.postingIdentity)}答复</Badge>}
+            <span>{thread.displayName || '模拟读者'}{kind === 'reader_exchange' ? ` → ${thread.replyDisplayName || '模拟读者'}` : ''}</span>
+          </div>
+          {kind === 'organic_reaction' ? <strong>{thread.question}</strong> : kind === 'reader_exchange' ? <>
+            <strong>{thread.displayName || '模拟读者 A'}：{thread.question}</strong>
+            <p>{thread.replyDisplayName || '模拟读者 B'}：{thread.answer}</p>
+          </> : <>
+            <strong>问：{thread.question}</strong><p>答：{thread.answer}</p>
+          </>}
+          {kind !== 'organic_reaction' && thread.followUps.map((followUp, index) => <div className="harness-thread__follow-up" key={`${thread.id}-${index}`}><b>{followUp.kind === 'counterexample' ? '反例' : kind === 'reader_exchange' ? '接着聊' : '追问'}：{followUp.question}</b><span>{followUp.answer}</span></div>)}
+          {kind === 'org_answer' && <div className="harness-thread__resolution"><p><b>澄清</b>{thread.clarification || '旧运行未记录'}</p><p><b>下一步</b>{thread.nextStep || '旧运行未记录'}</p><p><b>停止原因</b>{threadStopReasonLabel(thread.stopReason)}</p></div>}
+          {kind === 'org_answer' && thread.boundary && <small>边界：{thread.boundary}</small>}
+        </article>;
+      })}
     </details>
     <section className="harness-execution-plan" aria-label="真实问题承接计划">
       <header><div><span className="v2-lab-id">aC · EXECUTION PLAN</span><h4>真实问题承接计划</h4></div><Badge tone="warning">计划，非已执行</Badge></header>
@@ -289,7 +373,7 @@ export function AgentHarnessPage() {
   const navigate = useNavigate();
   const { projectId, currentProject, setProjectId } = useProjects();
   const [form, setForm] = useState<HarnessFineTune>(INITIAL_FINE_TUNE);
-  const [intentId, setIntentId] = useState<HarnessIntentId>('decision');
+  const [intentId, setIntentId] = useState<HarnessIntentId>('project_value');
   const [methodProfileId, setMethodProfileId] = useState<HarnessMethodId>(DEFAULT_HARNESS_METHOD_ID);
   const [audienceStageId, setAudienceStageId] = useState<HarnessAudienceStageId>(getHarnessMethodProfile(DEFAULT_HARNESS_METHOD_ID).audienceStage);
   const [audienceStageAdjusted, setAudienceStageAdjusted] = useState(false);
@@ -527,6 +611,8 @@ export function AgentHarnessPage() {
   const quickInput = useMemo(() => {
     const overrides: Partial<AgentHarnessCreateInput> = {};
     if (form.bodyLength) overrides.bodyLength = form.bodyLength;
+    // 空串不进 overrides:缺省交给后端的 DEFAULT_HARNESS_SEEDING_MODE,前端不编第二份默认值。
+    if (form.seedingMode) overrides.seedingMode = form.seedingMode;
     const textOverrides: Array<[keyof AgentHarnessCreateInput, string]> = [
       ['goal', form.goal], ['audience', form.audience], ['entryPoint', form.entryPoint], ['tone', form.tone],
       ['accountIdentity', form.accountIdentity], ['callToAction', form.callToAction],
@@ -771,7 +857,7 @@ export function AgentHarnessPage() {
     <V2Hero
       status={<>{currentProject?.name || '未选择项目'} · 独立实验频道</>}
       title="Agent 创作"
-      description="这个频道还在测试中：流程和界面都可能调整，导出仍要过同一套硬校验。不读取八轮分析、缺口池、表达策略、选题机会或原编排计划。Agent 直接从原始项目证据和你明确选择的已批准图片观察出发，自主检索、构思、自评并提交三套完整发布参考包。"
+      description="这个频道还在测试中：流程和界面都可能调整，导出仍要过同一套硬校验。不读取八轮分析、缺口池、表达策略、选题机会或原编排计划。Agent 直接从原始项目证据和你明确选择的已批准图片观察出发，自主检索、构思、自评并提交三套完整发布参考包。默认按素人代发生成：正文用真人账号第一人称，评论区由博主自己回，医生姓名靠被问出来；需要机构口吻时在设置里切换。"
       actions={<a className="v2-hero__link" href="/generate"><Sparkles size={15} />切换到结构化创作</a>}
     />
 
@@ -833,7 +919,7 @@ export function AgentHarnessPage() {
           </section>
 
           <div className="harness-auto-summary">
-            <Sparkles size={19} /><div><strong>现在开始，Agent 会这样做</strong><p>{topicMode === 'agent_discovery' ? '从项目资料自主找题' : `围绕“${form.topic.trim() || '待填写主题'}”创作`} · {selectedIntent.title} · 采用“{selectedMethod.label}” · 面向{selectedAudienceStage.title}的读者 · 生成 3 套方案</p><small>{assetMode === 'auto' ? `自动检查 ${Math.min(images.length, 12)} 张已批准素材并逐张决定使用或舍弃` : assetMode === 'manual' ? `只检查你选中的 ${form.imageAssetIds.length} 张素材` : '本次不使用已有图片素材'}</small></div>
+            <Sparkles size={19} /><div><strong>现在开始，Agent 会这样做</strong><p>{topicMode === 'agent_discovery' ? '从项目资料自主找题' : `围绕“${form.topic.trim() || '待填写主题'}”创作`} · {selectedIntent.title} · 采用“{selectedMethod.label}” · {harnessSeedingModeLabel(form.seedingMode)} · 面向{selectedAudienceStage.title}的读者 · 生成 3 套方案</p><small>{assetMode === 'auto' ? `自动检查 ${Math.min(images.length, 12)} 张已批准素材并逐张决定使用或舍弃` : assetMode === 'manual' ? `只检查你选中的 ${form.imageAssetIds.length} 张素材` : '本次不使用已有图片素材'}</small></div>
           </div>
 
           <details className="harness-fine-tune">
@@ -847,6 +933,7 @@ export function AgentHarnessPage() {
               <section><h3>覆盖系统推荐（可选）</h3><p className="harness-combo-note">点击输入框右侧可选常用值；选中后仍可继续修改，也可以直接输入自己的要求。</p><div className="harness-form__row"><Field label="生成目标"><input list="harness-goal-options" value={form.goal} onChange={(event) => setForm({ ...form, goal: event.target.value })} placeholder={String(quickInput.goal || '')} /><datalist id="harness-goal-options">{HARNESS_FINE_TUNE_SUGGESTIONS.goals.map((value) => <option key={value} value={value} />)}</datalist></Field><Field label="目标读者"><input list="harness-audience-options" value={form.audience} onChange={(event) => setForm({ ...form, audience: event.target.value })} placeholder={String(quickInput.audience || '')} /><datalist id="harness-audience-options">{HARNESS_FINE_TUNE_SUGGESTIONS.audiences.map((value) => <option key={value} value={value} />)}</datalist></Field></div>
               <div className="harness-form__row"><Field label="内容入口"><input list="harness-entry-options" value={form.entryPoint} onChange={(event) => setForm({ ...form, entryPoint: event.target.value })} placeholder={String(quickInput.entryPoint || '')} /><datalist id="harness-entry-options">{HARNESS_FINE_TUNE_SUGGESTIONS.entryPoints.map((value) => <option key={value} value={value} />)}</datalist></Field><Field label="发布身份"><input list="harness-identity-options" value={form.accountIdentity} onChange={(event) => setForm({ ...form, accountIdentity: event.target.value })} placeholder="选择常用身份，或直接填写" /><datalist id="harness-identity-options">{HARNESS_FINE_TUNE_SUGGESTIONS.accountIdentities.map((value) => <option key={value} value={value} />)}</datalist></Field></div>
               <div className="harness-form__row"><Field label="语气"><input list="harness-tone-options" value={form.tone} onChange={(event) => setForm({ ...form, tone: event.target.value })} placeholder={String(quickInput.tone || '')} /><datalist id="harness-tone-options">{HARNESS_FINE_TUNE_SUGGESTIONS.tones.map((value) => <option key={value} value={value} />)}</datalist></Field><Field label="正文长度"><select value={form.bodyLength} onChange={(event) => setForm({ ...form, bodyLength: event.target.value as HarnessFineTune['bodyLength'] })}><option value="">跟随方法（{selectedMethod.bodyLength === 'short' ? '短' : selectedMethod.bodyLength === 'medium' ? '中' : '长'}）</option><option value="short">短，快速看完</option><option value="medium">中，充分说明</option><option value="long">长，完整展开</option></select></Field></div>
+              <div className="harness-form__row"><Field label="内容形态" hint="决定谁在说话：正文的第一人称是真人账号还是项目官方"><select value={form.seedingMode} onChange={(event) => setForm({ ...form, seedingMode: event.target.value as HarnessFineTune['seedingMode'] })}><option value="">素人代发（推荐）</option><option value="peer_seeding">素人代发：真人账号第一人称</option><option value="brand_voice">机构口吻：官方身份答疑</option></select></Field></div>
               <Field label="行动引导"><input list="harness-cta-options" value={form.callToAction} onChange={(event) => setForm({ ...form, callToAction: event.target.value })} placeholder={String(quickInput.callToAction || '')} /><datalist id="harness-cta-options">{HARNESS_FINE_TUNE_SUGGESTIONS.callsToAction.map((value) => <option key={value} value={value} />)}</datalist></Field>
               <Field label="发布说明"><div className="harness-template-input"><select aria-label="选择常用发布说明" value="" onChange={(event) => { if (event.target.value) setForm({ ...form, publishingNotes: event.target.value }); }}><option value="">选择常用说明（选后仍可修改）</option>{HARNESS_FINE_TUNE_SUGGESTIONS.publishingNotes.map((value) => <option key={value} value={value}>{value}</option>)}</select><textarea value={form.publishingNotes} onChange={(event) => setForm({ ...form, publishingNotes: event.target.value })} rows={3} maxLength={1000} placeholder="也可以直接填写排期、互动目标或审核要求" /></div></Field></section>
 
@@ -874,7 +961,7 @@ export function AgentHarnessPage() {
     {selected && <section className="harness-result">
       <div className="harness-result__header"><div><span className="v2-lab-id">HARNESS RUN · {runKindLabel(selected.runKind)}</span><h2>{selected.topic}</h2><p>{selected.goal}</p>{selected.instruction && <p>改稿要求：{selected.instruction}</p>}</div><div className="harness-result__actions"><Badge tone={selected.status === 'completed' && !reviewBlocked ? 'positive' : selected.status === 'failed' || reviewBlocked ? 'danger' : 'blue'}>{statusLabel(selected)}</Badge><Button variant="ghost" icon={<Link2 size={14} />} onClick={() => void copyLink()}>复制链接</Button><Button variant="ghost" icon={<Download size={14} />} disabled={!canExport || !canExportHarnessRun(selected)} title={!canExport ? '缺少导出权限' : undefined} onClick={() => window.location.assign(api.agentHarness.runExportUrl(selected.id, 'markdown'))}>导出整次</Button><Button variant="ghost" icon={<RotateCcw size={14} />} loading={actionBusy} disabled={!canRun || !['completed', 'failed'].includes(selected.status)} title={!canRun ? '缺少创作权限' : undefined} onClick={() => void retry()}>重新运行</Button><Button variant="danger" icon={<Trash2 size={14} />} loading={actionBusy} disabled={!canEdit} title={!canEdit ? '缺少编辑权限' : undefined} onClick={() => void remove()}>删除</Button></div></div>
       {selected.parentJobId && <div className="harness-lineage">本次由旧运行派生：{selected.parentDeleted ? <span>源运行已在回收站</span> : <button type="button" onClick={() => navigate(`/agent-harness/${selected.parentJobId}`)}>{selected.parentJobId.slice(0, 8)}</button>}</div>}
-      <details className="harness-task-contract"><summary><ShieldCheck size={15} />复核本次冻结的创作合同</summary><div className="harness-task-contract__grid"><section><small>选题 / 方法</small><strong>{taskContract.topicMode} · {taskContract.methodLabel}</strong><p>{taskContract.audienceStage} · {taskContract.entryPoint} · {taskContract.bodyLength}</p></section><section><small>正文 / 评论职责</small><p><b>正文：</b>{taskContract.bodyRole}</p><p><b>评论：</b>{taskContract.commentRole}</p></section><section><small>真实性边界</small><p>{taskContract.boundaryPolicy}</p><p>必须包含：{taskContract.mustInclude.join('、') || '无'} · 禁止：{taskContract.forbidden.join('、') || '无'}</p><p>批准图片快照：{taskContract.imageCount} 张</p></section></div></details>
+      <details className="harness-task-contract"><summary><ShieldCheck size={15} />复核本次冻结的创作合同</summary><div className="harness-task-contract__grid"><section><small>选题 / 方法</small><strong>{taskContract.topicMode} · {taskContract.methodLabel}</strong><p>{taskContract.audienceStage} · {taskContract.entryPoint} · {taskContract.bodyLength}</p><p><b>内容形态：</b>{harnessSeedingModeLabel(selected.task?.seedingMode)}</p></section><section><small>正文 / 评论职责</small><p><b>正文：</b>{taskContract.bodyRole}</p><p><b>评论：</b>{taskContract.commentRole}</p></section><section><small>真实性边界</small><p>{taskContract.boundaryPolicy}</p><p>必须包含：{taskContract.mustInclude.join('、') || '无'} · 禁止：{taskContract.forbidden.join('、') || '无'}</p><p>批准图片快照：{taskContract.imageCount} 张</p></section></div></details>
       {['queued', 'running'].includes(selected.status) && <div className="harness-progress" role="status" aria-live="polite"><div role="progressbar" aria-label="Agent 运行进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={selected.progress}><span style={{ width: `${selected.progress}%` }} /></div><p><LoaderCircle className="spin" size={15} />{selected.status === 'queued' ? `等待队列中${selected.queuePosition ? ` · 第 ${selected.queuePosition}${selected.queueLength && selected.queueLength >= selected.queuePosition ? `/${selected.queueLength}` : ''} 位` : ''}` : 'Agent 正在自主决定下一步'}；页面可关闭，任务会在独立队列继续运行。<b>{selected.progress}%</b></p></div>}
       {pollWarning && ['queued', 'running'].includes(selected.status) && <div className="harness-result-notice warning" role="alert"><TriangleAlert size={18} /><div><strong>状态刷新暂时中断</strong><p>{pollWarning}。后台任务不会因此停止；可等待自动恢复或手动刷新。</p><Button variant="secondary" onClick={() => void loadList()}>立即刷新</Button></div></div>}
       {selected.status === 'failed' && failureGuidance && <div className="harness-failure" role="alert"><TriangleAlert size={19} /><div><strong>本次没有产生候选</strong><p>{failureGuidance.message}</p><Button variant="secondary" icon={failureGuidance.action === 'retry' ? <RotateCcw size={14} /> : <Sparkles size={14} />} loading={actionBusy} onClick={() => failureGuidance.action === 'retry' ? void retry() : navigate('/settings')}>{failureGuidance.actionLabel}</Button></div></div>}

@@ -4,10 +4,18 @@ import {
   ContentGenerationAgent,
   createDefaultGenerationConfig,
   DEFAULT_FORMULA_VERSION,
+  GENERATION_CORE_OUTPUT_TOKENS,
+  GENERATION_OUTPUT_TOKENS,
+  GENERATION_SHORT_OUTPUT_TOKENS,
   FORMULA_EXECUTION_POLICY_DIGEST,
   FORMULA_EXECUTION_POLICY_VERSION,
   indexKnowledgeSource,
+  normalizeProjectCreativeBlueprint,
   resolveGenerationConfig,
+  shouldAttemptGenerationRepair,
+  shouldCorrectCommentReadersFailure,
+  shouldRegenerateCommentReadersFailure,
+  ModelProviderError,
 } from "../src/index.js";
 import type { ModelGenerationRequest, ModelProvider } from "../src/index.js";
 
@@ -69,7 +77,47 @@ function stagedCommentThreads(request: ModelGenerationRequest, answer: string) {
   }));
 }
 
+describe("observed generation cost controls", () => {
+  it("separates empty-output regeneration from non-empty JSON shape correction", () => {
+    const empty = new ModelProviderError("Model response did not contain output text.", 200, "r", false, "stop", undefined, {
+      topLevelKeys: ["choices"], contentKind: "string", contentChars: 0, reasoningContentChars: 512,
+    });
+    expect(shouldRegenerateCommentReadersFailure(empty)).toBe(true);
+    const recoveredEmpty = new ModelProviderError("empty after recovery", 200, "r", false, "stop", undefined, {
+      topLevelKeys: ["choices"], contentKind: "string", contentChars: 0, reasoningContentChars: 512,
+      emptyOutputRecoveryAttempted: true,
+    });
+    expect(shouldRegenerateCommentReadersFailure(recoveredEmpty)).toBe(false);
+    expect(shouldCorrectCommentReadersFailure(empty, "")).toBe(false);
+    expect(shouldRegenerateCommentReadersFailure(new ModelProviderError("gateway", 502, "r", true))).toBe(false);
+    expect(shouldCorrectCommentReadersFailure(new Error("parser error"), "{bad json")).toBe(true);
+    expect(shouldCorrectCommentReadersFailure(new Error("parser error"), "")).toBe(false);
+  });
+
+  it("skips model repair when a terminal hard error already makes the candidate non-publishable", () => {
+    expect(shouldAttemptGenerationRepair([
+      { code: "visible_claim_not_in_ledger", severity: "error", channel: "N.body", message: "repairable", repairable: true },
+      { code: "gap_resolution_not_realized", severity: "error", channel: "N.body", message: "terminal", repairable: false },
+    ])).toBe(false);
+    expect(shouldAttemptGenerationRepair([
+      { code: "visible_claim_not_in_ledger", severity: "error", channel: "N.body", message: "repairable", repairable: true },
+    ])).toBe(true);
+    expect(shouldAttemptGenerationRepair([
+      { code: "shape", severity: "warning", channel: "N.body", message: "warning", repairable: true },
+    ])).toBe(false);
+  });
+});
+
 describe("resolved generation config", () => {
+  it("defaults to a 64K output budget and reserves the same capacity in the context window", () => {
+    const defaults = createDefaultGenerationConfig(project, DEFAULT_FORMULA_VERSION);
+    expect(defaults.model.maxOutputTokens).toBe(GENERATION_OUTPUT_TOKENS);
+    expect(defaults.knowledge.outputReserveTokens).toBe(GENERATION_OUTPUT_TOKENS);
+    expect(GENERATION_OUTPUT_TOKENS).toBe(64_000);
+    expect(GENERATION_CORE_OUTPUT_TOKENS).toBe(32_000);
+    expect(GENERATION_SHORT_OUTPUT_TOKENS).toBe(16_000);
+  });
+
   it("applies system -> workspace -> project -> task precedence and replaces arrays", () => {
     const defaults = config();
     const resolved = resolveGenerationConfig(defaults, {
@@ -88,6 +136,32 @@ describe("resolved generation config", () => {
     const resolved = resolveGenerationConfig(config(), { task: malicious });
     expect(({} as any).polluted).toBeUndefined();
     expect(resolved.project.id).toBe("p1");
+  });
+});
+
+describe("traditional generation telemetry", () => {
+  it("emits metadata-only candidate validation events and ignores a failing sink", async () => {
+    const events: unknown[] = [];
+    const input = {
+      jobId: "telemetry-job",
+      config: config(),
+      formulaVersion: DEFAULT_FORMULA_VERSION,
+      knowledge,
+    };
+    const baseline = await new ContentGenerationAgent({ now: () => new Date("2026-07-12T12:00:00.000Z") })
+      .generate(input);
+    const observed = await new ContentGenerationAgent({ now: () => new Date("2026-07-12T12:00:00.000Z") })
+      .generate({ ...input, onTelemetry: (event) => { events.push(event); } });
+    expect(observed.packages.map((item) => item.content)).toEqual(baseline.packages.map((item) => item.content));
+    expect(events.filter((event: any) => event.type === "candidate_validation")).toHaveLength(3);
+    expect(events.filter((event: any) => event.type === "candidate_completed")).toHaveLength(3);
+    const serialized = JSON.stringify(events);
+    expect(serialized).not.toContain("项目资料只确认这些信息");
+    expect(serialized).not.toMatch(/"(?:title|body|prompt|response|message)"/u);
+
+    const withBrokenSink = await new ContentGenerationAgent({ now: () => new Date("2026-07-12T12:00:00.000Z") })
+      .generate({ ...input, onTelemetry: () => { throw new Error("telemetry unavailable"); } });
+    expect(withBrokenSink.packages.map((item) => item.content)).toEqual(baseline.packages.map((item) => item.content));
   });
 });
 
@@ -263,6 +337,10 @@ describe("three-candidate content generation engine", () => {
     const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-07-12T00:00:00Z") })
       .generate({ jobId: "repair-job", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge: [knowledge[0]!] });
     expect(calls.filter((item) => item.metadata?.purpose === "generate_core")).toHaveLength(3);
+    expect(calls.filter((item) => item.metadata?.purpose === "generate_core").every((item) => item.maxOutputTokens === GENERATION_CORE_OUTPUT_TOKENS)).toBe(true);
+    expect(calls.filter((item) => item.metadata?.purpose === "generate_org_answers").every((item) => item.maxOutputTokens === GENERATION_SHORT_OUTPUT_TOKENS)).toBe(true);
+    expect(calls.filter((item) => ["generate_comment_readers", "generate_ledger", "repair"].includes(String(item.metadata?.purpose)))
+      .every((item) => item.maxOutputTokens === GENERATION_OUTPUT_TOKENS)).toBe(true);
     // 按侧+按角色隔离后,评论读者侧调用取代原合并评论调用(purpose 更名)。
     expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_readers")).toHaveLength(3);
     // Task 7.3: multi-turn comment growth (stage 2B) is opt-in and conservative by
@@ -335,6 +413,85 @@ describe("three-candidate content generation engine", () => {
     expect(result.packages.every((item) => item.content.N.title === "先核实再决定")).toBe(true);
   });
 
+  it("评论读者阶段严格分流：空响应完整重生成、坏 JSON 只修结构、连续空响应淘汰候选", async () => {
+    const calls: ModelGenerationRequest[] = [];
+    const emptyReaderResponse = () => new ModelProviderError(
+      "Model response did not contain output text.",
+      200,
+      "req_empty",
+      false,
+      "stop",
+      { inputTokens: 100, outputTokens: 600, totalTokens: 700 },
+      {
+        topLevelKeys: ["choices", "usage"],
+        choiceMessageKeys: ["content", "reasoning_content"],
+        contentKind: "string",
+        contentChars: 0,
+        reasoningContentChars: 600,
+      },
+    );
+    const core = JSON.stringify({
+      H: { hashtags: ["方案选择", "信息核验", "适用边界"] },
+      N: {
+        imageBrief: "信息清单封面",
+        title: "先核实再决定",
+        body: "资料中确认了产品要点。具体适用条件仍需核实。".repeat(8),
+      },
+    });
+    const provider: ModelProvider = {
+      async generate(request) {
+        calls.push(request);
+        const purpose = String(request.metadata?.purpose);
+        const candidate = Number(request.metadata?.candidateIndex ?? 0);
+        if (purpose === "generate_core") return { text: core, raw: {} };
+        if (purpose === "generate_comment_readers") {
+          if (candidate === 0 || candidate === 2) throw emptyReaderResponse();
+          return { text: "{not valid json", raw: {} };
+        }
+        if (purpose === "regenerate_comment_readers") {
+          if (candidate === 2) throw emptyReaderResponse();
+          return {
+            text: JSON.stringify({ threads: stagedCommentThreads(request, "我也在看这个，先等等更多信息。") }),
+            raw: {},
+          };
+        }
+        if (purpose === "repair_comment_readers") return {
+          text: JSON.stringify({ threads: stagedCommentThreads(request, "我也在看这个，先等等更多信息。") }),
+          raw: {},
+        };
+        if (purpose === "generate_org_answers") return {
+          text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "具体要结合已披露条件核实。" })) }),
+          raw: {},
+        };
+        if (purpose === "generate_ledger") return {
+          text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }),
+          raw: {},
+        };
+        return { text: "{}", raw: {} };
+      },
+    };
+    const value = config();
+    value.content.bodyMinChars = 20;
+    value.generation.maxRepairAttempts = 0;
+    const result = await new ContentGenerationAgent({ modelProvider: provider })
+      .generate({ jobId: "reader-failure-routing", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge });
+
+    expect(result.packages.map((item) => item.candidateIndex)).toEqual([0, 1]);
+    expect(result.degradedCandidates).toEqual([
+      { candidateIndex: 2, reason: expect.stringContaining("did not contain output text") },
+    ]);
+    expect(result.packages.find((item) => item.candidateIndex === 0)?.validation.issues)
+      .toContainEqual(expect.objectContaining({ code: "model_comment_readers_regenerated", severity: "warning" }));
+    expect(result.packages.find((item) => item.candidateIndex === 1)?.validation.issues)
+      .toContainEqual(expect.objectContaining({ code: "model_comment_readers_corrected", severity: "warning" }));
+    expect(calls.filter((call) => call.metadata?.purpose === "regenerate_comment_readers")
+      .map((call) => call.metadata?.candidateIndex).sort()).toEqual([0, 2]);
+    expect(calls.filter((call) => call.metadata?.purpose === "repair_comment_readers")
+      .map((call) => call.metadata?.candidateIndex)).toEqual([1]);
+    expect(result.packages.flatMap((item) => item.content.Cref.threads)
+      .every((thread) => !/(?:主问题原文|只可改成|表达方式)/u.test(thread.question))).toBe(true);
+  });
+
   it("三个候选全失败时仍然整单失败,不吐兜底稿", async () => {
     const provider: ModelProvider = { async generate() { throw new Error("temporary upstream failure"); } };
     const value = config();
@@ -342,6 +499,57 @@ describe("three-candidate content generation engine", () => {
     await expect(new ContentGenerationAgent({ modelProvider: provider })
       .generate({ jobId: "all-candidates-failed", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge }))
       .rejects.toThrow(/三个模型候选全部生成失败.*未生成可发布降级稿/u);
+  });
+
+  it("Core 身份屏障失败后不启动任何评论、答复或台账阶段", async () => {
+    const calls: ModelGenerationRequest[] = [];
+    const provider: ModelProvider = {
+      async generate(request) {
+        calls.push(request);
+        return {
+          text: JSON.stringify({
+            H: { hashtags: ["记录"] },
+            N: { imageBrief: "记录画面", title: "昨天的记录", body: "我昨天已经面诊了。" },
+          }),
+          raw: {},
+        };
+      },
+    };
+    const blueprint = normalizeProjectCreativeBlueprint({
+      projectId: "p1",
+      sourceFingerprint: "core-identity-barrier",
+      moduleRevisions: {},
+      modules: {
+        domain_model: { projectNoun: "服务", actions: ["面诊"] },
+        scenario_model: {
+          families: [{
+            id: "current", label: "当前状态", prototype: "narrow_request",
+            applicableStages: ["comparing"], prohibitedUnsupportedHistories: ["已经面诊"],
+            source: { status: "inference", evidenceIds: [] },
+          }],
+        },
+      },
+    });
+
+    await expect(new ContentGenerationAgent({ modelProvider: provider }).generate({
+      jobId: "core-identity-barrier",
+      config: config(),
+      formulaVersion: DEFAULT_FORMULA_VERSION,
+      knowledge,
+      planningContext: { projectBlueprint: blueprint },
+    })).rejects.toThrow(/三个模型候选全部生成失败.*Publishing-topology preflight failed/u);
+
+    expect(calls).toHaveLength(6);
+    for (const candidateIndex of [0, 1, 2]) {
+      expect(calls
+        .filter((call) => call.metadata?.candidateIndex === candidateIndex)
+        .map((call) => call.metadata?.purpose))
+        .toEqual(["generate_core", "repair_core_identity"]);
+    }
+    expect(calls.some((call) => [
+      "generate_comment_readers", "repair_comment_readers", "generate_host_answers",
+      "generate_org_answers", "generate_comment_growth", "generate_ledger", "repair",
+    ].includes(String(call.metadata?.purpose)))).toBe(false);
   });
 
   it("revises only the selected candidate and preserves unaffected channels", async () => {
@@ -487,13 +695,14 @@ describe("three-candidate content generation engine", () => {
         imageAnalyses: approvedImageAnalyses,
       },
     });
-    // 按侧+按角色隔离后,每候选 6 次阶段调用:core + assign_reply_identities
-    // (1.9,答复身份分配) + comment_readers(2A-R) + org_answers(2A-O,本测试线程
-    // 全部同一身份路由,1 次) + comment_growth(2B,显式开启) + ledger;growth mock
-    // 不留空答复追问,故不触发 2B-O 补答。
+    // 身份已在规划期冻结，每候选 6 次阶段调用：core + comment_readers(2A-R)
+    // + comment_editor(2A-E) + org_answers(2A-O，本测试线程同一身份，1 次)
+    // + comment_growth(2B) + ledger。
+    // 不再存在 assign_reply_identities 二次映射调用。
     expect(calls).toHaveLength(18);
-    expect(calls.filter((item) => item.metadata?.purpose === "assign_reply_identities")).toHaveLength(3);
+    expect(calls.filter((item) => item.metadata?.purpose === "assign_reply_identities")).toHaveLength(0);
     expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_readers")).toHaveLength(3);
+    expect(calls.filter((item) => item.metadata?.purpose === "edit_comment_readers")).toHaveLength(3);
     expect(calls.filter((item) => item.metadata?.purpose === "generate_org_answers")).toHaveLength(3);
     expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_growth")).toHaveLength(3);
     const promptTextOf = (call: ModelGenerationRequest): string => {
@@ -501,7 +710,7 @@ describe("three-candidate content generation engine", () => {
       return Array.isArray(content) ? content.find((part) => part.type === "text")?.text ?? "" : content;
     };
     const fullContractCalls = calls.filter((call) => ["generate_core", "generate_ledger"].includes(String(call.metadata?.purpose)));
-    const isolatedCalls = calls.filter((call) => ["generate_comment_readers", "generate_org_answers", "generate_comment_growth"].includes(String(call.metadata?.purpose)));
+    const isolatedCalls = calls.filter((call) => ["generate_comment_readers", "edit_comment_readers", "generate_org_answers", "generate_comment_growth"].includes(String(call.metadata?.purpose)));
     // stage1/stage3 仍注入全量生产合同(含图片);按侧隔离的评论调用只带精简
     // 上下文——不含编排元信息,也不再随附图片(图片只影响 stage1 图文)。
     for (const call of fullContractCalls) expect(Array.isArray(call.messages[1]!.content)).toBe(true);
@@ -509,7 +718,7 @@ describe("three-candidate content generation engine", () => {
     expect(fullContractCalls.map(promptTextOf).every((text) => text.includes("image-analysis:img1") && text.includes("inferredSignals and unknowns are not factual evidence"))).toBe(true);
     expect(isolatedCalls.map(promptTextOf).every((text) => !text.includes("orchestrationPlan") && !text.includes("image-analysis:img1"))).toBe(true);
     // 读者侧上下文含任务基本信息(主题);机构侧上下文含本角色身份卡(项目名)。
-    const readerSideCalls = calls.filter((call) => ["generate_comment_readers", "generate_comment_growth"].includes(String(call.metadata?.purpose)));
+    const readerSideCalls = calls.filter((call) => ["generate_comment_readers", "edit_comment_readers", "generate_comment_growth"].includes(String(call.metadata?.purpose)));
     expect(readerSideCalls.map(promptTextOf).every((text) => text.includes("方案选择"))).toBe(true);
     expect(calls.filter((call) => call.metadata?.purpose === "generate_org_answers").map(promptTextOf).every((text) => text.includes("测试项目"))).toBe(true);
     expect(new Set(result.packages.map((item) => item.orchestrationSnapshot?.strategy.id)).size).toBe(3);
@@ -526,7 +735,12 @@ describe("three-candidate content generation engine", () => {
       && item.productionArtifacts.deployment.status === "not_deployed")).toBe(true);
     expect(result.packages.every((item) => item.dialogueThreads?.[0]?.postingIdentity === "publisher")).toBe(true);
     expect(result.packages.every((item) => item.dialogueThreads?.every((thread) => thread.roleCard.stage === thread.stage && Object.values(thread.replyPlan).every(Boolean)))).toBe(true);
-    expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => Boolean(thread.roleCard && thread.replyPlan && thread.primaryGapId)))).toBe(true);
+    expect(result.packages.every((item) => item.content.Cref.threads
+      .filter((thread) => (thread.threadKind ?? "org_answer") === "org_answer")
+      .every((thread) => Boolean(thread.roleCard && thread.replyPlan && thread.primaryGapId)))).toBe(true);
+    expect(result.packages.every((item) => item.content.Cref.threads
+      .filter((thread) => (thread.threadKind ?? "org_answer") !== "org_answer")
+      .every((thread) => !thread.roleCard && !thread.replyPlan && !thread.primaryGapId && thread.evidenceIds.length === 0))).toBe(true);
     expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => thread.followUps.length <= 2))).toBe(true);
     expect(result.packages.some((item) => item.content.Cref.threads.some((thread) => thread.followUps.length === 0))).toBe(true);
     // 按侧+按角色隔离:T1 答复来自机构调用,T2 来自读者侧(同一 mock 文案);

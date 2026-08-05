@@ -7,6 +7,7 @@ const source = readFileSync(new URL('../src/pages/AgentHarnessPage.tsx', import.
 test('Agent 创建主路径默认零必填，并把文本字段收进可选精调', () => {
   assert.ok(source.includes('零必填'));
   assert.ok(source.includes('让 Agent 开始创作 3 套方案'));
+  assert.ok(source.includes("useState<HarnessIntentId>('project_value')"));
   assert.ok(source.includes('<details className="harness-fine-tune">'));
   assert.ok(!source.includes('<Field label="主题" required>'));
   assert.ok(!source.includes('disabled={!projectId || !form.topic.trim()}'));
@@ -46,12 +47,26 @@ test('精调字段提供可编辑下拉推荐，并保留自定义输入', () =>
 });
 
 
+test('结果页展示可审阅的软营销心智链，并在复制 Markdown 中保留策略', () => {
+  assert.match(source, /软营销心智链/u);
+  assert.match(source, /这篇如何自然种草/u);
+  assert.match(source, /narrativePathLabel\(candidate\.marketingStrategy\.narrativePath\)/u);
+  assert.match(source, /顾虑切入/u);
+  assert.match(source, /candidate\.marketingStrategy\.readerDesire/u);
+  assert.match(source, /candidate\.marketingStrategy\.newJudgment/u);
+  assert.match(source, /candidate\.marketingStrategy\.projectBridge/u);
+  assert.match(source, /candidate\.marketingStrategy\.lowPressureNextStep/u);
+});
+
 test('结果先比较再聚焦单套，并明确区分模拟问答与真实承接', () => {
   assert.ok(source.includes('先对照三套差异，再聚焦阅读一套'));
   assert.ok(source.includes('activeCandidate && <CandidateCard'));
   assert.ok(source.includes('真实问题承接计划'));
   assert.ok(source.includes('计划，非已执行'));
   assert.ok(source.includes('停止原因'));
+  assert.ok(source.includes("kind === 'reader_exchange' ? '读者接话'"));
+  assert.ok(source.includes("kind === 'org_answer' && <Badge"));
+  assert.ok(source.includes("kind === 'organic_reaction' ? <strong>{thread.question}</strong>"));
 });
 
 test('运行管理支持筛选、冻结合同复核和可操作失败恢复', () => {

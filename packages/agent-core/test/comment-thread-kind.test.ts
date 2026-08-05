@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   assignCommentThreadKind,
+  attachConfirmedAuthorFactReasoning,
   buildKnowledgeLedger,
   COMMENT_NICKNAME_POOL,
   commentThreadKindOf,
@@ -13,6 +14,7 @@ import {
   parseGenerationDraft,
   planTopicOrchestrations,
   validateGenerationDraft,
+  validatePublishingTopologyCopy,
 } from "../src/index.js";
 import type {
   GenerationDraft,
@@ -120,7 +122,7 @@ function opportunity(id = "topic-kind"): TopicOpportunity {
   };
 }
 
-const THREAD_KINDS = new Set(["org_answer", "reader_exchange", "organic_reaction"]);
+const THREAD_KINDS = new Set(["org_answer", "host_reply", "reader_exchange", "organic_reaction"]);
 
 describe("assignCommentThreadKind (互动形态确定性抽取)", () => {
   it("is deterministic for the same seed + salt and only emits legal kinds", () => {
@@ -166,6 +168,39 @@ describe("dialoguePlans threadKind assignment", () => {
     });
   });
 
+
+  it("项目缺口席位固定为 org_answer，社会线程不冒充 primary gap owner", () => {
+    for (const plan of build()) {
+      for (const entry of plan.gapCoverageLedger.entries) {
+        for (const id of entry.primaryThreadIds) {
+          const thread = plan.dialogueThreads.find((item) => item.id === id)!;
+          expect(thread.threadKind).toBe("org_answer");
+          expect(thread.coverageRole).toBe("primary_gap");
+        }
+      }
+      for (const thread of plan.dialogueThreads.filter((item) => item.threadKind !== "org_answer")) {
+        expect(thread.coverageRole).not.toBe("primary_gap");
+        expect(plan.gapCoverageLedger.entries.flatMap((entry) => entry.primaryThreadIds)).not.toContain(thread.id);
+      }
+    }
+  });
+
+  it("个人作者拓扑预留一条 host_reply，且只引用人类确认事实", () => {
+    const value = config();
+    value.task.publishingTopology = "confirmed_individual_author";
+    value.task.authorContext = {
+      status: "confirmed",
+      facts: [{ id: "af1", statement: "我目前还没决定", category: "current_state", confirmedBy: "u1", confirmedAt: "2026-08-04T12:00:00Z" }],
+    };
+    for (const plan of planTopicOrchestrations({ opportunity: opportunity("host"), gaps, config: value, seeds: [11, 22, 33] })) {
+      const hosts = plan.dialogueThreads.filter((thread) => thread.threadKind === "host_reply");
+      expect(hosts).toHaveLength(1);
+      expect(hosts[0]).toMatchObject({ postingIdentity: "author", coverageRole: "topic_anchor", evidenceIds: [], authorFactIds: ["af1"] });
+      expect(hosts[0]!.hostReplyPlan?.allowedAuthorFactIds).toEqual(["af1"]);
+      expect(hosts[0]!.conversationPlan?.targetFollowUps).toBe(0);
+    }
+  });
+
   it("T2 线程:speakerA/B 不同 displayRole 且不同昵称,B 接话范围限 permittedContribution", () => {
     const exchanges = build().flatMap((plan) =>
       plan.dialogueThreads.filter((thread) => thread.threadKind === "reader_exchange"));
@@ -187,11 +222,8 @@ describe("dialoguePlans threadKind assignment", () => {
   it("T3 线程:1-3 条漂浮短反应,不生长、answer 无回答需求", () => {
     for (const plan of build()) {
       const organics = plan.dialogueThreads.filter((thread) => thread.threadKind === "organic_reaction");
-      // targetCount>=3 时 T3 为 1-3 条。
-      if (plan.dialogueThreads.length >= 3) {
-        expect(organics.length).toBeGreaterThanOrEqual(1);
-        expect(organics.length).toBeLessThanOrEqual(3);
-      }
+      // 漂浮反应只来自额外社会席位；项目缺口席位不得为了凑 T3 被降级。
+      expect(organics.length).toBeLessThanOrEqual(3);
       for (const thread of organics) {
         expect(thread.conversationPlan?.topology).toBe("organic_reaction");
         expect(thread.conversationPlan?.targetFollowUps).toBe(0);
@@ -346,6 +378,22 @@ describe("threadKind validation (读者互动层)", () => {
     }));
   });
 
+  it("T2 读者互聊不承担机构问答的 Gap、Next、replyPlan 或 discoveryPlan", () => {
+    const draft = draftWithKind("reader_exchange", "我也在纠结要不要去问问", "我更想先问疼不疼。");
+    Object.assign(draft.content.Cref.threads[0]!, {
+      stage: "comparing",
+      function: "verification",
+      gap: undefined,
+      nextStep: undefined,
+      replyPlan: undefined,
+      discoveryPlan: undefined,
+    });
+    const issueCodes = codes(validate(draft));
+    expect(issueCodes).not.toContain("thread_unit_incomplete");
+    expect(issueCodes).not.toContain("comment_reply_plan_missing");
+    expect(issueCodes).not.toContain("comment_discovery_plan_missing");
+  });
+
   it("T3 漂浮短反应只查证词形态:证词 → error;受控声明不触发 warning", () => {
     const testimonial = validate(draftWithKind("organic_reaction", "亲测有效，效果很好", ""));
     expect(testimonial).toContainEqual(expect.objectContaining({
@@ -371,5 +419,111 @@ describe("threadKind validation (读者互动层)", () => {
     expect(codes(legacy)).not.toContain("reader_exchange_controlled_claim");
     expect(commentThreadKindOf({})).toBe("org_answer");
     expect(commentThreadKindOf({ threadKind: "未知形态" })).toBe("org_answer");
+  });
+});
+
+
+describe("publishing topology and host-reply hard gates", () => {
+  const blueprint = normalizeProjectCreativeBlueprint({
+    projectId: "p1",
+    sourceFingerprint: "topology-gate",
+    moduleRevisions: {},
+    modules: {
+      domain_model: { projectNoun: "服务", actions: ["面诊", "购买"] },
+      scenario_model: {
+        families: [{
+          id: "current", label: "当前状态", prototype: "narrow_request",
+          applicableStages: ["comparing"], prohibitedUnsupportedHistories: ["已经面诊", "已经购买"],
+          source: { status: "inference", evidenceIds: [] },
+        }],
+      },
+    },
+  });
+
+  it("机构拓扑拦截所有消费者第一人称，不再放行当前打算", () => {
+    const value = config();
+    value.task.publishingTopology = "institution_owned";
+    for (const body of ["我昨天已经面诊了。", "我还没去，打算先把问题问清楚。", "我最近越看越纠结。"]) {
+      expect(validatePublishingTopologyCopy({ N: { imageBrief: "", title: "记录", body } }, value, blueprint))
+        .toContainEqual(expect.objectContaining({ code: "unsupported_narrative_history", channel: "N.body" }));
+    }
+    expect(validatePublishingTopologyCopy({ N: { imageBrief: "", title: "机构说明", body: "本次先说明适用条件，未知信息仍需核实。" } }, value, blueprint)).toEqual([]);
+  });
+
+  it("自动用户情景由选题与场景模型驱动，不要求作者事实确认", () => {
+    const value = config();
+    expect(value.task.publishingTopology).toBe("creative_scenario");
+    expect(value.task.authorContext).toEqual({ status: "not_provided", facts: [] });
+    expect(validatePublishingTopologyCopy({
+      N: { imageBrief: "", title: "还在比较", body: "我还没去，最近越看越纠结，想先把问题问清楚。" },
+    }, value, blueprint)).toEqual([]);
+  });
+
+  it("个人作者拓扑只允许人工确认事实范围内的已发生经历", () => {
+    const value = config();
+    value.task.publishingTopology = "confirmed_individual_author";
+    value.task.authorContext = {
+      status: "confirmed",
+      facts: [{ id: "af1", statement: "我昨天已经面诊", category: "project_contact", confirmedBy: "u1", confirmedAt: "2026-08-04T12:00:00Z" }],
+    };
+    expect(validatePublishingTopologyCopy({ N: { imageBrief: "", title: "记录", body: "我昨天已经面诊。" } }, value, blueprint)).toEqual([]);
+    expect(validatePublishingTopologyCopy({ N: { imageBrief: "", title: "记录", body: "我昨天已经购买了。" } }, value, blueprint))
+      .toContainEqual(expect.objectContaining({ code: "author_fact_scope_exceeded" }));
+    expect(validatePublishingTopologyCopy({ N: { imageBrief: "", title: "记录", body: "我昨天已经面诊，后来又去现场咨询了。" } }, value, blueprint))
+      .toContainEqual(expect.objectContaining({ code: "author_fact_scope_exceeded" }));
+  });
+
+  it("系统确定性绑定作者事实台账，不混用项目证据或模型假设", () => {
+    const value = config();
+    value.task.publishingTopology = "confirmed_individual_author";
+    value.task.authorContext = {
+      status: "confirmed",
+      facts: [{ id: "af1", statement: "我目前还没决定", category: "current_state", confirmedBy: "u1", confirmedAt: "2026-08-04T12:00:00Z", confirmationId: "confirmation-1" }],
+    };
+    const draft = draftWithKind("host_reply", "所以你还没定吗？", "我目前还没决定");
+    draft.content.N.body = "我目前还没决定。";
+    draft.reasoning = [{ statement: "我目前还没决定。", location: "N.body", occurrence: { field: "body" }, status: "hypothesis", evidenceIds: [], sourceSpans: [] }];
+    draft.content.Cref.threads[0]!.postingIdentity = "author";
+    const bound = attachConfirmedAuthorFactReasoning(draft, value);
+    const authorRows = bound.reasoning.filter((item) => item.status === "human_confirmed_author_fact");
+    expect(authorRows).toHaveLength(2);
+    expect(authorRows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ authorFactId: "af1", confirmationId: "confirmation-1", evidenceIds: [], sourceSpans: [] }),
+    ]));
+    expect(bound.reasoning).not.toContainEqual(expect.objectContaining({ statement: "我目前还没决定。", status: "hypothesis" }));
+    const issues = validateGenerationDraft({ draft: bound, config: value, ledger: buildKnowledgeLedger([]), allowedEvidenceIds: [], evidenceSources: {}, projectBlueprint: blueprint });
+    expect(codes(issues)).not.toContain("author_fact_reference_invalid");
+    expect(codes(issues)).not.toContain("author_fact_confirmation_mismatch");
+    expect(codes(issues)).not.toContain("author_fact_project_evidence_mixed");
+  });
+
+  it("host_reply 仅允许已确认作者、零项目证据且不承担项目缺口", () => {
+    const value = config();
+    value.content.bodyMinChars = 2;
+    value.content.hashtagMin = 1;
+    value.task.publishingTopology = "confirmed_individual_author";
+    value.task.authorContext = {
+      status: "confirmed",
+      facts: [{ id: "af1", statement: "我目前还没决定", category: "current_state", confirmedBy: "u1", confirmedAt: "2026-08-04T12:00:00Z" }],
+    };
+    const draft = draftWithKind("host_reply", "所以你还没定吗？", "我目前还没决定");
+    const host = draft.content.Cref.threads[0]!;
+    host.postingIdentity = "author";
+    host.authorFactIds = ["af1"];
+    host.topicAnchorGapId = "fit_gap";
+    host.primaryGapId = undefined;
+    host.gap = undefined;
+    host.nextStep = undefined;
+    host.evidenceIds = [];
+    const issues = validateGenerationDraft({ draft, config: value, ledger: buildKnowledgeLedger([]), allowedEvidenceIds: [], projectBlueprint: blueprint });
+    expect(codes(issues)).not.toContain("host_reply_identity_violation");
+    expect(codes(issues)).not.toContain("host_reply_evidence_violation");
+    expect(codes(issues)).not.toContain("host_reply_author_fact_mismatch");
+
+    host.postingIdentity = "publisher";
+    host.evidenceIds = ["evidence_d2"];
+    const broken = validateGenerationDraft({ draft, config: value, ledger: buildKnowledgeLedger([]), allowedEvidenceIds: ["evidence_d2"], projectBlueprint: blueprint });
+    expect(codes(broken)).toContain("host_reply_identity_violation");
+    expect(codes(broken)).toContain("host_reply_evidence_violation");
   });
 });

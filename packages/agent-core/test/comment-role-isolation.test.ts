@@ -1,11 +1,18 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildGenerationPrompt,
   buildKnowledgeLedger,
   buildOrgThreadScope,
+  buildRepairPrompt,
   buildStagedCommentGrowthPrompt,
+  buildStagedCommentEditorPrompt,
+  buildStagedCommentReadersCorrectionPrompt,
   buildStagedCommentReadersPrompt,
+  buildStagedCommentReadersRegenerationPrompt,
+  buildStagedCoreIdentityRepairPrompt,
   buildStagedCorePrompt,
+  buildStagedHostAnswersPrompt,
   buildStagedOrgAnswersPrompt,
   buildStagedOrgFollowUpAnswersPrompt,
   commentStageInstructions,
@@ -16,6 +23,7 @@ import {
   DEFAULT_FORMULA_VERSION,
   indexKnowledgeSource,
   normalizeProjectCreativeBlueprint,
+  parseGenerationDraft,
   parseStagedCommentReaders,
   parseStagedOrgAnswers,
   planTopicOrchestrations,
@@ -322,6 +330,107 @@ function stagedThreadIds(request: ModelGenerationRequest): string[] {
   return [...new Set([...requestText(request).matchAll(/"id"\s*:\s*"([^"]*_thread_\d+)"/gu)].map((match) => match[1]!))];
 }
 
+describe("公开文案 Prompt 防泄漏合同覆盖", () => {
+  it("所有传统生成与改稿入口都携带前台语言合同", () => {
+    const plan = isolationPlan();
+    const input = promptInput(plan);
+    const planned = plan.dialogueThreads[0]!;
+    const thread = { planned, question: "这个要怎么判断？" };
+    const roots = {
+      disclaimer: STAGED_COMMENT_DISCLAIMER,
+      threads: plan.dialogueThreads.map((item) => ({
+        id: item.id,
+        question: "这个要怎么判断？",
+        answer: "先把条件问清楚。",
+        followUps: [],
+      })),
+    };
+    const readerPrompt = buildStagedCommentReadersPrompt(input, core);
+    const draft = parseGenerationDraft(JSON.stringify({
+      content: {
+        ...core,
+        Cref: {
+          disclaimer: STAGED_COMMENT_DISCLAIMER,
+          threads: [{
+            id: planned.id,
+            question: "这个要怎么判断？",
+            answer: "先把条件问清楚。",
+            followUps: [],
+            postingIdentity: "publisher",
+            sourceClusterIds: [],
+            evidenceIds: [],
+            personaRole: "information_collector",
+            speakerType: "simulated_reader",
+            claimStatus: "bounded",
+            replyTo: null,
+            threadDepth: 0,
+            simulated: true,
+            simulationLabel: "模拟潜在读者情景",
+          }],
+        },
+      },
+      evidenceIds: [],
+      reasoning: [],
+      unknowns: [],
+    }));
+    const repair = buildRepairPrompt({
+      current: draft,
+      issues: [{
+        code: "comment_context_meta_leak",
+        severity: "error",
+        channel: "Cref",
+        message: "评论暴露图文上下文",
+        repairable: true,
+      }],
+      channels: ["Cref"],
+      config: input.config,
+      knowledge: input.knowledge,
+      seed: 1,
+      attempt: 1,
+      orchestrationPlan: plan,
+      evidenceReferences: input.evidenceReferences,
+    });
+    const builders: Array<[string, PromptBundle]> = [
+      ["兼容完整生成", buildGenerationPrompt(input)],
+      ["正文生成", buildStagedCorePrompt(input)],
+      ["正文身份修复", buildStagedCoreIdentityRepairPrompt(input, core, [{
+        code: "publishing_topology_voice_mismatch",
+        severity: "error",
+        channel: "N.body",
+        message: "发布身份不匹配",
+        repairable: true,
+      }])],
+      ["读者生成", readerPrompt],
+      ["读者编辑", buildStagedCommentEditorPrompt(input, core, roots)],
+      ["读者空响应重试", buildStagedCommentReadersRegenerationPrompt(readerPrompt)],
+      ["读者结构校正", buildStagedCommentReadersCorrectionPrompt(
+        '{"threads":[]}',
+        [{ id: planned.id, threadKind: planned.threadKind ?? "org_answer" }],
+        "线程缺失",
+      )],
+      ["真实作者答复", buildStagedHostAnswersPrompt(input, core, [thread])],
+      ["机构答复", buildStagedOrgAnswersPrompt(input, core, "staff", [thread])],
+      ["评论生长", buildStagedCommentGrowthPrompt(input, core, roots)],
+      ["机构追问补答", buildStagedOrgFollowUpAnswersPrompt(input, core, "staff", [{
+        planned,
+        rootQuestion: "这个要怎么判断？",
+        rootAnswer: "先把条件问清楚。",
+        followUpId: `${planned.id}:fu:0`,
+        question: "那我先问哪一点？",
+      }])],
+      ["通用修复与按意见修改", repair],
+    ];
+
+    for (const [name, prompt] of builders) {
+      const system = prompt.messages.find((message) => message.role === "system");
+      expect(typeof system?.content, `${name} 缺少 system prompt`).toBe("string");
+      expect(String(system?.content), `${name} 缺少公开文案合同`).toContain("用户可见文案规则");
+      expect(String(system?.content), `${name} 未禁止模型自曝`).toContain("模型身份");
+      expect(String(system?.content), `${name} 未禁止泛化来源腔`).toContain("根据资料");
+    }
+  });
+});
+
 describe("评论参数分侧注入(滑杆真正参与生成)", () => {
   // 归属表的单元级断言:reader 侧拿到 reader+both,answer 侧拿到 answer+both,
   // 两侧互不串。用高档位保证 explicitBehavior 产出可断言的确定文本。
@@ -440,6 +549,19 @@ describe("评论参数分侧注入(滑杆真正参与生成)", () => {
     expect(staffText).toContain("包好");
   });
 
+  it("读者生成与评论编辑都禁止把正文上下文写成元叙事", () => {
+    const plan = isolationPlan();
+    const input = promptInput(plan);
+    const readerText = promptFullText(buildStagedCommentReadersPrompt(input, core));
+    expect(readerText).toContain("正文说/文中提到");
+    expect(readerText).toContain("元叙事");
+    const editorText = promptFullText(buildStagedCommentEditorPrompt(input, core, {
+      threads: plan.dialogueThreads.map((thread) => ({ id: thread.id, question: "正文说了什么？", answer: "" })),
+    }));
+    expect(editorText).toContain("必须删除或自然改写");
+    expect(editorText).toContain("正文说/文中提到");
+  });
+
   it("参数指令注入评论阶段时脱敏内部字段名:计划语言不下放给模型照抄", () => {
     // state_information_strength / question_compression 等指令原文含
     // personaScenePlan / surfaceRoleCard;它们正是 comment_plan_language_surface_
@@ -514,8 +636,10 @@ describe("buildOrgThreadScope (逐 gap 口径)", () => {
     // 前置断言:规划层确实会产出带前缀的口径,否则本测试是空跑。
     expect(leaked.length).toBeGreaterThan(0);
     const text = promptFullText(buildStagedCorePrompt(promptInput(plan)));
-    expect(text).not.toContain("待核实维度");
-    expect(text).not.toContain("已披露地点范围");
+    const candidateTask = text.match(/<task_data scope="candidate">\n([\s\S]*?)\n<\/task_data>/u)?.[1] ?? "";
+    expect(candidateTask).not.toContain("待核实维度");
+    expect(candidateTask).not.toContain("已披露地点范围");
+    expect(candidateTask).toContain("contentAnchor");
   });
 
   it("有证据的 gap 输出钉到该 gap 的 quote(id/section/quote/caveats),不带硬约束", () => {
@@ -568,9 +692,9 @@ describe("按侧+按角色隔离的评论提示词", () => {
   it("2A-O staff:只见助理身份卡与本角色线程口径,不见 IP/host 定义与其他线程", () => {
     const plan = isolationPlan();
     const staffThreads = plan.dialogueThreads.filter((thread) => thread.postingIdentity === "staff");
-    const publisherThreads = plan.dialogueThreads.filter((thread) => thread.postingIdentity === "publisher");
+    const otherIdentityThreads = plan.dialogueThreads.filter((thread) => thread.postingIdentity !== "staff");
     expect(staffThreads.length).toBeGreaterThan(0);
-    expect(publisherThreads.length).toBeGreaterThan(0);
+    expect(otherIdentityThreads.length).toBeGreaterThan(0);
     const prompt = buildStagedOrgAnswersPrompt(promptInput(plan), core, "staff", staffThreads.map((planned) => ({ planned, question: "这个多少钱？" })));
     const text = promptFullText(prompt);
     expect(text).toContain("知肤研究所助理");
@@ -592,27 +716,39 @@ describe("按侧+按角色隔离的评论提示词", () => {
     for (const banned of ["楼主", "发布者", "publisher", "host", "voiceTraits"]) {
       expect(text, `staff 调用不应出现: ${banned}`).not.toContain(banned);
     }
-    for (const thread of publisherThreads) expect(text).not.toContain(thread.id);
+    for (const thread of otherIdentityThreads) expect(text).not.toContain(thread.id);
   });
 
-  it("2A-O publisher:只见 host 声音与本角色线程,不见助理定义", () => {
+  it("2A-O publisher:明确项目方身份且不继承 host 叙事人物,不见助理定义", () => {
     const plan = isolationPlan();
-    const staffThreads = plan.dialogueThreads.filter((thread) => thread.postingIdentity === "staff");
-    const publisherThreads = plan.dialogueThreads.filter((thread) => thread.postingIdentity === "publisher");
-    const prompt = buildStagedOrgAnswersPrompt(promptInput(plan), core, "publisher", publisherThreads.map((planned) => ({ planned, question: "哪些条件影响适用性？" })));
+    const base = plan.dialogueThreads.find((thread) => thread.primaryGapId === "fit_gap")
+      ?? plan.dialogueThreads.find((thread) => thread.postingIdentity !== "staff")!;
+    // 该测试验证 publisher 单角色提示词隔离，不要求规划器为了凑身份产生 publisher。
+    const publisherThread: DialogueThreadPlan = {
+      ...base,
+      postingIdentity: "publisher",
+      routingReason: "测试夹具：规划期冻结 publisher",
+      surfaceRoleCard: base.surfaceRoleCard
+        ? { ...base.surfaceRoleCard, replyDisplayRole: "项目发布账号" }
+        : base.surfaceRoleCard,
+    };
+    const otherThreads = plan.dialogueThreads.filter((thread) => thread.id !== publisherThread.id);
+    const prompt = buildStagedOrgAnswersPrompt(promptInput(plan), core, "publisher", [{ planned: publisherThread, question: "哪些条件影响适用性？" }]);
     const text = promptFullText(prompt);
-    // 方法论 ROLE 04:publisher 是发布账号本人(可追责答复方),不是顾客人设;
-    // §1738「自有账号不能冒充独立消费者」。host 声音只用于延续语气。
-    expect(text).toContain("发布账号本人");
-    expect(text).toContain("叙述声音");
+    // publisher 是明确署名的机构项目账号，不是正文叙事人物；host 的生活经历、
+    // 语气卡与第一人称位置都不得进入这个机构答复阶段。
+    expect(text).toContain("项目发布账号");
+    expect(text).toContain("不是正文叙事人物");
     expect(text).toContain("不冒充独立消费者");
+    expect(text).not.toContain("叙述声音");
+    expect(text).not.toContain("voiceTraits");
     expect(text).toContain("你只知道下方列出的口径");
     // 无证据的适用条件 gap 走硬约束。
     expect(text).toContain("你手里没有适用条件的信息口径，只能走转人工（“我帮你跟专人确认”）或保留未知；禁止承诺提供");
     for (const banned of ["助理", "staff"]) {
       expect(text, `publisher 调用不应出现: ${banned}`).not.toContain(banned);
     }
-    for (const thread of staffThreads) expect(text).not.toContain(thread.id);
+    for (const thread of otherThreads) expect(text).not.toContain(thread.id);
   });
 
   it("2B 生长:精简读者上下文,不含双号契约与机构概念", () => {
@@ -694,12 +830,106 @@ describe("按侧+按角色隔离的引擎合并", () => {
   const coreResponse = () => JSON.stringify({
     content: {
       H: { hashtags: ["方案选择", "信息", "核验"] },
-      N: { imageBrief: "信息清单封面", title: "先核实信息", body: "先核实适用边界，再决定下一步。细节我还在整理，确认后再补充。" },
+      N: { imageBrief: "信息清单封面", title: "先核实信息", body: "先核实适用边界，再决定下一步。细节仍在整理，确认后再补充。" },
       Cref: { disclaimer: "x", threads: [] },
     },
     evidenceIds: [],
     reasoning: [],
     unknowns: [],
+  });
+
+  function frozenReaderThreads(request: ModelGenerationRequest, edit = false) {
+    const text = requestText(request);
+    const specs = [...text.matchAll(/"id"\s*:\s*"([^"]+)"\s*,\s*"threadKind"\s*:\s*"([^"]+)"\s*,\s*"gap标签"\s*:\s*"([^"]+)"/gu)];
+    return specs.map((match) => ({
+      id: match[1]!,
+      question: edit
+        ? `我时间有限，${match[3]}最先要确认哪一项？`
+        : `关于${match[3]}，具体怎么看？`,
+      answer: match[2] === "reader_exchange" ? (edit ? "我也卡在这一步，先把条件问清楚。" : "我也在看这个。") : "",
+    }));
+  }
+
+  it("评论编辑 Agent 的职责内改写进入最终文案并持久化 pass 结论", async () => {
+    const provider: ModelProvider = {
+      async generate(request) {
+        const purpose = String(request.metadata?.purpose);
+        if (purpose === "generate_comment_readers") {
+          return { text: JSON.stringify({ threads: frozenReaderThreads(request) }), raw: {} };
+        }
+        if (purpose === "edit_comment_readers") {
+          return {
+            text: JSON.stringify({
+              threads: frozenReaderThreads(request, true),
+              assessment: { status: "pass", reasons: [], summary: "已按人物处境改成具体问法。" },
+            }),
+            raw: {},
+          };
+        }
+        if (purpose === "generate_org_answers") {
+          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "需要结合对应条件确认。" })) }), raw: {} };
+        }
+        if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
+        if (purpose === "repair") return {
+          text: JSON.stringify({ N: { body: "先核实适用边界，再决定下一步。修复后标记。细节仍在整理，确认后再补充。" } }),
+          raw: {},
+        };
+        return { text: coreResponse(), raw: {} };
+      },
+    };
+    const value = engineConfig();
+    value.generation.maxRepairAttempts = 1;
+    value.task.mustMention = ["修复后标记"];
+    const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-07-12T12:00:00Z") })
+      .generate({ jobId: "comment-editor-pass", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge, planningContext });
+
+    expect(result.packages).toHaveLength(3);
+    for (const pkg of result.packages) {
+      expect(pkg.validation.repairAttempts).toBe(1);
+      expect(pkg.commentEditorialAssessment).toEqual({ status: "pass", reasons: [], summary: "已按人物处境改成具体问法。" });
+      expect(pkg.content.Cref.threads.every((thread) => thread.question.includes("我时间有限"))).toBe(true);
+      expect(pkg.validation.issues.some((issue) => issue.code === "comment_editor_unavailable" || issue.code === "comment_editor_contract_rejected")).toBe(false);
+    }
+  });
+
+  it("评论编辑 Agent 越过冻结 gap 时原子拒收，机构答复只看到原始问题", async () => {
+    const orgPromptTexts: string[] = [];
+    const provider: ModelProvider = {
+      async generate(request) {
+        const purpose = String(request.metadata?.purpose);
+        if (purpose === "generate_comment_readers") {
+          return { text: JSON.stringify({ threads: frozenReaderThreads(request) }), raw: {} };
+        }
+        if (purpose === "edit_comment_readers") {
+          const original = frozenReaderThreads(request);
+          return {
+            text: JSON.stringify({
+              threads: original.map((thread) => ({ ...thread, question: "今天天气怎么样？" })),
+              assessment: { status: "pass", reasons: [], summary: "已编辑。" },
+            }),
+            raw: {},
+          };
+        }
+        if (purpose === "generate_org_answers") {
+          orgPromptTexts.push(requestText(request));
+          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "需要结合对应条件确认。" })) }), raw: {} };
+        }
+        if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
+        return { text: coreResponse(), raw: {} };
+      },
+    };
+    const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-07-12T12:00:00Z") })
+      .generate({ jobId: "comment-editor-contract", config: engineConfig(), formulaVersion: DEFAULT_FORMULA_VERSION, knowledge, planningContext });
+
+    expect(result.packages).toHaveLength(3);
+    expect(result.packages.every((pkg) => pkg.commentEditorialAssessment === undefined)).toBe(true);
+    expect(result.packages.every((pkg) => pkg.validation.issues.some((issue) =>
+      issue.code === "comment_editor_contract_rejected"
+      && issue.disposition === "advisory"
+      && issue.origin === "deterministic"))).toBe(true);
+    expect(result.packages.flatMap((pkg) => pkg.content.Cref.threads).every((thread) => thread.question !== "今天天气怎么样？")).toBe(true);
+    expect(orgPromptTexts.length).toBeGreaterThan(0);
+    expect(orgPromptTexts.every((text) => !text.includes("今天天气怎么样"))).toBe(true);
   });
 
   it("模型输出携带漂移字段时,surfaceRoleCard/postingIdentity/线程形态仍以规划层为准", async () => {
@@ -754,6 +984,75 @@ describe("按侧+按角色隔离的引擎合并", () => {
         else if (plan.postingIdentity === "staff") expect(thread.answer).toBe("这个我让专人跟你确认。");
         else expect(thread.answer).toBe("这个得看个人条件，我先不乱说。");
       }
+    }
+  });
+
+  it("个人作者拓扑走独立楼主调用，最终线程不携带项目答复元数据", async () => {
+    const calls: ModelGenerationRequest[] = [];
+    const provider: ModelProvider = {
+      async generate(request) {
+        calls.push(request);
+        const purpose = String(request.metadata?.purpose);
+        if (purpose === "generate_comment_readers") {
+          return {
+            text: JSON.stringify({
+              threads: stagedThreadIds(request).map((id, index) => ({
+                id,
+                question: `第${index + 1}条想确认一下？`,
+                answer: "姐妹我也在看",
+                followUps: [],
+              })),
+            }),
+            raw: {},
+          };
+        }
+        if (purpose === "generate_host_answers") {
+          return {
+            text: JSON.stringify({
+              answers: stagedThreadIds(request).map((id) => ({ id, answer: "我目前还没决定" })),
+            }),
+            raw: {},
+          };
+        }
+        if (purpose === "generate_org_answers") {
+          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "这个需要按项目口径确认。" })) }), raw: {} };
+        }
+        if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
+        return { text: coreResponse(), raw: {} };
+      },
+    };
+    const value = engineConfig();
+    value.task.publishingTopology = "confirmed_individual_author";
+    value.task.authorContext = {
+      status: "confirmed",
+      facts: [{
+        id: "af1",
+        statement: "我目前还没决定",
+        category: "current_state",
+        confirmedBy: "user-1",
+        confirmedAt: "2026-08-04T12:00:00Z",
+      }],
+    };
+    const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-07-12T12:00:00Z") })
+      .generate({ jobId: "host-isolation", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge, planningContext });
+
+    expect(calls.some((call) => call.metadata?.purpose === "generate_host_answers")).toBe(true);
+    for (const pkg of result.packages) {
+      const host = pkg.content.Cref.threads.find((thread) => thread.threadKind === "host_reply");
+      expect(host).toBeDefined();
+      expect(host).toMatchObject({
+        postingIdentity: "author",
+        answer: "我目前还没决定",
+        evidenceIds: [],
+        sourceClusterIds: [],
+        authorFactIds: ["af1"],
+        followUps: [],
+      });
+      expect(host?.primaryGapId).toBeUndefined();
+      expect(host?.gap).toBeUndefined();
+      expect(host?.replyPlan).toBeUndefined();
+      expect(host?.discoveryPlan).toBeUndefined();
+      expect(host?.nextStep).toBeUndefined();
     }
   });
 
@@ -906,7 +1205,7 @@ describe("按侧+按角色隔离的引擎合并", () => {
         if (purpose === "generate_comment_readers") {
           return {
             text: JSON.stringify({
-              threads: stagedThreadIds(request).map((id, index) => ({ id, question: `第${index + 1}项应该核实什么？`, answer: "", followUps: [] })),
+              threads: stagedThreadIds(request).map((id, index) => ({ id, question: `第${index + 1}项应该核实什么？`, answer: "我也在确认这件事。", followUps: [] })),
             }),
             raw: {},
           };

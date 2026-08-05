@@ -42,9 +42,22 @@ export const downloadText = (filename: string, content: string, type = 'text/pla
 export const candidateToMarkdown = (candidate: Candidate) => {
   // Cref contract v1.1 candidates copy in the two-part executive + audit
   // appendix layout (same policy as the API export); historical candidates
-  // keep the legacy single-flow markdown byte-for-byte.
-  if (isCrefV11Candidate(candidate)) return candidateToV11TwoPartMarkdown(candidate);
-  return legacyCandidateToMarkdown(candidate);
+  // keep the legacy single-flow markdown byte-for-byte unless this candidate
+  // was manually released after a failed automatic validation.
+  const markdown = isCrefV11Candidate(candidate)
+    ? candidateToV11TwoPartMarkdown(candidate)
+    : legacyCandidateToMarkdown(candidate);
+  if (candidate.manualDeliveryConfirmation?.confirmed !== true) return markdown;
+  return `${markdown.trimEnd()}
+
+---
+
+## 人工交付确认
+
+- 自动校验状态保持未通过；本记录不代表系统校验通过。
+- 确认时间：${candidate.manualDeliveryConfirmation.confirmedAt}
+- 确认范围：已逐条核对事实、证据、身份与风险，并承担本次人工交付决定。
+`;
 };
 
 /**
@@ -76,10 +89,12 @@ const candidateToV11TwoPartMarkdown = (candidate: Candidate) => {
   const nicknamePrefix = (name?: string) => (name?.trim() ? `${name.trim()}：` : '');
   const replyOrgName = (item: Candidate['comments'][number]): string => {
     const raw = item.surfaceRoleCard?.replyDisplayRole?.trim() ?? '';
-    if (!raw) return '';
-    // assistant_account / host_account 这类内部 id 形态只显示通用文案,不裸露内部 id。
-    if (/^[a-z][a-z0-9_]*$/.test(raw)) return item.postingIdentity === 'staff' ? '机构助理' : '机构 IP';
-    return raw;
+    const invalid = !raw || /^[a-z][a-z0-9_]*$/u.test(raw)
+      || /^(?:楼主|楼主本人|博主|博主本人|作者本人)$/u.test(raw);
+    if (!invalid) return raw;
+    return item.postingIdentity === 'staff' ? '机构助理'
+      : item.postingIdentity === 'expert' ? '机构 IP'
+        : item.postingIdentity === 'publisher' ? '项目发布账号' : '';
   };
   const ownedFirstComment = candidate.commentOwnedFirstComment
     ? `## 可发布首评参考\n\n> 【可发布首评参考】由发布账号（publisher）身份发布：${candidate.commentOwnedFirstComment}\n\n`
@@ -94,6 +109,14 @@ const candidateToV11TwoPartMarkdown = (candidate: Candidate) => {
         `### 话术 ${index + 1}（漂浮短反应）\n`,
         `- 漂浮反应：${nicknamePrefix(item.displayName)}${item.question}`,
         `- 无需机构回复（4-20 字短共鸣，机构不出现）`,
+      ].filter(Boolean).join('\n');
+    }
+    if (threadKind === 'host_reply') {
+      return [
+        `### 话术 ${index + 1}（楼主回复）\n`,
+        `- 提问：${nicknamePrefix(item.displayName)}${item.question}`,
+        `- 楼主本人回复：${item.answer}`,
+        `- 身份说明：已确认个人作者；只承接作者事实，不承担项目事实`,
       ].filter(Boolean).join('\n');
     }
     if (threadKind === 'reader_exchange') {
@@ -139,7 +162,9 @@ const legacyCandidateToMarkdown = (candidate: Candidate) => {
 
 /** Full per-thread audit metadata, shared by the legacy flow and the v1.1 audit appendix. */
 const commentThreadAuditMarkdown = (candidate: Candidate) => candidate.comments.map((item) => {
-  const isOrganicReaction = commentThreadKindOf(item) === 'organic_reaction';
+  const threadKind = commentThreadKindOf(item);
+  const isOrganicReaction = threadKind === 'organic_reaction';
+  const isHostReply = threadKind === 'host_reply';
   const attribution = auditAnswerAttribution(item);
   return [
     `> 【${item.simulated ? item.simulationLabel || '模拟潜在读者情景' : '历史内容，模拟字段未标注'}】${item.simulated ? '不代表真实评论、消费经历或第三方口碑。' : ''}`,
@@ -150,11 +175,11 @@ const commentThreadAuditMarkdown = (candidate: Candidate) => candidate.comments.
     item.boundary ? `> 答复边界：${item.boundary}` : '',
     item.evidenceIds?.length ? `> 证据引用：${item.evidenceIds.join('、')}` : '',
     item.surfaceRoleCard ? `> 可见人物：${item.surfaceRoleCard.displayRole}；与楼主关系=${item.surfaceRoleCard.relationToHost}；身份线索=${item.surfaceRoleCard.identityCue}；处境线索=${item.surfaceRoleCard.situationCue}；说话习惯=${item.surfaceRoleCard.speechPattern}；可选语域=${item.surfaceRoleCard.lexicalCues?.join('、') || '普通口语'}；接话钩子=${item.surfaceRoleCard.interactionHook || '按上一句里的具体细节自然接话'}；知识边界=${item.surfaceRoleCard.knowledgePosition}` : '',
-    item.roleCard ? `> 后台决策状态：阶段=${item.roleCard.stage}；已有知识=${item.roleCard.knowledge.join('、') || '未标注'}；现实约束=${item.roleCard.constraints.join('、') || '无'}；决策任务=${item.roleCard.decisionTask}；证据态度=${commentEvidenceStanceLabel(item.roleCard.evidenceStance)}` : '',
-    item.densityProxy ? `> 信息密度代理：1个主缺口＋${item.densityProxy.auxiliaryDimensionCount}个辅助维度；${item.densityProxy.constraintCount}个约束；短问软目标约${item.densityProxy.questionTargetChars}字（非效果分）` : '',
+    !isHostReply && item.roleCard ? `> 后台决策状态：阶段=${item.roleCard.stage}；已有知识=${item.roleCard.knowledge.join('、') || '未标注'}；现实约束=${item.roleCard.constraints.join('、') || '无'}；决策任务=${item.roleCard.decisionTask}；证据态度=${commentEvidenceStanceLabel(item.roleCard.evidenceStance)}` : '',
+    !isHostReply && item.densityProxy ? `> 信息密度代理：1个主缺口＋${item.densityProxy.auxiliaryDimensionCount}个辅助维度；${item.densityProxy.constraintCount}个约束；短问软目标约${item.densityProxy.questionTargetChars}字（非效果分）` : '',
     isOrganicReaction ? '' : `${attribution.label}：${item.followUps?.length ? item.answer.split(/\n\n追问：/u)[0] || item.answer : item.answer}`,
-    item.replyPlan ? `> 后台答复库存（按人物与关系择需使用，不要求全部写出）：直接回答=${item.replyPlan.directAnswer}；条件=${item.replyPlan.condition}；边界=${item.replyPlan.boundary}；未知=${item.replyPlan.unknown}；下一问=${item.replyPlan.nextQuestion}` : '',
-    item.discoveryPlan ? `> 发现式路径：线索=${item.discoveryPlan.cue}；一步推断=${item.discoveryPlan.inferencePrompt}；同线程揭示=${item.discoveryPlan.reveal}；自检=${item.discoveryPlan.selfCheck}；边界=${item.discoveryPlan.boundary}；难度=${item.discoveryPlan.difficulty === 'low' ? '低' : '中等'}` : '',
+    !isHostReply && item.replyPlan ? `> 后台答复库存（按人物与关系择需使用，不要求全部写出）：直接回答=${item.replyPlan.directAnswer}；条件=${item.replyPlan.condition}；边界=${item.replyPlan.boundary}；未知=${item.replyPlan.unknown}；下一问=${item.replyPlan.nextQuestion}` : '',
+    !isHostReply && item.discoveryPlan ? `> 发现式路径：线索=${item.discoveryPlan.cue}；一步推断=${item.discoveryPlan.inferencePrompt}；同线程揭示=${item.discoveryPlan.reveal}；自检=${item.discoveryPlan.selfCheck}；边界=${item.discoveryPlan.boundary}；难度=${item.discoveryPlan.difficulty === 'low' ? '低' : '中等'}` : '',
     item.conversationPlan ? `> 对话拓扑：${item.conversationPlan.topology}；目标接话=${item.conversationPlan.targetFollowUps}；延展=${item.conversationPlan.extensionMove}` : '',
     ...(isOrganicReaction ? [] : item.followUps || []).map((followUp) => [
       `接话：${followUp.question}\n\n回复：${followUp.answer}`,

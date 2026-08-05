@@ -3,7 +3,9 @@ import { join } from 'node:path';
 import {
   AGENT_HARNESS_PROFILE,
   DEFAULT_HARNESS_METHOD_ID,
+  DEFAULT_HARNESS_SEEDING_MODE,
   getHarnessMethodProfile,
+  HARNESS_SIMULATION_NOTICE,
   isHarnessMethodId,
   publicationChecklistFor,
   reviewHarnessCandidates,
@@ -15,6 +17,7 @@ import {
   type HarnessEvidenceSource,
   type HarnessImageSource,
   type HarnessModelProvider,
+  type HarnessSeedingMode,
   type HarnessTask,
   type HarnessToolTrace,
 } from '@content-agent/agent-harness-core';
@@ -46,7 +49,7 @@ import { classifyModelFailure } from './model-failure.js';
 import type { SessionPrincipal } from './models.js';
 import { ResourceService } from './resource.service.js';
 import { createSafeModelFetch } from './safe-model-fetch.js';
-import { SettingsService, type ResolvedProviderSettings } from './settings.service.js';
+import { modelOutputTokenLimit, SettingsService, type ResolvedProviderSettings } from './settings.service.js';
 import { readStoredText } from './storage-file.js';
 import { nowIso, parseJson, requireString, type Pagination } from './utils.js';
 
@@ -145,6 +148,7 @@ function optionalText(value: unknown, field: string, max: number): string | unde
 
 function publicationCheckLabel(key: string): string {
   return ({
+    soft_marketing: '软营销心智链',
     evidence: '事实与证据',
     simulation_disclosure: '模拟互动披露',
     execution_plan: '真实问题承接',
@@ -157,6 +161,15 @@ function publicationCheckLabel(key: string): string {
 function publicationCheckStatus(status: string): string {
   return ({ ready: '已就绪', blocked: '阻断', manual_review: '人工复核' } as Record<string, string>)[status] ?? status;
 }
+
+function narrativePathLabel(value?: string): string {
+  return value ? ({
+    tension_first: '顾虑切入',
+    observation_first: '观察切入',
+    question_first: '问题切入',
+  } as Record<string, string>)[value] ?? value : '旧运行未记录';
+}
+
 
 function publicFailure(error: unknown, mode: 'platform' | 'byok', refunded: boolean): string {
   const settlement = mode === 'platform'
@@ -275,6 +288,17 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
       }
       bodyLength = raw.bodyLength;
     }
+    /*
+     * 模式必须在这个字段白名单里显式解析。task 对象是逐字段构造的,不是把 raw 摊开,
+     * 所以前端传了而这里不接就会被静默丢掉 —— 界面上选了机构口吻,后端照旧按素人跑。
+     */
+    let seedingMode: HarnessSeedingMode | undefined;
+    if (raw.seedingMode !== undefined) {
+      if (raw.seedingMode !== 'peer_seeding' && raw.seedingMode !== 'brand_voice') {
+        throw new BadRequestException('seedingMode 只支持 peer_seeding 或 brand_voice');
+      }
+      seedingMode = raw.seedingMode;
+    }
     const task: HarnessTask = {
       topic,
       goal: optionalText(raw.goal, 'goal', 1_000) ?? '',
@@ -290,6 +314,7 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
       entryPoint,
       ...(tone ? { tone } : {}),
       bodyLength,
+      ...(seedingMode ? { seedingMode } : {}),
       ...(accountIdentity ? { accountIdentity } : {}),
       ...(callToAction ? { callToAction } : {}),
       ...(publishingNotes ? { publishingNotes } : {}),
@@ -636,7 +661,8 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
       ...AGENT_HARNESS_PROFILE,
       channel: 'agent_harness', source: 'neutral_project_evidence_and_approved_image_observations',
       excludes: ['project_intelligence', 'project_blueprint_modules', 'information_gaps', 'expression_strategies', 'topic_opportunities', 'coverage_records', 'planning_context'],
-      model: settings.model, providerMode: settings.mode, providerConfigVersion: settings.configVersion, fixedStages: ['search', 'read', 'submit', 'final_review'],
+      model: settings.model, providerMode: settings.mode, providerConfigVersion: settings.configVersion,
+      fixedStages: ['search', 'read_deterministic', 'body_draft', 'package_candidate_1', 'package_candidate_2', 'package_candidate_3', 'final_review'],
       evidenceReadiness: evidenceSourceCount ? 'grounded' : 'no_project_evidence', evidenceSourceCount,
     };
     this.database.transaction(() => {
@@ -880,6 +906,22 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
       sourceCandidateIndex: context.sourceCandidate?.candidateIndex,
       revisionInstruction: job.run_kind === 'revision' ? job.instruction : undefined,
       selectedImages: context.images,
+      /*
+       * 下面三个此前漏传,必须与 runner 生成时那处保持同一套约束。
+       *
+       * bodyLength 是既有缺陷:不传则校验器落到 medium,于是同一份候选在断点恢复
+       * 读结果时按 medium 判长度,而生成时按项目真实档位判 —— 界面显示合格、导出
+       * 却被拦,反过来也会发生,极难查。
+       * seedingMode 从 task 快照读而不是写死常量:模式随 task_json 持久化,断点恢复
+       * 必须用当初那个模式重判。写死常量时,一次 brand_voice 的运行恢复后会被按
+       * peer_seeding 判定 —— 界面说合格、导出被拦,或者反过来。历史运行没有这个
+       * 字段,`?? DEFAULT_HARNESS_SEEDING_MODE` 让它们照旧按素人代发判。
+       * projectName 直接传 context.project.name,空白名交给校验器自己跳过品牌词
+       * 检查(它有 .trim() 守卫),这里不编默认值 —— 猜出来的项目名会造成误报。
+       */
+      bodyLength: context.task.bodyLength ?? context.task.methodProfile?.bodyLength,
+      seedingMode: context.task.seedingMode ?? DEFAULT_HARNESS_SEEDING_MODE,
+      projectName: context.project.name,
     });
     return checkpoint.candidates.map((candidate) => {
       const candidateIssues = issues.filter((issue) => issue.candidateIndex === candidate.candidateIndex || issue.candidateIndex === -1);
@@ -926,7 +968,13 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async process(id: string): Promise<void> {
-    const job = this.jobRow(id);
+    // The job can be soft-deleted after claimNextFair() schedules this callback but
+    // before setImmediate runs. Treat that narrow race as a cancelled claim rather
+    // than allowing jobRow() to reject outside the process settlement boundary.
+    const job = this.database.prepare(
+      'SELECT * FROM agent_harness_jobs WHERE id=? AND deleted_at IS NULL',
+    ).get(id) as unknown as HarnessJobRow | undefined;
+    if (!job) return;
     const project = this.resources.projectRow(job.project_id);
     const workspaceId = String(project.workspace_id);
     const controller = new AbortController();
@@ -963,6 +1011,9 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
           revisionInstruction: job.run_kind === 'revision' ? job.instruction : undefined,
           candidates, readEvidenceIds: parseJson<string[]>(job.read_evidence_ids_json, []),
           provider, signal: controller.signal, onProgress: (value) => this.progress(id, value),
+          // 模式取 task 快照里冻结的那个,与 checkpointResults 那处同一个来源。
+          // 显式写出而不是靠 runner 自己从 task 读:这条路走的是哪个模式要在调用点可见。
+          seedingMode: context.task.seedingMode ?? DEFAULT_HARNESS_SEEDING_MODE,
         });
         const priorUsage = parseJson<Record<string, number>>(job.usage_json, {});
         result = {
@@ -981,6 +1032,8 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
         result = await runAgentHarness({
           jobId: id, ...context, runMode: job.run_kind,
           revisionInstruction: job.run_kind === 'revision' ? job.instruction : undefined,
+          // 与断点恢复那条路走同一个模式,否则同一个任务两次运行的判定标准不同。
+          seedingMode: context.task.seedingMode ?? DEFAULT_HARNESS_SEEDING_MODE,
           provider, signal: controller.signal,
           onProgress: (value) => this.progress(id, value),
           onTrace: (trace) => this.recordTrace(id, trace),
@@ -1199,6 +1252,15 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
     const { N, H, Cref, publishing } = candidate.content;
     const lines = [
       `# ${N.title}`, '', `> 创意命题：${candidate.concept}`, '',
+      ...(candidate.marketingStrategy ? [
+        '## 软营销心智链', '',
+        `叙事路径：${narrativePathLabel(candidate.marketingStrategy.narrativePath)}`,
+        `用户欲望：${candidate.marketingStrategy.readerDesire}`,
+        `隐藏卡点：${candidate.marketingStrategy.hiddenTension}`,
+        `认知翻转：${candidate.marketingStrategy.oldJudgment} → ${candidate.marketingStrategy.newJudgment}`,
+        `项目承接：${candidate.marketingStrategy.projectBridge}`,
+        `低压力下一步：${candidate.marketingStrategy.lowPressureNextStep}`, '',
+      ] : []),
       '## 封面', '', `主文案：${N.coverHeadline}`, `副文案：${N.coverSubheadline}`, '',
       '## 逐图脚本', '', `总任务：${N.imageBrief}`, '',
       ...N.imageSequence.flatMap((item) => [
@@ -1210,10 +1272,22 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
       '## 发布正文', '', N.body, '', `行动引导：${N.callToAction}`, '',
       '## 标签', '', H.hashtags.join(' '), '',
       '## 账号首评', '', Cref.ownedFirstComment, '',
-      '## 模拟问答参考', '', Cref.disclaimer, '',
+      // 提示语取自常量而非候选数据:它是给操盘手看的标注，不是要粘贴进评论区的内容。
+      // 导出件是内部工作文档，这句话该留；改成常量后也不会因模型漏写而消失。
+      '## 模拟问答参考', '', HARNESS_SIMULATION_NOTICE, '',
     ];
     for (const thread of Cref.threads) {
-      lines.push(`**问：${thread.question}**`, '', `答：${thread.answer}`, '');
+      const kind = thread.threadKind ?? 'org_answer';
+      if (kind === 'organic_reaction') {
+        lines.push(`**短反应 · ${thread.displayName || '模拟读者'}**`, '', thread.question, '');
+        continue;
+      }
+      if (kind === 'reader_exchange') {
+        lines.push(`**读者接话 · ${thread.displayName || '模拟读者 A'}**`, '', thread.question, '', `${thread.replyDisplayName || '模拟读者 B'}：${thread.answer}`, '');
+        for (const followUp of thread.followUps) lines.push(`${followUp.kind === 'counterexample' ? '反例' : '接着聊'}：${followUp.question}`, followUp.answer, '');
+        continue;
+      }
+      lines.push(`**${thread.displayName || '模拟读者'}问：${thread.question}**`, '', `${this.routeOwnerLabel(thread.postingIdentity === 'staff' || thread.postingIdentity === 'expert' ? thread.postingIdentity : 'publisher')}答：${thread.answer}`, '');
       for (const followUp of thread.followUps) lines.push(`${followUp.kind === 'counterexample' ? '反例' : '追问'}：${followUp.question}`, `答：${followUp.answer}`, '');
       if (thread.clarification) lines.push(`澄清：${thread.clarification}`, '');
       if (thread.nextStep) lines.push(`下一步：${thread.nextStep}`, '');
@@ -1260,6 +1334,7 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
             allowPrivateNetwork: this.options.byokAllowPrivateNetwork,
           })
         : undefined,
+      maxOutputTokenLimit: modelOutputTokenLimit(settings),
       timeoutMs: Math.max(10_000, Math.min(300_000, this.options.modelRequestTimeoutMs)),
     });
     return {
@@ -1432,15 +1507,26 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  // Keep this mapping byte-compatible with KnowledgeService: persisted rows use
+  // Chinese product labels (for example “已知事实” and “猜想”), while agent-core
+  // consumes the normalized English union. Falling unknown here silently strips
+  // every project selling point from the Harness.
   private knowledgeKind(value: string): KnowledgeKind {
-    return ['fact', 'case', 'user_view', 'methodology', 'inference', 'hypothesis', 'unknown', 'prohibited'].includes(value)
-      ? value as KnowledgeKind
-      : 'fact';
+    const lower = value.toLowerCase();
+    if (/禁止|prohibit|forbidden/u.test(lower)) return 'prohibited';
+    if (/未知|unknown|不足/u.test(lower)) return 'unknown';
+    if (/猜想|hypothesis/u.test(lower)) return 'hypothesis';
+    if (/推理|inference/u.test(lower)) return 'inference';
+    if (/方法|formula|method|prompt|提示词|evaluation|评分/u.test(lower)) return 'methodology';
+    if (/案例|样本|case|sample|reference|corpus|对标/u.test(lower)) return 'case';
+    if (/用户|观点|user/u.test(lower)) return 'user_view';
+    return 'fact';
   }
 
   private evidenceStatus(value: string): EvidenceStatus {
-    return ['observed', 'user_supplied', 'inferred', 'unknown'].includes(value)
-      ? value as EvidenceStatus
-      : 'unknown';
+    if (/observed|核验|已知事实/u.test(value)) return 'observed';
+    if (/inferred|推理|猜想/u.test(value)) return 'inferred';
+    if (/unknown|未知|不足/u.test(value)) return 'unknown';
+    return 'user_supplied';
   }
 }

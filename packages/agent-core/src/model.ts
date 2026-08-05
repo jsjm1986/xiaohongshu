@@ -1,4 +1,5 @@
 import type { PromptContentPart, PromptMessage } from "./types.js";
+import { GENERATION_OUTPUT_TOKENS } from "./output-budget.js";
 
 export type OpenAITransport = "responses" | "chat_completions";
 export type StructuredOutputMode = "json_schema" | "json_object" | "none";
@@ -25,6 +26,10 @@ export interface ModelGenerationResponse {
     inputTokens?: number;
     outputTokens?: number;
     totalTokens?: number;
+    cacheHitTokens?: number;
+    cacheMissTokens?: number;
+    /** Physical provider requests represented by this response (2 after one length expansion). */
+    modelCalls?: number;
   };
 }
 
@@ -44,7 +49,21 @@ export interface OpenAICompatibleClientOptions {
   includeTemperature?: boolean;
   chatMaxTokensField?: "max_tokens" | "max_completion_tokens";
   maxResponseBytes?: number;
+  /** Provider/model output capability. Normal stages still use request.maxOutputTokens. */
+  maxOutputTokenLimit?: number;
   fetch?: typeof globalThis.fetch;
+}
+
+export interface ModelResponseDiagnostics {
+  /** Shape-only diagnostics. Never contains model text, prompts, credentials or headers. */
+  topLevelKeys: string[];
+  choiceMessageKeys?: string[];
+  contentKind?: "missing" | "string" | "array" | "other";
+  contentChars?: number;
+  reasoningContentChars?: number;
+  outputItemTypes?: string[];
+  /** The client already made its single correction request for a reasoning-only response. */
+  emptyOutputRecoveryAttempted?: boolean;
 }
 
 export class ModelProviderError extends Error {
@@ -52,6 +71,14 @@ export class ModelProviderError extends Error {
     message: string,
     public readonly status?: number,
     public readonly requestId?: string,
+    /** Explicitly separates transport retries from completed-but-invalid model responses. */
+    public readonly retryable?: boolean,
+    /** Preserves provider termination metadata even when no visible output was returned. */
+    public readonly finishReason?: string,
+    /** Usage already spent by a completed response, including a controlled length expansion. */
+    public readonly usage?: ModelGenerationResponse['usage'],
+    /** Safe response-shape telemetry for completed responses with no visible output. */
+    public readonly responseDiagnostics?: ModelResponseDiagnostics,
   ) {
     super(message);
     this.name = "ModelProviderError";
@@ -188,6 +215,33 @@ function chatContent(content: string | PromptContentPart[]): string | Record<str
     : { type: "image_url", image_url: { ...part.image_url } });
 }
 
+export function modelResponseDiagnostics(payload: unknown): ModelResponseDiagnostics {
+  if (!isRecord(payload)) return { topLevelKeys: [] };
+  const diagnostics: ModelResponseDiagnostics = {
+    topLevelKeys: Object.keys(payload).sort().slice(0, 30),
+  };
+  if (Array.isArray(payload.output)) {
+    diagnostics.outputItemTypes = [...new Set(payload.output.flatMap((item) =>
+      isRecord(item) && typeof item.type === "string" ? [item.type] : []))].slice(0, 20);
+  }
+  const choice = Array.isArray(payload.choices) && isRecord(payload.choices[0]) ? payload.choices[0] : undefined;
+  const message = choice && isRecord(choice.message) ? choice.message : undefined;
+  if (message) {
+    diagnostics.choiceMessageKeys = Object.keys(message).sort().slice(0, 30);
+    const content = message.content;
+    diagnostics.contentKind = content === undefined || content === null
+      ? "missing"
+      : typeof content === "string" ? "string" : Array.isArray(content) ? "array" : "other";
+    diagnostics.contentChars = typeof content === "string"
+      ? content.length
+      : Array.isArray(content)
+        ? content.reduce((sum, part) => sum + (isRecord(part) && typeof part.text === "string" ? part.text.length : 0), 0)
+        : 0;
+    diagnostics.reasoningContentChars = typeof message.reasoning_content === "string" ? message.reasoning_content.length : 0;
+  }
+  return diagnostics;
+}
+
 export function extractModelText(payload: unknown): string {
   if (!isRecord(payload)) throw new ModelProviderError("Model response was not a JSON object.");
   if (typeof payload.output_text === "string" && payload.output_text.trim()) return payload.output_text;
@@ -219,7 +273,25 @@ export function extractModelText(payload: unknown): string {
   throw new ModelProviderError("Model response did not contain output text.");
 }
 
-const LENGTH_RETRY_TOKEN_CAP = 32_000;
+const DEFAULT_LENGTH_RETRY_TOKEN_CAP = GENERATION_OUTPUT_TOKENS;
+
+function sumOptional(left?: number, right?: number): number | undefined {
+  return left === undefined && right === undefined ? undefined : (left ?? 0) + (right ?? 0);
+}
+
+function mergeUsage(
+  left: ModelGenerationResponse["usage"],
+  right: ModelGenerationResponse["usage"],
+): ModelGenerationResponse["usage"] {
+  return {
+    inputTokens: sumOptional(left?.inputTokens, right?.inputTokens),
+    outputTokens: sumOptional(left?.outputTokens, right?.outputTokens),
+    totalTokens: sumOptional(left?.totalTokens, right?.totalTokens),
+    cacheHitTokens: sumOptional(left?.cacheHitTokens, right?.cacheHitTokens),
+    cacheMissTokens: sumOptional(left?.cacheMissTokens, right?.cacheMissTokens),
+    modelCalls: (left?.modelCalls ?? 1) + (right?.modelCalls ?? 1),
+  };
+}
 
 export class OpenAICompatibleClient implements ModelProvider {
   private readonly fetchImpl: typeof globalThis.fetch;
@@ -228,6 +300,7 @@ export class OpenAICompatibleClient implements ModelProvider {
   private readonly structuredOutput: StructuredOutputMode;
   private readonly timeoutMs: number;
   private readonly maxResponseBytes: number;
+  private readonly maxOutputTokenLimit: number;
 
   constructor(private readonly options: OpenAICompatibleClientOptions) {
     if (!options.apiKey.trim()) throw new Error("An API key is required for OpenAICompatibleClient.");
@@ -238,14 +311,22 @@ export class OpenAICompatibleClient implements ModelProvider {
     this.structuredOutput = options.structuredOutput ?? "json_schema";
     this.timeoutMs = options.timeoutMs ?? 60_000;
     this.maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_MODEL_RESPONSE_BYTES;
+    this.maxOutputTokenLimit = Number.isSafeInteger(options.maxOutputTokenLimit) && (options.maxOutputTokenLimit ?? 0) > 0
+      ? options.maxOutputTokenLimit!
+      : DEFAULT_LENGTH_RETRY_TOKEN_CAP;
   }
 
   async generate(request: ModelGenerationRequest): Promise<ModelGenerationResponse> {
     const model = request.model ?? this.options.model;
     if (!model) throw new Error("No model was configured for this generation request.");
     const endpoint = this.transport === "responses" ? "/responses" : "/chat/completions";
-    const attempt = async (maxOutputTokens: number | undefined): Promise<ModelGenerationResponse> => {
-      const effectiveRequest = maxOutputTokens === undefined ? request : { ...request, maxOutputTokens };
+    const attempt = async (
+      maxOutputTokens: number | undefined,
+      attemptRequest: ModelGenerationRequest = request,
+    ): Promise<ModelGenerationResponse> => {
+      const effectiveRequest = maxOutputTokens === undefined
+        ? attemptRequest
+        : { ...attemptRequest, maxOutputTokens };
       const body = this.transport === "responses"
         ? this.responsesBody(model, effectiveRequest)
         : this.chatBody(model, effectiveRequest);
@@ -285,7 +366,12 @@ export class OpenAICompatibleClient implements ModelProvider {
       try {
         rawText = await readBoundedModelResponseText(response, this.maxResponseBytes);
       } catch {
-        throw new ModelProviderError("Model response exceeded the configured size limit or could not be read.", response.status, requestId);
+        throw new ModelProviderError(
+          "Model response exceeded the configured size limit or could not be read.",
+          response.status,
+          requestId,
+          response.status === 429 || response.status >= 500,
+        );
       } finally {
         clearTimeout(timeout);
         request.signal?.removeEventListener("abort", abortFromCaller);
@@ -315,26 +401,104 @@ export class OpenAICompatibleClient implements ModelProvider {
         : isRecord(payload) && typeof payload.status === "string"
           ? payload.status
           : undefined;
-      return { text: extractModelText(payload), raw: payload, requestId, finishReason, usage };
+      // Read termination metadata before requiring visible text. Reasoning models can
+      // consume the whole output budget and return finish_reason=length with an empty
+      // content field. That is one controlled length retry, not a transport outage.
+      let text = "";
+      try {
+        text = extractModelText(payload);
+      } catch (error) {
+        if (error instanceof ModelProviderError && /did not contain output text/iu.test(error.message)) {
+          // Preserve the completed response metadata below; generate() decides whether
+          // this is the single controlled length expansion or a terminal empty output.
+        } else if (error instanceof ModelProviderError) {
+          throw new ModelProviderError(error.message, response.status, requestId, false, finishReason, undefined, modelResponseDiagnostics(payload));
+        } else {
+          throw error;
+        }
+      }
+      return { text, raw: payload, requestId, finishReason, usage: { ...usage, modelCalls: 1 } };
     };
 
+    const isLengthFinish = (value?: string): boolean => value === "length" || value === "max_output_tokens";
+    const isReasoningOnlyStop = (result: ModelGenerationResponse): boolean => {
+      if (result.finishReason !== "stop" || result.text.trim()) return false;
+      const diagnostics = modelResponseDiagnostics(result.raw);
+      return (diagnostics.contentKind === "missing" || diagnostics.contentChars === 0)
+        && (diagnostics.reasoningContentChars ?? 0) > 0;
+    };
+    const incompleteOutputError = (tokens: number | undefined, result: ModelGenerationResponse): ModelProviderError =>
+      new ModelProviderError(
+        isLengthFinish(result.finishReason)
+          ? `Model output was truncated${tokens ? ` at ${tokens} max tokens` : ""} (finish_reason=${result.finishReason}); increase the output token budget for this reasoning-heavy stage.`
+          : "Model response did not contain output text.",
+        200,
+        result.requestId,
+        false,
+        result.finishReason,
+        result.usage,
+        modelResponseDiagnostics(result.raw),
+      );
+
     const result = await attempt(request.maxOutputTokens);
-    // 推理模型（reasoning tokens 计入 max_tokens）在复杂结构化任务中会把预算
-    // 全部用于思考,finish_reason=length 时输出被截断甚至为零——上游会误报成
-    // JSON 解析失败。此处自愈:预算翻倍重试一次(封顶 32K);仍截断才给出
-    // 明确的截断错误,而不是让下游面对一段坏 JSON。
-    if (result.finishReason === "length" && typeof request.maxOutputTokens === "number" && request.maxOutputTokens < LENGTH_RETRY_TOKEN_CAP) {
-      const widened = Math.min(request.maxOutputTokens * 2, LENGTH_RETRY_TOKEN_CAP);
+    // A 1M context window is an input capacity. Reasoning output still has its own
+    // budget. When that budget is exhausted, widen exactly once to the declared model capability; never
+    // hand the result to the outer six-attempt transport retry loop.
+    if (isLengthFinish(result.finishReason)) {
+      if (typeof request.maxOutputTokens !== "number" || request.maxOutputTokens >= this.maxOutputTokenLimit) {
+        throw incompleteOutputError(request.maxOutputTokens, result);
+      }
+      // One deliberate jump to the declared provider capability. Do not walk through
+      // 8K→16K→32K and do not hand truncation to the outer transport retry loop.
+      const widened = this.maxOutputTokenLimit;
       const retried = await attempt(widened);
-      if (retried.finishReason === "length") {
+      const combinedUsage = mergeUsage(result.usage, retried.usage);
+      if (isLengthFinish(retried.finishReason) || !retried.text.trim()) {
+        throw incompleteOutputError(widened, { ...retried, usage: combinedUsage });
+      }
+      return { ...retried, usage: combinedUsage };
+    }
+    if (isReasoningOnlyStop(result)) {
+      // Some reasoning-compatible gateways occasionally return only private reasoning
+      // and then stop normally. Retry the same frozen task once with an appended delivery
+      // instruction. The original prompt remains an exact prefix for provider caching,
+      // and private reasoning is neither persisted nor sent back to the model.
+      const requiresJson = this.structuredOutput === "json_object"
+        || (this.structuredOutput === "json_schema" && request.responseSchema !== undefined);
+      const recoveryRequest: ModelGenerationRequest = {
+        ...request,
+        messages: [
+          ...request.messages,
+          {
+            role: "user",
+            content: requiresJson
+              ? "The previous attempt stopped after internal reasoning without a visible answer. Return only the final answer now, following the required JSON structure exactly. Do not include reasoning or explanation."
+              : "The previous attempt stopped after internal reasoning without a visible answer. Return only the final answer now. Do not include reasoning or explanation.",
+          },
+        ],
+        ...(typeof request.seed === "number" ? { seed: request.seed + 1 } : {}),
+        ...(typeof request.temperature === "number" ? { temperature: Math.min(request.temperature, 0.35) } : {}),
+      };
+      const recovered = await attempt(request.maxOutputTokens, recoveryRequest);
+      const combinedUsage = mergeUsage(result.usage, recovered.usage);
+      if (!recovered.text.trim() || isLengthFinish(recovered.finishReason)) {
+        const diagnostics = modelResponseDiagnostics(recovered.raw);
+        diagnostics.emptyOutputRecoveryAttempted = true;
         throw new ModelProviderError(
-          `Model output was truncated at ${widened} max tokens (finish_reason=length); increase the output token budget for reasoning-heavy stages.`,
-          undefined,
-          retried.requestId,
+          isLengthFinish(recovered.finishReason)
+            ? `Model output was truncated${request.maxOutputTokens ? ` at ${request.maxOutputTokens} max tokens` : ""} (finish_reason=${recovered.finishReason}) after empty-output recovery.`
+            : "Model response did not contain output text after one empty-output recovery attempt.",
+          200,
+          recovered.requestId,
+          false,
+          recovered.finishReason,
+          combinedUsage,
+          diagnostics,
         );
       }
-      return retried;
+      return { ...recovered, usage: combinedUsage };
     }
+    if (!result.text.trim()) throw incompleteOutputError(request.maxOutputTokens, result);
     return result;
   }
 
@@ -381,7 +545,11 @@ export class OpenAICompatibleClient implements ModelProvider {
     const inputTokens = numeric(payload.usage.input_tokens) ?? numeric(payload.usage.prompt_tokens);
     const outputTokens = numeric(payload.usage.output_tokens) ?? numeric(payload.usage.completion_tokens);
     const totalTokens = numeric(payload.usage.total_tokens) ?? (inputTokens !== undefined && outputTokens !== undefined ? inputTokens + outputTokens : undefined);
-    if (inputTokens === undefined && outputTokens === undefined && totalTokens === undefined) return undefined;
-    return { inputTokens, outputTokens, totalTokens };
+    const promptDetails = isRecord(payload.usage.prompt_tokens_details) ? payload.usage.prompt_tokens_details : undefined;
+    const cacheHitTokens = numeric(payload.usage.prompt_cache_hit_tokens) ?? numeric(promptDetails?.cached_tokens);
+    const cacheMissTokens = numeric(payload.usage.prompt_cache_miss_tokens);
+    if (inputTokens === undefined && outputTokens === undefined && totalTokens === undefined
+      && cacheHitTokens === undefined && cacheMissTokens === undefined) return undefined;
+    return { inputTokens, outputTokens, totalTokens, cacheHitTokens, cacheMissTokens, modelCalls: 1 };
   }
 }

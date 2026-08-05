@@ -85,6 +85,17 @@ export class IntelligenceController {
     return this.enrich.saveEnrichedKnowledge(projectId, content, targetFile, baseFileId, this.principal(request));
   }
 
+  @Post('author-facts/organize')
+  @RequirePermission({ permission: 'generation.run', projectParam: 'projectId' })
+  organizeAuthorFacts(
+    @Req() request: Request,
+    @Param('projectId') projectId: string,
+    @Body() body: unknown,
+  ) {
+    const input = objectOrEmpty(body);
+    return this.intelligence.organizeAuthorFacts(projectId, this.principal(request), input.narrative);
+  }
+
   @Get('intelligence/analysis-tasks/:taskId')
   @RequirePermission({ permission: 'project.read', projectParam: 'projectId' })
   getTask(@Param('projectId') projectId: string, @Param('taskId') taskId: string) {

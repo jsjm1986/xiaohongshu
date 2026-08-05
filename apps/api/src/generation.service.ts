@@ -3,12 +3,14 @@ import { join } from 'node:path';
 import {
   ContentGenerationAgent,
   GENERATION_PARAMETER_REGISTRY,
+  estimateTokens,
   ModelProviderError,
   OpenAICompatibleClient,
   indexKnowledgeSource,
   type ContentPackage,
   type FormulaVersion,
   type GenerationParameterSelection,
+  type GenerationTelemetryEvent,
   type KnowledgeDocument,
   type KnowledgeKind,
   type ModelProvider,
@@ -45,7 +47,7 @@ import {
 } from './job-claim.js';
 import { classifyModelFailure, modelFailureMessage } from './model-failure.js';
 import { detectProviderOutage } from './provider-outage.js';
-import { IntelligenceService } from './intelligence.service.js';
+import { IntelligenceService, type GenerationSourceSnapshot } from './intelligence.service.js';
 import {
   assertKnowledgeContextBudget,
   assertKnowledgeRowsBudget,
@@ -56,7 +58,7 @@ import { ResourceService } from './resource.service.js';
 import { ResearchService } from './research.service.js';
 import { RevisionService } from './revision.service.js';
 import { createSafeModelFetch } from './safe-model-fetch.js';
-import { SettingsService } from './settings.service.js';
+import { modelOutputTokenLimit, SettingsService } from './settings.service.js';
 import { readStoredText } from './storage-file.js';
 import { nowIso, parseJson } from './utils.js';
 
@@ -110,6 +112,20 @@ interface ModelProviderRetryOptions {
   maxAttempts?: number;
   baseDelayMs?: number;
   sleep?: (delayMs: number) => Promise<void>;
+  onAttempt?: (
+    request: Parameters<ModelProvider["generate"]>[0],
+    observation: {
+      providerAttempt: number;
+      maxAttempts: number;
+      outcome: "completed" | "failed";
+      elapsedMs: number;
+      providerRequests: number;
+      status?: number;
+      retryable?: boolean;
+      willRetry: boolean;
+      delayMs?: number;
+    },
+  ) => void;
 }
 
 /** 任务已被回收、接管或删除；旧执行者必须丢弃本轮结果。 */
@@ -169,11 +185,41 @@ export function retryModelProvider(
     generate: async (request) => {
       let lastError: unknown;
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        const startedAt = Date.now();
         try {
-          return await provider.generate(request);
+          const result = await provider.generate(request);
+          try {
+            options.onAttempt?.(request, {
+              providerAttempt: attempt + 1,
+              maxAttempts,
+              outcome: "completed",
+              elapsedMs: Date.now() - startedAt,
+              providerRequests: result.usage?.modelCalls ?? 1,
+              willRetry: false,
+            });
+          } catch { /* Telemetry must not affect model execution. */ }
+          return result;
         } catch (error) {
           lastError = error;
           const status = error instanceof ModelProviderError ? error.status : undefined;
+          const retryable = error instanceof ModelProviderError
+            ? (error.retryable ?? (status === undefined || status === 429 || status >= 500))
+            : false;
+          const willRetry = retryable && attempt < maxAttempts - 1;
+          const delayMs = willRetry ? baseDelayMs * 2 ** attempt : undefined;
+          try {
+            options.onAttempt?.(request, {
+              providerAttempt: attempt + 1,
+              maxAttempts,
+              outcome: "failed",
+              elapsedMs: Date.now() - startedAt,
+              providerRequests: error instanceof ModelProviderError ? (error.usage?.modelCalls ?? 1) : 1,
+              status,
+              retryable,
+              willRetry,
+              delayMs,
+            });
+          } catch { /* Telemetry must not affect model execution. */ }
           // 可选诊断:确认重试是否真的发生、每次 status 是什么。定位台账 100% 失败
           // 时靠它拿到了"两个候选把 4 次尝试全部耗尽"这一关键证据。
           if (process.env.CONTENT_AGENT_DEBUG_RETRY) {
@@ -184,8 +230,11 @@ export function retryModelProvider(
             // tenant data. Diagnostics retain only bounded non-secret fields.
             console.error(`[retry] purpose=${purpose} attempt=${attempt + 1}/${maxAttempts} status=${status ?? 'network'}`);
           }
-          if (status !== undefined && status !== 429 && status < 500) throw error;
-          if (attempt < maxAttempts - 1) await sleep(baseDelayMs * 2 ** attempt);
+          // Only transport failures, 429 and 5xx are repeatable. A completed HTTP
+          // response with empty/truncated/invalid structured output has already spent
+          // model tokens and must not enter this multi-attempt outage loop.
+          if (!retryable) throw error;
+          if (willRetry) await sleep(delayMs!);
         }
       }
       throw lastError;
@@ -386,10 +435,15 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     this.drainRevisions();
   }
 
-  create(raw: Record<string, unknown>, principal: SessionPrincipal): Record<string, unknown> {
+  async create(raw: Record<string, unknown>, principal: SessionPrincipal): Promise<Record<string, unknown>> {
+    const projectId = this.requiredString(raw.projectId, 'projectId');
+    const sourceSnapshot = await this.intelligence.preflightGenerationSource(projectId);
     // 扣额度、任务、queued 事件和审计必须同生共死。批量入口已有外层事务；
     // 单篇也显式包裹，避免插入失败或进程在两条语句间退出后留下“扣费但无任务”。
-    const id = this.database.transaction(() => this.insertJob(raw, principal, null));
+    const id = this.database.transaction(() => {
+      this.intelligence.assertGenerationSourceSnapshotCurrent(sourceSnapshot);
+      return this.insertJob(raw, principal, null);
+    });
     this.enqueue(id);
     return this.get(id);
   }
@@ -511,16 +565,21 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     return id;
   }
 
-  createBatch(raw: { projectId?: unknown; name?: unknown; jobs?: unknown }, principal: SessionPrincipal): Record<string, unknown> {
+  async createBatch(
+    raw: { projectId?: unknown; name?: unknown; jobs?: unknown },
+    principal: SessionPrincipal,
+  ): Promise<Record<string, unknown>> {
     const projectId = this.requiredString(raw.projectId, 'projectId');
     const jobs = Array.isArray(raw.jobs) ? raw.jobs.filter(isRecord) : [];
     if (!jobs.length) throw new BadRequestException('批量任务不能为空');
     if (jobs.length > 60) throw new BadRequestException('单批任务不能超过 60 篇');
+    const sourceSnapshot: GenerationSourceSnapshot = await this.intelligence.preflightGenerationSource(projectId);
     const name = typeof raw.name === 'string' ? raw.name.trim().slice(0, 120) : '';
     const batchId = randomUUID();
     const now = nowIso();
     // 先建批次账本(queued),再逐个插 job;任一 job 校验失败则整批回滚。
     const jobIds = this.database.transaction(() => {
+      this.intelligence.assertGenerationSourceSnapshotCurrent(sourceSnapshot);
       this.database
         .prepare(
           `INSERT INTO generation_batches
@@ -732,9 +791,30 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  get(id: string): Record<string, unknown> {
+  get(id: string, deliveryConfirmationUserId?: string): Record<string, unknown> {
     const row = this.jobRow(id);
-    return this.mapJob(row, true);
+    return this.mapJob(row, true, deliveryConfirmationUserId);
+  }
+
+  /**
+   * Metadata-only execution trace for one traditional generation job.
+   *
+   * Every event is projected through an explicit allowlist. Raw details_json is
+   * never returned, so future internal fields cannot accidentally disclose
+   * prompts, generated copy, provider responses or credentials.
+   */
+  trace(jobId: string): Record<string, unknown> {
+    const job = this.jobRow(jobId);
+    const rows = this.database.prepare(
+      'SELECT id,event,details_json,created_at FROM generation_events WHERE job_id=? ORDER BY id',
+    ).all(jobId) as Array<{ id: number; event: string; details_json: string; created_at: string }>;
+    const events = rows.map((row) => ({
+      id: Number(row.id),
+      event: row.event,
+      createdAt: row.created_at,
+      details: projectGenerationTraceDetails(row.event, parseJson<Record<string, unknown>>(row.details_json, {})),
+    }));
+    return buildGenerationTraceResponse(job, events);
   }
 
   jobRow(id: string): JobRow {
@@ -801,6 +881,37 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       }
     }
     throw new NotFoundException('候选内容不存在');
+  }
+
+  manualDeliveryConfirmation(packageId: string, userId: string): {
+    confirmed: true; confirmedAt: string; confirmedBy: string;
+  } | null {
+    const row = this.database.prepare(
+      `SELECT created_at FROM audit_logs
+       WHERE action='generation.manual-delivery-confirm'
+         AND entity_type='content_package' AND entity_id=? AND user_id=?
+       ORDER BY id DESC LIMIT 1`,
+    ).get(packageId, userId) as { created_at: string } | undefined;
+    return row ? { confirmed: true, confirmedAt: row.created_at, confirmedBy: userId } : null;
+  }
+
+  confirmManualDelivery(jobId: string, candidateId: string, principal: SessionPrincipal): Record<string, unknown> {
+    const job = this.jobRow(jobId);
+    const content = this.contentPackage(jobId, candidateId);
+    const existing = this.manualDeliveryConfirmation(content.id, principal.userId);
+    if (!existing) {
+      const project = this.resources.projectRow(job.project_id);
+      this.audit.record({
+        workspaceId: String(project.workspace_id), userId: principal.userId,
+        action: 'generation.manual-delivery-confirm', entityType: 'content_package', entityId: content.id,
+        details: {
+          jobId, candidateId: content.candidateId, packageId: content.id,
+          automaticValidationValid: content.validation.valid,
+          acknowledgement: 'reviewed_facts_evidence_identity_and_risk',
+        },
+      });
+    }
+    return this.get(jobId, principal.userId);
   }
 
   /**
@@ -1089,8 +1200,16 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       const knowledge = await this.loadKnowledge(job.project_id, config.knowledge, '内容生成');
       this.progress(jobId, 44);
       const planningContext = await this.intelligence.hydratePlanningContext(job.project_id, storedPlanningContext);
-      const agent = new ContentGenerationAgent({ modelProvider: this.modelProvider(providerSettings) });
-      const result = await agent.generate({ jobId, config, formulaVersion: formula, knowledge, parameterSelection, planningContext });
+      const agent = new ContentGenerationAgent({ modelProvider: this.modelProvider(providerSettings, jobId) });
+      const result = await agent.generate({
+        jobId,
+        config,
+        formulaVersion: formula,
+        knowledge,
+        parameterSelection,
+        planningContext,
+        onTelemetry: (telemetry) => this.generationTelemetryEvent(jobId, telemetry),
+      });
       const storedOpportunitySnapshot = parseJson<Record<string, unknown>>(job.opportunity_snapshot_json, {});
       const coreSelectionAudit = result.packages
         .map((content) => content.orchestrationSnapshot?.opportunitySelectionAudit)
@@ -1320,7 +1439,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       const hydrated = await this.intelligence.hydratePlanningContext(job.project_id, revisionPlanningContext);
 
       this.revisionProgress(revisionId, 40);
-      const provider = this.modelProvider(providerSettings);
+      const provider = this.modelProvider(providerSettings, job.id);
       const trackedProvider: ModelProvider | undefined = provider ? {
         generate: (request) => {
           modelInvoked = true;
@@ -1566,7 +1685,51 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private modelProvider(settings: ReturnType<SettingsService['provider']>): ModelProvider | undefined {
+  private modelRequestTelemetry(request: Parameters<ModelProvider["generate"]>[0]): Record<string, unknown> {
+    let textChars = 0;
+    let textParts = 0;
+    let imageCount = 0;
+    const tokenInputs: string[] = [];
+    for (const message of request.messages) {
+      if (typeof message.content === "string") {
+        textChars += message.content.length;
+        textParts += 1;
+        tokenInputs.push(`${message.role}\n${message.content}`);
+      } else {
+        for (const part of message.content) {
+          if (part.type === "text") {
+            textChars += part.text.length;
+            textParts += 1;
+            tokenInputs.push(`${message.role}\n${part.text}`);
+          } else imageCount += 1;
+        }
+      }
+    }
+    const schemaText = request.responseSchema ? JSON.stringify(request.responseSchema) : "";
+    if (schemaText) tokenInputs.push(schemaText);
+    return {
+      messageCount: request.messages.length,
+      textParts,
+      textChars,
+      imageCount,
+      schemaName: request.schemaName,
+      schemaChars: schemaText.length,
+      estimatedInputTokens: estimateTokens(tokenInputs.join("\n")),
+    };
+  }
+
+  private modelRequestIdentity(request: Parameters<ModelProvider["generate"]>[0]): Record<string, unknown> {
+    const metadata = request.metadata ?? {};
+    return {
+      purpose: typeof metadata.purpose === "string" ? metadata.purpose.slice(0, 80) : "unknown",
+      candidateIndex: typeof metadata.candidateIndex === "number" ? metadata.candidateIndex : undefined,
+      stage: typeof metadata.stage === "number" ? metadata.stage : undefined,
+      attempt: typeof metadata.attempt === "number" ? metadata.attempt : undefined,
+      identity: typeof metadata.identity === "string" ? metadata.identity.slice(0, 32) : undefined,
+    };
+  }
+
+  private modelProvider(settings: ReturnType<SettingsService['provider']>, usageJobId?: string): ModelProvider | undefined {
     if (!settings.apiKey) return undefined;
     const client = new OpenAICompatibleClient({
       apiKey: settings.apiKey,
@@ -1583,20 +1746,79 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
             allowPrivateNetwork: this.options.byokAllowPrivateNetwork,
           })
         : undefined,
+      maxOutputTokenLimit: modelOutputTokenLimit(settings),
       timeoutMs: Number.isFinite(this.options.modelRequestTimeoutMs)
         ? Math.max(10_000, Math.min(300_000, this.options.modelRequestTimeoutMs))
         : 90_000,
     });
-    return limitModelProvider(
+    const logicalCallIds = new WeakMap<object, string>();
+    const providerRequestCounts = new WeakMap<object, number>();
+    const provider = limitModelProvider(
       retryModelProvider(client, {
         maxAttempts: this.options.modelRetryAttempts,
         baseDelayMs: this.options.modelRetryBaseDelayMs,
+        ...(usageJobId ? { onAttempt: (request, observation) => {
+          const callId = logicalCallIds.get(request as object);
+          providerRequestCounts.set(
+            request as object,
+            (providerRequestCounts.get(request as object) ?? 0) + observation.providerRequests,
+          );
+          this.event(usageJobId, 'model_provider_attempt', {
+            callId,
+            ...this.modelRequestIdentity(request),
+            ...observation,
+          });
+        } } : {}),
       }),
       this.options.modelMaxConcurrentRequests,
     );
+    if (!usageJobId) return provider;
+    return {
+      generate: async (request) => {
+        const startedAt = Date.now();
+        const callId = randomUUID();
+        logicalCallIds.set(request as object, callId);
+        providerRequestCounts.set(request as object, 0);
+        this.event(usageJobId, 'model_stage_started', {
+          callId,
+          ...this.modelRequestIdentity(request),
+          ...this.modelRequestTelemetry(request),
+          requestedMaxOutputTokens: request.maxOutputTokens,
+        });
+        try {
+          const result = await provider.generate(request);
+          this.modelUsageEvent(usageJobId, request, {
+            callId,
+            outcome: 'completed',
+            elapsedMs: Date.now() - startedAt,
+            finishReason: result.finishReason,
+            usage: result.usage,
+            actualProviderRequests: providerRequestCounts.get(request as object),
+          });
+          return result;
+        } catch (error) {
+          this.modelUsageEvent(usageJobId, request, {
+            callId,
+            outcome: 'failed',
+            elapsedMs: Date.now() - startedAt,
+            finishReason: error instanceof ModelProviderError ? error.finishReason : undefined,
+            usage: error instanceof ModelProviderError ? error.usage : undefined,
+            status: error instanceof ModelProviderError ? error.status : undefined,
+            retryable: error instanceof ModelProviderError ? error.retryable : undefined,
+            failureKind: classifyModelFailure(error),
+            responseDiagnostics: error instanceof ModelProviderError ? error.responseDiagnostics : undefined,
+            actualProviderRequests: providerRequestCounts.get(request as object),
+          });
+          throw error;
+        } finally {
+          logicalCallIds.delete(request as object);
+          providerRequestCounts.delete(request as object);
+        }
+      },
+    };
   }
 
-  private mapJob(row: JobRow, includeCandidates: boolean): Record<string, unknown> {
+  private mapJob(row: JobRow, includeCandidates: boolean, deliveryConfirmationUserId?: string): Record<string, unknown> {
     const project = this.resources.projectRow(row.project_id);
     const config = parseJson<ResolvedGenerationConfig | null>(row.config_json, null);
     const resolutionSnapshot = parseJson<Record<string, unknown>>(row.resolution_snapshot_json, {});
@@ -1623,7 +1845,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       qualityStatus: row.quality_status,
       progress: row.progress,
       ...this.queueView(row.id),
-      candidates: includeCandidates && row.status === 'completed' ? this.packageRows(row.id).map((item) => this.mapCandidate(parseJson<ContentPackage>(item.content_json, {} as ContentPackage))) : undefined,
+      candidates: includeCandidates && row.status === 'completed' ? this.packageRows(row.id).map((item) => this.mapCandidate(parseJson<ContentPackage>(item.content_json, {} as ContentPackage), deliveryConfirmationUserId)) : undefined,
       seed: row.seed,
       formulaVersion: config?.formula.versionId,
       presetId: row.preset_id,
@@ -1672,7 +1894,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  private mapCandidate(content: ContentPackage): Record<string, unknown> {
+  private mapCandidate(content: ContentPackage, deliveryConfirmationUserId?: string): Record<string, unknown> {
     const errors = content.validation.issues.filter((item) => item.severity === 'error').length;
     const warnings = content.validation.issues.filter((item) => item.severity === 'warning').length;
     const score = Math.max(0, Math.round(100 - errors * 25 - warnings * 5));
@@ -1695,29 +1917,40 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
         const claimStatus = thread.claimStatus ?? planned?.claimStatus;
         const simulated = thread.simulated ?? planned?.simulated;
         const simulationLabel = thread.simulationLabel ?? planned?.simulationLabel;
-        const roleCard = thread.roleCard ?? planned?.roleCard;
-        const primaryGapId = thread.primaryGapId ?? planned?.primaryGapId;
-        const auxiliaryGapIds = thread.auxiliaryGapIds ?? planned?.auxiliaryGapIds;
-        const densityProxy = thread.densityProxy ?? planned?.densityProxy;
-        const replyPlan = thread.replyPlan ?? planned?.replyPlan;
-        const discoveryPlan = thread.discoveryPlan ?? planned?.discoveryPlan;
+        const threadKind = thread.threadKind ?? planned?.threadKind;
+        const ownsPrimaryGap = (planned?.coverageRole
+          ?? (threadKind === "org_answer" || !threadKind ? "primary_gap" : "topic_anchor")) === "primary_gap";
+        const isHostReply = threadKind === "host_reply";
+        const roleCard = ownsPrimaryGap ? (thread.roleCard ?? planned?.roleCard) : undefined;
+        const primaryGapId = ownsPrimaryGap ? (thread.primaryGapId ?? planned?.primaryGapId) : undefined;
+        const auxiliaryGapIds = ownsPrimaryGap ? (thread.auxiliaryGapIds ?? planned?.auxiliaryGapIds) : [];
+        const densityProxy = ownsPrimaryGap ? (thread.densityProxy ?? planned?.densityProxy) : undefined;
+        const replyPlan = ownsPrimaryGap ? (thread.replyPlan ?? planned?.replyPlan) : undefined;
+        const discoveryPlan = ownsPrimaryGap ? (thread.discoveryPlan ?? planned?.discoveryPlan) : undefined;
         const surfaceRoleCard = thread.surfaceRoleCard ?? planned?.surfaceRoleCard;
         const conversationPlan = thread.conversationPlan ?? planned?.conversationPlan;
         return {
           id: thread.id,
-          gap: thread.gap,
+          gap: ownsPrimaryGap ? thread.gap : undefined,
           function: thread.function,
           // 展示昵称(纯展示元数据);历史包缺失时保持缺省,前端不出空徽标。
           displayName: thread.displayName ?? planned?.displayName,
           // Cref contract v1.1 node metadata; absent on historical packages.
           kind: thread.kind,
           answerKind: thread.answerKind,
-          boundary: thread.boundary,
+          boundary: ownsPrimaryGap ? thread.boundary : undefined,
+          threadKind,
+          replyDisplayName: thread.replyDisplayName ?? planned?.replyDisplayName,
           postingIdentity: thread.postingIdentity,
-          sourceClusterIds: thread.sourceClusterIds,
-          evidenceIds: thread.evidenceIds,
+          answerIdentity: thread.answerIdentity ?? (threadKind === "reader_exchange"
+            ? "simulated_reader"
+            : threadKind === "organic_reaction" ? "none" : thread.postingIdentity),
+          sourceClusterIds: ownsPrimaryGap ? thread.sourceClusterIds : [],
+          evidenceIds: ownsPrimaryGap ? thread.evidenceIds : [],
+          authorFactIds: thread.authorFactIds ?? planned?.authorFactIds,
+          topicAnchorGapId: thread.topicAnchorGapId ?? planned?.topicAnchorGapId,
           stage: thread.stage,
-          nextStep: thread.nextStep,
+          nextStep: ownsPrimaryGap ? thread.nextStep : undefined,
           personaRole,
           speakerType,
           claimStatus,
@@ -1736,7 +1969,13 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
           question: thread.question,
           answer: thread.answer,
           followUps: thread.followUps,
-          purpose: `${simulationLabel || "模拟潜在读者情景"} · ${thread.postingIdentity} 可追责答复`,
+          purpose: threadKind === "host_reply"
+            ? `${simulationLabel || "模拟潜在读者情景"} · 已确认作者本人回复`
+            : threadKind === "reader_exchange"
+              ? `${simulationLabel || "模拟潜在读者情景"} · 模拟读者互聊`
+              : threadKind === "organic_reaction"
+                ? `${simulationLabel || "模拟潜在读者情景"} · 模拟读者短反应`
+                : `${simulationLabel || "模拟潜在读者情景"} · ${thread.postingIdentity} 可追责答复`,
         };
       }),
       commentDisclaimer: content.content.Cref.disclaimer,
@@ -1771,6 +2010,10 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       conflicts: content.conflicts.map((item) => `${item.key}：存在 ${item.alternatives.length} 种未解决说法`),
       seed: content.seed,
       validation: content.validation,
+      manualDeliveryConfirmation: deliveryConfirmationUserId
+        ? this.manualDeliveryConfirmation(content.id, deliveryConfirmationUserId) ?? undefined
+        : undefined,
+      commentEditorialAssessment: content.commentEditorialAssessment,
       revisions: content.revisions,
       resolutionSnapshot: content.resolutionSnapshot,
       impactReport: normalizedImpactReport ? publicImpacts(normalizedImpactReport) : undefined,
@@ -1786,6 +2029,69 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
 
   private packageRows(jobId: string): PackageRow[] {
     return this.database.prepare('SELECT * FROM content_packages WHERE job_id = ? ORDER BY candidate_index').all(jobId) as unknown as PackageRow[];
+  }
+
+  private generationTelemetryEvent(jobId: string, telemetry: GenerationTelemetryEvent): void {
+    const { type, ...details } = telemetry;
+    try {
+      this.event(jobId, type, details);
+    } catch {
+      // Observability must never alter the generated package or task outcome.
+    }
+  }
+
+  private modelUsageEvent(
+    jobId: string,
+    request: Parameters<ModelProvider['generate']>[0],
+    result: {
+      callId?: string;
+      outcome: 'completed' | 'failed';
+      elapsedMs: number;
+      actualProviderRequests?: number;
+      finishReason?: string;
+      usage?: Awaited<ReturnType<ModelProvider['generate']>>['usage'];
+      status?: number;
+      retryable?: boolean;
+      failureKind?: ReturnType<typeof classifyModelFailure>;
+      responseDiagnostics?: ModelProviderError['responseDiagnostics'];
+    },
+  ): void {
+    const usage = result.usage;
+    const inputTokens = usage?.inputTokens;
+    const cacheHitTokens = usage?.cacheHitTokens;
+    const cacheRate = typeof inputTokens === 'number' && inputTokens > 0 && typeof cacheHitTokens === 'number'
+      ? Math.round((cacheHitTokens / inputTokens) * 10_000) / 10_000
+      : undefined;
+    const metadata = request.metadata ?? {};
+    const details = {
+      callId: result.callId,
+      purpose: typeof metadata.purpose === 'string' ? metadata.purpose.slice(0, 80) : 'unknown',
+      candidateIndex: typeof metadata.candidateIndex === 'number' ? metadata.candidateIndex : undefined,
+      stage: typeof metadata.stage === 'number' ? metadata.stage : undefined,
+      attempt: typeof metadata.attempt === 'number' ? metadata.attempt : undefined,
+      identity: typeof metadata.identity === 'string' ? metadata.identity.slice(0, 32) : undefined,
+      outcome: result.outcome,
+      elapsedMs: result.elapsedMs,
+      ...this.modelRequestTelemetry(request),
+      requestedMaxOutputTokens: request.maxOutputTokens,
+      providerRequests: result.actualProviderRequests ?? usage?.modelCalls,
+      inputTokens,
+      outputTokens: usage?.outputTokens,
+      totalTokens: usage?.totalTokens,
+      cacheHitTokens,
+      cacheMissTokens: usage?.cacheMissTokens,
+      cacheRate,
+      finishReason: result.finishReason,
+      status: result.status,
+      retryable: result.retryable,
+      failureKind: result.failureKind,
+      ...(result.responseDiagnostics ? { responseDiagnostics: result.responseDiagnostics } : {}),
+    };
+    try {
+      this.event(jobId, 'model_usage', details);
+    } catch {
+      // Usage telemetry must never turn a successful model response into a failed job.
+    }
   }
 
   private event(jobId: string, event: string, details: Record<string, unknown>): void {
@@ -1853,28 +2159,247 @@ function validationIssueCountHeuristic(
   };
 }
 
+
+type GenerationTraceEventView = {
+  id: number;
+  event: string;
+  createdAt: string;
+  details: Record<string, unknown>;
+};
+
+const traceString = (value: unknown, max = 120): string | undefined =>
+  typeof value === 'string' ? value.slice(0, max) : undefined;
+const traceNumber = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+const traceBoolean = (value: unknown): boolean | undefined =>
+  typeof value === 'boolean' ? value : undefined;
+const traceStrings = (value: unknown, maxItems = 80): string[] | undefined =>
+  Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string').slice(0, maxItems).map((item) => item.slice(0, 120))
+    : undefined;
+
+function compactTraceRecord(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined));
+}
+
+/** Explicit safe projection for generation_events.details_json. */
+export function projectGenerationTraceDetails(event: string, raw: Record<string, unknown>): Record<string, unknown> {
+  const requestIdentity = {
+    callId: traceString(raw.callId, 80),
+    purpose: traceString(raw.purpose, 80),
+    candidateIndex: traceNumber(raw.candidateIndex),
+    stage: traceNumber(raw.stage),
+    attempt: traceNumber(raw.attempt),
+    identity: traceString(raw.identity, 32),
+  };
+  if (event === 'model_stage_started') return compactTraceRecord({
+    ...requestIdentity,
+    messageCount: traceNumber(raw.messageCount),
+    textParts: traceNumber(raw.textParts),
+    textChars: traceNumber(raw.textChars),
+    imageCount: traceNumber(raw.imageCount),
+    schemaName: traceString(raw.schemaName, 100),
+    schemaChars: traceNumber(raw.schemaChars),
+    estimatedInputTokens: traceNumber(raw.estimatedInputTokens),
+    requestedMaxOutputTokens: traceNumber(raw.requestedMaxOutputTokens),
+  });
+  if (event === 'model_provider_attempt') return compactTraceRecord({
+    ...requestIdentity,
+    providerAttempt: traceNumber(raw.providerAttempt),
+    maxAttempts: traceNumber(raw.maxAttempts),
+    outcome: traceString(raw.outcome, 24),
+    elapsedMs: traceNumber(raw.elapsedMs),
+    providerRequests: traceNumber(raw.providerRequests),
+    status: traceNumber(raw.status),
+    retryable: traceBoolean(raw.retryable),
+    willRetry: traceBoolean(raw.willRetry),
+    delayMs: traceNumber(raw.delayMs),
+  });
+  if (event === 'model_usage') {
+    const diagnostics = isRecord(raw.responseDiagnostics) ? raw.responseDiagnostics : {};
+    return compactTraceRecord({
+      ...requestIdentity,
+      outcome: traceString(raw.outcome, 24),
+      elapsedMs: traceNumber(raw.elapsedMs),
+      messageCount: traceNumber(raw.messageCount),
+      textParts: traceNumber(raw.textParts),
+      textChars: traceNumber(raw.textChars),
+      imageCount: traceNumber(raw.imageCount),
+      schemaName: traceString(raw.schemaName, 100),
+      schemaChars: traceNumber(raw.schemaChars),
+      estimatedInputTokens: traceNumber(raw.estimatedInputTokens),
+      requestedMaxOutputTokens: traceNumber(raw.requestedMaxOutputTokens),
+      providerRequests: traceNumber(raw.providerRequests),
+      inputTokens: traceNumber(raw.inputTokens),
+      outputTokens: traceNumber(raw.outputTokens),
+      totalTokens: traceNumber(raw.totalTokens),
+      cacheHitTokens: traceNumber(raw.cacheHitTokens),
+      cacheMissTokens: traceNumber(raw.cacheMissTokens),
+      cacheRate: traceNumber(raw.cacheRate),
+      finishReason: traceString(raw.finishReason, 80),
+      status: traceNumber(raw.status),
+      retryable: traceBoolean(raw.retryable),
+      failureKind: traceString(raw.failureKind, 40),
+      responseDiagnostics: Object.keys(diagnostics).length ? compactTraceRecord({
+        topLevelKeys: traceStrings(diagnostics.topLevelKeys, 30),
+        choiceMessageKeys: traceStrings(diagnostics.choiceMessageKeys, 30),
+        contentKind: traceString(diagnostics.contentKind, 30),
+        contentChars: traceNumber(diagnostics.contentChars),
+        reasoningContentChars: traceNumber(diagnostics.reasoningContentChars),
+        emptyOutputRecoveryAttempted: traceBoolean(diagnostics.emptyOutputRecoveryAttempted),
+      }) : undefined,
+    });
+  }
+  if (event === 'candidate_validation') return compactTraceRecord({
+    candidateIndex: traceNumber(raw.candidateIndex),
+    phase: traceString(raw.phase, 30),
+    repairAttempt: traceNumber(raw.repairAttempt),
+    summary: isRecord(raw.summary) ? projectValidationTraceSummary(raw.summary) : undefined,
+  });
+  if (event === 'candidate_repair_started') return compactTraceRecord({
+    candidateIndex: traceNumber(raw.candidateIndex),
+    repairAttempt: traceNumber(raw.repairAttempt),
+    channels: traceStrings(raw.channels, 20),
+    before: isRecord(raw.before) ? projectValidationTraceSummary(raw.before) : undefined,
+  });
+  if (event === 'candidate_repair_failed') return compactTraceRecord({
+    candidateIndex: traceNumber(raw.candidateIndex),
+    repairAttempt: traceNumber(raw.repairAttempt),
+    errorName: traceString(raw.errorName, 80),
+  });
+  if (event === 'candidate_repair_skipped') return compactTraceRecord({
+    candidateIndex: traceNumber(raw.candidateIndex),
+    reason: traceString(raw.reason, 40),
+    summary: isRecord(raw.summary) ? projectValidationTraceSummary(raw.summary) : undefined,
+  });
+  if (event === 'candidate_completed') return compactTraceRecord({
+    candidateIndex: traceNumber(raw.candidateIndex),
+    qualityStatus: traceString(raw.qualityStatus, 30),
+    repairAttempts: traceNumber(raw.repairAttempts),
+    summary: isRecord(raw.summary) ? projectValidationTraceSummary(raw.summary) : undefined,
+  });
+  if (event === 'candidate_failed') return compactTraceRecord({
+    candidateIndex: traceNumber(raw.candidateIndex),
+    errorName: traceString(raw.errorName, 80),
+  });
+  if (event === 'queued') return compactTraceRecord({
+    providerMode: traceString(raw.providerMode, 30),
+    hasProviderKey: traceBoolean(raw.hasProviderKey),
+    presetId: traceString(raw.presetId, 120),
+    styleProfileVersion: traceNumber(raw.styleProfileVersion),
+    opportunityId: traceString(raw.opportunityId, 120),
+    imageAssetCount: traceNumber(raw.imageAssetCount),
+    changedParameters: traceNumber(raw.changedParameters),
+    batchId: traceString(raw.batchId, 120),
+  });
+  if (event === 'completed') return compactTraceRecord({
+    candidateCount: traceNumber(raw.candidateCount),
+    validCandidateCount: traceNumber(raw.validCandidateCount),
+    qualityStatus: traceString(raw.qualityStatus, 30),
+    knowledgeMode: traceString(raw.knowledgeMode, 30),
+    selectedDocumentCount: Array.isArray(raw.selectedDocuments) ? raw.selectedDocuments.length : undefined,
+  });
+  if (event === 'failed') return compactTraceRecord({ message: traceString(raw.message, 500) });
+  if (event === 'provider_outage') return compactTraceRecord({
+    kind: traceString(raw.kind, 40), clearedQueuedJobs: traceNumber(raw.clearedQueuedJobs),
+  });
+  if (event.startsWith('revision_') || event === 'revised') return compactTraceRecord({
+    revisionId: traceString(raw.revisionId, 120),
+    candidateId: traceString(raw.candidateId, 160),
+    reason: traceString(raw.reason, 80),
+    message: traceString(raw.message, 500),
+    refundedQuota: traceNumber(raw.refundedQuota),
+    rerunChannels: traceStrings(raw.rerunChannels, 20),
+  });
+  if (event === 'requeued') return compactTraceRecord({ reason: traceString(raw.reason, 80) });
+  if (event === 'deleted') return compactTraceRecord({
+    removedFromQueue: traceBoolean(raw.removedFromQueue),
+    stoppedRevisions: traceNumber(raw.stoppedRevisions),
+    refundedRevisionQuota: traceNumber(raw.refundedRevisionQuota),
+  });
+  return {};
+}
+
+function projectValidationTraceSummary(raw: Record<string, unknown>): Record<string, unknown> {
+  return compactTraceRecord({
+    issueCount: traceNumber(raw.issueCount),
+    errorCount: traceNumber(raw.errorCount),
+    warningCount: traceNumber(raw.warningCount),
+    blockingCount: traceNumber(raw.blockingCount),
+    reviewCount: traceNumber(raw.reviewCount),
+    advisoryCount: traceNumber(raw.advisoryCount),
+    repairableBlockingCount: traceNumber(raw.repairableBlockingCount),
+    terminalBlockingCount: traceNumber(raw.terminalBlockingCount),
+    issueCodes: traceStrings(raw.issueCodes),
+    channels: traceStrings(raw.channels, 20),
+    origins: traceStrings(raw.origins, 10),
+  });
+}
+
+export function buildGenerationTraceResponse(job: Pick<JobRow, 'id' | 'status' | 'created_at' | 'completed_at'>, events: GenerationTraceEventView[]): Record<string, unknown> {
+  const usageEvents = events.filter((item) => item.event === 'model_usage');
+  const providerAttempts = events.filter((item) => item.event === 'model_provider_attempt');
+  const validationEvents = events.filter((item) => item.event.startsWith('candidate_'));
+  const sum = (key: string): number => usageEvents.reduce((total, item) => total + (traceNumber(item.details[key]) ?? 0), 0);
+  const cacheHitTokens = sum('cacheHitTokens');
+  const inputTokens = sum('inputTokens');
+  const firstAt = events[0]?.createdAt ?? job.created_at;
+  const lastAt = events.at(-1)?.createdAt ?? job.completed_at ?? job.created_at;
+  const elapsed = Date.parse(lastAt) - Date.parse(firstAt);
+  return {
+    schemaVersion: '1.0',
+    jobId: job.id,
+    status: job.status,
+    completeness: validationEvents.length ? 'full' : usageEvents.length ? 'legacy_model_only' : 'lifecycle_only',
+    summary: {
+      elapsedMs: Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : undefined,
+      logicalModelCalls: usageEvents.length,
+      failedModelCalls: usageEvents.filter((item) => item.details.outcome === 'failed').length,
+      providerRequests: sum('providerRequests'),
+      retryCount: providerAttempts.filter((item) => item.details.willRetry === true).length,
+      inputTokens,
+      outputTokens: sum('outputTokens'),
+      totalTokens: sum('totalTokens'),
+      cacheHitTokens,
+      cacheMissTokens: sum('cacheMissTokens'),
+      cacheRate: inputTokens > 0 ? Math.round((cacheHitTokens / inputTokens) * 10_000) / 10_000 : undefined,
+      validationTelemetryAvailable: validationEvents.length > 0,
+      candidateCompletedCount: events.filter((item) => item.event === 'candidate_completed').length,
+      candidateFailedCount: events.filter((item) => item.event === 'candidate_failed').length,
+      repairStartedCount: events.filter((item) => item.event === 'candidate_repair_started').length,
+      repairFailedCount: events.filter((item) => item.event === 'candidate_repair_failed').length,
+    },
+    events,
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 /**
- * 质量状态判定。
- *
- * 台账失败已从 error 降为 warning（可发布但事实锚定不完整，定级依据见 engine.ts）。
- * 降级后它不再拖垮 validation.valid，但也不该无声通过——quality_status 只有
- * passed/needs_review 两档，所以这里显式把「锚定受损」并入 needs_review：人工复核
- * 的信号保留，同时让完全正常的候选能真正 passed。
- *
- * 改这条之前，判定只看「有无 error」，于是中继一抖动就把整批打成 needs_review：
- * 实测 18 篇产出零 passed 全由台账那一条决定，质量信号完全失去区分度。
+ * Job quality is the best deliverable candidate, not a union of every warning
+ * emitted by all three attempts. New packages carry an explicit candidate
+ * status/disposition. Historical packages remain readable via the old
+ * error=block, warning=advisory convention.
  */
 export function deriveQualityStatus(
-  packages: Array<{ validation: { valid: boolean; issues: Array<{ code: string }> } }>,
+  packages: Array<{
+    validation: {
+      valid: boolean;
+      qualityStatus?: 'passed' | 'needs_review' | 'blocked';
+      issues: Array<{ severity?: 'error' | 'warning'; disposition?: 'block' | 'review' | 'advisory' }>;
+    };
+  }>,
 ): 'passed' | 'needs_review' {
-  const hasValidCandidate = packages.some((content) => content.validation.valid);
-  const anchoringDegraded = packages.some((content) => content.validation.issues
-    .some((issue) => issue.code === 'model_ledger_failed'));
-  return hasValidCandidate && !anchoringDegraded ? 'passed' : 'needs_review';
+  const candidateStatus = (content: typeof packages[number]): 'passed' | 'needs_review' | 'blocked' => {
+    if (content.validation.qualityStatus) return content.validation.qualityStatus;
+    if (!content.validation.valid) return 'blocked';
+    if (content.validation.issues.some((issue) => issue.disposition === 'block' || issue.severity === 'error')) return 'blocked';
+    if (content.validation.issues.some((issue) => issue.disposition === 'review')) return 'needs_review';
+    return 'passed';
+  };
+  return packages.some((content) => candidateStatus(content) === 'passed') ? 'passed' : 'needs_review';
 }
 
 export function computeBatchStatus(jobStatuses: string[]): 'queued' | 'running' | 'completed' | 'failed' | 'partial' {

@@ -22,6 +22,9 @@ export interface QuickComment {
   displayName?: string;
   /** T2 接话读者 B 的展示昵称;仅 reader_exchange 线程出现。 */
   replyDisplayName?: string;
+  /** org_answer 的可追责答复身份与最终展示名；仿真预览必须保留，不能统一冒充项目账号。 */
+  postingIdentity?: string;
+  surfaceRoleCard?: Pick<NonNullable<CommentThread['surfaceRoleCard']>, 'replyDisplayRole'>;
   followUps?: Array<{ question: string; answer: string; boundary?: string }>;
 }
 
@@ -65,6 +68,10 @@ function mapComment(thread: CommentThread): QuickComment {
     threadKind: thread.threadKind,
     displayName: thread.displayName,
     replyDisplayName: thread.replyDisplayName,
+    postingIdentity: thread.postingIdentity,
+    surfaceRoleCard: thread.surfaceRoleCard
+      ? { replyDisplayRole: thread.surfaceRoleCard.replyDisplayRole }
+      : undefined,
     followUps: isOrganicReaction
       ? []
       : thread.followUps?.map((f) => ({
@@ -131,7 +138,7 @@ export function quickCandidateToMarkdown(view: QuickCandidateView): string {
         continue;
       }
       parts.push(`Q: ${c.question}`);
-      parts.push(`A: ${c.answer}`);
+      parts.push(c.threadKind === 'host_reply' ? `楼主本人: ${c.answer}` : `A: ${c.answer}`);
       if (c.boundary) parts.push(`边界: ${c.boundary}`);
       if (c.nextStep) parts.push(`下一步: ${c.nextStep}`);
       for (const f of c.followUps ?? []) {

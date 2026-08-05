@@ -7,6 +7,9 @@ import {
   normalizeProjectCreativeBlueprint,
   parseGenerationDraft,
   planTopicOrchestrations,
+  guardedReplyIdentitiesForQuestion,
+  questionMatchesPlannedGap,
+  resolvePlannedReplyRoute,
   routeReplyPostingIdentity,
   validateGenerationDraft,
 } from "../src/index.js";
@@ -63,7 +66,7 @@ describe("routeReplyPostingIdentity (三身份生态:合规护栏 + 确定性兜
     expect(routeReplyPostingIdentity({ label: "本人操作", question: "是本人做吗？" }, rules)).toBe("expert");
   });
 
-  it("falls back to publisher (楼主) otherwise, with no keyword hard routing", () => {
+  it("falls back to an explicit project publisher otherwise, with no keyword hard routing", () => {
     expect(routeReplyPostingIdentity({ label: "适用条件", question: "哪些条件会改变适用性？" })).toBe("publisher");
     expect(routeReplyPostingIdentity({ label: "比较维度", question: "应该按哪些维度比较？" })).toBe("publisher");
     expect(routeReplyPostingIdentity({ label: "恢复过程", question: "恢复大概要多久？" })).toBe("publisher");
@@ -270,7 +273,7 @@ function marketingOpportunity(): TopicOpportunity {
 }
 
 describe("dual-identity reply routing in planned threads", () => {
-  it("assigns staff to guardrail threads and publisher to the rest, forcing replyDisplayRole per identity", () => {
+  it("assigns staff to guardrail threads and an explicit project publisher to the rest", () => {
     const plans = planTopicOrchestrations({
       opportunity: marketingOpportunity(),
       gaps: marketingGaps,
@@ -279,20 +282,89 @@ describe("dual-identity reply routing in planned threads", () => {
       seeds: [11, 22, 33],
     });
     for (const plan of plans) {
+      // 正文叙事人物不能继承 role_model 的机构运营口吻；机构话术只进入答复身份卡。
+      expect(plan.personaScenePlan.host.voiceTraits).not.toContain("克制");
+      expect(plan.personaScenePlan.host.speechMarkers).not.toContain("短句");
       const priceThread = plan.dialogueThreads.find((thread) => thread.gapId === "price_gap");
       const fitThread = plan.dialogueThreads.find((thread) => thread.gapId === "fit_gap");
       // 合规护栏:命中 price claimType → staff,replyDisplayRole 强制指向助理。
       expect(priceThread?.postingIdentity).toBe("staff");
       expect(priceThread?.surfaceRoleCard?.replyDisplayRole).toBe("知肤研究所助理");
       expect(priceThread?.routingReason).toContain("护栏");
-      // 未命中护栏与专业类的线程兜底 publisher(楼主),replyDisplayRole 强制"楼主"。
-      expect(fitThread?.postingIdentity).toBe("publisher");
-      expect(fitThread?.surfaceRoleCard?.replyDisplayRole).toBe("楼主");
-      expect(fitThread?.routingReason).toContain("兜底");
+      // 未命中营销/专业护栏时采用角色库的预分配；本蓝图把该读者角色交给专业账号。
+      expect(fitThread?.postingIdentity).toBe("expert");
+      expect(fitThread?.surfaceRoleCard?.replyDisplayRole).toBe("知肤研究所");
+      expect(fitThread?.routingReason).toContain("角色库指定");
     }
   });
 
-  it("falls back to publisher (楼主) for every thread when no blueprint is supplied", () => {
+  it("在生成之初冻结答复身份：专业/营销护栏高于角色库偏好", () => {
+    const blueprint = dualIdentityBlueprint("recurring");
+    const cast = planTopicOrchestrations({
+      opportunity: marketingOpportunity(), gaps: marketingGaps, config: config(),
+      projectBlueprint: blueprint, seeds: [11, 22, 33],
+    })[0]!.personaScenePlan.commentCast;
+    const rules = [
+      { id: "pain", label: "疼痛体验需如实描述并允许个体差异", claimType: "outcome" as const, terms: ["酸胀"], requiresEvidence: true, allowedEvidenceStatuses: ["supplied_fact" as const], dynamic: false, handling: "qualify" as const, source: { status: "inference" as const, evidenceIds: [] } },
+      { id: "recovery", label: "恢复期效果不承诺绝对", claimType: "outcome" as const, terms: ["一周左右自然"], requiresEvidence: true, allowedEvidenceStatuses: ["supplied_fact" as const], dynamic: false, handling: "qualify" as const, source: { status: "inference" as const, evidenceIds: [] } },
+      { id: "recurrence", label: "复发保障表述必须有依据且不虚构条款", claimType: "causality" as const, terms: ["复发免费处理"], requiresEvidence: true, allowedEvidenceStatuses: ["supplied_fact" as const], dynamic: true, handling: "qualify" as const, source: { status: "inference" as const, evidenceIds: [] } },
+      { id: "price", label: "价格区间必须以确认口径为准", claimType: "price" as const, terms: ["费用"], requiresEvidence: true, allowedEvidenceStatuses: ["supplied_fact" as const], dynamic: true, handling: "verify" as const, source: { status: "inference" as const, evidenceIds: [] } },
+      { id: "location", label: "地址范围", claimType: "location" as const, terms: ["门店"], requiresEvidence: true, allowedEvidenceStatuses: ["supplied_fact" as const], dynamic: true, handling: "verify" as const, source: { status: "inference" as const, evidenceIds: [] } },
+      { id: "duration", label: "操作时长统一口径", claimType: "schedule" as const, terms: ["操作时长"], requiresEvidence: true, allowedEvidenceStatuses: ["supplied_fact" as const], dynamic: true, handling: "qualify" as const, source: { status: "inference" as const, evidenceIds: [] } },
+    ];
+
+    for (const label of ["疼痛体验", "恢复期", "复发保障"]) {
+      const route = resolvePlannedReplyRoute(
+        { label, question: `${label}怎么判断？` } as any,
+        rules,
+        "知肤研究所助理", // 即便角色库偏好助理，专业护栏仍优先。
+        blueprint,
+        cast,
+      );
+      expect(route.identity, label).toBe("expert");
+      expect(route.replyDisplayRole, label).toBe("知肤研究所");
+      expect(route.reason, label).toContain("规划期专业护栏");
+    }
+
+    for (const item of [
+      { label: "价格", question: "费用怎么确认？" },
+      { label: "到院地址", question: "门店在哪里？" },
+      { label: "操作时长", question: "操作时长多久？" },
+    ]) {
+      const route = resolvePlannedReplyRoute(item as any, rules, "知肤研究所", blueprint, cast);
+      expect(route.identity, item.label).toBe("staff");
+      expect(route.replyDisplayRole, item.label).toBe("知肤研究所助理");
+      expect(route.reason, item.label).toContain("规划期营销护栏");
+    }
+  });
+
+  it("结构化 location category 在生成之初冻结为助理，不依赖地址词面命中", () => {
+    const blueprint = dualIdentityBlueprint("recurring");
+    const route = resolvePlannedReplyRoute(
+      { label: "到院信息", question: "具体怎么过去？", category: "location" },
+      blueprint.claimPolicy.rules,
+      "知肤研究所",
+      blueprint,
+      [],
+    );
+    expect(route.identity).toBe("staff");
+    expect(route.replyDisplayRole).toBe("知肤研究所助理");
+    expect(route.reason).toContain("规划期营销护栏");
+  });
+
+  it("冻结主问题判据阻止地址线程被改写成疼痛或价格问题", () => {
+    const locationGap = { label: "到院信息", question: "具体位置、预约和交通方式是什么？", category: "location" };
+    expect(questionMatchesPlannedGap("具体位置在哪里，怎么预约？", locationGap)).toBe(true);
+    expect(questionMatchesPlannedGap("做的时候疼不疼？", locationGap)).toBe(false);
+    const rules = [
+      { id: "price", label: "价格口径", claimType: "price" as const, terms: ["价格"], requiresEvidence: true, allowedEvidenceStatuses: ["supplied_fact" as const], dynamic: true, handling: "verify" as const, source: { status: "inference" as const, evidenceIds: [] } },
+      { id: "pain", label: "疼痛体验", claimType: "outcome" as const, terms: ["疼"], requiresEvidence: true, allowedEvidenceStatuses: ["supplied_fact" as const], dynamic: false, handling: "qualify" as const, source: { status: "inference" as const, evidenceIds: [] } },
+    ];
+    expect([...guardedReplyIdentitiesForQuestion("另外价格多少？", rules)]).toContain("staff");
+    expect([...guardedReplyIdentitiesForQuestion("做的时候疼不疼？", rules)]).toContain("expert");
+  });
+
+  it("falls back to an explicit project publisher for every thread when no blueprint is supplied", () => {
     const plans = planTopicOrchestrations({
       opportunity: marketingOpportunity(),
       gaps: marketingGaps,
@@ -300,11 +372,10 @@ describe("dual-identity reply routing in planned threads", () => {
       seeds: [11, 22, 33],
     });
     for (const plan of plans) {
-      // 无蓝图即无 claimRules:护栏不命中,关键词硬路由已删除,营销话头同样
-      // 先落 publisher(楼主),等引擎阶段 2 的 AI 分配再覆盖。
+      // 无蓝图即无 claimRules:规划期直接冻结为明确项目发布账号，后续不再重分配。
       for (const thread of plan.dialogueThreads) {
         expect(thread.postingIdentity).toBe("publisher");
-        expect(thread.surfaceRoleCard?.replyDisplayRole).toBe("楼主");
+        expect(thread.surfaceRoleCard?.replyDisplayRole).toBe("项目发布账号");
       }
     }
   });
@@ -336,15 +407,15 @@ describe("经历约束走标注制 + 开口人物去重 (方法论 §1594/§1745
       seeds: [11, 22, 33],
     });
     for (const plan of plans) {
-      // 双号蓝图读者席只有 1 个非机构角色(谨慎比较者),线程数必然超过池容量:
-      // 1 条线程占用,其余重复开口的线程必须标 personaRepeated。
-      const marked = plan.dialogueThreads.filter((thread) => thread.personaRepeated === true);
-      const unmarked = plan.dialogueThreads.filter((thread) => thread.personaRepeated !== true);
-      expect(marked.length).toBe(plan.dialogueThreads.length - 1);
-      expect(unmarked.length).toBe(1);
-      // 开口人物同篇不重复:未标记者之间 displayRole 不得重复(本夹具池=1,恒成立)。
-      const unmarkedRoles = unmarked.map((thread) => thread.surfaceRoleCard?.displayRole);
-      expect(new Set(unmarkedRoles).size).toBe(unmarkedRoles.length);
+      // 规划器现在会在现有角色与主 gap/答复职责不匹配时创建中性 gap 读者卡，
+      // 因此不能再假设整篇只有一个角色。personaRepeated 必须精确反映同名角色
+      // 是否已经在更早线程开口，新增中性角色不应被误标为重复。
+      const seen = new Set<string>();
+      for (const thread of plan.dialogueThreads) {
+        const role = thread.surfaceRoleCard?.displayRole ?? "";
+        expect(thread.personaRepeated === true, role).toBe(seen.has(role));
+        seen.add(role);
+      }
     }
   });
 });

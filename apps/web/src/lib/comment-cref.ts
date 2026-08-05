@@ -23,8 +23,8 @@ export const commentNodeKindLabel = (value?: string): string => {
  * org_answer(T1 机构问答)处理——历史包没有 threadKind 字段,界面与
  * 复制markdown 都按 T1 渲染,不出错。
  */
-export const commentThreadKindOf = (thread: { threadKind?: string }): "org_answer" | "reader_exchange" | "organic_reaction" =>
-  thread.threadKind === "reader_exchange" || thread.threadKind === "organic_reaction"
+export const commentThreadKindOf = (thread: { threadKind?: string }): "org_answer" | "host_reply" | "reader_exchange" | "organic_reaction" =>
+  thread.threadKind === "host_reply" || thread.threadKind === "reader_exchange" || thread.threadKind === "organic_reaction"
     ? thread.threadKind
     : "org_answer";
 
@@ -32,6 +32,7 @@ export const commentThreadKindOf = (thread: { threadKind?: string }): "org_answe
 export const commentThreadKindLabel = (value?: string): string => {
   const labels: Record<string, string> = {
     org_answer: "机构问答",
+    host_reply: "楼主回复",
     reader_exchange: "读者互聊",
     organic_reaction: "漂浮短反应",
   };
@@ -75,6 +76,12 @@ export const auditAnswerAttribution = (
       identity: "不适用（漂浮短反应，机构不出现）",
     };
   }
+  if (kind === "host_reply") {
+    return {
+      label: "楼主本人回复",
+      identity: "作者本人（已确认）",
+    };
+  }
   if (kind === "reader_exchange") {
     return {
       label: thread.replyDisplayName?.trim()
@@ -85,7 +92,7 @@ export const auditAnswerAttribution = (
     };
   }
   return {
-    label: "楼主/可追责身份回复",
+    label: "机构可追责身份回复",
     identity: postingIdentityText(thread.postingIdentity) || "可追责发布者",
   };
 };
@@ -93,7 +100,7 @@ export const auditAnswerAttribution = (
 /**
  * 答复徽标:org_answer 线程按 postingIdentity 分路。三者都是方法论里的
  * accountable_responder(可追责答复方),差别只在承接什么话头——
- * publisher 发布账号本人(直接回答＋条件＋边界＋下一步)、staff 营销承接
+ * publisher 项目发布账号(直接回答＋条件＋边界＋下一步)、staff 营销承接
  * (价格/预约/地址)、expert 专业解答。publisher 不是顾客人设:方法论
  * 《ROLE 04 · 发布账号》「自有账号不能冒充独立消费者」。历史/其他 postingIdentity
  * (author/brand/reader_question_template)返回 undefined,由调用方走

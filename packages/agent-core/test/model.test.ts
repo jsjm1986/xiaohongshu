@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   extractModelText,
+  modelResponseDiagnostics,
   ModelProviderError,
   normalizeOpenAIBaseUrl,
   OpenAICompatibleClient,
@@ -72,6 +73,154 @@ describe("OpenAI-compatible client", () => {
     expect(result.usage?.totalTokens).toBe(10);
   });
 
+  it("expands an empty length-truncated response exactly once and returns the widened result", async () => {
+    const requestedBudgets: number[] = [];
+    const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      requestedBudgets.push(body.max_tokens);
+      if (requestedBudgets.length === 1) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: "" }, finish_reason: "length" }],
+          usage: {
+            prompt_tokens: 100, completion_tokens: 8_000, total_tokens: 8_100,
+            prompt_cache_hit_tokens: 75, prompt_cache_miss_tokens: 25,
+          },
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: "{\"ok\":true}" }, finish_reason: "stop" }],
+        usage: {
+          prompt_tokens: 100, completion_tokens: 20, total_tokens: 120,
+          prompt_cache_hit_tokens: 80, prompt_cache_miss_tokens: 20,
+        },
+      }), { status: 200 });
+    });
+    const client = new OpenAICompatibleClient({
+      apiKey: "secret", model: "reasoning-model", transport: "chat_completions",
+      maxOutputTokenLimit: 384_000, fetch,
+    });
+
+    const result = await client.generate({ messages, maxOutputTokens: 8_000 });
+
+    expect(result.text).toBe("{\"ok\":true}");
+    expect(requestedBudgets).toEqual([8_000, 384_000]);
+    expect(result.usage).toMatchObject({
+      inputTokens: 200, outputTokens: 8_020, totalTokens: 8_220,
+      cacheHitTokens: 155, cacheMissTokens: 45, modelCalls: 2,
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops after one widened attempt when a reasoning model still returns empty length output", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: "" }, finish_reason: "length" }],
+      usage: { prompt_tokens: 100, completion_tokens: 8_000, total_tokens: 8_100 },
+    }), { status: 200 }));
+    const client = new OpenAICompatibleClient({
+      apiKey: "secret", model: "reasoning-model", transport: "chat_completions",
+      maxOutputTokenLimit: 384_000, fetch,
+    });
+
+    const promise = client.generate({ messages, maxOutputTokens: 8_000 });
+    await expect(promise).rejects.toMatchObject({
+      status: 200,
+      retryable: false,
+      finishReason: "length",
+    });
+    await expect(promise).rejects.toThrow(/truncated at 384000 max tokens/iu);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("marks a completed HTTP 200 empty output as terminal instead of a transport retry", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: "" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 },
+    }), { status: 200 }));
+    const client = new OpenAICompatibleClient({
+      apiKey: "secret", model: "chat-model", transport: "chat_completions", fetch,
+    });
+
+    await expect(client.generate({ messages, maxOutputTokens: 1_000 })).rejects.toMatchObject({
+      status: 200,
+      retryable: false,
+      finishReason: "stop",
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers a reasoning-only stop exactly once without replaying private reasoning", async () => {
+    const requestBodies: Array<Record<string, unknown>> = [];
+    const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      requestBodies.push(body);
+      if (requestBodies.length === 1) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: "", reasoning_content: "private chain" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 100, completion_tokens: 7, total_tokens: 107 },
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: "{\"ok\":true}" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 120, completion_tokens: 3, total_tokens: 123 },
+      }), { status: 200 });
+    });
+    const client = new OpenAICompatibleClient({
+      apiKey: "secret", model: "reasoning-model", transport: "chat_completions",
+      structuredOutput: "json_object", includeSeed: true, fetch,
+    });
+
+    const result = await client.generate({ messages, maxOutputTokens: 1_000, seed: 10, temperature: 0.8 });
+
+    expect(result.text).toBe("{\"ok\":true}");
+    expect(result.usage).toMatchObject({
+      inputTokens: 220, outputTokens: 10, totalTokens: 230, modelCalls: 2,
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(requestBodies[1]).toMatchObject({ seed: 11, temperature: 0.35 });
+    expect(JSON.stringify(requestBodies[1])).not.toContain("private chain");
+    expect((requestBodies[1].messages as Array<unknown>)).toHaveLength(messages.length + 1);
+  });
+
+  it("stops after one failed reasoning-only recovery and reports both requests", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: "", reasoning_content: "private chain" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 100, completion_tokens: 7, total_tokens: 107 },
+    }), { status: 200 }));
+    const client = new OpenAICompatibleClient({
+      apiKey: "secret", model: "reasoning-model", transport: "chat_completions", fetch,
+    });
+
+    const promise = client.generate({ messages, maxOutputTokens: 1_000 });
+    await expect(promise).rejects.toMatchObject({
+      status: 200,
+      retryable: false,
+      finishReason: "stop",
+      usage: { inputTokens: 200, outputTokens: 14, totalTokens: 214, modelCalls: 2 },
+      responseDiagnostics: { emptyOutputRecoveryAttempted: true, reasoningContentChars: 13 },
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not impose JSON on an unstructured empty-output recovery", async () => {
+    const requestBodies: Array<Record<string, unknown>> = [];
+    const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify(requestBodies.length === 1
+        ? { choices: [{ message: { content: "", reasoning_content: "private chain" }, finish_reason: "stop" }] }
+        : { choices: [{ message: { content: "final prose" }, finish_reason: "stop" }] }), { status: 200 });
+    });
+    const client = new OpenAICompatibleClient({
+      apiKey: "secret", model: "reasoning-model", transport: "chat_completions",
+      structuredOutput: "none", fetch,
+    });
+
+    await expect(client.generate({ messages })).resolves.toMatchObject({ text: "final prose" });
+
+    const recoveryMessages = requestBodies[1]?.messages as Array<{ content?: string }>;
+    expect(recoveryMessages.at(-1)?.content).not.toContain("JSON");
+    expect(JSON.stringify(requestBodies[1])).not.toContain("private chain");
+  });
+
   it("accepts a copied full compatible endpoint without duplicating its path", async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({
       choices: [{ message: { content: "{}" }, finish_reason: "stop" }],
@@ -134,6 +283,21 @@ describe("OpenAI-compatible client", () => {
   it("extracts nested Responses content and chat content arrays", () => {
     expect(extractModelText({ output: [{ content: [{ type: "output_text", text: "one" }, { type: "output_text", text: "two" }] }] })).toBe("onetwo");
     expect(extractModelText({ choices: [{ message: { content: [{ type: "text", text: "chat" }] } }] })).toBe("chat");
+  });
+
+  it("reports shape-only diagnostics for empty reasoning responses without exposing text", () => {
+    const diagnostics = modelResponseDiagnostics({
+      id: "secret-id",
+      choices: [{ message: { role: "assistant", content: "", reasoning_content: "private reasoning" } }],
+    });
+    expect(diagnostics).toEqual({
+      topLevelKeys: ["choices", "id"],
+      choiceMessageKeys: ["content", "reasoning_content", "role"],
+      contentKind: "string",
+      contentChars: 0,
+      reasoningContentChars: 17,
+    });
+    expect(JSON.stringify(diagnostics)).not.toContain("private reasoning");
   });
 
   it("requires a model at request or client level", async () => {

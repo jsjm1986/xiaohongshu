@@ -42,7 +42,14 @@ export class ExportController {
       throw new ForbiddenException('缺少权限：generation.export');
     }
     const content = this.generations.contentPackage(jobId, candidateId);
-    const buffer = await this.exporter.exportPackage(content, format);
+    const confirmation = this.generations.manualDeliveryConfirmation(content.id, principal.userId);
+    const buffer = await this.exporter.exportPackage(content, format, {
+      manualDeliveryConfirmation: confirmation ? {
+        ...confirmation,
+        jobId,
+        candidateId: content.candidateId,
+      } : undefined,
+    });
     const title = content.content.N.title.replace(/[\\/:*?"<>|\r\n]/gu, '_').slice(0, 60) || 'content-package';
     const filename = `${title}.${EXTENSIONS[format]}`;
     response.setHeader('Content-Type', TYPES[format]);

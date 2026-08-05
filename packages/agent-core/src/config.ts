@@ -1,5 +1,6 @@
 import type { FormulaVersion, ResolvedGenerationConfig } from "./types.js";
 import { DEFAULT_METHOD_PARAMETERS } from "./parameters.js";
+import { GENERATION_OUTPUT_TOKENS } from "./output-budget.js";
 
 export type DeepPartial<T> = {
   [Key in keyof T]?: T[Key] extends Array<infer Item>
@@ -47,6 +48,8 @@ export function createDefaultGenerationConfig(
       entry: "search",
       preContactKnown: [],
       readerConstraints: [],
+      publishingTopology: "creative_scenario",
+      authorContext: { status: "not_provided", facts: [] },
       mustMention: [],
       forbidden: [],
     },
@@ -55,7 +58,7 @@ export function createDefaultGenerationConfig(
       selectedFileIds: [],
       excludedFileIds: [],
       maxInputTokens: 96_000,
-      outputReserveTokens: 8_000,
+      outputReserveTokens: GENERATION_OUTPUT_TOKENS,
       safetyMarginTokens: 1_000,
     },
     informationWindow: {
@@ -90,7 +93,7 @@ export function createDefaultGenerationConfig(
     },
     model: {
       temperature: 0.8,
-      maxOutputTokens: 8_000,
+      maxOutputTokens: GENERATION_OUTPUT_TOKENS,
     },
     generation: {
       candidateCount: 3,

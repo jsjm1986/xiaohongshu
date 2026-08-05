@@ -8,6 +8,7 @@ import { createFormulaVersion } from '@content-agent/agent-core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { createApplication } from '../src/app.js';
 import { DatabaseService } from '../src/database.service.js';
+import { GenerationService } from '../src/generation.service.js';
 import { seedApprovedProjectBlueprint } from './project-blueprint-fixture.js';
 
 let app: NestExpressApplication;
@@ -598,6 +599,17 @@ test('formula registry, settings and deterministic generation form one working f
   assert.equal(job.status, 'completed', job.error);
   assert.equal(job.qualityStatus, 'passed');
   assert.equal(job.progress, 100);
+  const executionTrace = await request(`/api/generations/${jobId}/trace`);
+  assert.equal(executionTrace.response.status, 200);
+  assert.equal(executionTrace.body.jobId, jobId);
+  assert.equal(executionTrace.body.completeness, 'full');
+  assert.equal(executionTrace.body.summary.validationTelemetryAvailable, true);
+  assert.equal(executionTrace.body.summary.candidateCompletedCount, 3);
+  assert.ok(executionTrace.body.events.some((item: any) => item.event === 'candidate_validation'));
+  assert.ok(executionTrace.body.events.some((item: any) => item.event === 'candidate_completed'));
+  const traceJson = JSON.stringify(executionTrace.body);
+  assert.equal(traceJson.includes('resolvedConfig'), false);
+  assert.equal(traceJson.includes('content_json'), false);
   assert.equal(job.candidates.length, 3);
   assert.equal(job.imageContextKind, 'none');
   assert.deepEqual(job.sourceImageAssets, []);
@@ -644,12 +656,22 @@ test('formula registry, settings and deterministic generation form one working f
   assert.ok(job.candidates.every((item: any) => item.comments.length >= 3));
   assert.ok(job.candidates.every((item: any) => item.comments.every((comment: any) => comment.simulated === true)));
   assert.ok(job.candidates.every((item: any) => item.comments.every((comment: any) => comment.personaRole && comment.speakerType === 'simulated_reader' && comment.claimStatus)));
-  assert.ok(job.candidates.every((item: any) => item.comments.every((comment: any) => comment.roleCard?.decisionTask && comment.primaryGapId && comment.densityProxy?.primaryGapCount === 1)));
-  assert.ok(job.candidates.every((item: any) => item.comments.every((comment: any) => comment.replyPlan?.directAnswer && comment.replyPlan?.nextQuestion)));
-  assert.ok(job.candidates.every((item: any) => item.comments.every((comment: any) => comment.discoveryPlan?.cue && comment.discoveryPlan?.revealTiming === 'same_thread' && ['low', 'moderate'].includes(comment.discoveryPlan?.difficulty))));
+  assert.ok(job.candidates.every((item: any) => item.comments
+    .filter((comment: any) => (comment.threadKind ?? 'org_answer') === 'org_answer')
+    .every((comment: any) => comment.roleCard?.decisionTask && comment.primaryGapId && comment.densityProxy?.primaryGapCount === 1)));
+  assert.ok(job.candidates.every((item: any) => item.comments
+    .filter((comment: any) => (comment.threadKind ?? 'org_answer') === 'org_answer')
+    .every((comment: any) => comment.replyPlan?.directAnswer && comment.replyPlan?.nextQuestion)));
+  assert.ok(job.candidates.every((item: any) => item.comments
+    .filter((comment: any) => (comment.threadKind ?? 'org_answer') === 'org_answer')
+    .every((comment: any) => comment.discoveryPlan?.cue && comment.discoveryPlan?.revealTiming === 'same_thread' && ['low', 'moderate'].includes(comment.discoveryPlan?.difficulty))));
+  assert.ok(job.candidates.every((item: any) => item.comments
+    .filter((comment: any) => (comment.threadKind ?? 'org_answer') !== 'org_answer')
+    .every((comment: any) => !comment.primaryGapId && !comment.replyPlan && !(comment.evidenceIds?.length))));
   assert.ok(job.candidates.every((item: any) => item.comments.every((comment: any) => comment.surfaceRoleCard?.displayRole
     && comment.surfaceRoleCard?.speechPattern && !/DirectAnswer|本线程/u.test(`${comment.question}${comment.answer}`))));
-  assert.ok(job.candidates.every((item: any) => new Set(item.comments.map((comment: any) => comment.surfaceRoleCard?.displayRole)).size >= 3));
+  assert.ok(job.candidates.every((item: any) =>
+    new Set(item.comments.map((comment: any) => comment.surfaceRoleCard?.displayRole)).size >= 3));
   assert.ok(job.candidates.every((item: any) => item.gapCoverageLedger?.closureRate === 1 && item.gapCoverageLedger?.uncoveredGapIds?.length === 0));
   assert.ok(job.candidates.every((item: any) => item.effectiveThreadCount === item.comments.length));
   assert.ok(job.candidates.every((item: any) => item.comments.every((comment: any) => ['publisher', 'brand', 'staff', 'expert'].includes(comment.postingIdentity))));
@@ -742,6 +764,89 @@ test('formula registry, settings and deterministic generation form one working f
   const docx = await request(`/api/generations/${jobId}/candidates/${encodeURIComponent(exportCandidateId)}/export?format=docx`);
   assert.equal(docx.response.status, 200);
   assert.equal(Buffer.from(docx.body).subarray(0, 2).toString('ascii'), 'PK');
+
+  // A blocked candidate remains blocked at the server until the current user
+  // explicitly confirms manual delivery for this exact content-package row.
+  const deliveryDatabase = app.get(DatabaseService);
+  const deliveryRow = deliveryDatabase.prepare(
+    'SELECT id, content_json FROM content_packages WHERE job_id=? AND candidate_index=1',
+  ).get(jobId) as { id: string; content_json: string };
+  const blockedDeliveryContent = JSON.parse(deliveryRow.content_json);
+  blockedDeliveryContent.validation = {
+    valid: false,
+    qualityStatus: 'blocked',
+    repairAttempts: 2,
+    issues: [{
+      code: 'manual_delivery_test_block', severity: 'error', channel: 'N.body',
+      message: '测试用自动校验阻断', repairable: false,
+    }],
+  };
+  deliveryDatabase.prepare('UPDATE content_packages SET content_json=? WHERE id=?')
+    .run(JSON.stringify(blockedDeliveryContent), deliveryRow.id);
+
+  const blockedCandidateId = String(blockedDeliveryContent.candidateId);
+  const blockedExportPath = `/api/generations/${jobId}/candidates/${encodeURIComponent(blockedCandidateId)}/export`;
+  const beforeConfirmation = await request(`${blockedExportPath}?format=json`);
+  assert.equal(beforeConfirmation.response.status, 400);
+  assert.match(String(beforeConfirmation.body.message), /人工交付确认/u);
+
+  const missingAcknowledgement = await request(
+    `/api/generations/${jobId}/candidates/${encodeURIComponent(blockedCandidateId)}/manual-delivery-confirmation`,
+    { method: 'POST', body: JSON.stringify({ acknowledged: false }) },
+  );
+  assert.equal(missingAcknowledgement.response.status, 400);
+
+  const confirmedDelivery = await request(
+    `/api/generations/${jobId}/candidates/${encodeURIComponent(blockedCandidateId)}/manual-delivery-confirmation`,
+    { method: 'POST', body: JSON.stringify({ acknowledged: true }) },
+  );
+  assert.equal(confirmedDelivery.response.status, 201, JSON.stringify(confirmedDelivery.body));
+  const confirmedCandidate = confirmedDelivery.body.candidates.find((item: any) => item.id === blockedCandidateId);
+  assert.equal(confirmedCandidate.validation.valid, false, '人工确认不得篡改自动校验结论');
+  assert.equal(confirmedCandidate.manualDeliveryConfirmation.confirmed, true);
+  assert.equal(
+    confirmedDelivery.body.candidates.find((item: any) => item.id !== blockedCandidateId)?.manualDeliveryConfirmation,
+    undefined,
+    '确认不得继承到其他候选',
+  );
+
+  const manualMarkdown = await request(`${blockedExportPath}?format=markdown`);
+  assert.equal(manualMarkdown.response.status, 200);
+  const manualMarkdownText = Buffer.from(manualMarkdown.body).toString('utf8');
+  assert.match(manualMarkdownText, /## 人工交付确认/u);
+  assert.match(manualMarkdownText, /自动校验状态保持未通过/u);
+  assert.match(manualMarkdownText, /不代表系统校验通过/u);
+
+  const manualJson = await request(`${blockedExportPath}?format=json`);
+  assert.equal(manualJson.response.status, 200);
+  assert.equal(manualJson.body.validation.valid, false);
+  assert.equal(manualJson.body.manualDeliveryConfirmation.confirmed, true);
+  assert.equal(manualJson.body.manualDeliveryConfirmation.candidateId, blockedCandidateId);
+
+  const manualDocx = await request(`${blockedExportPath}?format=docx`);
+  assert.equal(manualDocx.response.status, 200);
+  assert.equal(Buffer.from(manualDocx.body).subarray(0, 2).toString('ascii'), 'PK');
+  const manualPdf = await request(`${blockedExportPath}?format=pdf`);
+  assert.equal(manualPdf.response.status, 200);
+  assert.equal(Buffer.from(manualPdf.body).subarray(0, 4).toString('ascii'), '%PDF');
+
+  const confirmationAudit = deliveryDatabase.prepare(
+    `SELECT user_id, details_json FROM audit_logs
+     WHERE action='generation.manual-delivery-confirm' AND entity_id=? ORDER BY id DESC LIMIT 1`,
+  ).get(deliveryRow.id) as { user_id: string; details_json: string };
+  const confirmationDetails = JSON.parse(confirmationAudit.details_json);
+  assert.equal(confirmationDetails.automaticValidationValid, false);
+  assert.equal(confirmationDetails.acknowledgement, 'reviewed_facts_evidence_identity_and_risk');
+  assert.equal(
+    app.get(GenerationService).manualDeliveryConfirmation(deliveryRow.id, 'another-user'),
+    null,
+    '确认必须按用户隔离',
+  );
+
+  // Restore the package bytes so the rest of this long integration test keeps
+  // exercising its original fixture; the audit record intentionally remains.
+  deliveryDatabase.prepare('UPDATE content_packages SET content_json=? WHERE id=?')
+    .run(deliveryRow.content_json, deliveryRow.id);
 
   const databaseForHistoricalDiagnostic = app.get(DatabaseService);
   const historicalRow = databaseForHistoricalDiagnostic.prepare(
@@ -916,4 +1021,38 @@ test('stored formula corruption and binding mismatches fail closed before F30 ca
   database.prepare('UPDATE formula_versions SET definition_json=? WHERE id=?')
     .run(JSON.stringify(projectStored), projectFixture.formulaRow.id);
   await assertCalculationRejected(projectFixture.formulaRow.id, 'project_binding_mismatch');
+});
+
+test('formal approved analysis with a stale source is rejected before generation is queued', async () => {
+  const project = await request('/api/projects', {
+    method: 'POST',
+    body: JSON.stringify({ name: '失效分析生成门禁', domain: '决策支持' }),
+  });
+  assert.equal(project.response.status, 201, JSON.stringify(project.body));
+  const staleProjectId = String(project.body.id);
+  const intelligenceId = seedApprovedProjectBlueprint(app, staleProjectId);
+  const database = app.get(DatabaseService);
+  const user = database.prepare("SELECT id FROM users WHERE username='admin'").get() as { id: string };
+  const now = new Date().toISOString();
+  database.prepare(
+    `INSERT INTO analysis_tasks
+       (id, project_id, kind, status, source_fingerprint, attempt_count, result_id,
+        created_by, created_at, updated_at, completed_at)
+     VALUES (?, ?, 'project', 'completed', 'formal-stale-source', 1, ?, ?, ?, ?, ?)`,
+  ).run(randomUUID(), staleProjectId, intelligenceId, user.id, now, now, now);
+
+  const before = database.prepare(
+    'SELECT COUNT(*) AS total FROM generation_jobs WHERE project_id=?',
+  ).get(staleProjectId) as { total: number | bigint };
+  const result = await request('/api/generations', {
+    method: 'POST',
+    body: JSON.stringify({ projectId: staleProjectId, topic: '不应使用旧分析' }),
+  });
+  assert.equal(result.response.status, 400, JSON.stringify(result.body));
+  assert.equal(result.body.code, 'ANALYSIS_SOURCE_STALE');
+  assert.match(String(result.body.message), /重新分析/u);
+  const after = database.prepare(
+    'SELECT COUNT(*) AS total FROM generation_jobs WHERE project_id=?',
+  ).get(staleProjectId) as { total: number | bigint };
+  assert.equal(Number(after.total), Number(before.total), '门禁必须发生在任务落库前');
 });
