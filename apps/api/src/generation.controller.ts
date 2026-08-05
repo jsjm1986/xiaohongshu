@@ -51,7 +51,7 @@ export class GenerationController {
   reader(@Req() request: Request, @Param('id') id: string) {
     const job = this.generations.jobRow(id);
     this.assert(request, job.project_id, 'project.read');
-    return this.generations.readerView(id);
+    return this.generations.readerView(id, this.principal(request).userId);
   }
 
   @Post()

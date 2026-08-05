@@ -19,6 +19,8 @@ interface Props {
   candidate: NoteCardSource;
   job: Pick<ReaderJob, 'completedAt' | 'createdAt'>;
   projectName?: string;
+  /** 自动校验未通过时，需人工确认后才开放任何复制入口。 */
+  copyEnabled?: boolean;
 }
 
 /**
@@ -34,7 +36,7 @@ interface Props {
  * - 配图位是虚线框 + 配图说明文字。系统只产出拍摄要求,没有真图;放一张占位图会让
  *   人以为配图已经有了。
  */
-export function NoteCard({ candidate, job, projectName }: Props) {
+export function NoteCard({ candidate, job, projectName, copyEnabled = true }: Props) {
   const toast = useToast();
   const account = accountName(projectName);
   const tone = avatarTone(account);
@@ -42,6 +44,7 @@ export function NoteCard({ candidate, job, projectName }: Props) {
   const comments = commentTotal(candidate);
 
   const copy = async (text: string, label = '已复制') => {
+    if (!copyEnabled) { toast.push('请先完成人工交付确认', 'error'); return; }
     try { await navigator.clipboard.writeText(text); toast.push(label); }
     catch { toast.push('复制失败，请手动选择文本', 'error'); }
   };
@@ -60,7 +63,7 @@ export function NoteCard({ candidate, job, projectName }: Props) {
         <span className="xhs-note__account">{account}</span>
         {/* 装饰,不可点:这是预览,没有真实的关注关系可建立 */}
         <span className="xhs-note__follow" aria-hidden="true">关注</span>
-        <Button variant="ghost" icon={<Copy size={13} />} onClick={() => void copy(fullText, '已复制全文')}>
+        <Button variant="ghost" icon={<Copy size={13} />} disabled={!copyEnabled} onClick={() => void copy(fullText, '已复制全文')}>
           复制全文
         </Button>
       </header>
@@ -71,7 +74,7 @@ export function NoteCard({ candidate, job, projectName }: Props) {
               「复制全文」按设计不含它。按钮与说明标签同一行,不挤压虚线框里的正文。 */}
           <div className="xhs-note__unit">
             <p>{candidate.imageBrief}</p>
-            <Button variant="ghost" icon={<Copy size={12} />} onClick={() => void copy(candidate.imageBrief!, '已复制配图说明')} aria-label="复制配图说明" />
+            <Button variant="ghost" icon={<Copy size={12} />} disabled={!copyEnabled} onClick={() => void copy(candidate.imageBrief!, '已复制配图说明')} aria-label="复制配图说明" />
           </div>
           <small>配图说明 · 按此拍摄或选图</small>
         </div>
@@ -81,14 +84,14 @@ export function NoteCard({ candidate, job, projectName }: Props) {
         {candidate.title && (
           <div className="xhs-note__unit">
             <h2 className="xhs-note__title">{candidate.title}</h2>
-            <Button variant="ghost" icon={<Copy size={12} />} onClick={() => void copy(candidate.title, '已复制标题')} aria-label="复制标题" />
+            <Button variant="ghost" icon={<Copy size={12} />} disabled={!copyEnabled} onClick={() => void copy(candidate.title, '已复制标题')} aria-label="复制标题" />
           </div>
         )}
         {candidate.body?.trim()
           ? (
             <div className="xhs-note__unit">
               <p className="xhs-note__text">{candidate.body}</p>
-              <Button variant="ghost" icon={<Copy size={12} />} onClick={() => void copy(candidate.body, '已复制正文')} aria-label="复制正文" />
+              <Button variant="ghost" icon={<Copy size={12} />} disabled={!copyEnabled} onClick={() => void copy(candidate.body, '已复制正文')} aria-label="复制正文" />
             </div>
           )
           : <p className="xhs-note__text xhs-note__text--empty">本次未产出正文</p>}
@@ -98,7 +101,7 @@ export function NoteCard({ candidate, job, projectName }: Props) {
             <div className="xhs-note__tags">
               {candidate.tags.map((tag) => <span key={tag}>{tag}</span>)}
             </div>
-            <Button variant="ghost" icon={<Copy size={12} />} onClick={() => void copy(candidate.tags.join(' '), '已复制话题')} aria-label="复制话题" />
+            <Button variant="ghost" icon={<Copy size={12} />} disabled={!copyEnabled} onClick={() => void copy(candidate.tags.join(' '), '已复制话题')} aria-label="复制话题" />
           </div>
         )}
 
@@ -113,7 +116,7 @@ export function NoteCard({ candidate, job, projectName }: Props) {
         <span><MessageCircle size={15} />评论{comments > 0 ? ` ${comments}` : ''}</span>
       </div>
 
-      <NoteComments candidate={candidate} accountLabel={account} />
+      <NoteComments candidate={candidate} accountLabel={account} copyEnabled={copyEnabled} />
     </article>
   );
 }

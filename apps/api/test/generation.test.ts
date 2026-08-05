@@ -801,11 +801,16 @@ test('formula registry, settings and deterministic generation form one working f
     { method: 'POST', body: JSON.stringify({ acknowledged: true }) },
   );
   assert.equal(confirmedDelivery.response.status, 201, JSON.stringify(confirmedDelivery.body));
-  const confirmedCandidate = confirmedDelivery.body.candidates.find((item: any) => item.id === blockedCandidateId);
+  assert.deepEqual(Object.keys(confirmedDelivery.body).sort(), ['candidateId', 'confirmation', 'jobId']);
+  assert.equal(confirmedDelivery.body.candidateId, blockedCandidateId);
+  assert.equal(confirmedDelivery.body.confirmation.confirmed, true);
+  assert.equal(confirmedDelivery.body.candidates, undefined, '确认响应不得夹带完整版候选');
+  const confirmedJob = (await request(`/api/generations/${jobId}`)).body;
+  const confirmedCandidate = confirmedJob.candidates.find((item: any) => item.id === blockedCandidateId);
   assert.equal(confirmedCandidate.validation.valid, false, '人工确认不得篡改自动校验结论');
   assert.equal(confirmedCandidate.manualDeliveryConfirmation.confirmed, true);
   assert.equal(
-    confirmedDelivery.body.candidates.find((item: any) => item.id !== blockedCandidateId)?.manualDeliveryConfirmation,
+    confirmedJob.candidates.find((item: any) => item.id !== blockedCandidateId)?.manualDeliveryConfirmation,
     undefined,
     '确认不得继承到其他候选',
   );

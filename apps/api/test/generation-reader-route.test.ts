@@ -21,6 +21,7 @@ let baseUrl = '';
 let adminCookie = '';
 let adminCsrf = '';
 let saasCookie = '';
+let saasCsrf = '';
 let projectId = '';
 let jobId = '';
 
@@ -139,6 +140,7 @@ before(async () => {
   }, '', '');
   assert.equal(saasLogin.response.status, 201, `saas 登录失败: ${JSON.stringify(saasLogin.body)}`);
   saasCookie = saasLogin.response.headers.get('set-cookie')!.split(';', 1)[0]!;
+  saasCsrf = saasLogin.body.csrfToken;
   const saasChanged = await request('/api/auth/change-password', {
     method: 'POST',
     body: JSON.stringify({ currentPassword: SAAS_PASSWORD, newPassword: SAAS_NEW_PASSWORD }),
@@ -217,6 +219,34 @@ test('SaaS 会话能读 reader:白名单是 /api/generations 前缀,子路径同
   const { response, body } = await request(`/api/generations/${jobId}/reader`, {}, saasCookie, '');
   assert.equal(response.status, 200, `SaaS 实际 ${response.status}: ${JSON.stringify(body).slice(0, 200)}`);
   assert.equal(body.candidates.length, 1);
+});
+
+test('SaaS 可确认当前候选，最小响应不泄露完整版字段，reader 刷新后持久化可见', async () => {
+  const db = app.get(DatabaseService);
+  const row = db.prepare('SELECT content_json FROM content_packages WHERE id=?').get(`${jobId}-pkg`) as { content_json: string };
+  const blocked = JSON.parse(row.content_json);
+  blocked.validation = {
+    valid: false,
+    repairAttempts: 1,
+    issues: [{ code: 'manual_delivery_reader_test', severity: 'error', message: '测试阻断' }],
+  };
+  db.prepare('UPDATE content_packages SET content_json=? WHERE id=?').run(JSON.stringify(blocked), `${jobId}-pkg`);
+
+  const path = `/api/generations/${jobId}/candidates/${jobId}-cand/manual-delivery-confirmation`;
+  const confirmed = await request(path, {
+    method: 'POST',
+    body: JSON.stringify({ acknowledged: true }),
+  }, saasCookie, saasCsrf);
+  assert.equal(confirmed.response.status, 201, JSON.stringify(confirmed.body));
+  assert.deepEqual(Object.keys(confirmed.body).sort(), ['candidateId', 'confirmation', 'jobId']);
+  assert.equal(confirmed.body.confirmation.confirmed, true);
+  assert.equal(confirmed.body.candidates, undefined);
+  assert.equal(confirmed.body.resolvedConfig, undefined);
+
+  const refreshed = await request(`/api/generations/${jobId}/reader`, {}, saasCookie, '');
+  assert.equal(refreshed.response.status, 200);
+  assert.equal(refreshed.body.candidates[0].validation.valid, false, '人工确认不得改写自动校验结论');
+  assert.equal(refreshed.body.candidates[0].manualDeliveryConfirmation.confirmed, true);
 });
 
 test('未完成任务返回空候选数组,而不是 undefined 或 404', async () => {

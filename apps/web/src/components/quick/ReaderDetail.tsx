@@ -7,7 +7,7 @@ import { DeploymentPlanCard } from './DeploymentPlanCard';
 import { FactLedgerCard } from './FactLedgerCard';
 import { GapCoverageCard } from './GapCoverageCard';
 import { ValidationVerdict } from './ValidationVerdict';
-import { issueVerdict, exportBlockReason } from '../../lib/issue-verdict';
+import { issueVerdict } from '../../lib/issue-verdict';
 import { clampCandidateIndex } from '../../lib/note-view';
 import { publishOrderText } from '../../lib/publish-copy';
 import type { ReaderCandidate, ReaderJob } from '../../types';
@@ -24,7 +24,7 @@ export type ExportFormat = (typeof EXPORT_FORMATS)[number];
 
 interface Props {
   job: ReaderJob;
-  /** 导出:markdown 本地拼装,其余走后端 */
+  /** 四种导出统一走后端，以保留人工确认与原始校验审计。 */
   onExport: (candidate: ReaderCandidate, format: ExportFormat) => void;
   /** 按意见修改;未接通时不显示该区块 */
   onRevise?: (candidate: ReaderCandidate, instruction: string) => Promise<void>;
@@ -37,9 +37,11 @@ interface Props {
    * 这里只读不写:切版本的按钮在预览区(CandidateSwitch),所以没有配套的 onPick。
    */
   activeIndex: number;
+  /** 自动通过或当前用户已人工确认当前候选。 */
+  deliverable: boolean;
 }
 
-export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, retrying, activeIndex }: Props) {
+export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, retrying, activeIndex, deliverable }: Props) {
   const toast = useToast();
   const [instruction, setInstruction] = useState('');
   const candidates = job.candidates;
@@ -47,9 +49,9 @@ export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, ret
   // 与预览区共用同一个夹法,见 clampCandidateIndex 的注释
   const current = candidates[clampCandidateIndex(activeIndex, candidates.length)]!;
   const verdict = issueVerdict(current.validation);
-  const blockReason = exportBlockReason(verdict);
 
   const copyText = async (text: string) => {
+    if (!deliverable) { toast.push('请先完成人工交付确认', 'error'); return; }
     try { await navigator.clipboard.writeText(text); toast.push('已复制'); }
     catch { toast.push('复制失败，请手动选择文本', 'error'); }
   };
@@ -66,7 +68,7 @@ export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, ret
       {/* 切版本在上面的预览区,这里只读差异 */}
       <CandidateDiffBar candidates={candidates} activeIndex={activeIndex} />
 
-      <ValidationVerdict validation={current.validation} />
+      <ValidationVerdict validation={current.validation} manuallyConfirmed={!verdict.publishable && deliverable} />
 
       {/* 第二段:判断依据。(原第一段「成品」已移交预览区 NoteCard,不是漏了;
           编号沿用旧序号,方便与计划文档对照) */}
@@ -99,28 +101,27 @@ export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, ret
 
       {/* 动作 */}
       <div className="qc-reader__actions">
-        <Button variant="secondary" icon={<Copy size={15} />} onClick={() => void copyText(publishOrderText(current))}>
+        <Button variant="secondary" icon={<Copy size={15} />} disabled={!deliverable} onClick={() => void copyText(publishOrderText(current))}>
           按发布顺序复制
         </Button>
         <span className="qc-export-group">
           <span className="qc-export-group__label"><Download size={13} />导出</span>
           {EXPORT_FORMATS.map((fmt) => {
-            // 后端三种格式对未通过校验的候选一律 400(export.service.ts 的发布门槛),
-            // 禁用并说明原因;本地 Markdown 不经后端,始终可用。
-            const blocked = fmt !== 'markdown' && !verdict.publishable;
+            // 自动校验通过，或当前用户已对当前候选完成人工交付确认，才可导出。
+            const blocked = !deliverable;
             return (
               <Button
                 key={fmt}
                 variant="ghost"
                 disabled={blocked}
-                title={blocked ? blockReason ?? undefined : undefined}
+                title={blocked ? '人工确认后可复制与导出' : undefined}
                 onClick={() => onExport(current, fmt)}
               >
                 {fmt === 'markdown' ? 'Markdown' : fmt.toUpperCase()}
               </Button>
             );
           })}
-          {!verdict.publishable && <small className="qc-hint">仅 Markdown 可导出（未通过校验）</small>}
+          {!verdict.publishable && <small className="qc-hint">{deliverable ? '已人工确认，可导出；自动校验结论仍保留' : '人工确认后可复制与导出'}</small>}
         </span>
         {onRetry && (
           <Button variant="ghost" icon={<RotateCcw size={13} />} loading={retrying} disabled={retrying} onClick={onRetry}>

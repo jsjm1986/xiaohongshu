@@ -10,7 +10,7 @@ import { issueVerdict, type VerdictInput } from '../../lib/issue-verdict';
  *
  * 这里把两类分开说:「须处理才能导出」与「可人工核对后使用」。
  */
-export function ValidationVerdict({ validation }: { validation?: VerdictInput }) {
+export function ValidationVerdict({ validation, manuallyConfirmed = false }: { validation?: VerdictInput; manuallyConfirmed?: boolean }) {
   const verdict = issueVerdict(validation);
 
   return (
@@ -22,7 +22,7 @@ export function ValidationVerdict({ validation }: { validation?: VerdictInput })
 
       {verdict.blocking.length > 0 && (
         <div className="qc-verdict__group qc-verdict__group--blocking">
-          <h5>须处理才能导出 · {verdict.blocking.length} 项</h5>
+          <h5>{manuallyConfirmed ? '自动校验仍未通过' : '须核对后确认交付'} · {verdict.blocking.length} 项</h5>
           <ul>
             {verdict.blocking.map((item) => (
               <li key={item.code ?? item.label}>

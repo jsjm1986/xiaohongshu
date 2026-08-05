@@ -80,7 +80,7 @@ export function issueVerdict(validation?: VerdictInput): IssueVerdict {
 export function exportBlockReason(verdict: IssueVerdict): string | null {
   if (verdict.publishable) return null;
   if (verdict.blocking.length > 0) {
-    return `有 ${verdict.blocking.length} 项必须处理的问题，未通过校验的稿子不能导出为 DOCX/PDF/JSON，可先导出 Markdown 人工核对`;
+    return `有 ${verdict.blocking.length} 项必须核对的问题；完成人工交付确认后可复制与导出，自动校验结论仍保留`;
   }
-  return '未通过可发布校验，不能导出为 DOCX/PDF/JSON，可先导出 Markdown 人工核对';
+  return '未通过可发布校验；完成人工交付确认后可复制与导出，自动校验结论仍保留';
 }

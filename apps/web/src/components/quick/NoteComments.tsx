@@ -26,6 +26,8 @@ export interface NoteCommentsProps {
   candidate: Source;
   /** 发布账号名,用于自备首评与机构答复的署名 */
   accountLabel: string;
+  /** 未通过自动校验且尚未人工确认时，所有复制入口统一锁定。 */
+  copyEnabled?: boolean;
 }
 
 /** 默认免责声明:候选没带 commentDisclaimer 时兜底,声明本身不允许缺席。 */
@@ -90,7 +92,7 @@ export function commentTotal(candidate: Pick<Source, 'comments' | 'commentOwnedF
  * 「情景演练参考,非真实用户发言」。这个 ⓘ 不能删——界面不声明就等于在断言这些是
  * 真实留言,而方法论明确禁止假冒消费者。编排信息移交工作区 CommentPlanCard。
  */
-export function NoteComments({ candidate, accountLabel }: NoteCommentsProps) {
+export function NoteComments({ candidate, accountLabel, copyEnabled = true }: NoteCommentsProps) {
   const toast = useToast();
   const [noteOpen, setNoteOpen] = useState(false);
   const view = commentSectionView(
@@ -100,6 +102,7 @@ export function NoteComments({ candidate, accountLabel }: NoteCommentsProps) {
   if (!view) return null;
 
   const copyOne = async (text: string) => {
+    if (!copyEnabled) { toast.push('请先完成人工交付确认', 'error'); return; }
     try { await navigator.clipboard.writeText(text); toast.push('已复制'); }
     catch { toast.push('复制失败，请手动选择文本', 'error'); }
   };
@@ -136,6 +139,7 @@ export function NoteComments({ candidate, accountLabel }: NoteCommentsProps) {
           badge="作者"
           text={candidate.commentOwnedFirstComment}
           onCopy={() => void copyOne(candidate.commentOwnedFirstComment!)}
+          copyEnabled={copyEnabled}
         />
       )}
 
@@ -169,6 +173,7 @@ export function NoteComments({ candidate, accountLabel }: NoteCommentsProps) {
             followUps={row.followUps.filter((f) => f.question?.trim())}
             onCopyFollow={(text) => void copyOne(text)}
             followReply={identity}
+            copyEnabled={copyEnabled}
           />
         );
       })}
@@ -186,9 +191,10 @@ interface RowProps {
   onCopyFollow?: (text: string) => void;
   /** 追问答复的署名:与主答复同一套判定结果(replyIdentity),只有 reader_exchange 不带「作者」标 */
   followReply?: { name: string; badge?: string };
+  copyEnabled?: boolean;
 }
 
-function Row({ name, badge, text, onCopy, reply, followUps = [], onCopyFollow, followReply }: RowProps) {
+function Row({ name, badge, text, onCopy, reply, followUps = [], onCopyFollow, followReply, copyEnabled = true }: RowProps) {
   const tone = avatarTone(name);
   return (
     <div className="xhs-comment">
@@ -197,7 +203,7 @@ function Row({ name, badge, text, onCopy, reply, followUps = [], onCopyFollow, f
         <div className="xhs-comment__name">
           {name}
           {badge && <em>{badge}</em>}
-          <Button variant="ghost" icon={<Copy size={11} />} onClick={onCopy} aria-label="复制这条" />
+          <Button variant="ghost" icon={<Copy size={11} />} disabled={!copyEnabled} onClick={onCopy} aria-label="复制这条" />
         </div>
         <p className="xhs-comment__text">{text}</p>
 
@@ -206,7 +212,7 @@ function Row({ name, badge, text, onCopy, reply, followUps = [], onCopyFollow, f
             <div className="xhs-comment__name">
               {reply.name}
               {reply.badge && <em>{reply.badge}</em>}
-              <Button variant="ghost" icon={<Copy size={11} />} onClick={reply.onCopy} aria-label="复制答复" />
+              <Button variant="ghost" icon={<Copy size={11} />} disabled={!copyEnabled} onClick={reply.onCopy} aria-label="复制答复" />
             </div>
             <p className="xhs-comment__text">{reply.text}</p>
           </div>
@@ -217,7 +223,7 @@ function Row({ name, badge, text, onCopy, reply, followUps = [], onCopyFollow, f
             <div className="xhs-comment__name">
               读者
               {onCopyFollow && (
-                <Button variant="ghost" icon={<Copy size={11} />} onClick={() => onCopyFollow(f.question)} aria-label="复制追问" />
+                <Button variant="ghost" icon={<Copy size={11} />} disabled={!copyEnabled} onClick={() => onCopyFollow(f.question)} aria-label="复制追问" />
               )}
             </div>
             <p className="xhs-comment__text">{f.question}</p>
@@ -229,7 +235,7 @@ function Row({ name, badge, text, onCopy, reply, followUps = [], onCopyFollow, f
                   {followReply?.name ?? '读者'}
                   {followReply?.badge && <em>{followReply.badge}</em>}
                   {onCopyFollow && (
-                    <Button variant="ghost" icon={<Copy size={11} />} onClick={() => onCopyFollow(f.answer)} aria-label="复制追问答复" />
+                    <Button variant="ghost" icon={<Copy size={11} />} disabled={!copyEnabled} onClick={() => onCopyFollow(f.answer)} aria-label="复制追问答复" />
                   )}
                 </div>
                 <p className="xhs-comment__text">{f.answer}</p>

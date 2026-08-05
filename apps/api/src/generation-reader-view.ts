@@ -70,6 +70,7 @@ export interface ReaderStrategy {
 
 export interface ReaderCandidate {
   id: string;
+  manualDeliveryConfirmation?: { confirmed: true; confirmedAt: string; confirmedBy: string };
   packageId: string;
   candidateIndex: number;
   seed: number;
@@ -206,10 +207,14 @@ function readerGapLedger(pkg: ContentPackage): ReaderCandidate['gapLedger'] {
   };
 }
 
-export function readerView(pkg: ContentPackage): ReaderCandidate {
+export function readerView(
+  pkg: ContentPackage,
+  manualDeliveryConfirmation?: ReaderCandidate['manualDeliveryConfirmation'],
+): ReaderCandidate {
   const strategy = pkg.orchestrationSnapshot?.strategy;
   return compact<ReaderCandidate>({
     id: pkg.candidateId,
+    manualDeliveryConfirmation,
     packageId: pkg.id,
     candidateIndex: pkg.candidateIndex,
     seed: pkg.seed,
