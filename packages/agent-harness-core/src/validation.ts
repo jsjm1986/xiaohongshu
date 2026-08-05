@@ -70,10 +70,25 @@ const UNSUPPORTED_POPULATION_LANGUAGE = /(很多人|大家都|最怕|最关心|�
 const EVIDENCE_ERROR_CODES = new Set(["claim_audit_incomplete", "claim_audit_not_visible", "undeclared_project_fact", "claim_audit_evidence_mismatch", "empty_citation_statement", "citation_not_visible", "citation_without_evidence", "unknown_evidence", "unread_evidence", "non_factual_evidence"]);
 const ASSET_ERROR_CODES = new Set(["asset_decision_count", "asset_decision_duplicate", "unknown_asset_decision", "asset_decision_evidence", "asset_use_without_sequence", "asset_omit_still_used", "image_sequence_asset", "image_sequence_evidence"]);
 const EXECUTION_ERROR_CODES = new Set(["missing_response_sla", "missing_live_question_routes", "incomplete_live_question_route", "missing_update_triggers", "missing_stop_rules"]);
+/*
+ * 软营销阻断码集合 —— 决定 soft_marketing 那一项显示 blocked 还是 ready。
+ *
+ * 这里原先列着 `marketing_bridge_without_reframe`:全仓只出现这一次,从来没有任何
+ * 地方发出它。而**实际发出**的 `marketing_bridge_ungrounded`(项目承接没有出处)
+ * 反倒不在集合里 —— 8a9e1aa 改了发出处的码名却没同步这个集合,于是它成了唯一
+ * 无法把 soft_marketing 翻成 blocked 的软营销码。
+ *
+ * 本次改动把 `marketing_bridge_ungrounded` 提升成素人模式的核心诚实守卫(锚点可选,
+ * 但一旦提到项目就必须有出处),偏偏它是显示不出来的那一个,所以必须一起修。
+ * 顺带补上同样漏掉的 `marketing_narrative_path`。
+ *
+ * 这是显示层修正,不改阻断行为:导出本来就由 `severity: "error"` 挡住,
+ * 这个集合只影响清单上那一行的文案。
+ */
 const SOFT_MARKETING_ERROR_CODES = new Set([
   "missing_marketing_strategy", "marketing_strategy_incomplete", "marketing_anchor_missing",
   "marketing_anchor_order", "marketing_anchor_duplicate", "marketing_judgment_unchanged",
-  "marketing_bridge_without_reframe", "hard_sell_language",
+  "marketing_bridge_ungrounded", "marketing_narrative_path", "hard_sell_language",
 ]);
 const HARD_SELL_LANGUAGE = /(限时|最后机会|赶紧|立刻下单|马上抢|错过(?:就|再等)|闭眼入|无脑冲|必做|必须做|不做就|全网最低|名额仅剩)/u;
 
@@ -123,7 +138,22 @@ export function candidateTextByOrigin(candidate: HarnessCandidate): { authorOwne
   return { authorOwned, restricted };
 }
 
-export function publicationChecklistFor(candidate: HarnessCandidate, issues: HarnessValidationIssue[]): HarnessPublicationCheck[] {
+/**
+ * 发布前清单。
+ *
+ * `seedingMode` 是**可选**第三参:缺省走 DEFAULT_HARNESS_SEEDING_MODE。做成可选是
+ * 为了不动红线外的调用点(apps/api 那处靠缺省保持现状),而不是因为它不重要。
+ *
+ * 为什么必须传:soft_marketing 那一行的 ready 文案原先写死「正文已形成顾虑进入、
+ * 认知翻转、项目承接与低压力余味」。素人模式下认知翻转与项目承接已改为可选,
+ * 于是一篇合格的裸提问帖(只有处境加一个窄问题)会被这行文案说成「已形成认知翻转
+ * 与项目承接」—— 那是假话,而且是操盘手唯一会读的那句话。
+ */
+export function publicationChecklistFor(
+  candidate: HarnessCandidate,
+  issues: HarnessValidationIssue[],
+  seedingMode: HarnessSeedingMode = DEFAULT_HARNESS_SEEDING_MODE,
+): HarnessPublicationCheck[] {
   const errorCodes = new Set(issues.filter((issue) => issue.severity === "error").map((issue) => issue.code));
   const evidenceBlocked = [...errorCodes].some((code) => EVIDENCE_ERROR_CODES.has(code));
   const assetBlocked = [...errorCodes].some((code) => ASSET_ERROR_CODES.has(code));
@@ -137,7 +167,17 @@ export function publicationChecklistFor(candidate: HarnessCandidate, issues: Har
     "organic_reaction_overbuilt", "organic_reaction_too_long",
   ].some((code) => errorCodes.has(code));
   return [
-    { key: "soft_marketing", status: softMarketingBlocked ? "blocked" : "ready", note: softMarketingBlocked ? "用户欲望、认知翻转或项目承接没有形成完整软营销推进。" : "正文已形成顾虑进入、认知翻转、项目承接与低压力余味。" },
+    {
+      key: "soft_marketing", status: softMarketingBlocked ? "blocked" : "ready",
+      // ready 文案必须与实际校验的内容一致,不能承诺校验没查的东西。
+      note: softMarketingBlocked
+        ? (seedingMode === "peer_seeding"
+          ? "用户欲望、顾虑入口、开放余味没写全，或提到项目时没有绑定出处。"
+          : "用户欲望、认知翻转或项目承接没有形成完整软营销推进。")
+        : (seedingMode === "peer_seeding"
+          ? "正文按素人自述成立：有顾虑入口与低压力余味；未强制认知翻转与项目承接，若提到项目则已绑定出处。"
+          : "正文已形成顾虑进入、认知翻转、项目承接与低压力余味。"),
+    },
     { key: "evidence", status: evidenceBlocked ? "blocked" : "ready", note: evidenceBlocked ? "事实或证据绑定仍有阻断项。" : "可见事实已通过本轮证据校验。" },
     { key: "simulation_disclosure", status: simulationBlocked ? "blocked" : "ready", note: simulationBlocked ? "模拟互动披露或评论结构不完整。" : "首评归属与模拟问答披露已明确。" },
     { key: "execution_plan", status: executionBlocked ? "blocked" : "ready", note: executionBlocked ? "真实问题响应、分流、更新或停止规则不完整。" : "真实问题承接的响应、分流、更新与停止规则已齐备。" },
@@ -210,9 +250,13 @@ export function validateHarnessCandidates(
        * 引用重叠、翻转必须早于承接。满足这四条,写出来必然是「我原以为 X,其实是 Y,
        * 而这家正好符合 Y」—— 实跑三篇候选形状完全一样,正是这个原因。
        *
-       * 实测用户 67 篇真实对标语料(按笔记链接去重):含认知翻转标记 6 篇(9%)、
-       * 含项目/技术卖点词 6 篇(9%)、两者都有(≈原校验要求)仅 2 篇(3%),
-       * 85% 两者都无。用户要的讨论帖、劝退帖、案例贴图三类,没有一类符合原校验。
+       * 依据来自用户 67 篇真实对标语料(按笔记链接去重)。稳健且三次独立测量一致的
+       * 那个数字是:**同时满足「有认知翻转」和「有带引用的项目承接」的样本为 0 篇** ——
+       * 也就是没有一篇真实内容能通过原校验。绝大多数样本两样都没有。
+       * (这里不写各分支的具体百分比:命中要靠关键词启发式判定,三次独立测量用了不同
+       * 词表,百分比各不相同、没人复现得出同一组数。写一个复现不出来的数字会让后来者
+       * 以为自己算错了。0 这个结论在三次测量下都成立,才是可靠的审计线索。)
+       * 用户要的讨论帖、劝退帖、案例贴图三类,没有一类符合原校验。
        *
        * 所以 peer_seeding 下这两个锚点降为可选。代价已确认接受:单篇可以不承载任何
        * 卖点,只做占位和铺量。brand_voice 一个字节不放宽 —— 那边是机构以自己的口吻

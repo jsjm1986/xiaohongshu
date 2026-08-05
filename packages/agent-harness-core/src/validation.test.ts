@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_HARNESS_SEEDING_MODE, HARNESS_SIMULATION_NOTICE, type HarnessSeedingMode } from "./methods.js";
-import type { HarnessCandidate, HarnessCommentThread, HarnessSoftMarketingStrategy } from "./types.js";
-import { validateHarnessCandidates } from "./validation.js";
+import type { HarnessCandidate, HarnessCommentThread, HarnessSoftMarketingStrategy, HarnessValidationIssue } from "./types.js";
+import { publicationChecklistFor, validateHarnessCandidates } from "./validation.js";
 
 /**
  * 只为评论区拓扑测试服务的最小线程。
@@ -553,9 +553,13 @@ describe("标签禁品牌词", () => {
   软营销骨架按模式分叉。
 
   四条 marketing_anchor_* 校验此前不分模式,它们联手只允许一种正文形状:
-  「我原以为 X,其实是 Y,而这家正好符合 Y」。实测用户 67 篇真实对标语料:
-  含认知翻转标记 6 篇(9%)、含项目卖点词 6 篇(9%)、两者都有 2 篇(3%),
-  85% 两者都无 —— 讨论帖、劝退帖、案例贴图这三类没有一类符合原校验。
+  「我原以为 X,其实是 Y,而这家正好符合 Y」。
+
+  依据(只写复现得出来的那个结论):67 篇真实对标语料里,同时具备「认知翻转」与
+  「带引用的项目承接」——即原校验实际要求的那个组合——的样本数为 0。这一点由三次
+  独立测量(实施、审查、复核)一致得出。各自用的启发式词表不同,所以单看「含翻转」
+  或「含卖点词」的篇数会有出入,但那个交集恒为 0:用户要的讨论帖、劝退帖、
+  案例贴图三类,没有一类符合原校验。
   所以 peer_seeding 下认知翻转与项目承接改为可选。代价是单篇可以不承载卖点,
   只做占位和铺量,这是已确认接受的。
 
@@ -909,3 +913,101 @@ const BRAND_VOICE_TOPOLOGY_LINES = [
 function brandVoiceLines(brandVoiceBlock: string): string[] {
   return [...brandVoiceBlock.matchAll(/^\s*"((?:[^"\\]|\\.)*)",$/gmu)].map((match) => match[1]!);
 }
+
+/*
+  发布前清单里那句话必须与实际校验一致。
+
+  soft_marketing 的 ready 文案是操盘手唯一会读的那一行。它原先写死「正文已形成
+  顾虑进入、认知翻转、项目承接与低压力余味」,而素人模式下后两样已改为可选 ——
+  一篇合格的裸提问帖会被这行文案说成「已形成认知翻转与项目承接」,那是假话。
+
+  同时钉住 SOFT_MARKETING_ERROR_CODES 里那个既有缺陷:集合里原先列的
+  marketing_bridge_without_reframe 全仓从不发出,而实际发出的
+  marketing_bridge_ungrounded 反倒不在集合里,于是它成了唯一无法把
+  soft_marketing 翻成 blocked 的软营销码 —— 而 Task 9 恰好把它提升成了素人模式的
+  核心诚实守卫(提到项目就必须有出处)。
+*/
+describe("发布前清单的软营销那一行", () => {
+  /** 取 soft_marketing 那一项。 */
+  function softMarketing(candidate: HarnessCandidate, issues: HarnessValidationIssue[], seedingMode?: HarnessSeedingMode) {
+    const checks = seedingMode
+      ? publicationChecklistFor(candidate, issues, seedingMode)
+      : publicationChecklistFor(candidate, issues);
+    return checks.find((check) => check.key === "soft_marketing")!;
+  }
+
+  /** 一份干净候选:清单只看 issues,不重新校验,所以候选内容不影响这组断言。 */
+  const clean = () => minimalCandidate([]);
+
+  it("peer_seeding:ready 文案不再声称正文形成了认知翻转与项目承接", () => {
+    /*
+     * 断言必须钉「肯定式断言」整句,不能禁「认知翻转」这个裸词 ——
+     * 如实的否定句「未强制认知翻转与项目承接」本身就含这四个字,禁裸词会把正确文案
+     * 判红,逼下一个人把 WHY 从文案里删掉。这与本仓踩过的「禁止经历词表用裸子串匹配
+     * 会误伤否定句」是同一类错误,实测就是这么红的。
+     *
+     * 所以:整句原文不许出现(它才是那句假话),同时要求文案带上否定标记和出处约束。
+     */
+    const note = softMarketing(clean(), [], "peer_seeding").note;
+    expect(note, "素人模式仍在原样使用机构口吻那句肯定式断言")
+      .not.toBe("正文已形成顾虑进入、认知翻转、项目承接与低压力余味。");
+    expect(note, "素人模式仍在肯定地声称正文形成了认知翻转与项目承接")
+      .not.toMatch(/已形成[^。]*认知翻转/u);
+    expect(note, "文案没说明认知翻转与项目承接在这个模式下并非强制").toMatch(/未强制|不强制|可留空|不必/u);
+    expect(note, "素人模式的文案没提到「提到项目才要出处」这个实际约束").toMatch(/出处|引用|证据/u);
+  });
+
+  it("brand_voice:ready 文案逐字保持原文", () => {
+    /* 换模式不该动机构口吻的既有文案。 */
+    expect(softMarketing(clean(), [], "brand_voice").note)
+      .toBe("正文已形成顾虑进入、认知翻转、项目承接与低压力余味。");
+  });
+
+  it("不传 seedingMode 时按默认模式走,不回落到机构文案", () => {
+    /*
+     * 第三参是可选的(为了不动红线外的 apps/api 调用点),所以必须钉住缺省行为:
+     * 缺省是 DEFAULT_HARNESS_SEEDING_MODE(素人代发),不是 brand_voice。
+     * 缺省若落到 brand_voice,那个调用点就会继续打印假话。
+     */
+    expect(softMarketing(clean(), []).note).toBe(softMarketing(clean(), [], DEFAULT_HARNESS_SEEDING_MODE).note);
+  });
+
+  it("marketing_bridge_ungrounded 必须能把 soft_marketing 翻成 blocked", () => {
+    /*
+     * 这是本组最要紧的一条。这个码是「提到项目却没有出处」,在素人模式下是核心
+     * 诚实守卫 —— 它不在阻断集合里的话,清单会对一篇无出处吹项目的稿子显示 ready。
+     * 导出仍被 severity: "error" 挡住,所以这是显示层的诚实性,不是阻断行为。
+     */
+    const issues: HarnessValidationIssue[] = [{
+      candidateIndex: 0, code: "marketing_bridge_ungrounded", severity: "error", message: "无出处的项目承接",
+    }];
+    expect(softMarketing(clean(), issues, "peer_seeding").status, "无出处的项目承接必须显示 blocked").toBe("blocked");
+    expect(softMarketing(clean(), issues, "brand_voice").status).toBe("blocked");
+  });
+
+  it("marketing_narrative_path 也在阻断集合里", () => {
+    /* 同样是实际发出却漏登记的码。 */
+    const issues: HarnessValidationIssue[] = [{
+      candidateIndex: 0, code: "marketing_narrative_path", severity: "error", message: "叙事路径无效",
+    }];
+    expect(softMarketing(clean(), issues, "peer_seeding").status).toBe("blocked");
+  });
+
+  it("阻断集合里不留任何全仓从不发出的死码", () => {
+    /*
+     * 源码断言。死码的危害不是多一个字符串,而是它掩盖了漏登记:
+     * marketing_bridge_without_reframe 在集合里占着位置,让人以为「承接类」已覆盖,
+     * 而真正发出的 marketing_bridge_ungrounded 却漏在外面 —— 这个缺陷就这么活了下来。
+     */
+    const source = readFileSync(new URL("./validation.ts", import.meta.url), "utf8");
+    const match = source.match(/const SOFT_MARKETING_ERROR_CODES = new Set\(\[([\s\S]*?)\]\);/u);
+    expect(match, "没解析到 SOFT_MARKETING_ERROR_CODES").toBeTruthy();
+    const listed = [...match![1]!.matchAll(/"([a-z_]+)"/gu)].map((item) => item[1]!);
+    expect(listed, "死码 marketing_bridge_without_reframe 又回来了").not.toContain("marketing_bridge_without_reframe");
+    expect(listed, "实际发出的 marketing_bridge_ungrounded 漏在集合外").toContain("marketing_bridge_ungrounded");
+    // 集合里每一个码都必须真的被 add(...) 发出过,否则又是一个占位死码。
+    for (const code of listed) {
+      expect(source, `${code} 在集合里但全仓从不发出`).toContain(`"${code}", "error"`);
+    }
+  });
+});

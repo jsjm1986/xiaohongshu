@@ -724,13 +724,18 @@ describe('素人代发模式按模式下发提示词', () => {
   不存在、在整个 runner.ts 里只出现一次。
 */
 describe('软营销骨架提示词按模式分叉', () => {
-  async function bodyDraftMessage(seedingMode: 'peer_seeding' | 'brand_voice') {
+  /** 跑一轮并取回两个阶段的 system message。calls[1] 是正文阶段,calls[2] 是组包阶段。 */
+  async function stageMessages(seedingMode: 'peer_seeding' | 'brand_voice') {
     const calls: HarnessModelRequest[] = [];
     await runAgentHarness({
       ...baseInput, seedingMode,
       provider: scriptedProvider(protocolReplies([candidate(0, '标题一'), candidate(1, '标题二'), candidate(2, '标题三')]), calls),
     });
-    return calls[1]!.messages[0]!.content;
+    return { bodyDraft: calls[1]!.messages[0]!.content, packaging: calls[2]!.messages[0]!.content };
+  }
+
+  async function bodyDraftMessage(seedingMode: 'peer_seeding' | 'brand_voice') {
+    return (await stageMessages(seedingMode)).bodyDraft;
   }
 
   it('peer_seeding:正文阶段被告知翻转与承接可选,且不再下发无条件四锚点要求', async () => {
@@ -820,6 +825,92 @@ describe('软营销骨架提示词按模式分叉', () => {
     // 上限两种模式一致:放宽的是下限,不是取消长度约束。
     expect(peer, '素人模式的上限被一起放开了').toContain(`-${short.max} Chinese characters`);
   });
+
+  /*
+   * 下面三条盯的是**夹在已分叉行中间的无条件句**。
+   *
+   * 这三句原先不按 seedingMode 分叉,每次素人运行都会照旧收到,而它们各自预设
+   * 「一定有 newJudgment / 一定有 reframe 和 bridge」:
+   *   - mustInclude 那句:「封面和 CTA 必须表达与正文相同的新判断」
+   *   - 三篇区分那句:「三篇必须各用一个不同的新判断」(只按 revision 分叉)
+   *   - 打包阶段那句:「让图片和评论强化冻结的 reframe 与 project bridge」
+   * 矛盾里具体指令赢:模型会为了满足它们先编一个新判断/承接出来 —— 前面所有放开
+   * 都会被这三句抵消掉,改动就成了装饰性的。
+   *
+   * 每条都两个方向一起断言(peer 有新表述、peer 不含原从句、brand 逐字保留原句),
+   * 少任一方向都杀不掉「两支恒取同一支」这类变异。
+   */
+  it('peer_seeding:mustInclude 那句不再预设一定有新判断', async () => {
+    const peer = await bodyDraftMessage('peer_seeding');
+    expect(peer, '封面/CTA 仍被要求表达「同一个新判断」，与 newJudgment 可留空对撞')
+      .not.toContain('Cover and CTA must express the same new judgment as the body');
+    expect(peer, '没改成「与正文实际所做的保持一致」这种按有无表述')
+      .toContain('must stay consistent with whatever the body actually does');
+    expect(peer, '正文没有判断变化时没写明封面与 CTA 也不许硬造一个')
+      .toContain('the cover and CTA must not assert one either');
+    // 与体裁无关的三件事必须逐字留着,不能借分叉顺手放宽。
+    expect(peer, 'mustInclude 逐字落地的要求被一起去掉了')
+      .toContain('place every non-empty task.mustInclude item verbatim in frozen cover, title, body or CTA');
+    expect(peer, '标题不许机械挂品牌这条被去掉了')
+      .toContain('Keep title direct and curiosity-bearing rather than appending the brand mechanically');
+    expect(peer, 'CTA 低压力那条被去掉了')
+      .toContain('CTA stays low-pressure and may not demand consultation, purchase, follow, comment or save');
+  });
+
+  it('peer_seeding:三篇区分度不再无条件要求三个不同的新判断', async () => {
+    const peer = await bodyDraftMessage('peer_seeding');
+    expect(peer, '仍在无条件要求三篇各用一个不同的新判断 —— 这是逼出同形软文最强的一句')
+      .not.toContain('and use different new judgments');
+    expect(peer, '没把新判断的区分要求降为「写了才要求不重复」')
+      .toContain('Where a draft does write a newJudgment, two drafts must not repeat the same one');
+    expect(peer, '没写明整篇没有判断变化是合格的')
+      .toContain('a draft that carries no judgment change at all is fine');
+    // 与体裁无关的两条必须留着。
+    expect(peer, '三条 narrativePath 各用一次的要求被一起去掉了')
+      .toContain('must use all three narrativePath values exactly once');
+    expect(peer, '读者欲望/决策张力必须真的不同这条被去掉了')
+      .toContain('pursue genuinely different reader desires or decision tensions');
+    expect(peer, '「不要把一个卖点改写三遍」被去掉了')
+      .toContain('Do not rewrite one selling point three ways');
+  });
+
+  it('peer_seeding:打包阶段不再无条件要求强化 reframe 与 bridge', async () => {
+    /*
+     * 正文在这一阶段已冻结、改不动,但这句会把编造的 reframe 推进 overlayText 和
+     * 评论线程 —— 正文干净、图文和评论区却替它编出一个认知翻转,等于换个位置写软文。
+     */
+    const { packaging } = await stageMessages('peer_seeding');
+    expect(packaging, '仍在无条件要求图片和评论强化 reframe 与 project bridge')
+      .not.toContain('reinforce the frozen reader desire, reframe and project bridge');
+    expect(packaging, '没写明锚点为空时那篇本来就没有，不许替它补一个')
+      .toContain('that post deliberately has none');
+    expect(packaging, '没点明不许在 overlay/首评/模拟线程里补出判断变化或项目提及')
+      .toContain('do not invent a judgment change or a project mention in overlay text');
+  });
+
+  it('brand_voice:三句原文逐字保留,一个字节不改', async () => {
+    /*
+     * 红线:brand_voice 下这三句必须与改动前一致。整句比对而不是抓中间片段 ——
+     * 上一轮实测过,只查片段时把句尾改掉测试照旧全绿。
+     */
+    const brand = await bodyDraftMessage('brand_voice');
+    const { packaging } = await stageMessages('brand_voice');
+    expect(brand, 'mustInclude 那句不是原文').toContain(
+      'For every draft independently, place every non-empty task.mustInclude item verbatim in frozen cover, title, body or CTA. Keep title direct and curiosity-bearing rather than appending the brand mechanically. Cover and CTA must express the same new judgment as the body; CTA stays low-pressure and may not demand consultation, purchase, follow, comment or save.');
+    expect(brand, '三篇区分那句不是原文').toContain(
+      'The three drafts must use all three narrativePath values exactly once, pursue genuinely different reader desires or decision tensions, and use different new judgments. Do not rewrite one selling point three ways.');
+    expect(packaging, '打包阶段那句不是原文').toContain(
+      'Make images and comments reinforce the frozen reader desire, reframe and project bridge without repeating the body as an FAQ.');
+    // 素人版措辞一个字都不许漏进 brand_voice。
+    for (const [label, message] of [['正文', brand], ['组包', packaging]] as const) {
+      expect(message, `${label}阶段漏进了素人版的封面/CTA 表述`)
+        .not.toContain('must stay consistent with whatever the body actually does');
+      expect(message, `${label}阶段漏进了素人版的新判断有条件表述`)
+        .not.toContain('a draft that carries no judgment change at all is fine');
+      expect(message, `${label}阶段漏进了素人版的锚点为空表述`)
+        .not.toContain('that post deliberately has none');
+    }
+  });
 });
 
 /*
@@ -873,6 +964,48 @@ describe('正文阶段解析器允许素人模式留空可选字段', () => {
       ...baseInput, seedingMode: 'brand_voice',
       provider: scriptedProvider(replies),
     })).rejects.toThrow(/complete soft-marketing strategy|soft-marketing/u);
+  });
+
+  /**
+   * 一份**零 citations** 的素人形态候选。
+   *
+   * 为什么必须零 citations(这是上一轮假绿的直接原因):
+   * bridgeGrounded 用 `citation.statement.includes(projectBridgeAnchor)` 判断,而
+   * projectBridgeAnchor 为空串时 `includes("")` 恒为 true —— 只要草稿里还有**任何**
+   * 一条引用,检查就意外通过。于是把守卫 `if (projectBridgeAnchor.trim())` 改成
+   * `if (true)`,38 条测试照旧全绿,守卫根本没被钉住(实测确认)。
+   * 引用清空后这条意外路径消失:守卫在,跳过检查;守卫不在,`some()` 对空数组返回
+   * false,直接抛 "The frozen project bridge must overlap an exact body-draft citation"。
+   */
+  function citationFreePeerReplies() {
+    const values = [candidate(0, '标题一'), candidate(1, '标题二'), candidate(2, '标题三')];
+    for (const item of values) {
+      item.marketingStrategy = {
+        ...item.marketingStrategy,
+        oldJudgment: '', newJudgment: '', projectBridge: '',
+        reframeAnchor: '', projectBridgeAnchor: '',
+      };
+      // 正文换成语料真实形态:一个处境加一个窄问题,不含任何项目事实,
+      // 所以本来就不该有引用 —— 这不是为了绕过检查而人为清空。
+      item.content.N.body = `${TENSION}想问问过来人一般都请几天合适。${OPEN_LOOP}`;
+      item.citations = [];
+    }
+    // 可见内容里已没有项目事实,盘点自然是空清单。
+    return protocolReplies(values, finalReview([]));
+  }
+
+  it('peer_seeding:零引用的素人草稿也跑得通 —— 承接守卫是真的在跳过检查', async () => {
+    /*
+     * 与上面那条「留空不再抛」的区别在于引用集合为空,而这正是区别所在:
+     * 那条被 `includes("")` 的意外路径满足,这条不会 —— 去掉守卫必须变红。
+     */
+    const result = await runAgentHarness({
+      ...baseInput, seedingMode: 'peer_seeding',
+      provider: scriptedProvider(citationFreePeerReplies()),
+    });
+    expect(result.candidates, '零引用的素人草稿应完整跑完三份').toHaveLength(3);
+    expect(result.candidates[0]?.citations, '解析器给零引用草稿补上了引用').toEqual([]);
+    expect(result.candidates[0]?.marketingStrategy.projectBridgeAnchor).toBe('');
   });
 
   it('两种模式下承接非空时都仍要求与引用重叠', async () => {
