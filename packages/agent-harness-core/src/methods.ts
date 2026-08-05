@@ -31,6 +31,22 @@ export const HARNESS_BODY_LENGTH_TARGETS: Readonly<Record<HarnessBodyLength, Rea
 });
 
 /**
+ * 素人代发模式的正文下限覆盖。
+ *
+ * 只降下限,不动上限,也不动 HARNESS_BODY_LENGTH_TARGETS 本身 ——
+ * 直接改 short.min 会连带放宽 brand_voice,而那边的契约本次不动。
+ *
+ * 为什么降:实测用户 67 篇真实对标语料(按笔记链接去重)正文中位数 74 字,
+ * 27 篇(40%)短于现 short 档的 60 字下限。语料里「今天化完妆来一张验证一下我选得
+ * 没错」这种 36 字的帖子是常态形态,按 60 字下限判会把它们全标成偏离目标。
+ *
+ * 为什么不一起放宽上限:上限的职责是防止把评论区该承担的信息(价格、恢复期、
+ * 麻醉方式)全塞进正文 —— 那正是产出读起来像广告的另一半原因。放宽下限是让
+ * 短帖合法,放宽上限只会让软文更长。
+ */
+export const HARNESS_PEER_BODY_MIN = 30;
+
+/**
  * A browser-safe, auditable translation of the ten established generation methods.
  * It carries semantic responsibilities, not the legacy parameter engine or planning chain.
  */

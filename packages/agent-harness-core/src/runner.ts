@@ -3,7 +3,7 @@ import type {
   HarnessImagePlanItem, HarnessModelProvider, HarnessReviewInput, HarnessRunInput, HarnessRunResult, HarnessSoftMarketingStrategy, HarnessToolAction, HarnessToolTrace,
 } from "./types.js";
 import { publicationChecklistFor, validateHarnessCandidates, visibleCandidateText } from "./validation.js";
-import { DEFAULT_HARNESS_SEEDING_MODE, HARNESS_BODY_LENGTH_TARGETS } from "./methods.js";
+import { DEFAULT_HARNESS_SEEDING_MODE, HARNESS_BODY_LENGTH_TARGETS, HARNESS_PEER_BODY_MIN } from "./methods.js";
 import type { HarnessSeedingMode } from "./methods.js";
 
 /*
@@ -33,9 +33,15 @@ const HARNESS_BODY_OUTPUT_TOKENS = 32_000;
 const HARNESS_SHORT_OUTPUT_TOKENS = 16_000;
 const SOFT_MARKETING_STRATEGY_SCHEMA = {
   type: "object", additionalProperties: false,
+  // reframeAnchor / projectBridgeAnchor / oldJudgment / newJudgment / projectBridge 不再列为必填。
+  // 留在 required 里,模型就得为**每篇**编出一次认知翻转和一个项目承接 —— 写出来必然是
+  // 「我原以为 X,其实是 Y,而这家正好符合 Y」,只放宽 validation.ts 一点用也没有。
+  // 实测 67 篇真实语料里只有 2 篇(3%)同时具备这两样,85% 两者都无。
+  // properties 保持不变,想填仍然能填;brand_voice 下缺失照旧 ERROR,由 validation.ts 保证。
+  // schema 只负责「允许不填」,校验负责「该填时必须填」。
   required: [
-    "narrativePath", "readerDesire", "hiddenTension", "oldJudgment", "newJudgment", "projectBridge", "lowPressureNextStep",
-    "tensionAnchor", "reframeAnchor", "projectBridgeAnchor", "openLoopAnchor",
+    "narrativePath", "readerDesire", "hiddenTension", "lowPressureNextStep",
+    "tensionAnchor", "openLoopAnchor",
   ],
   properties: {
     narrativePath: { type: "string", enum: ["tension_first", "observation_first", "question_first"] },
@@ -521,9 +527,21 @@ function packageCandidate(
   assertCandidateRuntimeBounds(candidate);
   return { candidate, decisionSummary: boundedText(value.decisionSummary, "decisionSummary", MAX_TOOL_TEXT) };
 }
+/*
+ * 正文阶段的硬契约也必须跟着模式分叉,否则放宽在生产路径上根本不可达。
+ *
+ * 这里两处 throw 是 schema 与 validation.ts 之外的**第三个**耦合点:
+ *   1. 每个 marketingStrategy 字段非空(下面那条 "complete soft-marketing strategy");
+ *   2. projectBridgeAnchor 必须与一条引用重叠。
+ * 它们是 StageContractError,会触发整阶段重发、重发仍失败就整轮失败 —— 比校验层的
+ * ERROR 更硬。schema 允许不填、validation.ts 允许为空,而这里照旧 throw 的话,
+ * 素人模式下一篇没有翻转的正文会在解析阶段就被打回,前两处放宽全是死信。
+ */
 function bodyDrafts(
   value: Record<string, unknown>, expectedCount: number, refToEvidenceId: ReadonlyMap<string, string>,
+  seedingMode: HarnessSeedingMode = DEFAULT_HARNESS_SEEDING_MODE,
 ): { drafts: HarnessBodyDraft[]; editorialSummary: string } {
+  const peerSeeding = seedingMode === "peer_seeding";
   const rawDrafts = boundedArray(value.drafts, "bodyDrafts", MAX_CANDIDATES);
   const drafts = rawDrafts.map((item) => {
     const raw = record(item);
@@ -550,11 +568,14 @@ function bodyDrafts(
         throw new Error("Every body-draft citation must bind a non-empty exact frozen-copy span to read evidence.");
       }
     }
-    const bridgeGrounded = draft.citations.some((citation) =>
-      citation.statement.includes(draft.marketingStrategy.projectBridgeAnchor)
-      || draft.marketingStrategy.projectBridgeAnchor.includes(citation.statement));
-    if (!bridgeGrounded) {
-      throw new Error("The frozen project bridge must overlap an exact body-draft citation.");
+    // 承接为空时跳过出处检查(素人模式下允许整篇不提项目);非空时两种模式都照旧要求。
+    if (draft.marketingStrategy.projectBridgeAnchor.trim()) {
+      const bridgeGrounded = draft.citations.some((citation) =>
+        citation.statement.includes(draft.marketingStrategy.projectBridgeAnchor)
+        || draft.marketingStrategy.projectBridgeAnchor.includes(citation.statement));
+      if (!bridgeGrounded) {
+        throw new Error("The frozen project bridge must overlap an exact body-draft citation.");
+      }
     }
     return draft;
   });
@@ -563,8 +584,23 @@ function bodyDrafts(
   if (indexes.size !== drafts.length || drafts.some((draft) => ![0, 1, 2].includes(draft.candidateIndex))) {
     throw new Error("Body drafts must use unique candidate indexes 0, 1 and 2.");
   }
+  /*
+   * 策略字段的非空要求必须跟着模式分叉,否则放宽不可达。
+   *
+   * 这个 throw 比 validation.ts 更早、更硬:它在解析阶段就拒收整批草稿,连
+   * StageContractError 的一次重试都要重跑。peer_seeding 下允许 reframeAnchor 为空
+   * 之后,若这里仍要求 11 个字段全非空,模型照旧被逼着为每篇编出认知翻转和项目承接
+   * —— 校验层和 schema 都放开了也没用,产出还是软文。
+   *
+   * 其余字段照旧硬要求:它们与体裁无关,缺了就是没写完。
+   */
+  const optionalStrategyFields: readonly string[] = seedingMode === "peer_seeding"
+    ? ["oldJudgment", "newJudgment", "projectBridge", "reframeAnchor", "projectBridgeAnchor"]
+    : [];
+  const strategyIncomplete = (strategy: HarnessSoftMarketingStrategy) => Object.entries(strategy)
+    .some(([field, item]) => !optionalStrategyFields.includes(field) && !item);
   if (drafts.some((draft) => !draft.postingIntent || !draft.coverHeadline || !draft.coverSubheadline || !draft.title
-    || !draft.body || !draft.callToAction || Object.values(draft.marketingStrategy).some((item) => !item))) {
+    || !draft.body || !draft.callToAction || strategyIncomplete(draft.marketingStrategy))) {
     throw new Error("Every body draft must contain a posting intent, complete soft-marketing strategy, frozen cover, title, body and CTA.");
   }
   if (expectedCount > 1) {
@@ -669,11 +705,61 @@ const BODY_VOICE_GUIDANCE = {
  * 因为组包阶段改不动正文;凡是关于评论线程和标签的话只在组包阶段说,因为这个
  * 阶段被明令不许规划评论区。
  *
- * 注意:四个 marketing_anchor_* 校验(validation.ts)**没有**按模式分叉,
- * peer_seeding 的正文照旧必须带认知翻转锚点、并且它要早于有引用的项目承接锚点。
- * 也就是说素人口吻是长在一套与模式无关的软营销骨架上的 —— 它改的是「谁在说话、
- * 说得多细」,不是「可以不做判断转换」。改这块前先看那几条校验。
+ * 注意:认知翻转与项目承接两个锚点在 peer_seeding 下已改为**可选**
+ * (见 SOFT_MARKETING_SKELETON_GUIDANCE 与 validation.ts 的同名分叉),
+ * 但 tensionAnchor / openLoopAnchor 仍必需,且一旦写了承接就仍必须带证据引用。
+ * 改这块前先看那几条校验。
  */
+/*
+ * 软营销骨架那两句,按模式分叉。
+ *
+ * 只追加新句子是不够的(Task 6 踩过):原句要求「四个锚点必须齐全、翻转必须早于承接、
+ * 承接必须与引用重叠」,与「翻转和承接可选」正面矛盾,模型会照旧写软文。原句本身要按
+ * 模式选择。
+ *
+ * 依据:实测用户 67 篇真实对标语料(按笔记链接去重)含认知翻转标记 6 篇(9%)、
+ * 含项目卖点词 6 篇(9%)、两者都有仅 2 篇(3%),85% 两者都无。逼出来的唯一形状是
+ * 「我原以为 X,其实是 Y,而这家正好符合 Y」—— 实跑三篇候选形状完全一样。
+ *
+ * peer_seeding 放开的边界:可选不等于可以无出处地吹。一旦正文提到项目,那句话仍必须
+ * 与一条带证据的引用逐字重叠 —— 这一条两种模式都不放宽,校验层同样如此。
+ * brand_voice 两句逐字保留原文。
+ */
+/*
+ * 「这篇要达成什么」那一句,按模式分叉。
+ *
+ * 原句把「改变一个判断标准、让一个项目差异成为答案」写成本阶段的目标,并给出
+ * 一句范例内心话。它不点名锚点,所以容易被漏掉 —— 但它恰恰是最强的那条指令:
+ * 目标句写着「必须完成判断转换」时,把锚点改成可选也不会改变模型的行为。
+ * peer_seeding 版把目标降为「像真人会发的一条帖」,项目那部分变成条件句。
+ */
+const SEEDING_GOAL_GUIDANCE = {
+  brand_voice: "This is seeding copy, not a user diary, pure education or a product manual. The accountable publisher enters through a desire or concrete hesitation already alive in the reader, changes one decision criterion, then lets one evidence-backed project difference become the natural answer. The goal is: '原来应该这样判断，这个项目的思路和我担心的点对得上，我愿意继续了解。'",
+  peer_seeding: "This is peer seeding copy, not a product manual and not pure education. The publisher enters through a desire or concrete hesitation they actually have. From there a post may do any of these: change one decision criterion and let an evidence-backed project difference become the natural answer; or simply state a situation and ask one narrow question; or record one small moment. Most real posts in this format do the latter two. Do not force a judgment change or a project mention into a post that does not need one.",
+} as const;
+
+/*
+ * marketingStrategy 字段说明那一句,按模式分叉。
+ *
+ * 原句把 oldJudgment / newJudgment / projectBridge 与其余字段并列成无条件必填,
+ * 不点明可留空时模型不会留空 —— 校验和 schema 放开了也没用。
+ */
+const STRATEGY_FIELD_GUIDANCE = {
+  brand_voice: "For each draft first define marketingStrategy: narrativePath, readerDesire (wanted life/result), hiddenTension (the unsaid friction), oldJudgment (the reader's current shortcut), newJudgment (one memorable replacement criterion), projectBridge (why this project naturally fits that criterion), and lowPressureNextStep (what the reader may choose to clarify next).",
+  peer_seeding: "For each draft first define marketingStrategy. Always required: narrativePath, readerDesire (wanted life/result), hiddenTension (the unsaid friction) and lowPressureNextStep (what the reader may choose to clarify next). Optional, and correctly left as empty strings whenever the post does not carry them: oldJudgment (the reader's current shortcut), newJudgment (one memorable replacement criterion) and projectBridge (why this project fits that criterion). Leave all three empty together rather than inventing a judgment change the post does not actually make.",
+} as const;
+
+const SOFT_MARKETING_SKELETON_GUIDANCE = {
+  brand_voice: [
+    "Write four short exact public-copy anchors. tensionAnchor may occur in coverHeadline, coverSubheadline, title or body. reframeAnchor and projectBridgeAnchor must occur in body, with reframeAnchor before projectBridgeAnchor. openLoopAnchor may occur in body or CTA. Do not force all four into four consecutive sentences. projectBridgeAnchor must overlap one exact citation.statement backed by read evidence; a generic uncited project compliment is invalid.",
+    "Soft marketing is not weak product presence. Make the project difference memorable because it answers the new judgment, not because the brand name or technical terms are repeated. Prefer one plain-language criterion over a string of mechanisms. The brand/project name should normally appear no more than once in the body.",
+  ],
+  peer_seeding: [
+    "Two anchors are required and two are optional in this format. tensionAnchor (an entry point, in coverHeadline, coverSubheadline, title or body) and openLoopAnchor (an unforced ending, in body or CTA) are always required. reframeAnchor and projectBridgeAnchor may be left as empty strings, and so may oldJudgment, newJudgment and projectBridge: in this format many posts are only one situation plus one narrow question, so not every post completes a judgment change and not every post mentions the project at all. When you do write either anchor it must still appear verbatim in the body, and reframeAnchor must still come before projectBridgeAnchor.",
+    "If a post does mention the project, that sentence must be evidence-backed: projectBridgeAnchor has to overlap one exact citation.statement supported by read evidence. A generic uncited project compliment is invalid — optional means the post may stay silent about the project, never that it may praise the project without a source. Keep the brand/project name to at most once in the body, and prefer one plain-language criterion over a string of mechanisms.",
+  ],
+} as const;
+
 const PEER_SEEDING_BODY_GUIDANCE = [
   "This run is peer seeding: the publishing account is a real individual, not the brand. Write the body in that person's own first person.",
   "Keep specific parameters out of the body when they can be asked instead. Price, recovery time, anesthesia type and whether it can be done same-day belong in the comment section, answered by the publisher when a reader asks. The body establishes one situation and one narrow question.",
@@ -732,14 +818,23 @@ function bodyDraftPrompt(input: WithSeedingMode<HarnessRunInput>, expectedCount:
   const lengthTarget = HARNESS_BODY_LENGTH_TARGETS[length];
   // 与组包阶段、校验层同一个缺省来源。三处若各自取默认,写出来的和判定的就会分叉。
   const seedingMode = input.seedingMode ?? input.task.seedingMode ?? DEFAULT_HARNESS_SEEDING_MODE;
+  /*
+   * 下限与校验层取同一个来源,不在提示词里写死数字。
+   *
+   * 写死的后果是提示词说 60、校验按 30 判(或反过来):模型被要求的和被判定的分叉。
+   * peerBodyMin 与 lengthTarget.min 相等时不额外说明,免得下发一句「最少 120 字
+   * (最少 120 字也行)」这样的废话 —— 素人下限只对 short 档有意义。
+   */
+  const peerBodyMin = seedingMode === "peer_seeding"
+    ? Math.min(lengthTarget.min, HARNESS_PEER_BODY_MIN)
+    : lengthTarget.min;
   return [
     "You are the soft-marketing editorial writer for the Agent Harness. This stage freezes the finished Xiaohongshu cover, title, body, CTA, exact copy citations and an auditable persuasion strategy. Do not plan image sequences, comments, operations or compliance notes here.",
-    "This is seeding copy, not a user diary, pure education or a product manual. The accountable publisher enters through a desire or concrete hesitation already alive in the reader, changes one decision criterion, then lets one evidence-backed project difference become the natural answer. The goal is: '原来应该这样判断，这个项目的思路和我担心的点对得上，我愿意继续了解。'",
-    `Create exactly ${expectedCount} finished draft${expectedCount === 1 ? "" : "s"}. Target ${lengthTarget.min}-${lengthTarget.max} Chinese characters for the body. Each draft must advance one and only one project value; do not average multiple selling points.`,
-    "For each draft first define marketingStrategy: narrativePath, readerDesire (wanted life/result), hiddenTension (the unsaid friction), oldJudgment (the reader's current shortcut), newJudgment (one memorable replacement criterion), projectBridge (why this project naturally fits that criterion), and lowPressureNextStep (what the reader may choose to clarify next).",
+    SEEDING_GOAL_GUIDANCE[seedingMode],
+    `Create exactly ${expectedCount} finished draft${expectedCount === 1 ? "" : "s"}. Target ${peerBodyMin}-${lengthTarget.max} Chinese characters for the body.${seedingMode === "peer_seeding" ? ` A very short body is a real shape in this format: ${peerBodyMin} characters is enough when the post is one situation plus one narrow question. A draft may advance one project value or none at all; never average multiple selling points.` : " Each draft must advance one and only one project value; do not average multiple selling points."}`,
+    STRATEGY_FIELD_GUIDANCE[seedingMode],
     "Use narrativePath=tension_first for candidate 0, observation_first for candidate 1, and question_first for candidate 2. tension_first opens from a bounded hesitation; observation_first opens from a concrete publisher-observable detail or action without inventing a person; question_first opens with the decision question itself. A directed revision keeps the source candidate index and may use the path that best satisfies the instruction.",
-    "Write four short exact public-copy anchors. tensionAnchor may occur in coverHeadline, coverSubheadline, title or body. reframeAnchor and projectBridgeAnchor must occur in body, with reframeAnchor before projectBridgeAnchor. openLoopAnchor may occur in body or CTA. Do not force all four into four consecutive sentences. projectBridgeAnchor must overlap one exact citation.statement backed by read evidence; a generic uncited project compliment is invalid.",
-    "Soft marketing is not weak product presence. Make the project difference memorable because it answers the new judgment, not because the brand name or technical terms are repeated. Prefer one plain-language criterion over a string of mechanisms. The brand/project name should normally appear no more than once in the body.",
+    ...SOFT_MARKETING_SKELETON_GUIDANCE[seedingMode],
     "Do not open with brand + technology + benefit. Do not write a knowledge summary, project introduction, mechanism lecture, checklist, FAQ, comparison table, slogan-plus-proof, or balanced corporate paragraph. Do not use scarcity, urgency, fear amplification, guaranteed outcomes, popularity or social proof.",
     BODY_VOICE_GUIDANCE[seedingMode],
     ...(seedingMode === "peer_seeding" ? PEER_SEEDING_BODY_GUIDANCE : []),
@@ -748,7 +843,11 @@ function bodyDraftPrompt(input: WithSeedingMode<HarnessRunInput>, expectedCount:
     revision
       ? "This is a directed revision. Return one draft with the source candidate index. Rebuild or preserve a coherent soft-marketing strategy according to revisionInstruction; supported facts remain bounded."
       : "The three drafts must use all three narrativePath values exactly once, pursue genuinely different reader desires or decision tensions, and use different new judgments. Do not rewrite one selling point three ways.",
-    "Before returning, verify that removing the project bridge still leaves useful reader insight, and adding the bridge clearly explains why this project deserves further attention. Return only JSON matching the schema.",
+    seedingMode === "peer_seeding"
+      // 原句预设「一定有 bridge」,与 bridge 可选正面矛盾:模型为了通过这条自检会
+      // 硬塞一个承接进去,放开就白做了。改成按有无分别自检。
+      ? "Before returning, check that the body stands on its own as something a real person would post. If it mentions the project, adding that sentence should clearly explain why the project deserves further attention and removing it should still leave a readable post; if it does not mention the project, the post must still be worth reading on its own. Return only JSON matching the schema."
+      : "Before returning, verify that removing the project bridge still leaves useful reader insight, and adding the bridge clearly explains why this project deserves further attention. Return only JSON matching the schema.",
   ].join("\n\n");
 }
 
@@ -1043,7 +1142,11 @@ export async function runAgentHarness(input: WithSeedingMode<HarnessRunInput>): 
   const drafted = await callStage(input.provider, [
     { role: "system", content: bodyDraftPrompt(input, expectedCount) },
     { role: "user", content: JSON.stringify({ ...base, readEvidence: evidenceOutput, instruction: `Write exactly ${expectedCount} finished title-and-body original(s).` }) },
-  ], "agent_harness_body_draft", BODY_DRAFT_SCHEMA, "agent_harness_body_draft", (value) => bodyDrafts(value, expectedCount, refToEvidenceId), usage, input.signal, HARNESS_BODY_OUTPUT_TOKENS);
+    // 解析阶段与提示词、校验层取同一个模式:少一环,模型被要求的和被判定的就会分叉。
+  ], "agent_harness_body_draft", BODY_DRAFT_SCHEMA, "agent_harness_body_draft", (value) => bodyDrafts(
+    value, expectedCount, refToEvidenceId,
+    input.seedingMode ?? input.task.seedingMode ?? DEFAULT_HARNESS_SEEDING_MODE,
+  ), usage, input.signal, HARNESS_BODY_OUTPUT_TOKENS);
 
   const packagedCandidates: HarnessCandidate[] = [];
   const packageSummaries: string[] = [];

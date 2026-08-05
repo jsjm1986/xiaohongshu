@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { runAgentHarness } from './runner.js';
+import { HARNESS_BODY_LENGTH_TARGETS, HARNESS_PEER_BODY_MIN } from './methods.js';
 import { visibleCandidateText } from './validation.js';
 import type {
   HarnessCandidate, HarnessCandidateCheckpoint, HarnessImageSource, HarnessModelProvider, HarnessModelRequest,
@@ -708,5 +709,184 @@ describe('素人代发模式按模式下发提示词', () => {
       .not.toContain('category words and city words');
     expect(packaging, '组包阶段收到了正文的参数分配要求,而它改不动正文')
       .not.toContain('The body establishes one situation and one narrow question');
+  });
+});
+
+/*
+  软营销骨架的提示词按模式分叉。
+
+  这一组盯的是「模型被要求写成什么形状」。校验层放开了锚点、schema 也不再强制,
+  但只要正文阶段那几句原文还在要求「四个锚点必须齐全」,模型照旧写软文 ——
+  Task 6 踩过这个坑:只追加新句子、不动原句,新旧指引正面矛盾,模型按原句走。
+
+  所以下面每条都成对断言:peer_seeding 下新句在、**原句不在**;brand_voice 下原句
+  逐字在、新句不在。下面用到的短语都已逐个核对:在目标分支里存在、在另一模式分支里
+  不存在、在整个 runner.ts 里只出现一次。
+*/
+describe('软营销骨架提示词按模式分叉', () => {
+  async function bodyDraftMessage(seedingMode: 'peer_seeding' | 'brand_voice') {
+    const calls: HarnessModelRequest[] = [];
+    await runAgentHarness({
+      ...baseInput, seedingMode,
+      provider: scriptedProvider(protocolReplies([candidate(0, '标题一'), candidate(1, '标题二'), candidate(2, '标题三')]), calls),
+    });
+    return calls[1]!.messages[0]!.content;
+  }
+
+  it('peer_seeding:正文阶段被告知翻转与承接可选,且不再下发无条件四锚点要求', async () => {
+    const bodyDraft = await bodyDraftMessage('peer_seeding');
+    // 新指引确实下发了:四处各钉一个独有短语,少任意一处都该变红。
+    expect(bodyDraft, '骨架句没说明两个锚点可选')
+      .toContain('Two anchors are required and two are optional in this format');
+    expect(bodyDraft, '没说明这个体裁里很多帖子不做判断转换')
+      .toContain('not every post completes a judgment change');
+    expect(bodyDraft, '策略字段那句没跟着分叉,模型仍会被逼着填满每个字段')
+      .toContain('Optional, and correctly left as empty strings');
+    expect(bodyDraft, '目标那句仍在要求每篇都完成判断转换')
+      .toContain('Do not force a judgment change or a project mention into a post that does not need one');
+    expect(bodyDraft, '篇数那句仍在要求每篇必须承载一个卖点')
+      .toContain('A draft may advance one project value or none at all');
+
+    /*
+     * 原句必须**消失**,不是被新句盖住。
+     *
+     * 这四条是本次改动的实质:它们留着就与新指引正面矛盾,而模型倾向于服从
+     * 更具体的那条("must occur in body, with reframeAnchor before projectBridgeAnchor")。
+     */
+    expect(bodyDraft, '无条件四锚点要求仍在下发,与可选正面矛盾')
+      .not.toContain('Write four short exact public-copy anchors');
+    expect(bodyDraft, '「软营销不是弱化产品」那句原文仍在,它预设每篇都要有项目承接')
+      .not.toContain('Soft marketing is not weak product presence');
+    expect(bodyDraft, '仍在要求每篇承载且仅承载一个项目价值')
+      .not.toContain('Each draft must advance one and only one project value');
+    expect(bodyDraft, '收尾自检仍预设一定有 project bridge,模型会为通过自检硬塞一个')
+      .not.toContain('Before returning, verify that removing the project bridge still leaves useful reader insight');
+  });
+
+  it('brand_voice:四句原文逐字保留,一个字节不改,也不漏进任何可选措辞', async () => {
+    /*
+     * 红线:brand_voice 是机构以自己的口吻种草,认知翻转与项目承接照旧是硬要求。
+     * 整句比对而非片段 —— 片段比对时句尾被改动照旧全绿,本插件前几轮的假绿都是这么来的。
+     */
+    const bodyDraft = await bodyDraftMessage('brand_voice');
+    expect(bodyDraft, '四锚点原句被改动').toContain(
+      'Write four short exact public-copy anchors. tensionAnchor may occur in coverHeadline, coverSubheadline, title or body. reframeAnchor and projectBridgeAnchor must occur in body, with reframeAnchor before projectBridgeAnchor. openLoopAnchor may occur in body or CTA. Do not force all four into four consecutive sentences. projectBridgeAnchor must overlap one exact citation.statement backed by read evidence; a generic uncited project compliment is invalid.');
+    expect(bodyDraft, '「软营销不是弱化产品」那句被改动').toContain(
+      'Soft marketing is not weak product presence. Make the project difference memorable because it answers the new judgment, not because the brand name or technical terms are repeated. Prefer one plain-language criterion over a string of mechanisms. The brand/project name should normally appear no more than once in the body.');
+    expect(bodyDraft, '策略字段那句被改动').toContain(
+      "For each draft first define marketingStrategy: narrativePath, readerDesire (wanted life/result), hiddenTension (the unsaid friction), oldJudgment (the reader's current shortcut), newJudgment (one memorable replacement criterion), projectBridge (why this project naturally fits that criterion), and lowPressureNextStep (what the reader may choose to clarify next).");
+    expect(bodyDraft, '收尾自检那句被改动').toContain(
+      'Before returning, verify that removing the project bridge still leaves useful reader insight, and adding the bridge clearly explains why this project deserves further attention.');
+
+    for (const phrase of [
+      'Two anchors are required and two are optional in this format',
+      'not every post completes a judgment change',
+      'Optional, and correctly left as empty strings',
+      'A draft may advance one project value or none at all',
+    ]) {
+      expect(bodyDraft, `brand_voice 漏进了素人的可选措辞：${phrase}`).not.toContain(phrase);
+    }
+  });
+
+  it('peer_seeding:可选不等于可以无出处地吹,承接一旦出现仍要求引用', async () => {
+    /*
+     * 这条钉住放开的边界。素人模式下正文可以完全不提项目,但一旦提了,
+     * 那句话必须与一条带证据的引用逐字重叠 —— 校验层同样如此(两种模式都不放宽)。
+     * 少了这句,「可选」会被模型读成「项目随便夸」。
+     */
+    const bodyDraft = await bodyDraftMessage('peer_seeding');
+    expect(bodyDraft, '素人骨架句没写清「提到项目就必须有出处」')
+      .toContain('optional means the post may stay silent about the project');
+    expect(bodyDraft, '素人骨架句没保留「无引用的泛化夸赞无效」')
+      .toContain('A generic uncited project compliment is invalid');
+  });
+
+  it('peer_seeding:正文下限从常量取,提示词不写死数字', async () => {
+    /*
+     * 提示词与校验层必须共用 HARNESS_PEER_BODY_MIN:写死数字的话常量一改就分叉,
+     * 模型被要求 60 字、校验按 30 字判(或反过来)。断言按常量算出期望串,
+     * 而不是在测试里也抄一遍数字 —— 抄一遍就等于没测到「共用」这件事。
+     */
+    const peer = await bodyDraftMessage('peer_seeding');
+    const brand = await bodyDraftMessage('brand_voice');
+    // baseInput 没指定 bodyLength,方法档缺省落到 short。
+    const short = HARNESS_BODY_LENGTH_TARGETS.short;
+    expect(peer, `素人模式下限应为 ${HARNESS_PEER_BODY_MIN}`)
+      .toContain(`Target ${HARNESS_PEER_BODY_MIN}-${short.max} Chinese characters`);
+    expect(peer, '没说明很短的正文在这个体裁里是真实形态')
+      .toContain(`${HARNESS_PEER_BODY_MIN} characters is enough when the post is one situation plus one narrow question`);
+    expect(brand, `品牌模式下限必须仍是 ${short.min}`)
+      .toContain(`Target ${short.min}-${short.max} Chinese characters`);
+    // 上限两种模式一致:放宽的是下限,不是取消长度约束。
+    expect(peer, '素人模式的上限被一起放开了').toContain(`-${short.max} Chinese characters`);
+  });
+});
+
+/*
+  正文阶段解析器的第三个耦合点 —— 任务书没提到,是实施时读代码发现的。
+
+  bodyDrafts() 里有两处**硬 throw**,比 schema 那处更靠前:
+    1. `Object.values(draft.marketingStrategy).some((item) => !item)` —— 任一字段为空就 throw;
+    2. bridgeGrounded 检查 —— projectBridgeAnchor 必须与一条引用重叠,空串时
+       `citation.statement.includes("")` 恒为 true 而侥幸通过,但那是巧合不是设计。
+  第 1 条会让「翻转与承接可选」在运行时完全不可达:模型照放开后的提示词交出空
+  oldJudgment,解析器直接 throw StageContractError,重试一次后整轮失败 —— 比改动前更糟。
+  schema 放开 required 只是「允许模型不填」,解析器才是「不填会不会炸」。三层要一起动。
+*/
+describe('正文阶段解析器允许素人模式留空可选字段', () => {
+  /** 把正文阶段的回复改成素人语料形态:翻转、承接、卖点说明全空。 */
+  function peerShapedReplies(seedingMode: 'peer_seeding' | 'brand_voice') {
+    const values = [candidate(0, '标题一'), candidate(1, '标题二'), candidate(2, '标题三')];
+    for (const item of values) {
+      item.marketingStrategy = {
+        ...item.marketingStrategy,
+        oldJudgment: '', newJudgment: '', projectBridge: '',
+        reframeAnchor: '', projectBridgeAnchor: '',
+      };
+    }
+    return { values, replies: protocolReplies(values), seedingMode };
+  }
+
+  it('peer_seeding:翻转与承接留空不再抛 StageContractError', async () => {
+    /*
+     * 这条是本任务最关键的行为测试:上面所有提示词断言都只证明「我们要求了模型可以留空」,
+     * 只有这条证明「模型真留空时链路跑得通」。解析器那句 throw 留着的话,放开的净效果
+     * 是每轮生成必然失败 —— 校验层测试却照旧全绿,因为它们根本没走解析器。
+     */
+    const { replies } = peerShapedReplies('peer_seeding');
+    const result = await runAgentHarness({
+      ...baseInput, seedingMode: 'peer_seeding',
+      provider: scriptedProvider(replies),
+    });
+    expect(result.candidates, '素人形态的三份候选应完整跑完').toHaveLength(3);
+    expect(result.candidates[0]?.marketingStrategy.reframeAnchor, '空锚点被解析器悄悄填上了').toBe('');
+    expect(result.candidates[0]?.marketingStrategy.oldJudgment).toBe('');
+  });
+
+  it('brand_voice:同一份留空的策略仍被解析器拒绝', async () => {
+    /*
+     * 钉住「放开只在素人模式生效」的解析器那一半。机构口吻下留空仍是契约违反,
+     * 所以会重试一次、第二次同样违反 —— 整轮 reject。
+     */
+    const { replies } = peerShapedReplies('brand_voice');
+    await expect(runAgentHarness({
+      ...baseInput, seedingMode: 'brand_voice',
+      provider: scriptedProvider(replies),
+    })).rejects.toThrow(/complete soft-marketing strategy|soft-marketing/u);
+  });
+
+  it('两种模式下承接非空时都仍要求与引用重叠', async () => {
+    /*
+     * 可选的边界:一旦写了承接,解析器照旧要求它与一条逐字引用重叠。
+     * 放开的是「可以不提项目」,不是「可以无出处地吹」。
+     */
+    for (const mode of ['peer_seeding', 'brand_voice'] as const) {
+      const values = [candidate(0, '标题一'), candidate(1, '标题二'), candidate(2, '标题三')];
+      values[0]!.marketingStrategy = { ...values[0]!.marketingStrategy, projectBridgeAnchor: '这家全国第一' };
+      await expect(runAgentHarness({
+        ...baseInput, seedingMode: mode,
+        provider: scriptedProvider(protocolReplies(values)),
+      }), `${mode} 下无引用的承接应被拒绝`).rejects.toThrow(/project bridge must overlap/u);
+    }
   });
 });

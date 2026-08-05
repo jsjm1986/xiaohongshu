@@ -1,7 +1,7 @@
 import type {
   HarnessCandidate, HarnessClaimAudit, HarnessEvidenceSource, HarnessImageSource, HarnessPublicationCheck, HarnessValidationIssue,
 } from "./types.js";
-import { DEFAULT_HARNESS_SEEDING_MODE, HARNESS_BODY_LENGTH_TARGETS } from "./methods.js";
+import { DEFAULT_HARNESS_SEEDING_MODE, HARNESS_BODY_LENGTH_TARGETS, HARNESS_PEER_BODY_MIN } from "./methods.js";
 import type { HarnessSeedingMode } from "./methods.js";
 
 /*
@@ -202,28 +202,88 @@ export function validateHarnessCandidates(
     if (!strategy) {
       add(index, "missing_marketing_strategy", "error", "缺少可审阅的软营销心智策略。");
     } else {
-      const strategyValues = Object.values(strategy).map((value) => value.trim());
-      if (strategyValues.some((value) => !value)) add(index, "marketing_strategy_incomplete", "error", "软营销策略必须写清用户欲望、隐藏卡点、旧判断、新判断、项目承接和低压力下一步。");
+      /*
+       * 软营销骨架按模式分叉。
+       *
+       * 原先四条 marketing_anchor_* 不分模式,它们联手只允许一种正文形状:
+       * 必须完成认知翻转(旧判断 ≠ 新判断)、必须有项目承接锚点、承接必须与带证据的
+       * 引用重叠、翻转必须早于承接。满足这四条,写出来必然是「我原以为 X,其实是 Y,
+       * 而这家正好符合 Y」—— 实跑三篇候选形状完全一样,正是这个原因。
+       *
+       * 实测用户 67 篇真实对标语料(按笔记链接去重):含认知翻转标记 6 篇(9%)、
+       * 含项目/技术卖点词 6 篇(9%)、两者都有(≈原校验要求)仅 2 篇(3%),
+       * 85% 两者都无。用户要的讨论帖、劝退帖、案例贴图三类,没有一类符合原校验。
+       *
+       * 所以 peer_seeding 下这两个锚点降为可选。代价已确认接受:单篇可以不承载任何
+       * 卖点,只做占位和铺量。brand_voice 一个字节不放宽 —— 那边是机构以自己的口吻
+       * 种草,认知翻转和项目承接照旧是硬要求。
+       */
+      const optionalStrategyFields: readonly string[] = peerSeeding
+        ? ["oldJudgment", "newJudgment", "projectBridge", "reframeAnchor", "projectBridgeAnchor"]
+        : [];
+      /*
+       * 必填字段集必须跟着分叉,否则放宽等于没做。
+       *
+       * 这一条原先要求 strategy 的**每个**字段非空,于是 peer_seeding 下允许
+       * reframeAnchor 为空之后,它会立刻替 marketing_anchor_missing 报错 ——
+       * 只是换个 code,产出照旧被逼成软文。
+       * 剩下的字段(readerDesire / hiddenTension / lowPressureNextStep 等)仍必须非空:
+       * 它们与体裁无关,是「这篇在对谁说、卡在哪、下一步是什么」。
+       */
+      const incompleteFields = Object.entries(strategy)
+        .filter(([field]) => !optionalStrategyFields.includes(field))
+        .filter(([, value]) => !String(value ?? "").trim());
+      if (incompleteFields.length) add(index, "marketing_strategy_incomplete", "error", peerSeeding
+        ? "软营销策略必须写清用户欲望、隐藏卡点和低压力下一步（素人模式下认知翻转与项目承接可留空）。"
+        : "软营销策略必须写清用户欲望、隐藏卡点、旧判断、新判断、项目承接和低压力下一步。");
       if (!["tension_first", "observation_first", "question_first"].includes(strategy.narrativePath)) add(index, "marketing_narrative_path", "error", "软营销策略必须声明有效的叙事路径。");
-      const anchors = [strategy.tensionAnchor, strategy.reframeAnchor, strategy.projectBridgeAnchor, strategy.openLoopAnchor];
+      /*
+       * 去重只对非空锚点做。
+       *
+       * peer_seeding 下两个锚点可能都是空字符串,拿四个锚点比 Set 大小时
+       * Set 只有 3 个元素 —— 「合法地不写翻转」会被判成「重复用了同一句话」。
+       */
+      const anchors = [strategy.tensionAnchor, strategy.reframeAnchor, strategy.projectBridgeAnchor, strategy.openLoopAnchor]
+        .filter((anchor) => anchor.trim());
       if (new Set(anchors).size !== anchors.length) add(index, "marketing_anchor_duplicate", "error", "软营销四个正文锚点必须各自承担不同推进职责，不能重复一句话。");
       const frozenEntryCopy = [n.coverHeadline, n.coverSubheadline, n.title, n.body].join("\n");
       const frozenOpenCopy = [n.body, n.callToAction].join("\n");
       const reframePosition = strategy.reframeAnchor ? n.body.indexOf(strategy.reframeAnchor) : -1;
       const bridgePosition = strategy.projectBridgeAnchor ? n.body.indexOf(strategy.projectBridgeAnchor) : -1;
+      /*
+       * tensionAnchor 与 openLoopAnchor 两种模式都必需:一篇总得有个切入点和一个
+       * 不逼人的收尾,那两条与体裁无关。翻转与承接在素人模式下可以整个不写,
+       * 但一旦写了就仍必须逐字落在正文里 —— 可选是「可以不写」,不是「写了可以不落地」。
+       */
+      const reframeMissing = peerSeeding && !strategy.reframeAnchor.trim() ? false : reframePosition < 0;
+      const bridgeMissing = peerSeeding && !strategy.projectBridgeAnchor.trim() ? false : bridgePosition < 0;
       if (!strategy.tensionAnchor || !frozenEntryCopy.includes(strategy.tensionAnchor)
-        || reframePosition < 0 || bridgePosition < 0
+        || reframeMissing || bridgeMissing
         || !strategy.openLoopAnchor || !frozenOpenCopy.includes(strategy.openLoopAnchor)) {
-        add(index, "marketing_anchor_missing", "error", "顾虑入口、认知翻转、项目承接和开放余味必须逐字落在各自允许的公开文案位置。");
-      } else if (reframePosition >= bridgePosition) {
+        add(index, "marketing_anchor_missing", "error", peerSeeding
+          ? "顾虑入口和开放余味必须逐字落在各自允许的公开文案位置；写了认知翻转或项目承接时，它们也必须逐字出现在正文里。"
+          : "顾虑入口、认知翻转、项目承接和开放余味必须逐字落在各自允许的公开文案位置。");
+      } else if (reframePosition >= 0 && bridgePosition >= 0 && reframePosition >= bridgePosition) {
+        // 顺序只在两个锚点都非空且都能在正文里定位时才检查:缺一个就没有先后可言。
         add(index, "marketing_anchor_order", "error", "正文中的认知翻转必须早于项目承接，不能先卖项目再补判断标准。");
       }
-      const bridgeGrounded = candidate.citations.some((citation) => citation.statement.includes(strategy.projectBridgeAnchor)
-        || strategy.projectBridgeAnchor.includes(citation.statement));
-      if (!bridgeGrounded) add(index, "marketing_bridge_ungrounded", "error", "项目承接必须与一条逐字证据声明重叠，不能用无引用的泛化卖点承接认知翻转。");
+      /*
+       * 承接为空时跳过出处检查;非空时**两种模式都照旧要求**与一条引用逐字重叠。
+       * 这是本次放开的边界:可选不等于可以无出处地吹。
+       */
+      if (strategy.projectBridgeAnchor.trim()) {
+        const bridgeGrounded = candidate.citations.some((citation) => citation.statement.includes(strategy.projectBridgeAnchor)
+          || strategy.projectBridgeAnchor.includes(citation.statement));
+        if (!bridgeGrounded) add(index, "marketing_bridge_ungrounded", "error", "项目承接必须与一条逐字证据声明重叠，不能用无引用的泛化卖点承接认知翻转。");
+      }
       const normalizedOld = strategy.oldJudgment.replace(/[\s\p{P}\p{S}]+/gu, "");
       const normalizedNew = strategy.newJudgment.replace(/[\s\p{P}\p{S}]+/gu, "");
-      if (!normalizedOld || normalizedOld === normalizedNew) add(index, "marketing_judgment_unchanged", "error", "种草正文必须完成一次真实的判断变化，不能只换句话重复原认知。");
+      /*
+       * peer_seeding 下两者**都为空**时不报:那是「这个体裁不需要翻转」。
+       * 非空且相同时仍报 —— 写了却没变化是敷衍,和体裁不需要是两件事。
+       */
+      const judgmentExempt = peerSeeding && !normalizedOld && !normalizedNew;
+      if (!judgmentExempt && (!normalizedOld || normalizedOld === normalizedNew)) add(index, "marketing_judgment_unchanged", "error", "种草正文必须完成一次真实的判断变化，不能只换句话重复原认知。");
     }
     for (const [code, value, label] of [
       ["missing_cover_headline", n.coverHeadline, "封面主文案"], ["missing_cover_subheadline", n.coverSubheadline, "封面副文案"],
@@ -354,7 +414,21 @@ export function validateHarnessCandidates(
     const titleChars = [...n.title.replace(/\s+/gu, "")].length;
     if (titleChars > 22) add(index, "title_shape_drift", "warning", "标题明显长于 70 篇参考语料的常见形态，请优先压缩到一个直接钩子。");
     const bodyTarget = HARNESS_BODY_LENGTH_TARGETS[effectiveLength];
-    if (bodyChars < bodyTarget.min || bodyChars > bodyTarget.max) add(index, "body_shape_drift", "warning", `正文为 ${bodyChars} 字，偏离${effectiveLength === "short" ? "短" : effectiveLength === "medium" ? "中" : "长"}篇 ${bodyTarget.min}—${bodyTarget.max} 字的统一目标。`);
+    /*
+     * 下限按模式取,上限两种模式一致。
+     *
+     * peer_seeding 用 HARNESS_PEER_BODY_MIN(30)而不是共用常量的 min:实测 67 篇
+     * 真实语料正文中位数 74 字,27 篇(40%)短于 short 档的 60 字下限,语料里 36 字
+     * 的帖子是常态形态。共用常量不动,brand_voice 的契约因此一个字节没变。
+     *
+     * 只降下限的理由:上限防的是把评论区该承担的信息(价格、恢复期、麻醉方式)
+     * 全塞进正文 —— 那是产出读起来像广告的另一半原因。放宽上限只会让软文更长。
+     *
+     * `Math.min` 而不是直接取常量:medium/long 档的 min 本就大于 30,直接覆盖会把
+     * 长篇的下限也砸到 30。取两者较小值保证只在下限确实更严时才放宽。
+     */
+    const bodyMin = peerSeeding ? Math.min(bodyTarget.min, HARNESS_PEER_BODY_MIN) : bodyTarget.min;
+    if (bodyChars < bodyMin || bodyChars > bodyTarget.max) add(index, "body_shape_drift", "warning", `正文为 ${bodyChars} 字，偏离${effectiveLength === "short" ? "短" : effectiveLength === "medium" ? "中" : "长"}篇 ${bodyMin}—${bodyTarget.max} 字的统一目标。`);
     for (const citation of candidate.citations) {
       if (!citation.statement.trim()) add(index, "empty_citation_statement", "error", "引用必须对应明确声明。");
       else if (!visible.includes(citation.statement)) add(index, "citation_not_visible", "error", `证据声明无法在可见内容中精确定位：${citation.statement}`);

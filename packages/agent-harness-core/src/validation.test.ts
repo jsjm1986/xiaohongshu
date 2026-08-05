@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_HARNESS_SEEDING_MODE, HARNESS_SIMULATION_NOTICE, type HarnessSeedingMode } from "./methods.js";
-import type { HarnessCandidate, HarnessCommentThread } from "./types.js";
+import type { HarnessCandidate, HarnessCommentThread, HarnessSoftMarketingStrategy } from "./types.js";
 import { validateHarnessCandidates } from "./validation.js";
 
 /**
@@ -545,6 +545,231 @@ describe("标签禁品牌词", () => {
       const issues = issuesForHashtags(["#成都眼袋", "#变美日记"], "peer_seeding", blank);
       const branded = issues.filter((issue) => issue.code === "brand_hashtag");
       expect(branded, `项目名为 ${JSON.stringify(blank)} 时不该报品牌词：${JSON.stringify(branded)}`).toEqual([]);
+    }
+  });
+});
+
+/*
+  软营销骨架按模式分叉。
+
+  四条 marketing_anchor_* 校验此前不分模式,它们联手只允许一种正文形状:
+  「我原以为 X,其实是 Y,而这家正好符合 Y」。实测用户 67 篇真实对标语料:
+  含认知翻转标记 6 篇(9%)、含项目卖点词 6 篇(9%)、两者都有 2 篇(3%),
+  85% 两者都无 —— 讨论帖、劝退帖、案例贴图这三类没有一类符合原校验。
+  所以 peer_seeding 下认知翻转与项目承接改为可选。代价是单篇可以不承载卖点,
+  只做占位和铺量,这是已确认接受的。
+
+  brand_voice 一个字节不放宽:那边仍然是机构在以自己的口吻做种草。
+*/
+const TENSION_A = "怕做完更凹";
+const REFRAME_A = "该先看的不是价格";
+const BRIDGE_A = "这家按取脂量分级做方案";
+const OPEN_A = "先想清自己最不能接受哪一点";
+/** 四个锚点齐全、顺序正确的基线正文。 */
+const FULL_BODY = `${TENSION_A}，${REFRAME_A}，${BRIDGE_A}。${OPEN_A}`;
+/** 语料真实形态:一个处境加一个窄问题,没有任何判断转换,也没有项目卖点。40 字。 */
+const PEER_BODY = "刷了好多，真的很心动！但作为上班族实在不敢请太久假，想问问过来人一般都请几天合适";
+/** 语料真实形态,36 字 —— 短于现 short 档 60 字下限,语料里 40% 都这么短。 */
+const SHORT_BODY = "今天化完妆来一张验证一下我选得没错，现在终于是看着不累了，班味都淡了好多";
+
+const STRATEGY_EVIDENCE = [{
+  evidenceId: "ev-strategy", documentId: "doc-1", path: "facts.md", heading: "分级",
+  content: `${BRIDGE_A}。`, kind: "fact", evidenceStatus: "user_supplied" as const,
+  caveats: [], sourceType: "knowledge" as const,
+}];
+
+function fullStrategy(): HarnessSoftMarketingStrategy {
+  return {
+    narrativePath: "tension_first",
+    readerDesire: "想看着不那么累",
+    hiddenTension: "怕做完反而更假",
+    oldJudgment: "只比价格",
+    newJudgment: "先看取脂量怎么定",
+    projectBridge: "按取脂量分级做方案",
+    lowPressureNextStep: "先问清自己适合哪一级",
+    tensionAnchor: TENSION_A, reframeAnchor: REFRAME_A,
+    projectBridgeAnchor: BRIDGE_A, openLoopAnchor: OPEN_A,
+  };
+}
+
+type StrategyCase = {
+  seedingMode: HarnessSeedingMode;
+  body?: string;
+  strategy?: Partial<HarnessSoftMarketingStrategy>;
+  citations?: Array<{ statement: string; evidenceIds: string[] }>;
+  bodyLength?: "short" | "medium" | "long";
+};
+
+/**
+ * 带完整 marketingStrategy 的候选。
+ *
+ * minimalCandidate 不构造 marketingStrategy,于是最小 fixture 恒报
+ * missing_marketing_strategy —— 那样就分不出「策略缺失」和「锚点不满足」。
+ * 这里补齐策略与一条能兜住 projectBridgeAnchor 的引用,让基线在 brand_voice 下
+ * 不报任何 marketing_* 码,后面每条对比都从这个基线单点偏离。
+ */
+function strategyCodes(options: StrategyCase): string[] {
+  const body = options.body ?? FULL_BODY;
+  const base = minimalCandidate([
+    authorThread("t1", "是哪个白白哦？", "老朱，朱冠锋呀"),
+    authorThread("t2", "价格多少", "看方案，5k到1w"),
+    readerExchange("t3"), organicReaction("t4"),
+  ], body);
+  const candidate = {
+    ...base,
+    marketingStrategy: { ...fullStrategy(), ...(options.strategy ?? {}) },
+    citations: options.citations ?? [{ statement: BRIDGE_A, evidenceIds: ["ev-strategy"] }],
+  } as unknown as HarnessCandidate;
+  return validateHarnessCandidates(
+    [candidate], STRATEGY_EVIDENCE, new Set(["ev-strategy"]),
+    { seedingMode: options.seedingMode, ...(options.bodyLength ? { bodyLength: options.bodyLength } : {}) },
+  ).filter((issue) => issue.candidateIndex === 0).map((issue) => issue.code);
+}
+
+const MARKETING_CODES = [
+  "marketing_strategy_incomplete", "marketing_anchor_missing", "marketing_anchor_order",
+  "marketing_anchor_duplicate", "marketing_judgment_unchanged", "marketing_bridge_ungrounded",
+  "missing_marketing_strategy", "marketing_narrative_path",
+] as const;
+
+/** 素人语料形态的策略:翻转与承接全空,只留与体裁无关的三个字段和两个锚点。 */
+const PEER_STRATEGY: Partial<HarnessSoftMarketingStrategy> = {
+  // 语义选「都为空」而不是「两者相同」:相同意味着模型写了却没变化,那是敷衍,
+  // 与「这个体裁不需要翻转」是两件事,后者仍必须报 marketing_judgment_unchanged。
+  oldJudgment: "", newJudgment: "", projectBridge: "",
+  reframeAnchor: "", projectBridgeAnchor: "",
+  tensionAnchor: "刷了好多", openLoopAnchor: "想问问过来人一般都请几天合适",
+};
+
+describe("软营销骨架按模式分叉", () => {
+  it("基线:四锚点齐全的候选在 brand_voice 下不报任何 marketing_* 码", () => {
+    const codes = strategyCodes({ seedingMode: "brand_voice" });
+    for (const code of MARKETING_CODES) {
+      expect(codes, `基线不该报 ${code}：${codes.join(",")}`).not.toContain(code);
+    }
+  });
+
+  it("peer_seeding:无认知翻转、无项目承接的正文不报锚点错", () => {
+    const codes = strategyCodes({ seedingMode: "peer_seeding", body: PEER_BODY, strategy: PEER_STRATEGY, citations: [] });
+    for (const code of ["marketing_judgment_unchanged", "marketing_anchor_missing", "marketing_anchor_order", "marketing_bridge_ungrounded"]) {
+      expect(codes, `素人语料形态不该报 ${code}：${codes.join(",")}`).not.toContain(code);
+    }
+  });
+
+  it("peer_seeding:两个锚点都为空时不误判锚点重复", () => {
+    /*
+     * marketing_anchor_duplicate 原先拿四个锚点比 Set 大小。两个锚点都是空字符串时
+     * Set 只有 3 个元素,于是「合法地不写翻转」会被判成「重复用了同一句话」——
+     * 放宽等于没做,只是换个码报错。去重必须只对非空锚点做。
+     */
+    const codes = strategyCodes({ seedingMode: "peer_seeding", body: PEER_BODY, strategy: PEER_STRATEGY, citations: [] });
+    expect(codes, `空锚点被误判成重复：${codes.join(",")}`).not.toContain("marketing_anchor_duplicate");
+  });
+
+  it("brand_voice:同一份候选仍然报错", () => {
+    /* 钉住「放开只在素人模式生效」。机构口吻下认知翻转和项目承接照旧是硬要求。 */
+    const codes = strategyCodes({ seedingMode: "brand_voice", body: PEER_BODY, strategy: PEER_STRATEGY, citations: [] });
+    expect(codes, "品牌模式下缺认知翻转必须报错").toContain("marketing_judgment_unchanged");
+    expect(codes, "品牌模式下缺锚点必须报错").toContain("marketing_anchor_missing");
+  });
+
+  it("peer_seeding:有承接就仍要求带证据引用", () => {
+    /*
+     * 本次放开的边界:可选不等于可以无出处地吹。一旦正文提了项目,
+     * 那句话必须与一条逐字证据声明重叠。
+     */
+    const codes = strategyCodes({
+      seedingMode: "peer_seeding",
+      body: `${TENSION_A}。${BRIDGE_A}。${OPEN_A}`,
+      strategy: { ...PEER_STRATEGY, tensionAnchor: TENSION_A, openLoopAnchor: OPEN_A, projectBridgeAnchor: BRIDGE_A },
+      citations: [],
+    });
+    expect(codes, "承接非空却无引用必须报错").toContain("marketing_bridge_ungrounded");
+  });
+
+  it("peer_seeding:翻转与承接都存在时,顺序仍然检查", () => {
+    const codes = strategyCodes({
+      seedingMode: "peer_seeding",
+      body: `${TENSION_A}，${BRIDGE_A}，${REFRAME_A}。${OPEN_A}`,
+    });
+    expect(codes, "先卖项目再补判断标准必须报错").toContain("marketing_anchor_order");
+  });
+
+  it("peer_seeding:非空锚点仍必须逐字落在正文里", () => {
+    /* 可选是「可以不写」,不是「写了可以不落地」。 */
+    const codes = strategyCodes({
+      seedingMode: "peer_seeding", body: PEER_BODY,
+      strategy: { ...PEER_STRATEGY, projectBridgeAnchor: "这家全国第一" },
+    });
+    expect(codes, "锚点写了却不在正文里必须报错").toContain("marketing_anchor_missing");
+  });
+
+  it("peer_seeding:36 字正文不报 body_shape_drift", () => {
+    const codes = strategyCodes({
+      seedingMode: "peer_seeding", body: SHORT_BODY, bodyLength: "short", citations: [],
+      strategy: { ...PEER_STRATEGY, tensionAnchor: "今天化完妆", openLoopAnchor: "班味都淡了好多" },
+    });
+    expect(codes, `素人模式下限应为 30 字：${codes.join(",")}`).not.toContain("body_shape_drift");
+  });
+
+  it("brand_voice:同样 36 字正文仍报 body_shape_drift", () => {
+    /* 钉住下限放宽只在素人模式生效,不能连带放宽 brand_voice。 */
+    const codes = strategyCodes({
+      seedingMode: "brand_voice", body: SHORT_BODY, bodyLength: "short", citations: [],
+      strategy: { ...PEER_STRATEGY, tensionAnchor: "今天化完妆", openLoopAnchor: "班味都淡了好多" },
+    });
+    expect(codes, "品牌模式下 36 字仍应偏离短篇目标").toContain("body_shape_drift");
+  });
+
+  it("peer_seeding:正文仍有上限", () => {
+    /* 放宽的是下限,不是取消长度检查:上限防止把评论区该承担的信息全塞进正文。 */
+    const codes = strategyCodes({
+      seedingMode: "peer_seeding", body: SHORT_BODY.repeat(5), bodyLength: "short", citations: [],
+      strategy: { ...PEER_STRATEGY, tensionAnchor: "今天化完妆", openLoopAnchor: "班味都淡了好多" },
+    });
+    expect(codes, "超过 short 档上限仍必须报错").toContain("body_shape_drift");
+  });
+
+  it("marketing_strategy_incomplete 的必填字段集按模式分叉", () => {
+    /*
+     * 这一条不改,放宽等于没做:它要求 strategy 每个字段非空,于是 peer_seeding 下
+     * 允许 reframeAnchor 为空之后,它会立刻替 marketing_anchor_missing 报错。
+     *
+     * 素人模式只要求 readerDesire、hiddenTension、lowPressureNextStep ——
+     * 这三条与体裁无关,是「这篇在对谁说、卡在哪、下一步是什么」。
+     */
+    const relaxed = strategyCodes({ seedingMode: "peer_seeding", body: PEER_BODY, strategy: PEER_STRATEGY, citations: [] });
+    expect(relaxed, `素人模式下缺可选字段不该报错：${relaxed.join(",")}`).not.toContain("marketing_strategy_incomplete");
+
+    const missingDesire = strategyCodes({
+      seedingMode: "peer_seeding", body: PEER_BODY, citations: [],
+      strategy: { ...PEER_STRATEGY, readerDesire: "" },
+    });
+    expect(missingDesire, "素人模式下缺 readerDesire 仍必须报错").toContain("marketing_strategy_incomplete");
+
+    const brandVoice = strategyCodes({ seedingMode: "brand_voice", strategy: { oldJudgment: "" } });
+    expect(brandVoice, "品牌模式下六个字段仍全部必填").toContain("marketing_strategy_incomplete");
+  });
+
+  it("SOFT_MARKETING_STRATEGY_SCHEMA 不再强制两个可选锚点:只改校验会被 schema 假绿", () => {
+    /*
+     * 与 THREAD_SCHEMA 那条同形。这两个键留在 required 里的话,模型照旧必须为每篇
+     * 编出认知翻转和项目承接,写出来还是软文 —— 校验放开了也没用。
+     * properties 里必须保留,否则模型连想填都填不了。
+     * brand_voice 的强制性由 validation.ts 保证,不靠 schema。
+     */
+    const source = readFileSync(new URL("./runner.ts", import.meta.url), "utf8");
+    const match = source.match(/const SOFT_MARKETING_STRATEGY_SCHEMA = \{[\s\S]*?required: \[([\s\S]*?)\],\n\s*properties:/u);
+    expect(match, "没解析到 SOFT_MARKETING_STRATEGY_SCHEMA 的 required 数组").toBeTruthy();
+    const required = match![1]!;
+    for (const key of ["reframeAnchor", "projectBridgeAnchor"]) {
+      expect(required, `${key} 仍在 required 里,模型仍会被逼着输出它`).not.toContain(`"${key}"`);
+    }
+    for (const key of ["tensionAnchor", "openLoopAnchor"]) {
+      expect(required, `${key} 与体裁无关,不该被一起放开`).toContain(`"${key}"`);
+    }
+    for (const key of ["reframeAnchor", "projectBridgeAnchor"]) {
+      expect(source, `${key} 从 properties 里被误删`).toMatch(new RegExp(`${key}: SHORT_TEXT_SCHEMA`, "u"));
     }
   });
 });
