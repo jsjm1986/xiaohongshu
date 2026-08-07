@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { containsPublicationRestriction, publicationRestrictionsFromText, redactPublicationRestrictedText } from "./knowledge.js";
 import type {
+  CommentQuestionContext,
   CommentSurfaceRoleCard,
   CommentThreadKind,
   ContentChannel,
@@ -1830,6 +1831,44 @@ export function diagnoseAccountableIdentities(blueprint?: ProjectCreativeBluepri
   return problems;
 }
 
+function questionContextFor(
+  gap: InformationGapPlanningCard,
+  personaRole: DialogueThreadPlan["personaRole"],
+  surfaceRole: CommentSurfaceRoleCard,
+  seed: number,
+  salt: string,
+): CommentQuestionContext {
+  const archetypes: Record<DialogueThreadPlan["personaRole"], CommentQuestionContext[]> = {
+    first_time_researcher: [
+      { personaLabel: "刚开始做功课的人", situation: "第一次认真了解这件事", currentAction: "正把不懂的地方记进备忘录", practicalConstraint: "不想一上来就被一堆术语绕晕", askingTrigger: gap.label },
+      { personaLabel: "先收藏再慢慢看的人", situation: "刚刷到相关内容", currentAction: "正在找最先要弄懂的一点", practicalConstraint: "信息太多，不知道从哪问起", askingTrigger: gap.label },
+    ],
+    information_collector: [
+      { personaLabel: "谨慎做功课的人", situation: "已经看了几种说法", currentAction: "正在逐项核对信息", practicalConstraint: "网上说法不一致，不敢直接照搬", askingTrigger: gap.label },
+      { personaLabel: "备忘录型提问者", situation: "准备把关键问题一次问清", currentAction: "正在列咨询前的问题", practicalConstraint: "怕漏掉真正会影响决定的细节", askingTrigger: gap.label },
+    ],
+    comparison_decider: [
+      { personaLabel: "正在对比选择的人", situation: "手里有不止一个选择", currentAction: "正在比较差异", practicalConstraint: "不想只听一个笼统答案", askingTrigger: gap.label },
+      { personaLabel: "替自己筛选的人", situation: "已经排除了几种不合适的选择", currentAction: "正在确认最后的判断点", practicalConstraint: "条件不同，答案可能完全不一样", askingTrigger: gap.label },
+    ],
+    risk_concerned: [
+      { personaLabel: "做之前一定会查清楚的人", situation: "还没决定要不要继续", currentAction: "正在核对边界和来源", practicalConstraint: "没说清楚的地方不会贸然行动", askingTrigger: gap.label },
+      { personaLabel: "容易担心踩坑的人", situation: "看到不同说法后更谨慎", currentAction: "正在找能负责的明确答复", practicalConstraint: "不想把宣传话术当成确定结论", askingTrigger: gap.label },
+    ],
+    local_action_seeker: [
+      { personaLabel: "周末准备去看一眼的人", situation: "正在安排周末时间", currentAction: "想先确认再出发", practicalConstraint: "不想到了才发现要预约或找不到", askingTrigger: gap.label },
+      { personaLabel: "下班后想顺路过去的人", situation: "正在看当天的时间安排", currentAction: "准备先问清到达和接待细节", practicalConstraint: "时间有限，怕白跑一趟", askingTrigger: gap.label },
+      { personaLabel: "出发前会反复确认的人", situation: "已经把这件事排进近期计划", currentAction: "正在确认最后一个行动信息", practicalConstraint: "不确定的信息会直接影响是否出发", askingTrigger: gap.label },
+    ],
+    skeptical_returning_reader: [
+      { personaLabel: "回来复核说法的人", situation: "之前看过一次但仍不放心", currentAction: "正在找前后说法是否一致", practicalConstraint: "不接受只换措辞、不补依据的回答", askingTrigger: gap.label },
+      { personaLabel: "会追问来源的人", situation: "看到一句笼统结论", currentAction: "正在确认这句话凭什么成立", practicalConstraint: "没有可核验来源就先保留判断", askingTrigger: gap.label },
+    ],
+  };
+  const pool = archetypes[personaRole];
+  return pool[Math.floor(hashUnit(seed, `question-context:${salt}:${surfaceRole.displayRole}`) * pool.length)]!;
+}
+
 function dialoguePlans(
   opportunity: TopicOpportunity,
   gapCards: InformationGapPlanningCard[],
@@ -1997,6 +2036,7 @@ function dialoguePlans(
     const roleStage = roleStages[Math.floor(hashUnit(seed, `role-stage:${index}`) * roleStages.length)] ?? opportunity.audienceStage;
     const stagePersonas = personasByStage[roleStage];
     const personaOffset = roleDiversity >= 40 ? Math.floor(hashUnit(seed, `persona:${index}`) * stagePersonas.length) : 0;
+    const personaRole = stagePersonas[personaOffset] ?? personas[index % personas.length]!;
     // 同上:证据立场池也按预设实际区间分档(旧阈值 >=70 让 75–95 共用全池)。
     // 90+ 全池 4 种,75–89 取 3 种,40–74 取 2 种,更低只留 1 种。
     const stancePool = roleDiversity >= 90
@@ -2042,19 +2082,27 @@ function dialoguePlans(
     const unusedResponsibilityMatched = responsibilityMatched.filter((role) =>
       !usedOpenerDisplayRoles.has(role.displayRole));
     const unusedTopicMatched = topicMatched.filter((role) => !usedOpenerDisplayRoles.has(role.displayRole));
+    const personaLabels: Record<DialogueThreadPlan["personaRole"], string> = {
+      first_time_researcher: "刚开始做功课的人",
+      information_collector: "谨慎做功课的人",
+      comparison_decider: "正在对比选择的人",
+      risk_concerned: "做之前会先查清楚的人",
+      local_action_seeker: "准备近期行动的人",
+      skeptical_returning_reader: "回来复核说法的人",
+    };
     const neutralRole: CommentSurfaceRoleCard = {
-      displayRole: `${gap.label}核实者`,
-      relationToHost: "围绕同一主问题补充现实条件的读者",
-      identityCue: `正在核实${gap.label}`,
-      situationCue: gap.question,
-      motive: `只把${gap.label}问清楚`,
+      displayRole: personaLabels[personaRole],
+      relationToHost: "从自己的现实安排出发追问同一件事",
+      identityCue: personaLabels[personaRole],
+      situationCue: "此刻正准备做下一步决定",
+      motive: `因为现实安排受到影响，现在要把${gap.label}问清楚`,
       knowledgePosition: "只知道自己的处境和公开信息，不替项目方回答",
-      speechPattern: "围绕主问题原文说一句自然短话",
+      speechPattern: "先露出半句生活处境，再问一个窄问题",
       lexicalCues: [],
       interactionHook: gap.label,
-      permittedContribution: `只提出“${gap.question}”这一主问题，不混入其他职责`,
+      permittedContribution: `只围绕${gap.label}提出一个会影响行动的问题，不混入其他主题`,
       utteranceMode: "direct_question",
-      targetChars: [6, 32],
+      targetChars: [12, 42],
       replyDisplayRole: forcedReplyDisplayRole(structuralIdentity, replyRouting.projectBlueprint, personaScenePlan.commentCast),
     };
     const hasProjectResponsibilityMap = Boolean(replyRouting.projectBlueprint)
@@ -2075,9 +2123,7 @@ function dialoguePlans(
           : unusedResponsibilityMatched;
     // 项目缺口席位存在职责映射时，命中角色一旦用尽就生成当前缺口专属的
     // 中性读者卡；社会席位则已在上面从真实读者角色池轮换。
-    const openerCard = focusContract?.mode === "focused" && ownsPrimaryGap
-      ? neutralRole
-      : eligiblePool[0] ?? neutralRole;
+    const openerCard = eligiblePool[0] ?? neutralRole;
     const personaRepeated = usedOpenerDisplayRoles.has(openerCard.displayRole);
     usedOpenerDisplayRoles.add(openerCard.displayRole);
     // T3 漂浮短反应也必须保留主 gap 语义，只压缩长度，不改换话题。
@@ -2095,7 +2141,6 @@ function dialoguePlans(
       ? assignCommentDisplayName(seed, `nickname:${threadId}:reader:b`, usedDisplayNames)
       : undefined;
     if (replyDisplayName) usedDisplayNames.add(replyDisplayName);
-    const personaRole = stagePersonas[personaOffset] ?? personas[index % personas.length]!;
     const variantSalt = `${index}:${threadFunction}:${surfaceRoleCard.utteranceMode}:${personaRole}`;
     const pickVariant = (pool: readonly string[], field: string) =>
       pool[Math.floor(hashUnit(seed, `reply-variant:${field}:${variantSalt}`) * pool.length)]!;
@@ -2234,6 +2279,7 @@ function dialoguePlans(
       ...surfaceRoleCard,
       replyDisplayRole: threadKind === "host_reply" ? "楼主" : frozenReplyRoute.replyDisplayRole,
     };
+    const questionContext = questionContextFor(gap, personaRole, threadSurfaceRoleCard, seed, `${threadId}:${index}`);
     const surfaceIntent: Record<typeof surfaceRoleCard.utteranceMode, string> = {
       direct_question: `像${surfaceRoleCard.displayRole}一样，只问“${gap.question}”里最现实的一点`,
       shared_concern: `先用一句同款担心接住正文，再自然带出“${gap.label}”`,
@@ -2247,7 +2293,7 @@ function dialoguePlans(
     };
     const styleIntent = surfaceIntent[surfaceRoleCard.utteranceMode]
       ?? (discoveryStrength >= 50 ? discoveryQuestion : gap.question);
-    const baseQuestionIntent = `主问题原文：“${gap.question}”；只可改成${surfaceRoleCard.displayRole}的自然口语，不得增加其他主题。表达方式：${styleIntent}`;
+    const baseQuestionIntent = `人物此刻正在“${questionContext.currentAction}”，受“${questionContext.practicalConstraint}”影响，所以现在追问${gap.label}；围绕同一主问题自然开口，不增加其他主题。表达方式：${styleIntent}`;
     let questionIntent = baseQuestionIntent;
     const comparableQuestion = (value: string) => value.replace(/[\s\p{P}\p{S}]+/gu, "");
     if (usedQuestionIntents.has(comparableQuestion(questionIntent))) {
@@ -2259,7 +2305,7 @@ function dialoguePlans(
     usedQuestionIntents.add(comparableQuestion(questionIntent));
     // T3 漂浮短反应:开口意图是一条 4-20 字短共鸣,不提问、不答题、无需回复。
     if (threadKind === "organic_reaction") {
-      questionIntent = `主问题原文：“${gap.question}”；只留一句4-20字短共鸣，但必须保留“${gap.label}”或原问题中的一个具体对象，不提问、不答题、无需回复`;
+      questionIntent = `围绕“${gap.label}”只留一句4-20字短共鸣，不提问、不答题、无需回复`;
     }
     if (threadKind === "host_reply") {
       questionIntent = "只问楼主正文已经公开的当前状态、打算或现实限制；不得询问价格、地址、预约、效果、恢复、风险、适用性、资质或其他项目事实";
@@ -2424,6 +2470,7 @@ function dialoguePlans(
       discoveryPlan,
       conversationPlan,
       surfaceRoleCard: threadSurfaceRoleCard,
+      questionContext,
       ...(replySurfaceRoleCard ? { replySurfaceRoleCard } : {}),
     };
   });

@@ -618,8 +618,11 @@ describe("P4 repair loop end-to-end", () => {
     value.content.bodyMaxChars = 800;
     value.content.hashtagMin = 3;
     value.content.hashtagMax = 6;
-    value.content.commentThreadMin = 2;
-    value.content.commentThreadMax = 2;
+    // Final generic-repair tests isolate N.body. Cref id-merge semantics are
+    // covered by the dedicated unit test above; unavailable accountable answers
+    // are now terminal partial artifacts and must not be fabricated for this fixture.
+    value.content.commentThreadMin = 0;
+    value.content.commentThreadMax = 0;
     value.content.followUpDepth = 0;
     value.generation.maxRepairAttempts = 2;
     return value;
@@ -649,9 +652,12 @@ describe("P4 repair loop end-to-end", () => {
   }
 
   function stagedThreads(request: ModelGenerationRequest) {
+    const questions = ["哪些条件影响适用性？", "不同做法按哪些点比较？"];
     return stagedThreadIds(request).map((id, index) => ({
       id,
-      question: `第${index + 1}项应该怎么选？`,
+      // Keep this fixture inside its frozen gap. These tests exercise the final
+      // patch protocol, not the earlier reader-editor stage.
+      question: questions[index] ?? "不同做法按哪些点比较？",
       answer: "先看自己的情况。",
       followUps: [] as Array<Record<string, unknown>>,
     }));
@@ -684,16 +690,10 @@ describe("P4 repair loop end-to-end", () => {
           return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
         }
         if (purpose === "repair") {
-          const ids = [...new Set(
-            [...requestText(request).matchAll(/"id"\s*:\s*"([^"]+)"/gu)]
-              .map((match) => match[1]!)
-              .filter((id) => id.includes("_thread_")),
-          )];
-          const [first, second] = ids;
           const rawPatch = [
             "修复结果：",
             "```json",
-            `{“N”：{“body”：“${fixedBody}”}，“Cref”：{“disclaimer”：“以下为模拟情景问答参考模板，不代表真实评论。”，“threads”：[{“id”：“${second}”，“question”：“不同做法具体按哪些点比较？”，“answer”：“先看自己的情况。”，“followUps”：[]}，{“id”：“${first}”，“question”：“哪些条件会影响适用性？”，“answer”：“多问一句再定。”，“followUps”：[]}]}}`,
+            `{“N”：{“body”：“${fixedBody}”}}`,
             "```",
           ].join("\n");
           return { text: rawPatch, raw: {} };
@@ -709,14 +709,12 @@ describe("P4 repair loop end-to-end", () => {
       expect(finalCodes).not.toContain("repair_parse_failed");
       expect(finalCodes).not.toContain("missing_required_phrase");
       expect(pkg.content.N.body).toBe(fixedBody);
-      // Out-of-order patch merged by id: original order, new prose.
-      expect(pkg.content.Cref.threads.map((item) => item.question)).toEqual(["哪些条件会影响适用性？", "不同做法具体按哪些点比较？"]);
-      // The repair itself converged and removed every blocker. A separate
-      // editorial review may still keep the candidate non-deliverable under
-      // the tri-state delivery contract.
+      expect(pkg.content.Cref.threads).toHaveLength(0);
+      // With comments explicitly disabled, the focused body repair removes
+      // the only blocker and the candidate is fully valid.
       expect(pkg.validation.issues.some((issue) => issue.disposition === "block" || issue.severity === "error")).toBe(false);
-      expect(pkg.validation.qualityStatus).toBe("needs_review");
-      expect(pkg.validation.valid).toBe(false);
+      expect(pkg.validation.qualityStatus).toBe("passed");
+      expect(pkg.validation.valid).toBe(true);
     }
   });
 

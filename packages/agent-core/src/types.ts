@@ -874,6 +874,19 @@ export interface CommentSurfaceRoleCard {
   orgSide?: boolean;
 }
 
+export interface CommentQuestionContext {
+  /** Concrete social position, not a renamed information-gap label. */
+  personaLabel: string;
+  /** What is happening in this person's life at the moment they comment. */
+  situation: string;
+  /** The action they are already taking before asking. */
+  currentAction: string;
+  /** A practical constraint that explains why a generic answer is insufficient. */
+  practicalConstraint: string;
+  /** The unresolved detail that made them ask now. */
+  askingTrigger: string;
+}
+
 export interface PersonaScenePlan {
   /** Project-defined family identifier used to select concrete scene material. */
   scenarioFamilyId: string;
@@ -1062,6 +1075,8 @@ export interface CommentReferenceThread extends CommentScenarioMetadata {
   discoveryPlan?: CommentDiscoveryPlan;
   conversationPlan?: DialogueThreadPlan["conversationPlan"];
   surfaceRoleCard?: CommentSurfaceRoleCard;
+  /** Frozen life-context and asking motive for the visible opener. */
+  questionContext?: CommentQuestionContext;
   /**
    * Backend display nickname for the thread opener (纯展示元数据), assigned
    * deterministically from the package seed. Display-only: it lets readers
@@ -1756,6 +1771,8 @@ export interface DialogueThreadPlan {
   };
   /** Visible person/scene carrier. The legacy roleCard remains the hidden decision task. */
   surfaceRoleCard?: CommentSurfaceRoleCard;
+  /** Frozen life-context and asking motive for the visible opener. */
+  questionContext?: CommentQuestionContext;
   /**
    * Backend display nickname for the thread opener (纯展示元数据), assigned by
    * the planner from the plan seed and carried into the bound thread; never

@@ -138,6 +138,20 @@ function surfaceRoleCard(value: unknown): ContentPackageContent["Cref"]["threads
   };
 }
 
+
+function questionContext(value: unknown): ContentPackageContent["Cref"]["threads"][number]["questionContext"] {
+  if (!isRecord(value)) return undefined;
+  const keys = ["personaLabel", "situation", "currentAction", "practicalConstraint", "askingTrigger"] as const;
+  if (!keys.every((key) => typeof value[key] === "string" && String(value[key]).trim())) return undefined;
+  return {
+    personaLabel: String(value.personaLabel).trim(),
+    situation: String(value.situation).trim(),
+    currentAction: String(value.currentAction).trim(),
+    practicalConstraint: String(value.practicalConstraint).trim(),
+    askingTrigger: String(value.askingTrigger).trim(),
+  };
+}
+
 function roleCard(value: unknown): ContentPackageContent["Cref"]["threads"][number]["roleCard"] {
   if (!isRecord(value) || typeof value.stage !== "string" || typeof value.decisionTask !== "string"
     || !evidenceStances.has(String(value.evidenceStance))) return undefined;
@@ -586,6 +600,7 @@ function parseContent(value: unknown): ContentPackageContent {
       replyPlan: replyPlan(thread.replyPlan),
       discoveryPlan: discoveryPlan(thread.discoveryPlan),
       surfaceRoleCard: surfaceRoleCard(thread.surfaceRoleCard),
+      questionContext: questionContext(thread.questionContext),
       replySurfaceRoleCard: surfaceRoleCard(thread.replySurfaceRoleCard),
       displayName: optionalTrimmedText(thread.displayName),
       replyDisplayName: optionalTrimmedText(thread.replyDisplayName),
@@ -973,34 +988,14 @@ function isPureShortConversationEcho(value: string): boolean {
   return /^(?:同问|同感|这个我也|我也|也是|确实|对啊|\+1|蹲一个)[，, ]*(?:我)?(?:也|还)?(?:没想明白|没想好|没敢定|不敢定|拿不准|在纠结|纠结中|没定|不确定|先等等看|再等等看|先看看|再看看)?$/u.test(compact);
 }
 
-/**
- * Keep a reader-to-reader reply on the frozen topic before it reaches the
- * expensive ledger/review stages. The replacement is deliberately content-free:
- * it acknowledges the same question without inventing another FAQ or project fact.
- */
-export function normalizeReaderExchangeContinuity(
-  draft: GenerationDraft,
-  plan: OrchestrationPlan,
-): { draft: GenerationDraft; changedThreadIds: string[] } {
-  const changedThreadIds: string[] = [];
-  const plannedById = new Map(plan.dialogueThreads.map((thread) => [thread.id, thread]));
-  const threads = draft.content.Cref.threads.map((thread) => {
-    if (commentThreadKindOf(thread) !== "reader_exchange" || !thread.question.trim() || !thread.answer.trim()) return thread;
-    const planned = plannedById.get(thread.id);
-    if (!planned) return thread;
-    const pivotTail = thread.answer.split(/(?:不过|但是|可我|更想|最怕|话说回来)/u).at(-1)?.trim() ?? "";
-    const pivotDrifts = pivotTail !== thread.answer.trim()
-      && pivotTail.length >= 4
-      && !sharesConversationTopic(thread.question, pivotTail);
-    if ((sharesConversationTopic(thread.question, thread.answer) || isPureShortConversationEcho(thread.answer)) && !pivotDrifts) return thread;
-    changedThreadIds.push(thread.id);
-    return { ...thread, answer: "同问，我也在纠结。" };
-  });
-  if (!changedThreadIds.length) return { draft, changedThreadIds };
-  return {
-    draft: { ...draft, content: { ...draft.content, Cref: { ...draft.content.Cref, threads } } },
-    changedThreadIds,
-  };
+/** Read-only continuity check used by editors and validators. */
+export function readerExchangeContinuesTopic(question: string, answer: string): boolean {
+  if (!question.trim() || !answer.trim()) return false;
+  const pivotTail = answer.split(/(?:不过|但是|可我|更想|最怕|话说回来)/u).at(-1)?.trim() ?? "";
+  const pivotDrifts = pivotTail !== answer.trim()
+    && pivotTail.length >= 4
+    && !sharesConversationTopic(question, pivotTail);
+  return (sharesConversationTopic(question, answer) || isPureShortConversationEcho(answer)) && !pivotDrifts;
 }
 
 /** A consumer carrier may ask about organization-controlled information but may not state it for the organization. */
@@ -2151,6 +2146,9 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     if (threadKind === "organic_reaction" && thread.answer.trim()) {
       add("organic_reaction_answer_violation", "error", "Cref", `Thread ${thread.id} organic_reaction must not contain an answer.`);
     }
+    if ((threadKind === "org_answer" || threadKind === "host_reply") && !thread.answer.trim()) {
+      add("comment_answer_unavailable", "error", "Cref", `Thread ${thread.id} requires an accountable answer, but the answer node is unavailable; generation must not synthesize fallback prose.`, false);
+    }
     const expectedAnswerIdentity = threadKind === "reader_exchange"
       ? "simulated_reader"
       : threadKind === "organic_reaction" ? "none" : thread.postingIdentity;
@@ -2557,6 +2555,10 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     const leakedPlan = visibleNodes.find((node) => /(?:主问题原文|只可改成|不得增加其他主题|表达方式|像.{1,16}(?:一样|那样)[，,]?(?:只|先)|先指出.{0,24}(?:细节|可见)|用一句.{0,24}提醒|只问[“"][^”"]+[”"]里|顺势问[“"])/u.test(node));
     if (leakedPlan) {
       add("comment_plan_language_surface_leak", "error", "Cref", `A visible comment renders a writing instruction instead of a person speaking: ${leakedPlan}`);
+    }
+    const questionnaireQuestion = /(?:公开渠道(?:能|可)?(?:查到|看到|核验)的有哪些|有哪些(?:可公开|能公开|可以公开|可核验|能核验)(?:的)?(?:信息|内容)?|具体要看什么条件|需要核实哪些(?:条件|信息)|由哪个(?:明确)?身份(?:来)?确认|行动前还要再次确认哪些)/u.test(thread.question);
+    if (questionnaireQuestion) {
+      add("comment_questionnaire_voice", "warning", "Cref", `Thread ${thread.id} sounds like an interview checklist instead of its frozen reader persona: ${thread.question}`);
     }
     const prohibitedHistories = input.projectBlueprint
       ? prohibitedHistoryTerms(input.projectBlueprint)

@@ -10,7 +10,8 @@ import {
   diagnosticsFromValidation,
   evaluateGapCoverageRealization,
   mergeCrefPatchById,
-  normalizeReaderExchangeContinuity,
+  parseStagedCommentEditor,
+  readerExchangeContinuesTopic,
   parseGenerationDraft,
   parseGenerationPatch,
   parseJsonObject,
@@ -82,6 +83,7 @@ import {
 import {
   buildClaimJudgePrompt,
   buildRepairPrompt,
+  buildStagedCommentEditorPrompt,
   buildStagedCommentGrowthPrompt,
   buildStagedCommentNetworkEditorPrompt,
   buildStagedCommentReadersCorrectionPrompt,
@@ -1550,37 +1552,8 @@ function deterministicDraft(
   };
 }
 
-/**
- * 线程答复的确定性兜底口径。读者互动层:T3 漂浮短反应无回答需求(空串);
- * T2 读者互聊由读者 B 接话。模块级函数:bindDialogueProvenance 的缺文案兜
- * 底与 2A-O 机构答复失败/缺 id 时的回落共用同一套口径。
- */
-function safeVisibleQuestionFromPlan(planned: OrchestrationPlan["dialogueThreads"][number]): string {
-  const task = planned.roleCard.decisionTask.trim().replace(/[？?。！!]+$/u, "");
-  const hook = planned.surfaceRoleCard?.interactionHook?.trim();
-  if (planned.threadKind === "organic_reaction") return hook ? `${hook}这点先蹲一个` : "这点先蹲一个";
-  if (planned.threadKind === "reader_exchange") return hook ? `${hook}这点我也在纠结` : "这点我也在纠结";
-  return task ? `${task}？` : "这件事具体要看什么条件？";
-}
-
-function answerFromPlan(planned: OrchestrationPlan["dialogueThreads"][number]): string {
-  if (planned.threadKind === "organic_reaction") return "";
-  if (planned.threadKind === "host_reply") return "";
-  // T2 的 answer 本就是读者 B 接话,路人腔在这里是正确的。
-  if (planned.threadKind === "reader_exchange") return "姐妹我也是，还在纠结要不要去问问";
-  // T1(org_answer)是可追责答复位:三档身份都是发布方,不是路人。此前这里按
-  // utteranceMode 发路人话术("我也是想先把这个问明白"/"我还在看，确定了来回你"),
-  // 那等于自有账号冒充独立消费者(《ROLE 04 · 发布账号》明令禁止),而 2A-O 失败
-  // 只记 warning 不阻断,兜底文案会直接进包。改为回落规划层已有的口径:
-  // directAnswer＋condition 是规划算出来的答复要点,没有则退到保留未知＋转核验,
-  // 不编造具体说法。
-  const plan = planned.replyPlan;
-  const spoken = [plan?.directAnswer, plan?.condition].map((part) => part?.trim()).filter(Boolean);
-  if (spoken.length) return `${spoken.join("；")}。`;
-  return "这一项目前无法确认，先不下结论。";
-}
-
-const ORGANIZATION_UNKNOWN_ANSWER = "这一项当前无法确认，先不下结论。";
+/** Reader-stage language checks are diagnostics; visible speech remains agent-authored. */
+const QUESTIONNAIRE_QUESTION = /(?:公开渠道(?:能|可)?(?:查到|看到|核验)的有哪些|有哪些(?:可公开|能公开|可以公开|可核验|能核验)(?:的)?(?:信息|内容)?|具体要看什么条件|需要核实哪些(?:条件|信息)|由哪个(?:明确)?身份(?:来)?确认|行动前还要再次确认哪些)/u;
 
 function factualEvidenceForThread(
   planned: OrchestrationPlan["dialogueThreads"][number],
@@ -1608,16 +1581,6 @@ function organizationAnswerSupported(answer: string, references: EvidenceReferen
   });
 }
 
-function safeOrganizationFallback(
-  planned: OrchestrationPlan["dialogueThreads"][number],
-  references: EvidenceReference[],
-): string {
-  if (!references.length) return ORGANIZATION_UNKNOWN_ANSWER;
-  const plannedAnswer = answerFromPlan(planned);
-  return organizationAnswerSupported(plannedAnswer, references)
-    ? plannedAnswer
-    : ORGANIZATION_UNKNOWN_ANSWER;
-}
 
 function bindDialogueProvenance(
   draft: GenerationDraft,
@@ -1676,41 +1639,18 @@ function bindDialogueProvenance(
       }
     : item);
   const remappedDraft: GenerationDraft = { ...draft, reasoning: remappedReasoning };
-  const cleanVisibleText = (value: string): string => value
-    .replace(/\bevidence_[\w:.-]+\b/giu, "资料原文")
-    .replace(/(?:回到|核对)资料原文(?:核对)?/gu, "核对资料原文")
-    .replace(/[；;，,]?\s*核验时只采用(?:本线程|该线程|这条回答)列出的证据来源[。；;]?/gu, "")
-    .replace(/(?:本线程|该线程|线程内)/gu, "这条回答")
-    .replace(/；{2,}/gu, "；")
-    .replace(/。{2,}/gu, "。")
-    .replace(/；。/gu, "。")
-    .trim();
   const threads = plan.dialogueThreads.map((planned, index) => {
-    const existing = remappedDraft.content.Cref.threads[index];
-    const fallbackId = planned.id;
-    const base = existing ?? {
-      id: fallbackId,
-      question: safeVisibleQuestionFromPlan(planned),
-      answer: answerFromPlan(planned),
-      followUps: [],
-      postingIdentity: planned.postingIdentity,
-      sourceClusterIds: [...planned.sourceClusterIds],
-      evidenceIds: [...planned.evidenceIds],
-    };
+    const base = remappedDraft.content.Cref.threads[index];
+    if (!base) throw new Error(`Missing generated comment thread at index ${index}; provenance binding cannot author visible copy.`);
     const selectedSurface = base.surfaceRoleCard ?? planned.surfaceRoleCard;
     const realizedConversation = base.conversationPlan ?? planned.conversationPlan;
     // Preserve the model's visible copy. The orchestration plan is metadata,
     // not user-facing prose and may contain audit IDs or intentionally verbose
     // planning language that must never overwrite a natural question/answer.
-    const existingQuestion = cleanVisibleText(base.question);
-    const safeFallbackQuestion = safeVisibleQuestionFromPlan(planned);
-    // Extremely short comments such as “同问” or “蹲” are legitimate social
-    // nodes in the reference corpus; never expand them merely for being short.
-    const question = !existingQuestion
-      ? safeFallbackQuestion
-      : existingQuestion;
-    const existingAnswer = cleanVisibleText(base.answer);
-    const answer = existingAnswer || answerFromPlan(planned);
+    // Binding owns metadata only. Visible copy is preserved byte-for-byte;
+    // leaks or weak prose are validator/editor responsibilities, not binder work.
+    const question = base.question;
+    const answer = base.answer;
     // Planned evidence is context, not a citation. A visible thread may expose
     // only the exact factual source spans pinned to that thread occurrence.
     const evidenceIds = [...new Set(remappedDraft.reasoning
@@ -1736,8 +1676,8 @@ function bindDialogueProvenance(
       return {
         ...followUp,
         displayName: followUpDisplayName,
-        question: cleanVisibleText(followUp.question),
-        answer: cleanVisibleText(followUp.answer),
+        question: followUp.question,
+        answer: followUp.answer,
         replyTo: planned.id,
         // Positional default: a follow-up node extends the thread, so its kind is
         // "follow_up" (its answer side is positionally a "clarification").
@@ -1799,6 +1739,7 @@ function bindDialogueProvenance(
       discoveryPlan: ownsPrimaryGap && planned.discoveryPlan ? { ...planned.discoveryPlan } : undefined,
       conversationPlan: realizedConversation ? { ...realizedConversation } : undefined,
       surfaceRoleCard: selectedSurface ? { ...selectedSurface, targetChars: [...selectedSurface.targetChars] as [number, number] } : undefined,
+      questionContext: planned.questionContext ? { ...planned.questionContext } : undefined,
       ...(planned.replySurfaceRoleCard ? {
         replySurfaceRoleCard: {
           ...planned.replySurfaceRoleCard,
@@ -1831,11 +1772,8 @@ function bindDialogueProvenance(
         ...remappedDraft.content.Cref,
         threads,
         uncoveredGaps,
-        // Model-produced visible copy, cleaned like any other comment text;
-        // when the staged flow produced none it stays absent (never synthesized).
-        ownedFirstComment: remappedDraft.content.Cref.ownedFirstComment
-          ? cleanVisibleText(remappedDraft.content.Cref.ownedFirstComment)
-          : undefined,
+        // Model-produced visible copy is preserved exactly; absent stays absent.
+        ownedFirstComment: remappedDraft.content.Cref.ownedFirstComment,
       },
     },
   };
@@ -2157,23 +2095,6 @@ function keepCriticalBoundariesInBody(
   };
 }
 
-/**
- * Repair small model length overshoots before the ledger sees the text. This is
- * intentionally narrow: larger overruns still surface as body_too_long and go
- * through the normal repair path instead of being silently truncated.
- */
-function trimMinorBodyOverflowBeforeLedger(
-  draft: GenerationDraft,
-  plan: OrchestrationPlan,
-  config: ResolvedGenerationConfig,
-): GenerationDraft {
-  const length = [...draft.content.N.body].length;
-  const limit = config.content.bodyMaxChars;
-  const tolerance = Math.max(24, Math.floor(limit * 0.1));
-  if (length <= limit || length > limit + tolerance) return draft;
-  return keepCriticalBoundariesInBody(draft, plan, config);
-}
-
 function packageId(jobId: string, candidateIndex: number, seed: number): string {
   return `pkg_${createHash("sha256").update(`${jobId}:${candidateIndex}:${seed}`).digest("hex").slice(0, 20)}`;
 }
@@ -2355,6 +2276,70 @@ ${core.N.body}`;
   });
 }
 
+/** Stage-local diagnostics for reader speech. This function never rewrites visible copy. */
+function readerStageEditorialReasons(
+  readers: ReturnType<typeof parseStagedCommentReaders>,
+  plan: OrchestrationPlan,
+  claimRules: Parameters<typeof guardedReplyIdentitiesForQuestion>[1],
+): string[] {
+  const cards = new Map((plan.gapPlanningCards ?? []).map((card) => [card.gapId, card]));
+  const reasons: string[] = [];
+  readers.threads.forEach((thread, index) => {
+    const planned = plan.dialogueThreads[index];
+    if (!planned || thread.id !== planned.id) {
+      reasons.push(`线程顺序或ID与冻结计划不一致：${thread.id}`);
+      return;
+    }
+    const kind = planned.threadKind ?? "org_answer";
+    if (QUESTIONNAIRE_QUESTION.test(thread.question)) reasons.push(`线程 ${thread.id} 使用采访或审核清单腔`);
+    if (kind === "org_answer") {
+      const card = cards.get(planned.primaryGapId);
+      if (!card || !questionMatchesPlannedGap(thread.question, card)) reasons.push(`线程 ${thread.id} 偏离冻结主缺口 ${planned.primaryGapId}`);
+      const guarded = guardedReplyIdentitiesForQuestion(thread.question, claimRules);
+      if ([...guarded].some((identity) => identity !== planned.postingIdentity)) reasons.push(`线程 ${thread.id} 改变了冻结答复身份`);
+    }
+    if (kind === "host_reply") {
+      const guarded = guardedReplyIdentitiesForQuestion(thread.question, claimRules);
+      if (guarded.size) reasons.push(`线程 ${thread.id} 越过楼主个人事实边界`);
+    }
+    if (kind === "reader_exchange" && thread.answer.trim()
+      && !readerExchangeContinuesTopic(thread.question, thread.answer)) {
+      reasons.push(`线程 ${thread.id} 的读者B接话跨题`);
+    }
+  });
+  return [...new Set(reasons)];
+}
+
+/** Accept only reader-side visible edits that preserve the frozen thread contract. */
+function acceptReaderStageEdit(
+  original: ReturnType<typeof parseStagedCommentReaders>,
+  edited: ReturnType<typeof parseStagedCommentEditor>,
+  plan: OrchestrationPlan,
+  claimRules: Parameters<typeof guardedReplyIdentitiesForQuestion>[1],
+): ReturnType<typeof parseStagedCommentReaders> {
+  if (edited.threads.length !== original.threads.length) throw new CommentEditorContractError("Reader editor changed thread count.");
+  const cards = new Map((plan.gapPlanningCards ?? []).map((card) => [card.gapId, card]));
+  const threads = edited.threads.map((thread, index) => {
+    const before = original.threads[index]!;
+    const planned = plan.dialogueThreads[index]!;
+    if (thread.id !== before.id || thread.id !== planned.id) throw new CommentEditorContractError(`Reader editor changed thread identity at ${index}.`);
+    const kind = planned.threadKind ?? "org_answer";
+    if (kind !== "reader_exchange" && thread.answer.trim()) throw new CommentEditorContractError(`Reader editor wrote an answer for ${thread.id}.`);
+    if (kind === "reader_exchange" && !thread.answer.trim()) throw new CommentEditorContractError(`Reader editor removed reader-B speech from ${thread.id}.`);
+    if (kind === "org_answer") {
+      const card = cards.get(planned.primaryGapId);
+      if (!card || !questionMatchesPlannedGap(thread.question, card)) throw new CommentEditorContractError(`Reader editor changed the primary responsibility of ${thread.id}.`);
+      const guarded = guardedReplyIdentitiesForQuestion(thread.question, claimRules);
+      if ([...guarded].some((identity) => identity !== planned.postingIdentity)) throw new CommentEditorContractError(`Reader editor changed the responder of ${thread.id}.`);
+    }
+    if (kind === "host_reply" && guardedReplyIdentitiesForQuestion(thread.question, claimRules).size) {
+      throw new CommentEditorContractError(`Reader editor crossed the host boundary in ${thread.id}.`);
+    }
+    return { ...before, question: thread.question, answer: thread.answer };
+  });
+  return { threads };
+}
+
 /** Server-owned trigger for complete-network editing; no vocabulary is treated as a quality score. */
 export function commentNetworkEditorialReasons(
   comments: StagedCommentCopy,
@@ -2383,11 +2368,16 @@ export function commentNetworkEditorialReasons(
       if (prior) reasons.push(`线程 ${thread.id} 与 ${prior} 的根答复重复`);
       else seenAnswers.set(compactAnswer, thread.id);
     }
-    if ((planned.threadKind ?? "org_answer") === "org_answer") {
+    const kind = planned.threadKind ?? "org_answer";
+    if (kind === "org_answer") {
       const card = plan.gapPlanningCards?.find((item) => item.gapId === planned.primaryGapId);
       if (card && !questionMatchesPlannedGap(thread.question, card)) {
         reasons.push(`线程 ${thread.id} 的问题偏离冻结主缺口 ${card.gapId}`);
       }
+    }
+    if (kind === "reader_exchange" && thread.question.trim() && thread.answer.trim()
+      && !readerExchangeContinuesTopic(thread.question, thread.answer)) {
+      reasons.push(`线程 ${thread.id} 的读者B接话没有承接根问题`);
     }
     let previous = thread.answer || thread.question;
     thread.followUps.forEach((followUp, followUpIndex) => {
@@ -2426,7 +2416,11 @@ function acceptCommentNetworkEdit(
       const guarded = guardedReplyIdentitiesForQuestion(thread.question, []);
       if ([...guarded].some((identity) => identity !== planned.postingIdentity)) throw new CommentEditorContractError(`Comment editor changed the responder of ${thread.id}.`);
       const evidence = factualEvidenceForThread(planned, plan, references);
-      if (!organizationAnswerSupported(thread.answer, evidence)) throw new CommentEditorContractError(`Comment editor expanded unsupported organization copy in ${thread.id}.`);
+      if (!before.answer.trim()) {
+        if (thread.answer.trim()) throw new CommentEditorContractError(`Comment editor filled unavailable organization copy in ${thread.id}.`);
+      } else if (!organizationAnswerSupported(thread.answer, evidence)) {
+        throw new CommentEditorContractError(`Comment editor expanded unsupported organization copy in ${thread.id}.`);
+      }
       for (const followUp of thread.followUps) {
         if (followUp.answer.trim() && !organizationAnswerSupported(followUp.answer, evidence)) {
           throw new CommentEditorContractError(`Comment editor expanded unsupported organization follow-up in ${thread.id}.`);
@@ -2835,102 +2829,116 @@ export class ContentGenerationAgent implements GenerationEngine {
         });
         return response.text;
       };
-      let initialReaderText = "";
-      try {
-        initialReaderText = await generateReaders(readersPrompt, "generate_comment_readers", seed + 1, 2);
-      } catch (error) {
-        if (!shouldRegenerateCommentReadersFailure(error)) throw error;
-        stageIssues.push({
-          code: "model_comment_readers_regenerated",
-          severity: "warning",
-          disposition: "advisory",
-          origin: "infrastructure",
-          channel: "Cref",
-          message: "读者评论阶段首次返回没有可见正文，已使用完整原任务重新生成一次；该候选需要人工复核评论自然度。",
-          repairable: false,
-        });
-        const regenerationPrompt = buildStagedCommentReadersRegenerationPrompt(readersPrompt);
-        // A second empty response is terminal for this candidate. Never fabricate
-        // comments from planning instructions or route it through shape correction.
-        initialReaderText = await generateReaders(regenerationPrompt, "regenerate_comment_readers", seed + 101, 2.02);
-      }
       let parsedReaderSide: ReturnType<typeof parseStagedCommentReaders>;
-      try {
-        parsedReaderSide = parseReaders(initialReaderText);
-      } catch (error) {
-        if (!shouldCorrectCommentReadersFailure(error, initialReaderText)) throw error;
-        stageIssues.push({
-          code: "model_comment_readers_corrected",
-          severity: "warning",
-          disposition: "advisory",
-          origin: "infrastructure",
-          channel: "Cref",
-          message: "读者评论有可见原文但 JSON 结构不符合冻结合同，已做一次仅修结构的校正；该候选需要人工复核。",
-          repairable: false,
-        });
-        const correctionPrompt = buildStagedCommentReadersCorrectionPrompt(
-          initialReaderText,
-          expectedReaderThreads,
-          error instanceof Error ? error.message : String(error),
-        );
-        const corrected = await this.provider.generate({
-          messages: correctionPrompt.messages,
-          responseSchema: correctionPrompt.responseSchema,
-          schemaName: "content_candidate_comment_readers_correction",
-          model: input.config.model.model,
-          seed: seed + 102,
-          temperature: Math.min(input.config.model.temperature, 0.2),
-          maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_SHORT_OUTPUT_TOKENS),
-          metadata: { jobId: input.jobId, candidateIndex, purpose: "repair_comment_readers", stage: 2.01, attempt: 1 },
-        });
-        parsedReaderSide = parseReaders(corrected.text);
+      if (!expectedReaderIds.length) {
+        // Comments are explicitly disabled. Do not pay for or fabricate an
+        // empty reader stage; downstream assembly naturally keeps Cref empty.
+        parsedReaderSide = { threads: [] };
+      } else {
+        let initialReaderText = "";
+        try {
+          initialReaderText = await generateReaders(readersPrompt, "generate_comment_readers", seed + 1, 2);
+        } catch (error) {
+          if (!shouldRegenerateCommentReadersFailure(error)) throw error;
+          stageIssues.push({
+            code: "model_comment_readers_regenerated",
+            severity: "warning",
+            disposition: "advisory",
+            origin: "infrastructure",
+            channel: "Cref",
+            message: "读者评论阶段首次返回没有可见正文，已使用完整原任务重新生成一次；该候选需要人工复核评论自然度。",
+            repairable: false,
+          });
+          const regenerationPrompt = buildStagedCommentReadersRegenerationPrompt(readersPrompt);
+          // A second empty response is terminal for this candidate. Never fabricate
+          // comments from planning instructions or route it through shape correction.
+          initialReaderText = await generateReaders(regenerationPrompt, "regenerate_comment_readers", seed + 101, 2.02);
+        }
+        try {
+          parsedReaderSide = parseReaders(initialReaderText);
+        } catch (error) {
+          if (!shouldCorrectCommentReadersFailure(error, initialReaderText)) throw error;
+          stageIssues.push({
+            code: "model_comment_readers_corrected",
+            severity: "warning",
+            disposition: "advisory",
+            origin: "infrastructure",
+            channel: "Cref",
+            message: "读者评论有可见原文但 JSON 结构不符合冻结合同，已做一次仅修结构的校正；该候选需要人工复核。",
+            repairable: false,
+          });
+          const correctionPrompt = buildStagedCommentReadersCorrectionPrompt(
+            initialReaderText,
+            expectedReaderThreads,
+            error instanceof Error ? error.message : String(error),
+          );
+          const corrected = await this.provider.generate({
+            messages: correctionPrompt.messages,
+            responseSchema: correctionPrompt.responseSchema,
+            schemaName: "content_candidate_comment_readers_correction",
+            model: input.config.model.model,
+            seed: seed + 102,
+            temperature: Math.min(input.config.model.temperature, 0.2),
+            maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_SHORT_OUTPUT_TOKENS),
+            metadata: { jobId: input.jobId, candidateIndex, purpose: "repair_comment_readers", stage: 2.01, attempt: 1 },
+          });
+          parsedReaderSide = parseReaders(corrected.text);
+        }
       }
       const gapCardById = new Map((orchestrationPlan.gapPlanningCards ?? []).map((card) => [card.gapId, card]));
       const claimRules = input.planningContext?.projectBlueprint?.claimPolicy.rules ?? [];
       let commentEditorialAssessment: import("./types.js").CommentEditorialAssessment | undefined;
-      let readerSide = {
-        ...parsedReaderSide,
-        threads: parsedReaderSide.threads.map((thread, index) => {
-          const planned = orchestrationPlan.dialogueThreads[index]!;
-          const gap = gapCardById.get(planned.primaryGapId);
-          const threadKind = planned.threadKind ?? "org_answer";
-          if (threadKind === "host_reply") {
-            const guarded = guardedReplyIdentitiesForQuestion(thread.question, claimRules);
-            if (guarded.size === 0) return thread;
-            const firstFact = input.config.task.authorContext.facts
-              .find((fact) => (planned.authorFactIds ?? []).includes(fact.id));
-            stageIssues.push({
-              code: "reader_question_plan_drift",
-              severity: "warning",
-              channel: "Cref",
-              message: `线程 ${planned.id} 的楼主问题越过个人处境边界，已回退到已确认作者事实。`,
-              repairable: false,
-            });
-            return { ...thread, question: firstFact ? `你现在还是“${firstFact.statement}”这个状态吗？` : "所以你现在还没定下来吗？" };
-          }
-          if (threadKind !== "org_answer" || !gap) return thread;
-          const guardedIdentities = guardedReplyIdentitiesForQuestion(thread.question, claimRules);
-          const introducesConflictingResponsibility = [...guardedIdentities].some((identity) => identity !== planned.postingIdentity);
-          if (questionMatchesPlannedGap(thread.question, gap) && !introducesConflictingResponsibility) return thread;
-          stageIssues.push({
-            code: "reader_question_plan_drift",
-            severity: "warning",
-            channel: "Cref",
-            message: `线程 ${planned.id} 的读者问题偏离冻结主问题，已回退为带主缺口锚点的自然问法；答复身份保持 ${planned.postingIdentity} 不变。`,
-            repairable: false,
+      let readerSide = parsedReaderSide;
+      const initialReaderReasons = readerStageEditorialReasons(readerSide, orchestrationPlan, claimRules);
+      if (initialReaderReasons.length) {
+        try {
+          const editorPrompt = buildStagedCommentEditorPrompt(promptInput, core, readerSide);
+          const editorResponse = await this.provider.generate({
+            messages: editorPrompt.messages,
+            responseSchema: editorPrompt.responseSchema,
+            schemaName: "content_candidate_comment_reader_editor",
+            model: input.config.model.model,
+            seed: seed + 102,
+            temperature: Math.min(input.config.model.temperature, 0.35),
+            maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_SHORT_OUTPUT_TOKENS),
+            metadata: { jobId: input.jobId, candidateIndex, purpose: "edit_comment_openers", stage: 2.03 },
           });
-          const label = gap.label.trim() || "这件事";
-          return { ...thread, question: `关于${label}，具体要看什么条件？` };
-        }),
-      };
+          const edited = parseStagedCommentEditor(editorResponse.text);
+          const accepted = acceptReaderStageEdit(readerSide, edited, orchestrationPlan, claimRules);
+          const remaining = readerStageEditorialReasons(accepted, orchestrationPlan, claimRules);
+          if (edited.assessment.status === "pass" && remaining.length) {
+            throw new CommentEditorContractError(`Reader editor reported pass with unresolved problems: ${remaining.join("; ")}`);
+          }
+          readerSide = accepted;
+          commentEditorialAssessment = edited.assessment;
+          if (edited.assessment.status === "review" || remaining.length) {
+            stageIssues.push({
+              code: "reader_editor_review", severity: "warning", channel: "Cref",
+              message: edited.assessment.summary || edited.assessment.reasons.join("；") || remaining.join("；") || "读者问题编辑后仍建议人工复核。",
+              repairable: false, disposition: "review", origin: "agent",
+            });
+          }
+        } catch (error) {
+          const rejected = error instanceof CommentEditorContractError;
+          stageIssues.push({
+            code: rejected ? "reader_editor_contract_rejected" : "reader_editor_unavailable",
+            severity: "warning", channel: "Cref",
+            message: rejected
+              ? `读者问题编辑越过或未完成冻结职责，已原子拒收并保留模型原文：${error.message}`
+              : `读者问题编辑未完成，保留模型原文：${error instanceof Error ? error.message : String(error)}`,
+            repairable: false, disposition: "review", origin: rejected ? "deterministic" : "infrastructure",
+          });
+        }
+      }
+
 
       // postingIdentity、replyDisplayRole 与 routingReason 已在线程规划时冻结。
       // 读者模型只负责在该线程 questionIntent / gap 职责内写可见问题；这里不再
       // 根据成稿问题调用模型重分配，避免“先写问题、后换角色”的映射漂移。
       // 阶段2A-O 机构答复(三身份:publisher 项目发布账号/staff 助理/expert 机构 IP,
       // 各≤1 次,该身份无线程则跳过):每次调用只见本角色身份卡与逐 gap 口径
-      // scope,其他身份的任何信息不出现。每个调用独立 try/catch:失败或缺 id
-      // 的线程回落 answerFromPlan 并记 warning(沿用 stageIssues 通道,不阻断候选)。
+      // scope,其他身份的任何信息不出现。每个调用独立 try/catch；失败、缺 id
+      // 或证据不足时答复保持空缺，由最终完整性校验阻断，不生成替代话术。
       const hostAnswersById = new Map<string, StagedOrgAnswersCopy["answers"][number]>();
       const hostAnswerThreads = orchestrationPlan.dialogueThreads
         .map((planned, index) => ({ planned, reader: readerSide.threads[index]! }))
@@ -2956,23 +2964,22 @@ export class ContentGenerationAgent implements GenerationEngine {
           for (const { planned } of hostAnswerThreads) {
             const found = hostSide.answers.find((answer) => answer.id === planned.id);
             if (found) hostAnswersById.set(planned.id, found);
-            else stageIssues.push({ code: "model_host_answer_failed", severity: "warning", channel: "Cref", message: `楼主答复未覆盖线程 ${planned.id}，已回落到人工确认事实。`, repairable: false });
+            else stageIssues.push({
+              code: "model_host_answer_failed", severity: "warning", channel: "Cref",
+              message: `楼主答复未覆盖线程 ${planned.id}；该答复保持空缺并阻断交付。`,
+              repairable: false, disposition: "review", origin: "agent",
+            });
           }
         } catch (error) {
           stageIssues.push({
             code: "model_host_answer_failed",
             severity: "warning",
             channel: "Cref",
-            message: `楼主答复阶段失败，已回落到人工确认事实：${error instanceof Error ? error.message : String(error)}`,
-            repairable: false,
+            message: `楼主答复阶段失败；答复保持空缺并阻断交付：${error instanceof Error ? error.message : String(error)}`,
+            repairable: false, disposition: "review", origin: "infrastructure",
           });
         }
       }
-      const hostFallback = (planned: OrchestrationPlan["dialogueThreads"][number]): string => {
-        const fact = input.config.task.authorContext.facts.find((item) => (planned.authorFactIds ?? []).includes(item.id));
-        return fact?.statement ?? answerFromPlan(planned);
-      };
-
       const orgAnswersById = new Map<string, StagedOrgAnswersCopy["answers"][number]>();
       let ownedFirstComment: string | undefined;
       const orgAnswerThreads = orchestrationPlan.dialogueThreads
@@ -2988,7 +2995,11 @@ export class ContentGenerationAgent implements GenerationEngine {
         ]));
         const modelEligibleThreads = identityThreads.filter(({ planned }) => (evidenceByThread.get(planned.id)?.length ?? 0) > 0);
         for (const { planned } of identityThreads.filter(({ planned }) => !modelEligibleThreads.some((item) => item.planned.id === planned.id))) {
-          orgAnswersById.set(planned.id, { id: planned.id, answer: ORGANIZATION_UNKNOWN_ANSWER });
+          stageIssues.push({
+            code: "model_org_answer_skipped_no_evidence", severity: "warning", channel: "Cref",
+            message: `线程 ${planned.id} 没有可支持机构答复的事实来源；答复保持空缺，未用系统模板代写。`,
+            repairable: false, disposition: "review", origin: "deterministic",
+          });
         }
         // No factual source means there is nothing an accountable organization
         // answer model may safely add. Skip the call instead of paying it to
@@ -3036,19 +3047,15 @@ export class ContentGenerationAgent implements GenerationEngine {
             if (found && organizationAnswerSupported(found.answer, references)) {
               orgAnswersById.set(planned.id, found);
             } else {
-              orgAnswersById.set(planned.id, {
-                id: planned.id,
-                answer: safeOrganizationFallback(planned, references),
-              });
               stageIssues.push({
                 code: "model_org_answer_failed",
-                severity: "warning",
+                severity: "error",
                 channel: "Cref",
                 message: found
-                  ? `机构答复（${identity}）在线程 ${planned.id} 新增了证据未支持的事实或服务动作，已确定性回落安全口径。`
-                  : `机构答复（${identity}）未覆盖线程 ${planned.id}，该线程答复已回落安全口径。`,
+                  ? `机构答复（${identity}）在线程 ${planned.id} 新增了证据未支持的内容；原答复已隔离，节点保持空缺。`
+                  : `机构答复（${identity}）未覆盖线程 ${planned.id}；节点保持空缺。`,
                 repairable: false,
-                disposition: "advisory",
+                disposition: "block",
                 origin: "deterministic",
               });
             }
@@ -3058,8 +3065,8 @@ export class ContentGenerationAgent implements GenerationEngine {
             code: "model_org_answer_failed",
             severity: "warning",
             channel: "Cref",
-            message: `机构答复（${identity}）阶段失败，该角色线程答复已回落规划口径：${error instanceof Error ? error.message : String(error)}`,
-            repairable: false,
+            message: `机构答复（${identity}）阶段失败；该角色线程答复保持空缺：${error instanceof Error ? error.message : String(error)}`,
+            repairable: false, disposition: "review", origin: "infrastructure",
           });
         }
       }
@@ -3076,17 +3083,14 @@ export class ContentGenerationAgent implements GenerationEngine {
           return {
             id: reader.id,
             question: reader.question,
-            // T3 恒空;T2 读者B接话来自读者侧;T1 机构答复,缺失时回落规划口径。
+            // T3 恒空；T2 读者B接话来自读者侧；可追责答复缺失时保持空缺。
             answer: threadKind === "organic_reaction"
               ? ""
               : threadKind === "reader_exchange"
                 ? reader.answer
                 : threadKind === "host_reply"
-                  ? (hostAnswer?.answer ?? hostFallback(planned))
-                  : (orgAnswer?.answer ?? safeOrganizationFallback(
-                    planned,
-                    factualEvidenceForThread(planned, orchestrationPlan, availableEvidence),
-                  )),
+                  ? (hostAnswer?.answer ?? "")
+                  : (orgAnswer?.answer ?? ""),
             kind: reader.kind,
             answerKind: hostAnswer?.answerKind ?? orgAnswer?.answerKind ?? reader.answerKind,
             boundary: threadKind === "host_reply" ? undefined : (orgAnswer?.boundary ?? reader.boundary),
@@ -3177,7 +3181,11 @@ export class ContentGenerationAgent implements GenerationEngine {
             (evidenceByRequestId.get(`${thread.id}:fu:${followUpIndex}`)?.length ?? 0) > 0);
           for (const { thread, followUpIndex } of items.filter(({ thread, followUpIndex }) =>
             !modelEligibleItems.some((item) => item.thread.id === thread.id && item.followUpIndex === followUpIndex))) {
-            filledAnswers.set(`${thread.id}:fu:${followUpIndex}`, ORGANIZATION_UNKNOWN_ANSWER);
+            stageIssues.push({
+              code: "comment_followup_answer_unavailable", severity: "warning", channel: "Cref",
+              message: `线程 ${thread.id} 的第 ${followUpIndex + 1} 条追问没有可支持答复的事实来源；未用系统模板代写，该可选追问将不进入成稿。`,
+              repairable: false, disposition: "review", origin: "deterministic",
+            });
           }
           if (!modelEligibleItems.length) continue;
           try {
@@ -3211,16 +3219,15 @@ export class ContentGenerationAgent implements GenerationEngine {
               if (found?.answer.trim() && organizationAnswerSupported(found.answer, references)) {
                 filledAnswers.set(requestId, found.answer);
               } else {
-                filledAnswers.set(requestId, safeOrganizationFallback(planned, references));
                 stageIssues.push({
                   code: "model_org_answer_failed",
                   severity: "warning",
                   channel: "Cref",
                   message: found
-                    ? `机构补答（${identity}）在线程 ${thread.id} 的第 ${followUpIndex + 1} 条追问新增了证据未支持的内容，已回落安全口径。`
-                    : `机构补答（${identity}）未覆盖线程 ${thread.id} 的第 ${followUpIndex + 1} 条追问，已回落安全口径。`,
+                    ? `机构补答（${identity}）在线程 ${thread.id} 的第 ${followUpIndex + 1} 条追问新增了证据未支持的内容；原答复已隔离，该可选追问将不进入成稿。`
+                    : `机构补答（${identity}）未覆盖线程 ${thread.id} 的第 ${followUpIndex + 1} 条追问；该可选追问将不进入成稿。`,
                   repairable: false,
-                  disposition: "advisory",
+                  disposition: "review",
                   origin: "deterministic",
                 });
               }
@@ -3386,42 +3393,11 @@ export class ContentGenerationAgent implements GenerationEngine {
           }),
         },
       };
-      const continuity = normalizeReaderExchangeContinuity(
-        { ...deterministicBase, content: stagedContent },
-        orchestrationPlan,
-      );
-      stagedContent = continuity.draft.content;
-      if (continuity.changedThreadIds.length) {
-        stageIssues.push({
-          code: "comment_reply_topic_normalized",
-          severity: "warning",
-          disposition: "advisory",
-          origin: "deterministic",
-          channel: "Cref",
-          message: `读者互聊中 ${continuity.changedThreadIds.length} 条跨题接话已在进入证据台账前收束为同题共鸣。`,
-          repairable: false,
-        });
-      }
-      const beforeLength = [...stagedContent.N.body].length;
-      const preLedgerDraft = trimMinorBodyOverflowBeforeLedger(
-        { ...deterministicBase, content: stagedContent },
-        orchestrationPlan,
-        input.config,
-      );
-      stagedContent = preLedgerDraft.content;
-      if ([...stagedContent.N.body].length < beforeLength) {
-        stageIssues.push({
-          code: "body_minor_overflow_trimmed",
-          severity: "warning",
-          disposition: "advisory",
-          origin: "deterministic",
-          channel: "N.body",
-          message: `正文轻微超过 ${input.config.content.bodyMaxChars} 字，已在证据台账前按句界确定性收束。`,
-          repairable: false,
-        });
-      }
+      // The ledger sees the exact accepted agent copy. Length defects are routed
+      // to the core editor/final validator; deterministic code never trims prose.
       draft = {
-        ...preLedgerDraft,
+        ...deterministicBase,
+        content: stagedContent,
         ...(commentEditorialAssessment ? { commentEditorialAssessment } : {}),
       };
       const ledgerPrompt = buildStagedLedgerPrompt(promptInput, stagedContent);

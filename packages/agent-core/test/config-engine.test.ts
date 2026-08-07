@@ -347,7 +347,8 @@ describe("three-candidate content generation engine", () => {
     value.task.mustMention = ["适用边界"];
     value.content.bodyMinChars = 40;
     value.content.hashtagMin = 2;
-    value.content.commentThreadMin = 1;
+    value.content.commentThreadMin = 0;
+    value.content.commentThreadMax = 0;
     value.generation.maxRepairAttempts = 2;
     value.task.forbidden = ["按资料逐项核实"];
     value.model.model = "provider-selected-model";
@@ -366,8 +367,9 @@ describe("three-candidate content generation engine", () => {
       .every((item) => item.maxOutputTokens === GENERATION_OUTPUT_TOKENS)).toBe(true);
     expect(calls.filter((item) => item.metadata?.purpose === "generate_ledger")
       .every((item) => item.maxOutputTokens === GENERATION_LEDGER_OUTPUT_TOKENS)).toBe(true);
-    // 按侧+按角色隔离后,评论读者侧调用取代原合并评论调用(purpose 更名)。
-    expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_readers")).toHaveLength(3);
+    // This repair-loop fixture disables comments so a partial Cref artifact cannot
+    // mask the N.body repair behavior under test.
+    expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_readers")).toHaveLength(0);
     // Task 7.3: multi-turn comment growth (stage 2B) is opt-in and conservative by
     // default, so with the default config it never fires the extra LLM growth call.
     // The pipeline still produces valid root comments and fails closed as expected.
@@ -383,8 +385,9 @@ describe("three-candidate content generation engine", () => {
     }));
     expect(calls.every((item) => item.model === "provider-selected-model")).toBe(true);
     expect(result.packages.map((item) => item.validation.repairAttempts)).toEqual([1, 1, 1]);
-    expect(result.packages.every((item) => item.validation.valid === false
-      && item.validation.issues.some((issue) => issue.disposition === "block" || issue.severity === "error"))).toBe(true);
+    expect(result.packages[0]!.validation.valid).toBe(false);
+    expect(result.packages[0]!.validation.issues.some((issue) => issue.disposition === "block" || issue.severity === "error")).toBe(true);
+    expect(result.packages.slice(1).every((item) => item.validation.valid === true)).toBe(true);
   });
 
   it("fails closed when one initial model request fails instead of returning a publishable fallback", async () => {
@@ -662,9 +665,7 @@ describe("three-candidate content generation engine", () => {
               question: index === 0
                 ? "适用条件目前还不能确定，具体情况和信息范围要怎么核实？"
                 : `适用条件还没问清，第${index + 1}项现实情况该怎么确认？`,
-              answer: index === 0
-                ? "我也还不能确定，准备把自己的具体情况一起问清。"
-                : "我会先补充自己的限制，再核实信息范围。",
+              answer: index === 0 ? "同问，我也没想明白。" : "我也拿不准。",
               followUps: [],
             })),
           }),
@@ -677,9 +678,7 @@ describe("three-candidate content generation engine", () => {
               question: index === 0
                 ? "适用条件目前还不能确定，具体情况和信息范围要怎么核实？"
                 : `适用条件还没问清，第${index + 1}项现实情况该怎么确认？`,
-              answer: index === 0
-                ? "我也还不能确定，准备把自己的具体情况一起问清。"
-                : "我会先补充自己的限制，再核实信息范围。",
+              answer: index === 0 ? "同问，我也没想明白。" : "我也拿不准。",
             })),
             assessment: { status: "pass", reasons: [], summary: "已保留同题但不同处境的自然问法。" },
           }),
@@ -697,9 +696,7 @@ describe("three-candidate content generation engine", () => {
               question: index === 0
                 ? "适用条件目前还不能确定，具体情况和信息范围要怎么核实？"
                 : `适用条件还没问清，第${index + 1}项现实情况该怎么确认？`,
-              answer: index === 0
-                ? "我也还不能确定，准备把自己的具体情况一起问清。"
-                : "我会先补充自己的限制，再核实信息范围。",
+              answer: index === 0 ? "同问，我也没想明白。" : "我也拿不准。",
               followUps: [],
             })),
           }),
@@ -787,12 +784,13 @@ describe("three-candidate content generation engine", () => {
         imageAnalyses: approvedImageAnalyses,
       },
     });
-    // 发布拓扑与身份已在规划期冻结。该夹具没有网络诊断问题，因此按需终编零调用。
+    // 该夹具的读者问题与互聊已满足冻结合同，不触发两个编辑阶段。
     // 三候选各自只调用 core + readers + growth + ledger。
     expect(calls).toHaveLength(12);
     expect(calls.filter((item) => item.metadata?.purpose === "pair_style_repair")).toHaveLength(0);
     expect(calls.filter((item) => item.metadata?.purpose === "assign_reply_identities")).toHaveLength(0);
     expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_readers")).toHaveLength(3);
+    expect(calls.filter((item) => item.metadata?.purpose === "edit_comment_openers")).toHaveLength(0);
     expect(calls.filter((item) => item.metadata?.purpose === "edit_comment_readers")).toHaveLength(0);
     expect(calls.filter((item) => item.metadata?.purpose === "generate_org_answers")).toHaveLength(0);
     expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_growth")).toHaveLength(3);
@@ -834,18 +832,16 @@ describe("three-candidate content generation engine", () => {
       .every((thread) => !thread.roleCard && !thread.replyPlan && !thread.primaryGapId && thread.evidenceIds.length === 0))).toBe(true);
     expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => thread.followUps.length <= 2))).toBe(true);
     expect(result.packages.some((item) => item.content.Cref.threads.some((thread) => thread.followUps.length === 0))).toBe(true);
-    // 无事实证据的 T1 机构位确定性保留未知；T2 仍采用读者侧文案；
-    // T3 漂浮短反应恒空。任何机构位都不能把 mock 的“按资料核实”当事实答复。
+    // 无可用答复的 T1 机构位保持空缺并由校验阻断；T2 仍采用读者侧文案；
+    // T3 漂浮短反应恒空。系统不得用“当前无法确认”等模板伪装成已完成答复。
     expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => {
       const kind = thread.threadKind ?? "org_answer";
-      if (kind === "organic_reaction") return thread.answer === "";
-      if (kind === "reader_exchange") {
-        return Boolean(thread.answer.trim())
-          && !/(?:官网|执照|资质|地址|预约|帮.*确认|稍后|私信|对接|安排|发给)/u.test(thread.answer);
-      }
-      return /(?:当前|目前).{0,12}(?:无法确认|不能确定)/u.test(thread.answer)
-        && !/(?:帮.*确认|稍后|私信|预约|对接|安排|发给|保证|承诺)/u.test(thread.answer);
+      if (kind === "organic_reaction" || kind === "org_answer" || kind === "host_reply") return thread.answer === "";
+      return Boolean(thread.answer.trim())
+        && !/(?:官网|执照|资质|地址|预约|帮.*确认|稍后|私信|对接|安排|发给)/u.test(thread.answer);
     }))).toBe(true);
+    expect(result.packages.every((item) => item.validation.issues.some((issue) =>
+      issue.code === "comment_answer_unavailable" && issue.disposition === "block"))).toBe(true);
     expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => !/直接回答\s*[：:]|NextQuestion\s*[：:]/u.test(thread.answer)))).toBe(true);
     expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => !thread.question.includes("…")))).toBe(true);
     // 缺口边界流入 stage1/stage3 全量上下文(task_data)与机构侧逐 gap 口径;
