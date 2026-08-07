@@ -1011,57 +1011,86 @@ describe("按侧+按角色隔离的引擎合并", () => {
     expect(result.packages.flatMap((pkg) => pkg.content.Cref.threads).every((thread) => thread.question !== "今天天气怎么样？")).toBe(true);
   });
 
-  it("模型输出携带漂移字段时,surfaceRoleCard/postingIdentity/线程形态仍以规划层为准", async () => {
+  it("采访腔由读者编辑Agent纠正，原子验收后才进入答复阶段", async () => {
+    let openerEditorCalls = 0;
     const provider: ModelProvider = {
       async generate(request) {
         const purpose = String(request.metadata?.purpose);
         if (purpose === "generate_comment_readers") {
-          // 漂移字段:全部线程冒充同一 roleIndex、自称 staff、自写免责声明;
-          // 这些字段在解析与合并层都不应生效。
           return {
             text: JSON.stringify({
-              disclaimer: "模型自编免责声明",
-              threads: stagedThreadIds(request).map((id, index) => ({
-                id,
-                roleIndex: 0,
-                postingIdentity: "staff",
-                question: `第${index + 1}项应该核实什么？`,
-                answer: "姐妹我也蹲一个",
-                followUps: [],
-              })),
+              threads: [...requestText(request).matchAll(/"id"\s*:\s*"([^"]*_thread_\d+)"[\s\S]*?"gap标签"\s*:\s*"([^"]+)"/gu)]
+                .map((match) => ({
+                  id: match[1]!,
+                  question: `${match[2]}有哪些可核验的信息？`,
+                  answer: "姐妹我也蹲一个",
+                })),
+            }),
+            raw: {},
+          };
+        }
+        if (purpose === "edit_comment_openers") {
+          openerEditorCalls += 1;
+          return {
+            text: JSON.stringify({
+              threads: frozenReaderThreads(request, true),
+              assessment: { status: "pass", reasons: [], summary: "已按人物处境改写。" },
             }),
             raw: {},
           };
         }
         if (purpose === "generate_org_answers") {
-          const answer = request.metadata?.identity === "staff" ? "这个我让专人跟你确认。" : "这个得看个人条件，我先不乱说。";
-          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer })) }), raw: {} };
+          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "这一项先按现有依据确认。" })) }), raw: {} };
         }
         if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
         return { text: coreResponse(), raw: {} };
       },
     };
     const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-07-12T12:00:00Z") })
-      .generate({ jobId: "role-isolation-merge", config: engineConfig(), formulaVersion: DEFAULT_FORMULA_VERSION, knowledge, planningContext });
-    expect(result.packages).toHaveLength(3);
+      .generate({ jobId: "reader-editor-success", config: engineConfig(), formulaVersion: DEFAULT_FORMULA_VERSION, knowledge, planningContext });
+
+    expect(openerEditorCalls).toBe(3);
     for (const pkg of result.packages) {
-      const planned = pkg.dialogueThreads ?? [];
-      const threads = pkg.content.Cref.threads;
-      // 形状回归:线程数与规划一致,免责声明为确定性常量(模型自编文本不生效)。
-      expect(threads.length).toBe(planned.length);
-      expect(pkg.content.Cref.disclaimer).toBe(STAGED_COMMENT_DISCLAIMER);
-      for (const [index, thread] of threads.entries()) {
-        const plan = planned[index]!;
-        const kind = plan.threadKind ?? "org_answer";
-        expect(thread.threadKind ?? "org_answer").toBe(kind);
-        // 身份与人物卡以规划层为准:漂移的 roleIndex/postingIdentity 不生效。
-        expect(thread.postingIdentity).toBe(plan.postingIdentity);
-        expect(thread.surfaceRoleCard).toEqual(plan.surfaceRoleCard);
-        // 答复来源:T3 恒空;T2 来自读者侧;T1 来自对应角色的机构调用。
-        if (kind === "organic_reaction") expect(thread.answer).toBe("");
-        else if (kind === "reader_exchange") expect(thread.answer).toBe("姐妹我也蹲一个");
-        else expect(thread.answer).toBe("这一项当前无法确认，先不下结论。");
+      expect(pkg.commentEditorialAssessment).toMatchObject({ status: "pass", summary: "已按人物处境改写。" });
+      for (const [index, thread] of pkg.content.Cref.threads.entries()) {
+        const planned = pkg.dialogueThreads![index]!;
+        expect(thread.postingIdentity).toBe(planned.postingIdentity);
+        expect(thread.surfaceRoleCard).toEqual(planned.surfaceRoleCard);
+        expect(thread.questionContext).toEqual(planned.questionContext);
+        expect(thread.question).not.toMatch(/公开渠道|有哪些可核验|具体要看什么条件|需要核实哪些信息/u);
       }
+      expect(pkg.validation.issues.some((issue) => issue.code === "reader_editor_unavailable" || issue.code === "reader_editor_contract_rejected")).toBe(false);
+    }
+  });
+
+  it("读者编辑不可用时保留模型原文并进入复核，不用服务端模板代写", async () => {
+    const rawById = new Map<string, string>();
+    const provider: ModelProvider = {
+      async generate(request) {
+        const purpose = String(request.metadata?.purpose);
+        if (purpose === "generate_comment_readers") {
+          const threads = [...requestText(request).matchAll(/"id"\s*:\s*"([^"]*_thread_\d+)"[\s\S]*?"gap标签"\s*:\s*"([^"]+)"/gu)]
+            .map((match) => {
+              const question = `${match[2]}有哪些可核验的信息？`;
+              rawById.set(match[1]!, question);
+              return { id: match[1]!, question, answer: "姐妹我也蹲一个" };
+            });
+          return { text: JSON.stringify({ threads }), raw: {} };
+        }
+        if (purpose === "edit_comment_openers") throw new Error("reader editor unavailable");
+        if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
+        return { text: coreResponse(), raw: {} };
+      },
+    };
+    const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-07-12T12:00:00Z") })
+      .generate({ jobId: "reader-editor-failure", config: engineConfig(), formulaVersion: DEFAULT_FORMULA_VERSION, knowledge, planningContext });
+
+    for (const pkg of result.packages) {
+      for (const thread of pkg.content.Cref.threads) expect(thread.question).toBe(rawById.get(thread.id));
+      expect(pkg.validation.qualityStatus).not.toBe("passed");
+      expect(pkg.validation.issues).toContainEqual(expect.objectContaining({
+        code: "reader_editor_unavailable", disposition: "review", origin: "infrastructure",
+      }));
     }
   });
 
@@ -1136,7 +1165,7 @@ describe("按侧+按角色隔离的引擎合并", () => {
     }
   });
 
-  it("无事实证据的机构线程零调用并确定性保留未知", async () => {
+  it("无事实证据的机构线程零调用并保持答复空缺，不用安全模板伪装完成", async () => {
     const calls: ModelGenerationRequest[] = [];
     const provider: ModelProvider = {
       async generate(request) {
@@ -1161,9 +1190,15 @@ describe("按侧+按角色隔离的引擎合并", () => {
     expect(calls.filter((call) => call.metadata?.purpose === "generate_org_answers")).toHaveLength(0);
     for (const pkg of result.packages) {
       for (const thread of pkg.content.Cref.threads.filter((item) => item.threadKind === "org_answer")) {
-        expect(thread.answer).toBe("这一项当前无法确认，先不下结论。");
-        expect(thread.answer).not.toMatch(/(?:帮.*确认|稍后|私信|预约|对接|安排|发给)/u);
+        expect(thread.answer).toBe("");
       }
+      expect(pkg.validation.qualityStatus).toBe("blocked");
+      expect(pkg.validation.issues).toContainEqual(expect.objectContaining({
+        code: "comment_answer_unavailable", disposition: "block", origin: "deterministic",
+      }));
+      expect(pkg.validation.issues).toContainEqual(expect.objectContaining({
+        code: "model_org_answer_skipped_no_evidence", disposition: "review", origin: "deterministic",
+      }));
     }
   });
 

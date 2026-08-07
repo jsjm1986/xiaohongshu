@@ -792,8 +792,13 @@ describe("non-vector orchestration planning", () => {
         expect(plan.dialogueThreads.filter((thread) => thread.coverageRole === "topic_anchor")).toHaveLength(selectedConfig.content.commentThreadMin - 2);
         expect(plan.dialogueThreads.every((thread) => thread.auxiliaryGapIds.length === 0)).toBe(true);
         expect(plan.dialogueThreads.every((thread) => thread.conversationPlan?.targetFollowUps === 0)).toBe(true);
-        expect(plan.dialogueThreads.filter((thread) => thread.coverageRole === "primary_gap")
-          .every((thread) => thread.surfaceRoleCard?.displayRole === `${plan.gapPlanningCards?.find((card) => card.gapId === thread.primaryGapId)?.label}核实者`)).toBe(true);
+        const primaryThreads = plan.dialogueThreads.filter((thread) => thread.coverageRole === "primary_gap");
+        expect(primaryThreads.every((thread) => Boolean(
+          thread.questionContext?.personaLabel
+          && thread.questionContext.currentAction
+          && thread.questionContext.practicalConstraint
+          && thread.questionContext.askingTrigger,
+        ))).toBe(true);
         expect(JSON.stringify(plan.dialogueThreads.map((thread) => thread.surfaceRoleCard))).not.toMatch(/价格|多少钱|加项|团购|优惠|效果|恢复/u);
         expect(plan.personaScenePlan?.commentNetwork.multiTurnTarget).toEqual([0, 0]);
         expect(plan.focusContract?.effectiveAngle).not.toContain("真实到店体验");
@@ -835,8 +840,13 @@ describe("non-vector orchestration planning", () => {
       expect(unknown?.obligation).toBe("network_required");
       expect(plan.contentIntent?.bodyMustEstablish).not.toContain("org_info");
       const thread = plan.dialogueThreads.find((item) => item.primaryGapId === "org_info")!;
-      expect(thread.surfaceRoleCard).toMatchObject({
-        displayRole: "机构信息核实者", interactionHook: "机构信息", lexicalCues: [],
+      expect(thread.surfaceRoleCard).toMatchObject({ lexicalCues: [] });
+      expect(thread.questionContext).toMatchObject({
+        askingTrigger: "机构信息",
+        personaLabel: expect.any(String),
+        situation: expect.any(String),
+        currentAction: expect.any(String),
+        practicalConstraint: expect.any(String),
       });
       expect(thread.roleCard.constraints).toEqual([]);
       expect(JSON.stringify(thread.surfaceRoleCard)).not.toMatch(/价格|费用|优惠|效果|恢复/u);
