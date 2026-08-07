@@ -491,6 +491,7 @@ describe("marketing_claim_grounding (助理营销话术锚定复核)", () => {
           status: "fact",
           evidenceIds: ["ev_k1"],
           location: "Cref.thread",
+          occurrence: { field: "answer", threadId: "t1" },
           sourceSpans: [{ evidenceId: "ev_k1", quote: "价格一般5000到8000元，以当期确认为准。" }],
         }],
       }))),
@@ -536,7 +537,7 @@ describe("marketing_claim_grounding (助理营销话术锚定复核)", () => {
  * 证据"由读者侧角色卡在提示词里承担(见 prompt.ts READER_ROLE_EVIDENCE_
  * PROHIBITIONS),不在校验层按配额拦。
  */
-describe("fabricated_operational_experience (标注制:只拦证词形态与蓝图禁令)", () => {
+describe("consumer experience labelling (消费者亲历允许，机构冒充消费者仍阻断)", () => {
   /** 经历类禁语的真源是蓝图:同一句话在不同行业结论相反,由这里参数化。 */
   const blueprintWithProhibitedHistories = (terms: string[]) =>
     dualIdentityBlueprint("recurring", terms);
@@ -557,11 +558,12 @@ describe("fabricated_operational_experience (标注制:只拦证词形态与蓝�
     expect(codes(issues)).not.toContain("fabricated_operational_experience");
   });
 
-  it("证词形态(第一人称完成＋效果背书)仍是 error——那是独立口碑不是处境", () => {
+  it("已标注模拟消费者可以讲完成经历与主观效果，但只作为创作参考", () => {
     const issues = validate(
       parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({ id: "t1", question: "我做过了，效果真的很好，姐妹们可以冲。" })]))),
     );
-    expect(issues).toContainEqual(expect.objectContaining({ code: "fabricated_operational_experience", severity: "error" }));
+    expect(codes(issues)).not.toContain("fabricated_operational_experience");
+    expect(issues).toContainEqual(expect.objectContaining({ code: "creative_persona_experience", severity: "warning" }));
   });
 
   it("经历类禁语按蓝图真源拦,不按跨行业词表:同一句话在两个行业结论相反", () => {
@@ -571,12 +573,12 @@ describe("fabricated_operational_experience (标注制:只拦证词形态与蓝�
     const question = "我是老用户了，想问下这次还一样吗？";
     const draft = () => parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({ id: "t1", question })])));
 
-    // (a) 蓝图把"老用户"列为禁止声称 → error。
+    // (a) 蓝图把“老用户”列为风险提示，也不能覆盖产品级的“消费者亲历允许”合同。
     const declared = validate(draft(), {
       projectBlueprint: blueprintWithProhibitedHistories(["老用户", "回购"]),
     });
-    expect(declared, "蓝图列了禁语就该拦").toContainEqual(
-      expect.objectContaining({ code: "fabricated_operational_experience", severity: "error" }));
+    expect(codes(declared), "模拟消费者身份经历只能作为创作参考，不应被当作造假硬拦")
+      .not.toContain("fabricated_operational_experience");
 
     // (b) 蓝图没列(中性语境) → 不拦,也不该由校验层猜。
     const undeclared = validate(draft(), {
@@ -629,7 +631,7 @@ describe("fabricated_operational_experience (标注制:只拦证词形态与蓝�
     }
   });
 
-  it("否定豁免不过度:同句里真实声称仍然拦", () => {
+  it("模拟消费者真实声称经历也只作为创作参考，不因肯定或否定句式改变", () => {
     const blueprint = blueprintWithProhibitedHistories(["续费", "复购"]);
     for (const sentence of [
       "我复购过两次了，想问下这次还一样吗？",
@@ -640,7 +642,7 @@ describe("fabricated_operational_experience (标注制:只拦证词形态与蓝�
         parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({ id: "t1", question: sentence })]))),
         { projectBlueprint: blueprint },
       );
-      expect(codes(issues), `真实声称必须仍被拦:${sentence}`).toContain("fabricated_operational_experience");
+      expect(codes(issues), `已标注消费者亲历应允许:${sentence}`).not.toContain("fabricated_operational_experience");
     }
   });
 

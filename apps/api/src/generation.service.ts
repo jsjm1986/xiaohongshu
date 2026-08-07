@@ -1208,7 +1208,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       const knowledge = await this.loadKnowledge(job.project_id, config.knowledge, '内容生成');
       this.progress(jobId, 44);
       const planningContext = await this.intelligence.hydratePlanningContext(job.project_id, storedPlanningContext);
-      const agent = new ContentGenerationAgent({ modelProvider: this.modelProvider(providerSettings, jobId) });
+      const agent = new ContentGenerationAgent({ modelProvider: this.modelProvider(providerSettings, jobId), deliveryReadinessPolicy: 'formal' });
       const result = await agent.generate({
         jobId,
         config,
@@ -1454,7 +1454,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
           return provider.generate(request);
         },
       } : undefined;
-      const agent = new ContentGenerationAgent({ modelProvider: trackedProvider });
+      const agent = new ContentGenerationAgent({ modelProvider: trackedProvider, deliveryReadinessPolicy: 'formal' });
       const result = await agent.revise({
         package: current,
         instruction: task.instruction,
@@ -1752,6 +1752,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
         ? createSafeModelFetch({
             allowHttp: this.options.byokAllowHttp,
             allowPrivateNetwork: this.options.byokAllowPrivateNetwork,
+            allowProxyFakeIp: this.options.byokAllowProxyFakeIp,
           })
         : undefined,
       maxOutputTokenLimit: modelOutputTokenLimit(settings),
@@ -1914,6 +1915,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     return {
       id: content.candidateId,
       packageId: content.id,
+      candidateIndex: content.candidateIndex,
       label: '随机候选',
       title: content.content.N.title,
       body: content.content.N.body,

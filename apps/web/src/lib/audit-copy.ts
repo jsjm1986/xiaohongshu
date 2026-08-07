@@ -136,6 +136,7 @@ export const AUDIT_ACTION_COPY: Record<string, AuditCopy> = {
   'research.release.activate': { label: '启用研究发布' },
   'research.release.baseline': { label: '建立发布基线', automatic: true },
   'research.release.baseline-heal': { label: '契约漂移后自动重建基线', automatic: true },
+  'research.release.baseline-reactivate': { label: '重新启用既有发布基线', automatic: true },
 };
 
 /** entityType → 中文资源名。键是后端写入的表名/资源名字面量。 */

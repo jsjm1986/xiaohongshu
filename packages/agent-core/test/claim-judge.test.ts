@@ -28,12 +28,14 @@ const EV_RECOVERY = "evidence_recovery";
 const EV_GIFT = "evidence_gift";
 const EV_FOLLOWUP = "evidence_followup";
 const EV_INFERRED = "evidence_inferred";
+const EV_REVIEW = "evidence_review";
 
 const evidenceSources: Record<string, string> = {
   [EV_RECOVERY]: "根据店内记录,消肿一般7天左右,但每个人体质不同,也有人可能需要两三周。",
   [EV_GIFT]: "本月到店有赠送护理包,数量有限。",
   [EV_FOLLOWUP]: "恢复期以复诊记录为准,大多数人一到两周。",
   [EV_INFERRED]: "消肿一般7天左右。",
+  [EV_REVIEW]: "根据店内记录（消肿一般7天左右）但每个人体质不同也有人可能需要两三周",
 };
 
 function evidenceReference(id: string, evidenceStatus: EvidenceReference["evidenceStatus"]): EvidenceReference {
@@ -54,6 +56,7 @@ const evidenceReferences = [
   evidenceReference(EV_GIFT, "user_supplied"),
   evidenceReference(EV_FOLLOWUP, "observed"),
   evidenceReference(EV_INFERRED, "inferred"),
+  evidenceReference(EV_REVIEW, "observed"),
 ];
 
 // 受控声明规则:词面命中"恢复期"即要求证据。与 knowledge-anchor.test.ts 同一蓝图。
@@ -168,6 +171,12 @@ function anchorContext(overrides: Partial<KnowledgeAnchorContext> = {}): Knowled
   };
 }
 
+const reviewContext = anchorContext({
+  allowedEvidenceIds: [EV_REVIEW],
+  evidenceSources: { [EV_REVIEW]: evidenceSources[EV_REVIEW]! },
+  evidenceReferences: [evidenceReference(EV_REVIEW, "observed")],
+});
+
 function makeDraft(body: string): GenerationDraft {
   return parseGenerationDraft(JSON.stringify({
     content: {
@@ -193,8 +202,7 @@ function validationConfig() {
 }
 
 /** 敏感声明校验结果:只取 error 级 sensitive_claim_without_evidence。 */
-function sensitiveClaimIssues(draft: GenerationDraft) {
-  const context = anchorContext();
+function sensitiveClaimIssues(draft: GenerationDraft, context = reviewContext) {
   return validateGenerationDraft({
     draft,
     config: validationConfig(),
@@ -219,8 +227,8 @@ function spyProvider(text: string): ModelProvider & { requests: ModelGenerationR
 
 /** 机械锚定后的 draft:句面命中词表但锚不到证据,正是判官的输入。 */
 function unanchoredDraft(body: string): GenerationDraft {
-  const draft = attachKnowledgeAnchors(makeDraft(body), anchorContext());
-  expect(collectUnanchoredSensitiveClaims(draft, anchorContext())).toHaveLength(1);
+  const draft = attachKnowledgeAnchors(makeDraft(body), reviewContext);
+  expect(collectUnanchoredSensitiveClaims(draft, reviewContext)).toHaveLength(1);
   return draft;
 }
 
@@ -233,11 +241,11 @@ describe("judgeSensitiveClaimsWithModel 四类句子裁决", () => {
     const provider = spyProvider(JSON.stringify({
       judgments: [{ statementIndex: 0, classification: "service_offer", supported: null, quote: null }],
     }));
-    const judged = await judgeSensitiveClaimsWithModel(provider, draft, anchorContext(), { model: "test-model" });
+    const judged = await judgeSensitiveClaimsWithModel(provider, draft, reviewContext, { model: "test-model" });
     expect(provider.requests).toHaveLength(1);
     expect(provider.requests[0]).toMatchObject({ schemaName: "claim_judge", model: "test-model" });
     expect(judged.claimJudgments).toEqual([
-      { statement: "想约的姐妹私聊我,帮你安排恢复期的面诊。", classification: "service_offer" },
+      { statement: "帮你安排恢复期的面诊。", classification: "service_offer" },
     ]);
     expect(sensitiveClaimIssues(judged)).toEqual([]);
   });
@@ -249,7 +257,7 @@ describe("judgeSensitiveClaimsWithModel 四类句子裁决", () => {
     const provider = spyProvider(JSON.stringify({
       judgments: [{ statementIndex: 0, classification: "hedge", supported: null, quote: null }],
     }));
-    const judged = await judgeSensitiveClaimsWithModel(provider, draft, anchorContext(), {});
+    const judged = await judgeSensitiveClaimsWithModel(provider, draft, reviewContext, {});
     expect(judged.claimJudgments).toEqual([
       { statement: "具体恢复期以面诊为准。", classification: "hedge" },
     ]);
@@ -263,7 +271,7 @@ describe("judgeSensitiveClaimsWithModel 四类句子裁决", () => {
     const provider = spyProvider(JSON.stringify({
       judgments: [{ statementIndex: 0, classification: "question", supported: null, quote: null }],
     }));
-    const judged = await judgeSensitiveClaimsWithModel(provider, draft, anchorContext(), {});
+    const judged = await judgeSensitiveClaimsWithModel(provider, draft, reviewContext, {});
     expect(sensitiveClaimIssues(judged)).toEqual([]);
   });
 
@@ -272,25 +280,32 @@ describe("judgeSensitiveClaimsWithModel 四类句子裁决", () => {
     expect(sensitiveClaimIssues(draft)).toHaveLength(1);
 
     const provider = spyProvider(JSON.stringify({
-      judgments: [{ statementIndex: 0, classification: "factual_assertion", supported: true, quote: "消肿一般7天左右" }],
+      judgments: [{ statementIndex: 0, classification: "factual_assertion", supported: true, evidenceId: EV_REVIEW, quote: "消肿一般7天左右" }],
     }));
-    const judged = await judgeSensitiveClaimsWithModel(provider, draft, anchorContext(), {});
+    const judged = await judgeSensitiveClaimsWithModel(provider, draft, reviewContext, {});
     expect(judged.claimJudgments).toEqual([
       { statement: "大部分人7天左右能消肿。", classification: "factual_assertion", supported: true },
     ]);
+    expect(judged.reasoning).toContainEqual(expect.objectContaining({
+      statement: "大部分人7天左右能消肿。",
+      status: "fact",
+      evidenceIds: [EV_REVIEW],
+      sourceSpans: [{ evidenceId: EV_REVIEW, quote: "消肿一般7天左右" }],
+    }));
     expect(sensitiveClaimIssues(judged)).toEqual([]);
   });
 
-  it("事实断言 supported 但不附引文 → 放行(引文可选)", async () => {
+  it("事实断言 supported 但缺来源身份或引文 → 强制改判无据", async () => {
     const draft = unanchoredDraft("先记录一下。大部分人7天左右能消肿。");
     const provider = spyProvider(JSON.stringify({
-      judgments: [{ statementIndex: 0, classification: "factual_assertion", supported: true, quote: null }],
+      judgments: [{ statementIndex: 0, classification: "factual_assertion", supported: true, evidenceId: null, quote: null }],
     }));
-    const judged = await judgeSensitiveClaimsWithModel(provider, draft, anchorContext(), {});
+    const judged = await judgeSensitiveClaimsWithModel(provider, draft, reviewContext, {});
     expect(judged.claimJudgments).toEqual([
-      { statement: "大部分人7天左右能消肿。", classification: "factual_assertion", supported: true },
+      { statement: "大部分人7天左右能消肿。", classification: "factual_assertion", supported: false },
     ]);
-    expect(sensitiveClaimIssues(judged)).toEqual([]);
+    expect(judged.reasoning.some((item) => item.status === "fact")).toBe(false);
+    expect(sensitiveClaimIssues(judged)).toHaveLength(1);
   });
 
   it("事实断言无据(编门口停车位,证据源没有)→ error 照旧", async () => {
@@ -298,7 +313,7 @@ describe("judgeSensitiveClaimsWithModel 四类句子裁决", () => {
     const provider = spyProvider(JSON.stringify({
       judgments: [{ statementIndex: 0, classification: "factual_assertion", supported: false, quote: null }],
     }));
-    const judged = await judgeSensitiveClaimsWithModel(provider, draft, anchorContext(), {});
+    const judged = await judgeSensitiveClaimsWithModel(provider, draft, reviewContext, {});
     expect(judged.claimJudgments).toEqual([
       { statement: "店门口有8个停车位。", classification: "factual_assertion", supported: false },
     ]);
@@ -311,9 +326,9 @@ describe("judgeSensitiveClaimsWithModel 四类句子裁决", () => {
   it("AI 附假引文(非源内连续片段)→ 机械校验拦下改判无据,error 照旧", async () => {
     const draft = unanchoredDraft("先记录一下。大部分人7天左右能消肿。");
     const provider = spyProvider(JSON.stringify({
-      judgments: [{ statementIndex: 0, classification: "factual_assertion", supported: true, quote: "所有人一周保证消肿" }],
+      judgments: [{ statementIndex: 0, classification: "factual_assertion", supported: true, evidenceId: EV_RECOVERY, quote: "所有人一周保证消肿" }],
     }));
-    const judged = await judgeSensitiveClaimsWithModel(provider, draft, anchorContext(), {});
+    const judged = await judgeSensitiveClaimsWithModel(provider, draft, reviewContext, {});
     expect(judged.claimJudgments).toEqual([
       { statement: "大部分人7天左右能消肿。", classification: "factual_assertion", supported: false },
     ]);
@@ -325,7 +340,7 @@ describe("judgeSensitiveClaimsWithModel 安全降级", () => {
   it("模型输出不可解析 → 无裁决,回退词面旧行为(error 照旧,不更坏)", async () => {
     const draft = unanchoredDraft("今天整理了大家常问的问题。想约的姐妹私聊我,帮你安排恢复期的面诊。");
     const provider = spyProvider("这不是 JSON");
-    const judged = await judgeSensitiveClaimsWithModel(provider, draft, anchorContext(), {});
+    const judged = await judgeSensitiveClaimsWithModel(provider, draft, reviewContext, {});
     expect(judged.claimJudgments).toBeUndefined();
     expect(sensitiveClaimIssues(judged)).toHaveLength(1);
   });
@@ -333,7 +348,7 @@ describe("judgeSensitiveClaimsWithModel 安全降级", () => {
   it("模型调用抛错 → 无裁决,不炸", async () => {
     const draft = unanchoredDraft("今天整理了大家常问的问题。想约的姐妹私聊我,帮你安排恢复期的面诊。");
     const provider: ModelProvider = { async generate() { throw new Error("network down"); } };
-    const judged = await judgeSensitiveClaimsWithModel(provider, draft, anchorContext(), {});
+    const judged = await judgeSensitiveClaimsWithModel(provider, draft, reviewContext, {});
     expect(judged.claimJudgments).toBeUndefined();
     expect(sensitiveClaimIssues(judged)).toHaveLength(1);
   });
@@ -350,7 +365,7 @@ describe("judgeSensitiveClaimsWithModel 安全降级", () => {
     const judged = await judgeSensitiveClaimsWithModel(
       { async generate() { throw thrown; } },
       draft,
-      anchorContext(),
+      reviewContext,
       { onFailure: (error) => failures.push(error) },
     );
     expect(failures).toEqual([thrown]);
@@ -362,7 +377,7 @@ describe("judgeSensitiveClaimsWithModel 安全降级", () => {
   it("解析失败(而非调用抛错)同样触发 onFailure", async () => {
     const draft = unanchoredDraft("今天整理了大家常问的问题。想约的姐妹私聊我,帮你安排恢复期的面诊。");
     const failures: unknown[] = [];
-    await judgeSensitiveClaimsWithModel(spyProvider("这不是 JSON"), draft, anchorContext(), {
+    await judgeSensitiveClaimsWithModel(spyProvider("这不是 JSON"), draft, reviewContext, {
       onFailure: (error) => failures.push(error),
     });
     expect(failures).toHaveLength(1);
@@ -374,7 +389,7 @@ describe("judgeSensitiveClaimsWithModel 安全降级", () => {
     const judged = await judgeSensitiveClaimsWithModel(
       spyProvider(JSON.stringify({ judgments: [{ statementIndex: 0, classification: "service_offer" }] })),
       draft,
-      anchorContext(),
+      reviewContext,
       { onFailure: (error) => failures.push(error) },
     );
     expect(failures).toEqual([]);
@@ -405,7 +420,7 @@ describe("judgeSensitiveClaimsWithModel 安全降级", () => {
 
 describe("parseClaimJudgeVerdicts / resolveClaimJudgments", () => {
   const claims = [
-    { statement: "句甲。", location: "N.body" as const, occurrence: { field: "body" as const } },
+    { statement: "大部分人7天左右能消肿。", location: "N.body" as const, occurrence: { field: "body" as const } },
     { statement: "句乙。", location: "N.body" as const, occurrence: { field: "body" as const } },
   ];
   const pool = [{ evidenceId: EV_RECOVERY, quote: evidenceSources[EV_RECOVERY]! }];
@@ -436,12 +451,12 @@ describe("parseClaimJudgeVerdicts / resolveClaimJudgments", () => {
 
   it("resolve:引文是源内连续片段才保 supported,否则改判无据;编号越界跳过", () => {
     const judgments = resolveClaimJudgments(claims, [
-      { statementIndex: 0, classification: "factual_assertion", supported: true, quote: "消肿一般7天左右" },
-      { statementIndex: 1, classification: "factual_assertion", supported: true, quote: "编造的一句话" },
+      { statementIndex: 0, classification: "factual_assertion", supported: true, evidenceId: EV_RECOVERY, quote: "消肿一般7天左右" },
+      { statementIndex: 1, classification: "factual_assertion", supported: true, evidenceId: EV_RECOVERY, quote: "编造的一句话" },
       { statementIndex: 9, classification: "hedge" },
     ], pool);
     expect(judgments).toEqual([
-      { statement: "句甲。", classification: "factual_assertion", supported: true },
+      { statement: "大部分人7天左右能消肿。", classification: "factual_assertion", supported: true },
       { statement: "句乙。", classification: "factual_assertion", supported: false },
     ]);
   });

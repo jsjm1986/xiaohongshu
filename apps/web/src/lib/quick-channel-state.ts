@@ -67,11 +67,29 @@ export function formatDoctors(doctors?: Array<{ name: string; points?: string[] 
 
 export type OpportunityFilter = 'all' | 'collected' | 'archived';
 
-/** 选题筛选:'all' = 非归档;'collected' = 已收藏;'archived' = 已归档。 */
-export function filterOpportunities<T extends { collectionStatus?: string }>(items: T[], filter: OpportunityFilter): T[] {
-  if (filter === 'collected') return items.filter((item) => item.collectionStatus === 'collected');
-  if (filter === 'archived') return items.filter((item) => item.collectionStatus === 'archived');
-  return items.filter((item) => item.collectionStatus !== 'archived');
+export interface CreationOpportunityState {
+  status?: string;
+  approvalStatus?: string;
+  eligibilityStatus?: string;
+  effectiveEligibility?: string;
+}
+
+/** Historical rows remain readable, but they cannot enter a new generation. */
+export function isOpportunityAvailableForCreation(item: CreationOpportunityState): boolean {
+  const approvalStatus = item.approvalStatus ?? item.status;
+  return approvalStatus !== 'stale'
+    && item.status !== 'stale'
+    && item.status !== 'blocked'
+    && item.eligibilityStatus !== 'blocked'
+    && item.effectiveEligibility !== 'ineligible';
+}
+
+/** 创作区筛选始终排除失效/阻断项；归档只控制当前集合视图。 */
+export function filterOpportunities<T extends CreationOpportunityState & { collectionStatus?: string }>(items: T[], filter: OpportunityFilter): T[] {
+  const current = items.filter(isOpportunityAvailableForCreation);
+  if (filter === 'collected') return current.filter((item) => item.collectionStatus === 'collected');
+  if (filter === 'archived') return current.filter((item) => item.collectionStatus === 'archived');
+  return current.filter((item) => item.collectionStatus !== 'archived');
 }
 
 export type GenerationStatusFilter = 'all' | 'completed' | 'running' | 'failed';

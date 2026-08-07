@@ -400,6 +400,22 @@ test('omitted publishing topology resolves to the selection-driven creative scen
   assert.deepEqual(resolved.body.resolvedConfig.task.authorContext, { status: 'not_provided', facts: [] });
 });
 
+test('top-level publishing selection overrides hidden config layers', async () => {
+  const resolved = await request(`/api/projects/${projectId}/resolve-config`, {
+    method: 'POST',
+    body: JSON.stringify({
+      topic: 'visible institution selection wins',
+      publishingTopology: 'institution_owned',
+      config: { overrides: { task: { publishingTopology: 'creative_scenario' } } },
+      overrides: { task: { publishingTopology: 'creative_scenario' } },
+      configOverrides: { task: { publishingTopology: 'creative_scenario' } },
+    }),
+  });
+  assert.equal(resolved.response.status, 201, JSON.stringify(resolved.body));
+  assert.equal(resolved.body.resolvedConfig.task.publishingTopology, 'institution_owned');
+  assert.deepEqual(resolved.body.resolvedConfig.task.authorContext, { status: 'not_provided', facts: [] });
+});
+
 test('individual-author facts are atomically validated and frozen by the server principal', async () => {
   const me = await request('/api/auth/me');
   assert.equal(me.response.status, 200, JSON.stringify(me.body));

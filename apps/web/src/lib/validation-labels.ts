@@ -143,6 +143,9 @@ export function validationIssueLabel(code?: string) {
     repair_parse_failed: "模型输出没有完整解析,本次生成不完整",
     model_ledger_failed: "事实账本生成失败(文案可用,事实锚定待人工复核)",
     model_comment_growth_failed: "评论多轮生长失败",
+    model_not_invoked: "未执行配置模型，仅生成了确定性结构稿",
+    gap_evidence_binding_degraded: "审批答案与本次冻结证据仅部分匹配",
+    required_information_not_realized: "必要信息未在最终正文或正确评论线程中完整落地",
   };
   return (code && labels[code]) || null;
 }

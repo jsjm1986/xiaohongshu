@@ -13,6 +13,7 @@ import {
   COMMENT_RICHNESS_PROFILES,
   mergeCommentRichnessOverrides,
   resolveSimpleGenerationSettings,
+  simpleGenerationNotices,
   shouldShowSimpleLocalFields,
 } from '../src/lib/simple-generation.js';
 import { BUILT_IN_GENERATION_PRESETS, GENERATION_PARAMETER_REGISTRY } from '../../../packages/agent-core/src/parameters.js';
@@ -616,4 +617,21 @@ test('legacy vigilance control is presented as an uncalibrated writing control, 
   assert.match(parameter.equation || '', /evidence_strictness \+ boundary_visibility/u);
   assert.match(parameter.evidenceNote || '', /未标定/u);
   assert.doesNotMatch(parameter.description, /预计读者/u);
+});
+
+
+test('simple mode explains stage coverage, neutral strategy fallback, and comment minimum before generation', () => {
+  const notices = simpleGenerationNotices({
+    audienceStage: 'hesitating',
+    opportunity,
+    gaps: [{ audienceStages: ['comparing'] }],
+    compatibleStrategyCount: 0,
+    preset: { id: 'p', name: '模板', description: '', source: 'project', values: { comment_thread_min: 4 } },
+  });
+  assert.deepEqual(notices.map((item) => item.code), ['stage_coverage', 'strategy_fallback', 'comment_contract']);
+  assert.match(notices[0]!.message, /仅 0\/1 个.*hesitating/u);
+  assert.match(notices[1]!.message, /中立聚焦策略.*不引入价格、效果或恢复/u);
+  assert.match(notices[2]!.message, /至少 4 条根线程.*不复制同一答案/u);
+  assert.equal(notices[0]!.tone, 'warning');
+  assert.equal(notices[1]!.tone, 'warning');
 });

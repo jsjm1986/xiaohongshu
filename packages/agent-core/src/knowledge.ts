@@ -31,6 +31,39 @@ const KNOWLEDGE_KINDS = new Set<KnowledgeKind>([
 ]);
 const EVIDENCE_STATUSES = new Set<EvidenceStatus>(["observed", "user_supplied", "inferred", "unknown"]);
 
+/**
+ * The single evidence-role gate for factual public claims.
+ *
+ * Planning may retain case, inference and unknown material for audit, but an
+ * accountable answer or a fact ledger row may cite only observed facts or an
+ * explicitly owner-supplied fact. Prompt projection, deterministic binding and
+ * validation must share this rule so they cannot disagree about the same ID.
+ */
+export function evidenceReferenceCanSupportFact(
+  reference: Pick<EvidenceReference, "kind" | "evidenceStatus">,
+): boolean {
+  return reference.kind === "fact"
+    && (reference.evidenceStatus === "observed" || reference.evidenceStatus === "user_supplied");
+}
+
+/**
+ * Resolve a historical/planning evidence ID to the one canonical ID exposed in
+ * the current generation context. Older analysis rows sometimes stored
+ * `section_x` while the section evidence layer exposes `evidence_section_x`.
+ * Only a unique alias is accepted; ambiguous or unrelated IDs remain invalid.
+ */
+export function resolveCanonicalEvidenceId(
+  id: string,
+  references: Array<Pick<EvidenceReference, "id">>,
+): string | undefined {
+  const exact = references.find((reference) => reference.id === id);
+  if (exact) return exact.id;
+  const alias = (value: string) => value.replace(/^evidence_/u, "");
+  const normalized = alias(id);
+  const matches = references.filter((reference) => alias(reference.id) === normalized);
+  return matches.length === 1 ? matches[0]!.id : undefined;
+}
+
 export interface LoadKnowledgeOptions {
   maxFileBytes?: number;
   followSymlinks?: boolean;
@@ -536,6 +569,159 @@ export function createEvidenceReferences(
  * visible claim. The legacy document-level references above remain available
  * for historical packages and imports; new generation uses this function.
  */
+/** Marker for a clause that is governance-only and must never become copy. */
+const PUBLICATION_RESTRICTION_MARKER = /(?:内部(?:须知|使用|资料|口径|信息|规定|要求)|仅限内部|仅内部|内部可见|保密|(?:不得|不能|不可|不宜|禁止)(?:对外)?(?:公开|披露|发布|露出)|(?:不|未)(?:对外)?公开|(?:全称|名称|地址|信息).{0,8}(?:不公开|不披露))/u;
+
+/**
+ * Split at punctuation fine enough to separate a public fact from an adjacent
+ * governance note. This is intentionally clause-based rather than line-based:
+ * Markdown tables commonly put `公开地址；全称不公开（内部须知）` in one cell.
+ */
+function publicationClauses(value: string): string[] {
+  return value
+    .split(/[\n。！？!?；;，,|]+/u)
+    .map((item) => item.replace(/[*_`#]/gu, "").trim())
+    .filter(Boolean);
+}
+
+/** Extract exact source clauses marked internal/confidential. */
+export function publicationRestrictionsFromText(value: string): string[] {
+  return [...new Set(publicationClauses(value)
+    .filter((clause) => PUBLICATION_RESTRICTION_MARKER.test(clause))
+    .map((clause) => clause
+      .replace(/[（(](?:内部(?:须知|使用|资料|口径|信息|规定|要求)|仅限内部|仅内部|保密)[）)]/gu, "")
+      .replace(/^(?:内部(?:须知|使用|资料|口径|信息|规定|要求)|仅限内部|仅内部|保密)[：:]?/u, "")
+      .trim())
+    .filter((clause) => clause.length >= 2))];
+}
+
+/** True when text itself asks for or states a non-public governance rule. */
+export function containsPublicationRestriction(value: string): boolean {
+  return publicationClauses(value).some((clause) => PUBLICATION_RESTRICTION_MARKER.test(clause))
+    || /(?:是否|能否|能不能|可不可以).{0,16}(?:公开|披露|发布|露出)/u.test(value);
+}
+
+/**
+ * Remove only restricted clauses before copy-writing calls. Public siblings in
+ * the same line/table cell remain available as evidence. Formatting is kept
+ * readable, but exact Markdown layout is not part of the evidence contract.
+ */
+export function redactPublicationRestrictedText(value: string): string {
+  return value
+    .split("\n")
+    .map((line) => {
+      if (!containsPublicationRestriction(line)) return line;
+      const table = line.includes("|");
+      const cells = table ? line.split("|") : [line];
+      const cleaned = cells.map((cell) => cell
+        .split(/([。！？!?；;，,])/u)
+        .reduce<string[]>((parts, token) => {
+          if (!token) return parts;
+          if (/^[。！？!?；;，,]$/u.test(token)) {
+            if (parts.length && !/^[。！？!?；;，,]$/u.test(parts.at(-1) ?? "")) parts.push(token);
+            return parts;
+          }
+          const withoutMarker = token
+            .replace(/[（(](?:内部(?:须知|使用|资料|口径|信息|规定|要求)|仅限内部|仅内部|保密)[）)]/gu, "")
+            .trim();
+          if (!withoutMarker || PUBLICATION_RESTRICTION_MARKER.test(withoutMarker)
+            || /(?:是否|能否|能不能|可不可以).{0,16}(?:公开|披露|发布|露出)/u.test(withoutMarker)) return parts;
+          parts.push(withoutMarker);
+          return parts;
+        }, [])
+        .join("")
+        .replace(/[；;，,]+$/u, "")
+        .trim());
+      const rebuilt = table ? cleaned.join("|") : cleaned[0] ?? "";
+      return rebuilt.replace(/\|\s*\|/gu, "|").trim();
+    })
+    .filter((line) => line.replace(/\|/gu, "").trim().length > 0)
+    .join("\n");
+}
+
+
+/**
+ * Recursively project arbitrary planning/audit data into a writer-safe view.
+ * Restriction clauses can be nested in approved opportunities, intelligence,
+ * blueprint notes and orchestration snapshots; sanitising only knowledge text
+ * leaves those structured side channels open.
+ */
+export function redactPublicationRestrictedValue<T>(value: T): T {
+  if (typeof value === "string") return redactPublicationRestrictedText(value) as T;
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => redactPublicationRestrictedValue(item))
+      .filter((item) => typeof item !== "string" || item.trim().length > 0) as T;
+  }
+  if (value && typeof value === "object") {
+    const projected = Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      // Governance clauses remain available to deterministic server checks but
+      // are never part of any writer/model projection, even when nested.
+      .filter(([key]) => key !== "publicationRestrictions")
+      .map(([key, item]) => [key, redactPublicationRestrictedValue(item)] as const)
+      .filter(([, item]) => item !== undefined && (typeof item !== "string" || item.trim().length > 0)));
+    return projected as T;
+  }
+  return value;
+}
+
+
+const NON_PUBLIC_ORGANIZATION_NAME = /(?:(?:机构|组织|公司|门店|项目)?(?:全称|名称).{0,12}(?:不得|不能|不可|禁止|不宜|不)(?:对外)?(?:公开|披露|发布|露出)|(?:不得|不能|不可|禁止|不宜|不)(?:对外)?(?:公开|披露|发布|露出).{0,12}(?:机构|组织|公司|门店|项目)?(?:全称|名称))/u;
+
+function nestedTextValues(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(nestedTextValues);
+  if (value && typeof value === "object") return Object.values(value as Record<string, unknown>).flatMap(nestedTextValues);
+  return [];
+}
+
+/** Whether governance explicitly forbids publishing the organization's name. */
+export function organizationNamePublicationRestricted(...context: unknown[]): boolean {
+  return context.flatMap(nestedTextValues).some((text) => NON_PUBLIC_ORGANIZATION_NAME.test(text));
+}
+
+function projectIdentityTokens(projectName: string, context: unknown[]): string[] {
+  const exact = projectName.trim();
+  const base = exact.replace(/[（(][^）)]*[）)]/gu, "").replace(/[\s\p{P}\p{S}]+/gu, "");
+  const texts = context.flatMap(nestedTextValues).filter((text) => text !== projectName);
+  const chars = [...base];
+  // Keep every distinctive 3+ character prefix found in the writer context,
+  // not only the longest one. The full configured name often appears beside a
+  // shorter public alias (for example “品牌项目” and “品牌技术”); selecting
+  // only the longest prefix leaves the alias visible.
+  const sharedPrefixes = Array.from({ length: Math.max(0, chars.length - 2) }, (_, index) =>
+    chars.slice(0, chars.length - index).join(""))
+    .filter((candidate) => texts.some((text) => text.includes(candidate)));
+  return [...new Set([exact, base, ...sharedPrefixes].filter((token) => [...token].length >= 3))]
+    .sort((left, right) => right.length - left.length);
+}
+
+/**
+ * Writer-only identity projection. Audit/config/evidence retain their original
+ * values; when governance forbids the organization name, exact names and a
+ * distinctive 3+ character project-name prefix shared by source aliases become
+ * “本机构”. This catches aliases without maintaining an industry name list.
+ */
+export function redactRestrictedProjectIdentity<T>(
+  value: T,
+  projectName: string,
+  ...governanceContext: unknown[]
+): T {
+  if (!organizationNamePublicationRestricted(...governanceContext)) return value;
+  const tokens = projectIdentityTokens(projectName, [value, ...governanceContext]);
+  const visit = (item: unknown): unknown => {
+    if (typeof item === "string") {
+      return tokens.reduce((text, token) => text.replaceAll(token, "本机构"), item);
+    }
+    if (Array.isArray(item)) return item.map(visit);
+    if (item && typeof item === "object") {
+      return Object.fromEntries(Object.entries(item as Record<string, unknown>).map(([key, child]) => [key, visit(child)]));
+    }
+    return item;
+  };
+  return visit(value) as T;
+}
+
 export function createSectionEvidenceReferences(
   documents: KnowledgeDocument[],
   selection: KnowledgeContextSelection,
@@ -560,12 +746,27 @@ export function createSectionEvidenceReferences(
           ...document.metadata.caveats,
           ...(section.truncated ? ["Only the disclosed, truncated section was available to this generation."] : []),
         ],
+        quote: redactPublicationRestrictedText(section.content) || undefined,
+        publicationRestrictions: publicationRestrictionsFromText(section.content),
       }];
     });
 }
 
 function comparableEvidenceText(value: string): string {
-  return value.normalize("NFKC").toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    // Preserve scope while canonicalizing common majority-frequency wording.
+    // This permits harmless word-order paraphrases such as “大部分人…7天” /
+    // “…一般7天”, without equating them with universal claims (“所有人”).
+    .replace(/(?:大多数人?|大部分人?|多数人|通常)/gu, "一般")
+    // Limited frequency/subject paraphrases that preserve scope, polarity and
+    // modality. These are intentionally enumerated instead of using a semantic
+    // similarity model: “部分人/些许人” remain non-universal, while a natural
+    // “客户常常…” rendering stays comparable with “常有人…”.
+    .replace(/(?:部分人|些许人|少部分人?)/gu, "部分人")
+    .replace(/(?:客户|顾客|用户)常常/gu, "常有人")
+    .replace(/[\s\p{P}\p{S}]+/gu, "");
 }
 
 function evidenceBigrams(value: string): Set<string> {
@@ -590,7 +791,205 @@ function normalizedQuantityTokens(value: string): string[] {
 }
 
 function stripAttributionPrefix(value: string): string {
-  return value.replace(/^(?:(?:项目资料|知识库|资料|研究|论文|报告|记录)(?:中)?(?:显示|表明|能确认|确认|记载|披露)?[：:,，]?\s*)+/iu, "");
+  return value
+    .replace(/^(?:(?:项目资料|知识库|资料|研究|论文|报告|记录)(?:中)?(?:显示|表明|能确认|确认|记载|披露)?[：:,，]?\s*)+/iu, "")
+    // Conversational organization answers often introduce a disclosed fact with
+    // a presentation phrase. The phrase changes neither polarity nor modality,
+    // so remove it before lexical support matching; uncertain prefixes such as
+    // “据说/可能” are intentionally not included here.
+    .replace(/^(?:(?:能|可|可以)(?:够)?核对的是|公开信息(?:给到|披露|确认)的(?:范围|内容)是|现有(?:资料|信息|口径)(?:显示|确认|是|为)?)[：:,，]?\s*/u, "");
+}
+
+/**
+ * Split a visible compound sentence into independently verifiable factual
+ * atoms. This is deliberately punctuation-based rather than semantic: it never
+ * invents a proposition, and every returned atom remains an exact substring of
+ * the visible sentence (apart from harmless presentation-prefix normalization
+ * performed by conservativeEvidenceSupport).
+ */
+export function evidenceClaimAtoms(value: string): string[] {
+  return value
+    .split(/(?<=[。！？!?；;])|\n+/u)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .flatMap((statement) => {
+      const terminal = statement.match(/[。！？!?；;]+$/u)?.[0] ?? "";
+      const core = terminal ? statement.slice(0, -terminal.length) : statement;
+      const parts = core.split(/[，,、]+/u).map((item) => item.trim()).filter(Boolean);
+      return parts.map((part, index) => index === parts.length - 1 ? `${part}${terminal}` : part);
+    })
+    .filter((item) => comparableEvidenceText(stripAttributionPrefix(item)).length >= 2);
+}
+
+/**
+ * Safe relation terms whose order must remain visible in the cited source.
+ * This closes a fuzzy-match hole where an address-only quote could otherwise
+ * appear to support “门诊在该地址”. Causal/comparative relations are deliberately
+ * excluded: they still require one directly supportive source span.
+ */
+function safeRelationalTerms(value: string): string[] {
+  const normalized = stripAttributionPrefix(value.trim())
+    .replace(/[。！？!?；;]+$/u, "")
+    .trim();
+  const organizationLocation = normalized.match(
+    /^(?:我们|我方|本机构|本门诊|机构方|项目方|官方账号)(?:位于|在)(.{2,})$/u,
+  );
+  // An accountable organization saying “我们在 X” is a location relation.
+  // Require both the address field and the full location object in one or more
+  // exact source spans; the organization pronoun itself is not a source fact.
+  if (organizationLocation) return ["地址", organizationLocation[1]!.trim()];
+  const withoutOrganizationSubject = normalized
+    .replace(/^(?:我们|我方|本机构|本门诊|机构方|项目方|官方账号)/u, "")
+    .trim();
+  const addressLocation = withoutOrganizationSubject.match(/^(?:地址|位置)(?:是|为|位于|在)(.{2,})$/u);
+  // “位置在 X” and “地址在 X” express the same disclosed address field.
+  // Canonicalize only the field label; the complete location object must still
+  // occur in exact source spans, so a more precise invented address cannot pass.
+  if (addressLocation) return ["地址", addressLocation[1]!.trim()];
+  const relationValue = withoutOrganizationSubject
+    .replace(/^(?:机构|组织|公司|门店|场所)(?:是|为)/u, "")
+    // An organization account may naturally say “我们是一家…的门诊”. “一家”
+    // is a presentational classifier, not a new factual entity.
+    .replace(/^(?:是|为)?一家/u, "");
+  const patterns = [
+    /^(.{2,}?)(?:是|为|属于)(.{2,})$/u,
+    /^(.{2,}?)(?:位于|在)(.{2,})$/u,
+    /^(?:是|为)?(.{2,})的(.{2,})$/u,
+  ];
+  for (const pattern of patterns) {
+    const match = relationValue.match(pattern);
+    if (!match) continue;
+    const terms = match.slice(1).map((item) => item.trim()).filter((item) => comparableEvidenceText(item).length >= 2);
+    if (terms.length >= 2) return terms;
+  }
+  return [];
+}
+
+function allTermsSupported(terms: readonly string[], sourceSpans: readonly string[]): boolean {
+  if (terms.length < 2) return false;
+  const source = comparableEvidenceText(sourceSpans.join(" "));
+  return terms.every((term) => source.includes(comparableEvidenceText(term)));
+}
+
+function evidenceConstraintsCompatible(statement: string, sourceText: string): boolean {
+  const claimRaw = stripAttributionPrefix(statement.trim());
+  const claimQuantities = normalizedQuantityTokens(claimRaw);
+  const sourceQuantities = normalizedQuantityTokens(sourceText);
+  if (claimQuantities.some((quantity) => !sourceQuantities.includes(quantity))) return false;
+  for (const claimQuantity of claimQuantities) {
+    const unit = claimQuantity.split(":")[1];
+    const sameUnit = sourceQuantities.filter((quantity) => quantity.split(":")[1] === unit);
+    if (sameUnit.length && !sameUnit.includes(claimQuantity)) return false;
+  }
+  if (NEGATION_PATTERN.test(claimRaw) !== NEGATION_PATTERN.test(sourceText)) return false;
+  if (!UNCERTAINTY_PATTERN.test(claimRaw) && UNCERTAINTY_PATTERN.test(sourceText)) return false;
+  return true;
+}
+
+/**
+ * Verify one factual statement against one or more exact source spans. Each
+ * punctuation-delimited atom must be supported; joining spans is allowed only
+ * to cover a single relational atom whose fields are stored on separate source
+ * lines (for example organization type + location). Numeric, polarity and
+ * uncertainty checks still run through conservativeEvidenceSupport.
+ */
+export function combinedEvidenceSupport(statement: string, sourceSpans: readonly string[]): boolean {
+  const sources = sourceSpans.map((item) => item.trim()).filter(Boolean);
+  if (!sources.length) return false;
+  const sourceAtoms = sources.flatMap((source) => {
+    const atoms = evidenceClaimAtoms(source);
+    return atoms.length ? atoms : [source];
+  });
+  const atoms = evidenceClaimAtoms(statement);
+  return atoms.length > 0 && atoms.every((atom) => {
+    const relationalTerms = safeRelationalTerms(atom);
+    if (relationalTerms.length) {
+      // Keep comma-split fragments from the same exact table row together. A
+      // relation such as “地址在成都锦江区锦华万达附近” may be represented as
+      // “| 地址 | 成都锦江区，锦华万达附近 |”. Requiring one atom to contain the
+      // entire object loses that valid row; requiring all relation entities in
+      // the selected exact spans still prevents an address-only row from
+      // proving “门诊在该地址”.
+      const relevantSpans = sources.filter((source) => relationalTerms.some((term) => {
+        const termComparable = comparableEvidenceText(term);
+        const sourceComparable = comparableEvidenceText(source);
+        return sourceComparable.includes(termComparable)
+          || termComparable.includes(sourceComparable)
+          || supportOverlapScore(term, source) >= 0.2;
+      }));
+      const relevantAtoms = relevantSpans.flatMap((source) => {
+        const split = evidenceClaimAtoms(source);
+        return split.length ? split : [source];
+      }).filter((source) => relationalTerms.some((term) => {
+        const termComparable = comparableEvidenceText(term);
+        const sourceComparable = comparableEvidenceText(source);
+        return sourceComparable.includes(termComparable)
+          || termComparable.includes(sourceComparable)
+          || supportOverlapScore(term, source) >= 0.2;
+      }));
+      return relevantSpans.length > 0
+        && relevantAtoms.length > 0
+        && evidenceConstraintsCompatible(atom, relevantAtoms.join(" "))
+        && allTermsSupported(relationalTerms, relevantSpans);
+    }
+    return sourceAtoms.some((source) =>
+      evidenceConstraintsCompatible(atom, source) && conservativeEvidenceSupport(atom, source));
+  });
+}
+
+function exactSpanCandidates(source: string): string[] {
+  const candidates = new Set<string>();
+  const add = (value: string): void => {
+    const trimmed = value.trim();
+    if (trimmed.length >= 2 && trimmed.length <= 500 && source.includes(trimmed)) candidates.add(trimmed);
+  };
+  for (const line of source.split(/\n+/u)) {
+    add(line);
+    for (const sentence of line.split(/[。；;！？!?]+/u)) {
+      add(sentence);
+      for (const clause of sentence.split(/[，,、|]+/u)) add(clause);
+    }
+  }
+  return [...candidates];
+}
+
+function supportOverlapScore(statement: string, source: string): number {
+  const claimGrams = evidenceBigrams(stripAttributionPrefix(statement));
+  if (!claimGrams.size) return 0;
+  const sourceGrams = evidenceBigrams(source);
+  return [...claimGrams].filter((gram) => sourceGrams.has(gram)).length / claimGrams.size;
+}
+
+/**
+ * Return exact contiguous source spans that jointly support a visible factual
+ * atom. The result is empty unless the conservative combined-support gate
+ * passes. This permits a markdown table to support “门诊在某区域” with its
+ * separate type/address cells without treating the whole section as one quote.
+ */
+export function exactEvidenceSupportSpans(statement: string, source: string): string[] {
+  const trimmed = statement.trim();
+  if (trimmed.length < 2 || !source.trim()) return [];
+  if (source.includes(trimmed) && conservativeEvidenceSupport(trimmed, trimmed)) return [trimmed];
+  const candidates = exactSpanCandidates(source)
+    .map((quote) => ({ quote, score: supportOverlapScore(trimmed, quote) }))
+    .filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score || left.quote.length - right.quote.length);
+  for (const candidate of candidates) {
+    if (conservativeEvidenceSupport(trimmed, candidate.quote)
+      && combinedEvidenceSupport(trimmed, [candidate.quote])) return [candidate.quote];
+  }
+  const selected: string[] = [];
+  for (const candidate of candidates) {
+    if (selected.includes(candidate.quote)) continue;
+    selected.push(candidate.quote);
+    // Similarity chooses the smallest useful set, but relational support must
+    // read spans in source order. Otherwise a valid table row pair can be
+    // rejected merely because the address matched more strongly than the type.
+    const inSourceOrder = [...selected].sort((left, right) => source.indexOf(left) - source.indexOf(right));
+    if (combinedEvidenceSupport(trimmed, inSourceOrder)) return inSourceOrder;
+    if (selected.length >= 6) break;
+  }
+  return [];
 }
 
 /**
@@ -643,7 +1042,13 @@ export function findSupportingSectionEvidenceIds(
   if (!claims.length) return [];
   const matches: string[] = [];
   for (const section of selection.sections.filter((item) => item.documentId !== "generated")) {
-    const supported = claims.some((claim) => conservativeEvidenceSupport(claim, section.content));
+    // Gap answers are often compound facts backed by separate cells in one
+    // Markdown table (for example organization type + public area). Validate
+    // them with the same exact-span joint-support gate used after generation.
+    // Governance-only sibling clauses are removed first so an unrelated
+    // “name must not be public” negation cannot invalidate a positive address.
+    const publicSource = redactPublicationRestrictedText(section.content);
+    const supported = claims.some((claim) => combinedEvidenceSupport(claim, [publicSource]));
     if (supported) matches.push(evidenceIdForSection(section));
   }
   return [...new Set(matches)];

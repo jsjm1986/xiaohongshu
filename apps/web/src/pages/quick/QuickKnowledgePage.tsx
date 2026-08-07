@@ -8,7 +8,7 @@ import type { TopicOpportunity } from '../../types';
 
 /** 知识库区。分析完把选题灌进跨区状态,然后跳创作区。 */
 export function QuickKnowledgePage() {
-  const { project, setOpportunities, setOpportunityId, setResults, setJobId } = useQuickWorkspace();
+  const { project, setOpportunities, setOpportunityId, setPublishing, setResults, setJobId } = useQuickWorkspace();
   const navigate = useNavigate();
   const toast = useToast();
   const [busy, setBusy] = useState(false);
@@ -23,6 +23,7 @@ export function QuickKnowledgePage() {
    * 不清的话,创作区会带着旧选题的结果显示新选题池,右栏和左栏说的不是一回事。
    */
   const onAnalyzed = (opps: TopicOpportunity[]) => {
+    setPublishing({});
     setOpportunities(opps);
     setOpportunityId('');
     setResults([]);

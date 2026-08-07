@@ -223,6 +223,14 @@ describe("structured output parsing and validation", () => {
       ]));
     }
 
+    for (const leakedPolicy of [
+      "不允许写百分百无痛，需保留个体差异。",
+      "统一口径：禁止使用完全零感。",
+      "必须保留适用边界。",
+    ]) {
+      expect(issueCodesFor(leakedPolicy), leakedPolicy).toContain("frontstage_instruction_leak");
+    }
+
     for (const natural of [
       "这款 AI 客服能转人工吗？",
       "官网写明周末可以预约。",
@@ -770,6 +778,9 @@ describe("structured output parsing and validation", () => {
   it("accepts an evidence-bound natural paraphrase but rejects partial or polarity-reversed gap copy", () => {
     const config = createDefaultGenerationConfig(project, DEFAULT_FORMULA_VERSION);
     config.task.theme = "机构信息";
+    // This test evaluates organization-owned body realization. Consumer topology
+    // intentionally routes organization facts to accountable comments instead.
+    config.task.publishingTopology = "institution_owned";
     config.content.bodyMinChars = 1;
     config.content.bodyMaxChars = 500;
     config.content.hashtagMin = 0;
@@ -778,7 +789,7 @@ describe("structured output parsing and validation", () => {
     config.content.commentThreadMax = 0;
     config.expressionWindow.channels = config.expressionWindow.channels.filter((channel) => channel !== "comments");
     const expected = "机构类型为门诊，专注眼周年轻化，地址在成都锦江区锦华万达附近；机构全称不对外公开。";
-    const paraphrase = "地址在成都锦江区锦华万达附近，机构是专注眼周年轻化的门诊，机构全称不对外公开。";
+    const paraphrase = "地址在成都锦江区锦华万达附近，机构是专注眼周年轻化的门诊。";
     const gap: InformationGap = {
       id: "institution",
       label: "机构信息",
@@ -813,7 +824,7 @@ describe("structured output parsing and validation", () => {
       imageAssetIds: [],
       status: "eligible",
     };
-    const plan = planTopicOrchestrations({ opportunity, gaps: [gap], config, seed: 31 })[0];
+    const plan = planTopicOrchestrations({ opportunity, gaps: [gap], config, seed: 31 })[1];
     const draftFor = (body: string): GenerationDraft => ({
       content: {
         H: { hashtags: [] },
@@ -832,6 +843,10 @@ describe("structured output parsing and validation", () => {
     });
 
     expect(evaluateGapCoverageRealization(draftFor(paraphrase), plan).entries[0])
+      .toMatchObject({ status: "body_resolved" });
+    expect(evaluateGapCoverageRealization(draftFor("门诊在成都锦江区锦华万达附近，专注眼周年轻化。"), plan).entries[0])
+      .toMatchObject({ status: "body_resolved" });
+    expect(evaluateGapCoverageRealization(draftFor("我们在成都锦江区锦华万达附近，是专注眼周年轻化的门诊。"), plan).entries[0])
       .toMatchObject({ status: "body_resolved" });
     expect(evaluateGapCoverageRealization(draftFor("地址在成都锦江区锦华万达附近。"), plan).entries[0])
       .toMatchObject({ status: "realization_failed" });
@@ -1091,7 +1106,13 @@ describe("prompt security and formula grounding", () => {
       required: ["statement", "location", "occurrence", "status", "evidenceIds", "sourceSpans"],
       properties: {
         location: { enum: ["H", "N.imageBrief", "N.title", "N.body", "Cref.thread", "Cref.followUp"] },
-        sourceSpans: { type: "array" },
+        sourceSpans: {
+          type: "array",
+          items: {
+            required: ["evidenceId", "quote"],
+            properties: { evidenceId: { minLength: 1 }, quote: { minLength: 1 } },
+          },
+        },
       },
     });
     expect(String(prompt.messages[1]?.content)).toContain('"personaRole":"information_collector"');
@@ -1102,6 +1123,47 @@ describe("prompt security and formula grounding", () => {
     expect(String(prompt.messages[1]?.content)).toContain("gapCoverageLedger");
     expect(String(prompt.messages[1]?.content)).toContain("评论区不是 FAQ");
     expect(String(prompt.messages[1]?.content)).toContain("replyPlan 的五项只是后台可用信息库存");
+  });
+
+  it("removes non-public clauses from both knowledge text and evidence quotes before drafting", () => {
+    const document = indexKnowledgeSource({
+      projectId: "p1",
+      id: "d-private",
+      path: "private-facts.md",
+      content: "公开流程：先沟通再确认。\n内部须知：机构全称不对外公开。",
+    });
+    const knowledge = selectKnowledgeContext({
+      documents: [document],
+      query: "流程",
+      budget: { maxInputTokens: 5000, systemPromptTokens: 10, formulaPromptTokens: 10, outputReserveTokens: 100, safetyMarginTokens: 0 },
+    });
+    const config = createDefaultGenerationConfig(project, DEFAULT_FORMULA_VERSION);
+    config.task.theme = "公开流程";
+    const prompt = buildGenerationPrompt({
+      config,
+      formulaVersion: DEFAULT_FORMULA_VERSION,
+      knowledge,
+      ledger: buildKnowledgeLedger([]),
+      candidateIndex: 0,
+      seed: 9,
+      variation: { opening: "问题", pacing: "短句", structure: "问答", phrasing: "克制" },
+      evidenceReferences: [{
+        id: "evidence_private",
+        documentId: "d-private",
+        path: "private-facts.md",
+        section: "流程",
+        quote: "公开流程：先沟通再确认。\n内部须知：机构全称不对外公开。",
+        kind: "fact",
+        evidenceStatus: "observed",
+        scope: ["流程"],
+        caveats: [],
+        publicationRestrictions: ["机构全称不对外公开"],
+      }],
+    });
+    const text = String(prompt.messages[1]?.content);
+    expect(text).toContain("公开流程：先沟通再确认");
+    expect(text).not.toContain("机构全称不对外公开");
+    expect(text).not.toContain("内部须知");
   });
 
   it("uses section-scoped evidence references when the binder supplies them", () => {

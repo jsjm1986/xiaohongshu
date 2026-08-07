@@ -43,6 +43,7 @@ export function QuickCreatePage() {
 
   // 选题池就在左栏:选中只更新下游状态,不跳区(换选题清结果的级联保留)
   const onPickTopic = (id: string, loadedPresets: ContentPreset[]) => {
+    w.setPublishing({});
     w.setOpportunityId(id);
     w.setResults([]);
     w.setJobId(undefined);
@@ -56,11 +57,13 @@ export function QuickCreatePage() {
     w.setCheckedIds((cur) => pruneCheckedIds(cur, id));
     if (id !== w.opportunityId) return;
     w.setOpportunityId('');
+    w.setPublishing({});
     w.setResults([]);
     w.setJobId(undefined);
   };
 
   const onAnalyzed = (opps: TopicOpportunity[]) => {
+    w.setPublishing({});
     w.setOpportunities(opps);
     w.setOpportunityId('');
     w.setResults([]);
@@ -74,6 +77,8 @@ export function QuickCreatePage() {
 
   // 进入批量态:预设可能还没加载过(单篇路径是选题时才拉),按需补一次
   const onConfigBatch = async () => {
+    // A normal batch is a fresh creative action, never a replay of one author's truth.
+    w.setPublishing({});
     let list = w.presets;
     if (list.length === 0) {
       setBusy(true);
@@ -99,6 +104,7 @@ export function QuickCreatePage() {
         presets: w.presets.filter((p) => w.batchPresetIds.includes(p.id)),
         overrides: w.overrides,
         imageAssetIds: w.imageAssetIds,
+        publishing: w.publishing,
       });
       const batch = await api.generationBatches.create({ projectId: project.id, jobs });
       setBusy(false);
@@ -120,6 +126,7 @@ export function QuickCreatePage() {
       presetId={w.presetId}
       overrides={w.overrides}
       imageAssetIds={w.imageAssetIds}
+      publishing={w.publishing}
       jobId={w.jobId}
       results={w.results}
       busy={busy}

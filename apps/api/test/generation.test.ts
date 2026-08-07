@@ -597,7 +597,7 @@ test('formula registry, settings and deterministic generation form one working f
 
   const job = await waitForJob(jobId);
   assert.equal(job.status, 'completed', job.error);
-  assert.equal(job.qualityStatus, 'passed');
+  assert.equal(job.qualityStatus, 'needs_review');
   assert.equal(job.progress, 100);
   const executionTrace = await request(`/api/generations/${jobId}/trace`);
   assert.equal(executionTrace.response.status, 200);
@@ -635,10 +635,45 @@ test('formula registry, settings and deterministic generation form one working f
   assert.ok(job.candidates.every((item: any) => projectFacts.some((fact: string) => item.orchestrationSnapshot?.stateSeed?.availableEvidence?.includes(fact))));
   assert.ok(job.candidates.every((item: any) => item.orchestrationSnapshot?.stateSeed?.history?.status === 'provided'));
   assert.equal(new Set(job.candidates.map((item: any) => item.id)).size, 3);
-  assert.ok(job.candidates.every((item: any) => item.validation?.valid === true), JSON.stringify(job.candidates.map((item: any) => item.validation)));
+  assert.ok(job.candidates.every((item: any) => item.validation?.valid === false
+    && item.validation?.qualityStatus === 'needs_review'
+    && item.validation?.issues.some((issue: any) => issue.code === 'model_not_invoked' && issue.disposition === 'review')),
+  JSON.stringify(job.candidates.map((item: any) => item.validation)));
   assert.equal(job.knowledgeContext.mode, 'full');
   assert.ok(job.knowledgeContext.selectedDocumentIds.includes(currentKnowledge.body.id));
   assert.equal(job.knowledgeContext.selectedDocumentIds.includes(uploaded.body.id), false);
+
+  // The visible top-level selector is the per-run source of truth. Deliberately
+  // conflict every hidden override layer, then verify both the job snapshot and
+  // all three persisted packages retain the selected institution topology.
+  const institutionCreated = await request('/api/generations', {
+    method: 'POST',
+    body: JSON.stringify({
+      projectId,
+      mode: 'simple',
+      topic: '机构账号说明适用条件',
+      audienceStage: '收集期',
+      entryPoint: '搜索',
+      publishingTopology: 'institution_owned',
+      config: { overrides: { task: { publishingTopology: 'creative_scenario' } } },
+      overrides: { task: { publishingTopology: 'creative_scenario' } },
+      configOverrides: { task: { publishingTopology: 'creative_scenario' } },
+      seed: 54321,
+    }),
+  });
+  assert.equal(institutionCreated.response.status, 201, JSON.stringify(institutionCreated.body));
+  const institutionJob = await waitForJob(String(institutionCreated.body.id));
+  assert.equal(institutionJob.status, 'completed', institutionJob.error);
+  assert.equal(institutionJob.resolvedConfig.task.publishingTopology, 'institution_owned');
+  assert.equal(institutionJob.candidates.length, 3);
+  assert.deepEqual(institutionJob.candidates.map((candidate: any) => candidate.candidateIndex), [0, 1, 2]);
+  const institutionRows = app.get(DatabaseService).prepare(
+    'SELECT candidate_index, content_json FROM content_packages WHERE job_id=? ORDER BY candidate_index',
+  ).all(institutionJob.id) as Array<{ candidate_index: number; content_json: string }>;
+  assert.deepEqual(institutionRows.map((row) => row.candidate_index), [0, 1, 2]);
+  assert.ok(institutionRows.every((row) =>
+    JSON.parse(row.content_json).configSnapshot.task.publishingTopology === 'institution_owned'));
+
   const staleKnowledgeSelection = await request('/api/generations', {
     method: 'POST',
     body: JSON.stringify({
@@ -741,9 +776,19 @@ test('formula registry, settings and deterministic generation form one working f
   const revisedCandidate = afterRevision.body.candidates.find((item: any) => item.packageId === settledRevision.resultPackageId);
   assert.ok(revisedCandidate, '结果包应出现在候选里');
   assert.equal(revisedCandidate.revisions.length, 1);
-  assert.equal(revisedCandidate.validation?.valid, true, JSON.stringify(revisedCandidate.validation));
+  assert.equal(revisedCandidate.validation?.valid, false, JSON.stringify(revisedCandidate.validation));
+  assert.equal(revisedCandidate.validation?.qualityStatus, 'needs_review');
+  assert.ok(revisedCandidate.validation?.issues.some((issue: any) => issue.code === 'model_not_invoked' && issue.disposition === 'review'));
+  assert.ok(revisedCandidate.body.length > 0, '无模型改稿仍应保留可审阅内容');
 
-  const exportCandidateId = job.candidates[1].id;
+  const exportCandidateId = job.candidates[2].id;
+  const unconfirmedMarkdown = await request(`/api/generations/${jobId}/candidates/${encodeURIComponent(exportCandidateId)}/export?format=markdown`);
+  assert.equal(unconfirmedMarkdown.response.status, 400);
+  const exportConfirmation = await request(
+    `/api/generations/${jobId}/candidates/${encodeURIComponent(exportCandidateId)}/manual-delivery-confirmation`,
+    { method: 'POST', body: JSON.stringify({ acknowledged: true }) },
+  );
+  assert.equal(exportConfirmation.response.status, 201, JSON.stringify(exportConfirmation.body));
   const markdown = await request(`/api/generations/${jobId}/candidates/${encodeURIComponent(exportCandidateId)}/export?format=markdown`);
   assert.equal(markdown.response.status, 200);
   // Generated packages are schemaVersion 1.1, so the export uses the two-part
@@ -911,7 +956,10 @@ test('formula registry, settings and deterministic generation form one working f
   assert.equal(advanced.response.status, 201);
   const advancedJob = await waitForJob(advanced.body.id);
   assert.equal(advancedJob.status, 'completed', advancedJob.error);
-  assert.equal(advancedJob.qualityStatus, 'passed');
+  assert.equal(advancedJob.qualityStatus, 'needs_review');
+  assert.ok(advancedJob.candidates.every((item: any) => item.validation?.valid === false
+    && item.validation?.qualityStatus === 'needs_review'
+    && item.validation?.issues.some((issue: any) => issue.code === 'model_not_invoked')));
   assert.deepEqual(advancedJob.resolvedConfig.task.preContactKnown, []);
   assert.deepEqual(advancedJob.resolvedConfig.task.readerConstraints, []);
   assert.equal(advancedJob.resolvedConfig.task.readerHistory, undefined);

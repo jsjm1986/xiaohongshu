@@ -51,3 +51,23 @@ test("简单二选一、设置三选一和窄屏单栏都有专属样式", () =>
   assert.match(css, /@media \(max-width:560px\)[\s\S]*?\.simple-publishing-choice__options\s*\{\s*grid-template-columns:1fr/u);
   assert.match(css, /@media \(max-width:560px\)[\s\S]*?\.publishing-view-options\s*\{\s*grid-template-columns:1fr/u);
 });
+
+
+test("快捷版同款回填保留发布合同，新创作边界主动清空", () => {
+  const workspace = readFileSync(new URL("../src/components/quick/QuickWorkspaceContext.tsx", import.meta.url), "utf8");
+  const history = readFileSync(new URL("../src/pages/quick/QuickHistoryPage.tsx", import.meta.url), "utf8");
+  const create = readFileSync(new URL("../src/pages/quick/QuickCreatePage.tsx", import.meta.url), "utf8");
+  const knowledge = readFileSync(new URL("../src/pages/quick/QuickKnowledgePage.tsx", import.meta.url), "utf8");
+  const config = readFileSync(new URL("../src/components/quick/ConfigTab.tsx", import.meta.url), "utf8");
+  const result = readFileSync(new URL("../src/components/quick/ResultTab.tsx", import.meta.url), "utf8");
+
+  assert.match(workspace, /publishing, setPublishing/u);
+  assert.match(history, /w\.setPublishing\(targets\.publishing\)/u);
+  assert.match(config, /publishing,\s*onProgress/u);
+  assert.match(result, /publishing,\s*onProgress/u);
+  assert.match(config, /正在复用原发布视角/u);
+  assert.match(create, /const onPickTopic[\s\S]*?w\.setPublishing\(\{\}\)/u);
+  assert.match(create, /const onAnalyzed[\s\S]*?w\.setPublishing\(\{\}\)/u);
+  assert.match(create, /const onConfigBatch[\s\S]*?w\.setPublishing\(\{\}\)/u);
+  assert.match(knowledge, /const onAnalyzed[\s\S]*?setPublishing\(\{\}\)/u);
+});

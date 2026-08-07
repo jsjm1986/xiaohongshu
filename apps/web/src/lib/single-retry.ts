@@ -58,6 +58,7 @@ export async function retryJobOnce(args: {
     presets: matchedPresets,
     overrides: targets.overrides,
     imageAssetIds: targets.imageAssetIds,
+    publishing: targets.publishing,
   });
   if (jobs.length === 0) throw new Error('无法按原配方重建任务，请回创作区重新配置');
   const batch = await deps.generationBatches.create({

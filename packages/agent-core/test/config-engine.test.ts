@@ -6,6 +6,8 @@ import {
   DEFAULT_FORMULA_VERSION,
   GENERATION_CORE_OUTPUT_TOKENS,
   GENERATION_OUTPUT_TOKENS,
+  GENERATION_LEDGER_OUTPUT_TOKENS,
+  GENERATION_REVIEW_OUTPUT_TOKENS,
   GENERATION_SHORT_OUTPUT_TOKENS,
   FORMULA_EXECUTION_POLICY_DIGEST,
   FORMULA_EXECUTION_POLICY_VERSION,
@@ -87,7 +89,7 @@ describe("observed generation cost controls", () => {
       topLevelKeys: ["choices"], contentKind: "string", contentChars: 0, reasoningContentChars: 512,
       emptyOutputRecoveryAttempted: true,
     });
-    expect(shouldRegenerateCommentReadersFailure(recoveredEmpty)).toBe(false);
+    expect(shouldRegenerateCommentReadersFailure(recoveredEmpty)).toBe(true);
     expect(shouldCorrectCommentReadersFailure(empty, "")).toBe(false);
     expect(shouldRegenerateCommentReadersFailure(new ModelProviderError("gateway", 502, "r", true))).toBe(false);
     expect(shouldCorrectCommentReadersFailure(new Error("parser error"), "{bad json")).toBe(true);
@@ -116,6 +118,8 @@ describe("resolved generation config", () => {
     expect(GENERATION_OUTPUT_TOKENS).toBe(64_000);
     expect(GENERATION_CORE_OUTPUT_TOKENS).toBe(32_000);
     expect(GENERATION_SHORT_OUTPUT_TOKENS).toBe(16_000);
+    expect(GENERATION_LEDGER_OUTPUT_TOKENS).toBe(24_000);
+    expect(GENERATION_REVIEW_OUTPUT_TOKENS).toBe(8_000);
   });
 
   it("applies system -> workspace -> project -> task precedence and replaces arrays", () => {
@@ -166,11 +170,14 @@ describe("traditional generation telemetry", () => {
 });
 
 describe("three-candidate content generation engine", () => {
-  it("generates exactly three distinct, reproducible packages without configured model", async () => {
+  it("generates three distinct reproducible packages under the user-selected publishing topology", async () => {
     const fixedNow = () => new Date("2026-07-12T12:00:00.000Z");
-    const first = await new ContentGenerationAgent({ now: fixedNow }).generate({ jobId: "job-1", config: config(), formulaVersion: DEFAULT_FORMULA_VERSION, knowledge });
-    const second = await new ContentGenerationAgent({ now: fixedNow }).generate({ jobId: "job-1", config: config(), formulaVersion: DEFAULT_FORMULA_VERSION, knowledge });
+    const creativeConfig = config();
+    const first = await new ContentGenerationAgent({ now: fixedNow }).generate({ jobId: "job-1", config: creativeConfig, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge });
+    const second = await new ContentGenerationAgent({ now: fixedNow }).generate({ jobId: "job-1", config: creativeConfig, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge });
     expect(first.packages).toHaveLength(3);
+    expect(first.packages.every((item) => item.configSnapshot.task.publishingTopology === "creative_scenario")).toBe(true);
+    expect(first.packages.every((item) => item.orchestrationSnapshot?.publishingPerspective === undefined)).toBe(true);
     expect(new Set(first.packages.map((item) => item.seed)).size).toBe(3);
     expect(new Set(first.packages.map((item) => item.content.N.title)).size).toBe(3);
     expect(new Set(first.packages.map((item) => item.content.N.body)).size).toBe(3);
@@ -214,6 +221,12 @@ describe("three-candidate content generation engine", () => {
     expect(first.packages.every((item) => item.orchestrationSnapshot?.opportunitySelectionAudit?.selectionMode === "default_policy"
       && item.orchestrationSnapshot.opportunitySelectionAudit.rankStatus === "not_applied"
       && item.orchestrationSnapshot.opportunitySelectionAudit.selectedOpportunityRank === undefined)).toBe(true);
+
+    const institutionConfig = config();
+    institutionConfig.task.publishingTopology = "institution_owned";
+    const institution = await new ContentGenerationAgent({ now: fixedNow }).generate({ jobId: "job-institution", config: institutionConfig, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge });
+    expect(institution.packages).toHaveLength(3);
+    expect(institution.packages.every((item) => item.configSnapshot.task.publishingTopology === "institution_owned")).toBe(true);
   });
 
   it("persists the selected automatic opportunity rank in every orchestration snapshot", async () => {
@@ -284,6 +297,7 @@ describe("three-candidate content generation engine", () => {
 
   it("passes candidate seed/model settings, caps repairs and fails closed when a provider ignores comment repairs", async () => {
     const calls: ModelGenerationRequest[] = [];
+    const telemetry: import("../src/index.js").GenerationTelemetryEvent[] = [];
     const evidenceId = "evidence_task_project";
     const supportedFact = "资料中确认了产品要点";
     const validBody = `${supportedFact}。适用边界已经写明；适合谁、如何比较、哪些未知目前仍未知，请补充个人条件并按来源核实。先记录条件，再比较选择。`.repeat(2);
@@ -310,7 +324,10 @@ describe("three-candidate content generation engine", () => {
     const provider: ModelProvider = {
       async generate(request) {
         calls.push(request);
-        if (request.metadata?.purpose === "repair") return { text: JSON.stringify({ N: { body: validBody } }), raw: {} };
+        if (request.metadata?.purpose === "repair") {
+          const body = request.metadata?.candidateIndex === 0 ? supportedFact : validBody;
+          return { text: JSON.stringify({ N: { body } }), raw: {} };
+        }
         if (String(request.metadata?.purpose) === "generate_comment_readers") return {
           text: JSON.stringify({ threads: stagedCommentThreads(request, "按资料逐项核实。") }),
           raw: {},
@@ -335,12 +352,20 @@ describe("three-candidate content generation engine", () => {
     value.task.forbidden = ["按资料逐项核实"];
     value.model.model = "provider-selected-model";
     const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-07-12T00:00:00Z") })
-      .generate({ jobId: "repair-job", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge: [knowledge[0]!] });
+      .generate({
+        jobId: "repair-job",
+        config: value,
+        formulaVersion: DEFAULT_FORMULA_VERSION,
+        knowledge: [knowledge[0]!],
+        onTelemetry: (event) => { telemetry.push(event); },
+      });
     expect(calls.filter((item) => item.metadata?.purpose === "generate_core")).toHaveLength(3);
     expect(calls.filter((item) => item.metadata?.purpose === "generate_core").every((item) => item.maxOutputTokens === GENERATION_CORE_OUTPUT_TOKENS)).toBe(true);
     expect(calls.filter((item) => item.metadata?.purpose === "generate_org_answers").every((item) => item.maxOutputTokens === GENERATION_SHORT_OUTPUT_TOKENS)).toBe(true);
-    expect(calls.filter((item) => ["generate_comment_readers", "generate_ledger", "repair"].includes(String(item.metadata?.purpose)))
+    expect(calls.filter((item) => ["generate_comment_readers", "repair"].includes(String(item.metadata?.purpose)))
       .every((item) => item.maxOutputTokens === GENERATION_OUTPUT_TOKENS)).toBe(true);
+    expect(calls.filter((item) => item.metadata?.purpose === "generate_ledger")
+      .every((item) => item.maxOutputTokens === GENERATION_LEDGER_OUTPUT_TOKENS)).toBe(true);
     // 按侧+按角色隔离后,评论读者侧调用取代原合并评论调用(purpose 更名)。
     expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_readers")).toHaveLength(3);
     // Task 7.3: multi-turn comment growth (stage 2B) is opt-in and conservative by
@@ -348,12 +373,18 @@ describe("three-candidate content generation engine", () => {
     // The pipeline still produces valid root comments and fails closed as expected.
     expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_growth")).toHaveLength(0);
     const repairCalls = calls.filter((item) => item.metadata?.purpose === "repair");
-    expect(repairCalls.length).toBeGreaterThanOrEqual(3);
-    expect(repairCalls.length).toBeLessThanOrEqual(6);
+    expect(repairCalls.filter((item) => item.metadata?.candidateIndex === 0)).toHaveLength(1);
+    expect(repairCalls.filter((item) => item.metadata?.candidateIndex === 1)).toHaveLength(1);
+    expect(repairCalls.filter((item) => item.metadata?.candidateIndex === 2)).toHaveLength(1);
+    expect(telemetry).toContainEqual(expect.objectContaining({
+      type: "candidate_repair_skipped",
+      candidateIndex: 0,
+      reason: "no_progress",
+    }));
     expect(calls.every((item) => item.model === "provider-selected-model")).toBe(true);
-    expect(result.packages.every((item) => item.validation.repairAttempts === 2)).toBe(true);
+    expect(result.packages.map((item) => item.validation.repairAttempts)).toEqual([1, 1, 1]);
     expect(result.packages.every((item) => item.validation.valid === false
-      && item.validation.issues.some((issue) => issue.code === "forbidden_phrase"))).toBe(true);
+      && item.validation.issues.some((issue) => issue.disposition === "block" || issue.severity === "error"))).toBe(true);
   });
 
   it("fails closed when one initial model request fails instead of returning a publishable fallback", async () => {
@@ -409,7 +440,7 @@ describe("three-candidate content generation engine", () => {
     expect(result.degradedCandidates).toEqual([
       { candidateIndex: 1, reason: expect.stringContaining("temporary upstream failure") },
     ]);
-    // 交付的必须是模型产出:失败候选的序号不出现,且没有候选退化成确定性兜底稿。
+    // 保留的必须是模型产出，不能退化成确定性兜底稿。
     expect(result.packages.every((item) => item.content.N.title === "先核实再决定")).toBe(true);
   });
 
@@ -531,9 +562,11 @@ describe("three-candidate content generation engine", () => {
       },
     });
 
+    const preContactConfig = config();
+    preContactConfig.task.goal = "还没接触，准备先了解再决定";
     await expect(new ContentGenerationAgent({ modelProvider: provider }).generate({
       jobId: "core-identity-barrier",
-      config: config(),
+      config: preContactConfig,
       formulaVersion: DEFAULT_FORMULA_VERSION,
       knowledge,
       planningContext: { projectBlueprint: blueprint },
@@ -592,13 +625,63 @@ describe("three-candidate content generation engine", () => {
       evidenceIds: ["evidence_d1"],
       source: "uploaded" as const,
     }];
-    const longBody = "正文明确说明适用边界，并把已知、未知和需要核验的信息分开。".repeat(10);
+    const longBody = "适用条件目前仍不能确定，需要核实具体情况和信息范围，同时保留适用边界。".repeat(10);
     const provider: ModelProvider = {
       async generate(request) {
         calls.push(request);
-        if (String(request.metadata?.purpose) === "generate_comment_readers") return {
+        const purpose = String(request.metadata?.purpose);
+        if (purpose === "revision") {
+          const ids = stagedThreadIds(request);
+          return {
+            text: JSON.stringify({
+              N: {
+                imageBrief: "另一种核验思路：把判断条件分层呈现",
+                title: "先把适用条件问具体",
+                body: "先把适用边界写清，再说明自己的情况和现实限制。哪些条件会改变判断，就逐项向可追责渠道问明白；当前没有统一答案，不替个人下结论。",
+              },
+              Cref: {
+                disclaimer: "以下为完整评论区创作参考，不代表真实用户发言。",
+                threads: ids.map((id, index) => ({
+                  id,
+                  question: `适用条件第${index + 1}项该怎么确认？`,
+                  answer: "这一项当前无法确认，先不下结论。",
+                  followUps: [],
+                })),
+              },
+              evidenceIds: [],
+              reasoning: [],
+              unknowns: [],
+            }),
+            raw: {},
+          };
+        }
+        if (purpose === "generate_comment_readers") return {
           text: JSON.stringify({
-            threads: stagedCommentThreads(request, "按资料来源逐项核验。"),
+            threads: stagedThreadIds(request).map((id, index) => ({
+              id,
+              question: index === 0
+                ? "适用条件目前还不能确定，具体情况和信息范围要怎么核实？"
+                : `适用条件还没问清，第${index + 1}项现实情况该怎么确认？`,
+              answer: index === 0
+                ? "我也还不能确定，准备把自己的具体情况一起问清。"
+                : "我会先补充自己的限制，再核实信息范围。",
+              followUps: [],
+            })),
+          }),
+          raw: {},
+        };
+        if (purpose === "edit_comment_readers") return {
+          text: JSON.stringify({
+            threads: stagedThreadIds(request).map((id, index) => ({
+              id,
+              question: index === 0
+                ? "适用条件目前还不能确定，具体情况和信息范围要怎么核实？"
+                : `适用条件还没问清，第${index + 1}项现实情况该怎么确认？`,
+              answer: index === 0
+                ? "我也还不能确定，准备把自己的具体情况一起问清。"
+                : "我会先补充自己的限制，再核实信息范围。",
+            })),
+            assessment: { status: "pass", reasons: [], summary: "已保留同题但不同处境的自然问法。" },
           }),
           raw: {},
         };
@@ -609,7 +692,16 @@ describe("three-candidate content generation engine", () => {
         if (String(request.metadata?.purpose) === "generate_comment_growth") return {
           text: JSON.stringify({
             disclaimer: "以下为评论区问答参考模板，不代表真实用户发言。",
-            threads: stagedCommentThreads(request, "按资料来源逐项核验。"),
+            threads: stagedThreadIds(request).map((id, index) => ({
+              id,
+              question: index === 0
+                ? "适用条件目前还不能确定，具体情况和信息范围要怎么核实？"
+                : `适用条件还没问清，第${index + 1}项现实情况该怎么确认？`,
+              answer: index === 0
+                ? "我也还不能确定，准备把自己的具体情况一起问清。"
+                : "我会先补充自己的限制，再核实信息范围。",
+              followUps: [],
+            })),
           }),
           raw: {},
         };
@@ -695,15 +787,14 @@ describe("three-candidate content generation engine", () => {
         imageAnalyses: approvedImageAnalyses,
       },
     });
-    // 身份已在规划期冻结，每候选 6 次阶段调用：core + comment_readers(2A-R)
-    // + comment_editor(2A-E) + org_answers(2A-O，本测试线程同一身份，1 次)
-    // + comment_growth(2B) + ledger。
-    // 不再存在 assign_reply_identities 二次映射调用。
-    expect(calls).toHaveLength(18);
+    // 发布拓扑与身份已在规划期冻结。该夹具没有网络诊断问题，因此按需终编零调用。
+    // 三候选各自只调用 core + readers + growth + ledger。
+    expect(calls).toHaveLength(12);
+    expect(calls.filter((item) => item.metadata?.purpose === "pair_style_repair")).toHaveLength(0);
     expect(calls.filter((item) => item.metadata?.purpose === "assign_reply_identities")).toHaveLength(0);
     expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_readers")).toHaveLength(3);
-    expect(calls.filter((item) => item.metadata?.purpose === "edit_comment_readers")).toHaveLength(3);
-    expect(calls.filter((item) => item.metadata?.purpose === "generate_org_answers")).toHaveLength(3);
+    expect(calls.filter((item) => item.metadata?.purpose === "edit_comment_readers")).toHaveLength(0);
+    expect(calls.filter((item) => item.metadata?.purpose === "generate_org_answers")).toHaveLength(0);
     expect(calls.filter((item) => item.metadata?.purpose === "generate_comment_growth")).toHaveLength(3);
     const promptTextOf = (call: ModelGenerationRequest): string => {
       const content = call.messages[1]!.content;
@@ -720,7 +811,7 @@ describe("three-candidate content generation engine", () => {
     // 读者侧上下文含任务基本信息(主题);机构侧上下文含本角色身份卡(项目名)。
     const readerSideCalls = calls.filter((call) => ["generate_comment_readers", "edit_comment_readers", "generate_comment_growth"].includes(String(call.metadata?.purpose)));
     expect(readerSideCalls.map(promptTextOf).every((text) => text.includes("方案选择"))).toBe(true);
-    expect(calls.filter((call) => call.metadata?.purpose === "generate_org_answers").map(promptTextOf).every((text) => text.includes("测试项目"))).toBe(true);
+    expect(calls.filter((call) => call.metadata?.purpose === "generate_org_answers")).toHaveLength(0);
     expect(new Set(result.packages.map((item) => item.orchestrationSnapshot?.strategy.id)).size).toBe(3);
     expect(result.packages.every((item) => item.orchestrationSnapshot?.opportunitySelectionAudit?.selectionMode === "explicit_locked"
       && item.orchestrationSnapshot.opportunitySelectionAudit.rankStatus === "not_applied"
@@ -743,13 +834,18 @@ describe("three-candidate content generation engine", () => {
       .every((thread) => !thread.roleCard && !thread.replyPlan && !thread.primaryGapId && thread.evidenceIds.length === 0))).toBe(true);
     expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => thread.followUps.length <= 2))).toBe(true);
     expect(result.packages.some((item) => item.content.Cref.threads.some((thread) => thread.followUps.length === 0))).toBe(true);
-    // 按侧+按角色隔离:T1 答复来自机构调用,T2 来自读者侧(同一 mock 文案);
-    // T3 漂浮短反应的 answer 由合并层确定性置空(旧流程由模型一次写全部,
-    // mock 文案会覆盖 T3;新流程 T3 恒空是设计语义)。
-    expect(result.packages.every((item) => item.content.Cref.threads.every((thread) =>
-      (thread.threadKind ?? "org_answer") === "organic_reaction"
-        ? thread.answer === ""
-        : thread.answer === "按资料来源逐项核验。"))).toBe(true);
+    // 无事实证据的 T1 机构位确定性保留未知；T2 仍采用读者侧文案；
+    // T3 漂浮短反应恒空。任何机构位都不能把 mock 的“按资料核实”当事实答复。
+    expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => {
+      const kind = thread.threadKind ?? "org_answer";
+      if (kind === "organic_reaction") return thread.answer === "";
+      if (kind === "reader_exchange") {
+        return Boolean(thread.answer.trim())
+          && !/(?:官网|执照|资质|地址|预约|帮.*确认|稍后|私信|对接|安排|发给)/u.test(thread.answer);
+      }
+      return /(?:当前|目前).{0,12}(?:无法确认|不能确定)/u.test(thread.answer)
+        && !/(?:帮.*确认|稍后|私信|预约|对接|安排|发给|保证|承诺)/u.test(thread.answer);
+    }))).toBe(true);
     expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => !/直接回答\s*[：:]|NextQuestion\s*[：:]/u.test(thread.answer)))).toBe(true);
     expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => !thread.question.includes("…")))).toBe(true);
     // 缺口边界流入 stage1/stage3 全量上下文(task_data)与机构侧逐 gap 口径;
@@ -956,8 +1052,10 @@ describe("three-candidate content generation engine", () => {
    * 语义裁决还是按裸词面判定,从产物上完全看不出来。
    */
   it("判官调用失败时在校验结果里留下 model_claim_judge_failed", async () => {
+    const calls: ModelGenerationRequest[] = [];
     const provider: ModelProvider = {
       async generate(request) {
+        calls.push(request);
         const purpose = String(request.metadata?.purpose);
         if (purpose === "claim_judge") throw new Error("读取响应失败: error decoding response body");
         if (purpose === "generate_comment_readers") return {
@@ -1011,6 +1109,13 @@ describe("three-candidate content generation engine", () => {
       .generate({ jobId: "judge-failure-job", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge: [knowledge[0]!] });
     const failures = result.packages.flatMap((item) =>
       item.validation.issues.filter((issue) => issue.code === "model_claim_judge_failed"));
+    const judgeCalls = calls.filter((call) => call.metadata?.purpose === "claim_judge");
+    expect(judgeCalls).toHaveLength(result.packages.length);
+    expect(new Set(judgeCalls.map((call) => call.metadata?.candidateIndex)).size).toBe(result.packages.length);
+    expect(judgeCalls.every((call) => call.schemaName === "claim_judge"
+      && call.maxOutputTokens === GENERATION_REVIEW_OUTPUT_TOKENS)).toBe(true);
+    expect(calls.some((call) => call.schemaName === "knowledge_anchor_review"
+      || call.metadata?.purpose === "knowledge_anchor_review")).toBe(false);
     expect(failures.length).toBeGreaterThan(0);
     // 只补信号,不升级严重度:判官失效不阻断发布。
     expect(failures.every((issue) => issue.severity === "warning" && issue.repairable === false)).toBe(true);
@@ -1019,5 +1124,79 @@ describe("three-candidate content generation engine", () => {
     for (const item of result.packages) {
       expect(item.validation.issues.filter((issue) => issue.code === "model_claim_judge_failed").length).toBeLessThanOrEqual(1);
     }
+  });
+});
+
+
+describe("real-generation P0 regressions", () => {
+  it("regenerates only the core candidate whose HTTP-200 response contains reasoning but no visible content", async () => {
+    const calls: ModelGenerationRequest[] = [];
+    const core = JSON.stringify({
+      H: { hashtags: ["方案选择", "信息核验", "适用边界"] },
+      N: {
+        imageBrief: "问题清单随手拍",
+        title: "先问清楚再决定",
+        body: "我还没去，准备先把适用条件、限制和未知信息逐项问清楚，再决定下一步。".repeat(3),
+      },
+    });
+    const institutionCore = JSON.stringify({
+      H: { hashtags: ["方案选择", "信息核验", "适用边界"] },
+      N: {
+        imageBrief: "机构信息核验说明图",
+        title: "先说明条件再决定",
+        body: "我们会先说明适用条件、限制和当前未知信息，再请读者结合自身情况决定下一步。".repeat(3),
+      },
+    });
+    const emptyCore = () => new ModelProviderError(
+      "Model response did not contain output text after one empty-output recovery attempt.",
+      200,
+      "core-empty",
+      false,
+      "stop",
+      { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+      {
+        topLevelKeys: ["choices", "usage"],
+        choiceMessageKeys: ["content", "reasoning_content"],
+        contentKind: "string",
+        contentChars: 0,
+        reasoningContentChars: 360,
+        emptyOutputRecoveryAttempted: true,
+      },
+    );
+    const provider: ModelProvider = {
+      async generate(request) {
+        calls.push(request);
+        const purpose = String(request.metadata?.purpose);
+        if (purpose === "generate_core" && request.metadata?.candidateIndex === 1) throw emptyCore();
+        if (purpose === "regenerate_core" && request.metadata?.candidateIndex === 1) return { text: institutionCore, raw: {} };
+        if (purpose === "generate_core" || purpose === "regenerate_core") return { text: core, raw: {} };
+        if (purpose === "generate_comment_readers") return {
+          text: JSON.stringify({ threads: stagedCommentThreads(request, "同问，我也还没决定。") }), raw: {},
+        };
+        if (purpose === "edit_comment_readers") return {
+          text: JSON.stringify({
+            threads: stagedCommentThreads(request, "同问，我也还没决定。"),
+            assessment: { status: "pass", reasons: [], summary: "保持同题。" },
+          }),
+          raw: {},
+        };
+        if (purpose === "generate_ledger") return {
+          text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {},
+        };
+        return { text: "{}", raw: {} };
+      },
+    };
+    const value = config();
+    value.content.bodyMinChars = 20;
+    value.generation.maxRepairAttempts = 0;
+    const result = await new ContentGenerationAgent({ modelProvider: provider })
+      .generate({ jobId: "core-empty-single-candidate", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge });
+
+    expect(result.packages).toHaveLength(3);
+    expect(calls.filter((call) => call.metadata?.purpose === "regenerate_core")
+      .map((call) => call.metadata?.candidateIndex)).toEqual([1]);
+    expect(calls.filter((call) => call.metadata?.purpose === "generate_core")).toHaveLength(3);
+    expect(result.packages.find((item) => item.candidateIndex === 1)?.validation.issues)
+      .toContainEqual(expect.objectContaining({ code: "model_core_regenerated", severity: "warning" }));
   });
 });

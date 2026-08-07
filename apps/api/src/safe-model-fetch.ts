@@ -5,6 +5,11 @@ import { Agent, buildConnector, fetch as undiciFetch, type Dispatcher } from 'un
 export interface ByokUrlPolicy {
   allowHttp?: boolean;
   allowPrivateNetwork?: boolean;
+  /**
+   * Permit Clash-style DNS fake IPs only for HTTPS domain names. Direct IP URLs
+   * and every other private/reserved range remain blocked. Default is false.
+   */
+  allowProxyFakeIp?: boolean;
 }
 
 export interface PinnedModelTarget {
@@ -43,6 +48,17 @@ export const DEFAULT_MAX_MODEL_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 function normalizedIp(value: string): ReturnType<typeof ipaddr.parse> {
   return ipaddr.process(value);
+}
+
+function isProxyFakeIp(value: string): boolean {
+  try {
+    const address = normalizedIp(value);
+    if (address.kind() !== 'ipv4') return false;
+    const [a, b] = address.toByteArray();
+    return a === 198 && (b === 18 || b === 19);
+  } catch {
+    return false;
+  }
 }
 
 function isPublicIp(value: string): boolean {
@@ -123,6 +139,7 @@ async function resolveTarget(
   url: URL,
   lookup: Lookup,
   allowPrivateNetwork: boolean,
+  allowProxyFakeIp: boolean,
 ): Promise<PinnedModelTarget> {
   const hostname = normalizedHostname(url);
   assertSafeHost(url, allowPrivateNetwork);
@@ -138,7 +155,15 @@ async function resolveTarget(
   if (results.some((result) => !ipaddr.isValid(result.address))) {
     throw new Error('BYOK 模型主机 DNS 返回了无效地址');
   }
-  if (!allowPrivateNetwork && results.some((result) => !isPublicIp(result.address))) {
+  const domainOverHttps = url.protocol === 'https:' && !ipaddr.isValid(hostname);
+  // Clash fake-IP mode returns only synthetic addresses from 198.18.0.0/15.
+  // Accept the response only as one closed set: mixing a fake IP with a public
+  // or another private address is still rejected as suspicious DNS rebinding.
+  const proxyFakeIpSet = allowProxyFakeIp
+    && domainOverHttps
+    && results.every((result) => isProxyFakeIp(result.address));
+  if (!allowPrivateNetwork && !proxyFakeIpSet
+    && results.some((result) => !isPublicIp(result.address))) {
     throw new Error('BYOK 模型主机 DNS 必须全部解析到公网地址');
   }
   const selected = results[0];
@@ -265,6 +290,7 @@ export function createSafeModelFetch(options: SafeModelFetchOptions = {}): typeo
   const transportFetch = options.transportFetch ?? (undiciFetch as unknown as TransportFetch);
   const dispatcherFactory = options.dispatcherFactory ?? defaultDispatcherFactory;
   const allowPrivateNetwork = options.allowPrivateNetwork === true;
+  const allowProxyFakeIp = options.allowProxyFakeIp === true;
   const maxRedirects = redirectLimit(options);
   const maxResponseBytes = responseSizeLimit(options);
 
@@ -275,7 +301,7 @@ export function createSafeModelFetch(options: SafeModelFetchOptions = {}): typeo
 
     for (let redirects = 0; ; redirects += 1) {
       validateByokBaseUrl(url.toString(), options);
-      const target = await resolveTarget(url, lookup, allowPrivateNetwork);
+      const target = await resolveTarget(url, lookup, allowPrivateNetwork, allowProxyFakeIp);
       const active = dispatcherFactory(target);
       let response: Response;
       try {

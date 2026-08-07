@@ -473,6 +473,42 @@ describe("non-vector orchestration planning", () => {
       .every((thread) => Object.values(thread.replyPlan).every(Boolean))).toBe(true);
   });
 
+  it("honors the configured comment minimum with same-topic non-factual seats", () => {
+    const focusedConfig = config();
+    focusedConfig.content.commentThreadMin = 3;
+    focusedConfig.content.commentThreadMax = 5;
+    focusedConfig.content.commentMultiTurnGrowthEnabled = true;
+    focusedConfig.content.followUpDepth = 2;
+    const painGap: InformationGap = {
+      id: "pain_only", label: "疼痛体验", question: "过程中不舒服时如何沟通？", category: "outcome",
+      audienceStages: ["hesitating"], importance: 0.9, decisionLeverage: 0.9, proofability: 0.8,
+      answer: "过程中可沟通并调整节奏。", evidenceIds: ["evidence_pain"], required: true,
+      preferredChannels: ["N.body", "Cref"],
+    };
+    const plans = planTopicOrchestrations({
+      opportunity: {
+        ...opportunity("focused-minimum", "疼痛沟通"), gapIds: [painGap.id], audienceStage: "hesitating",
+        boundaries: ["不得承诺完全无痛"],
+      },
+      gaps: [painGap], config: focusedConfig, seeds: [21, 22, 23], expressionStrategies: [{
+        id: "pain_strategy", label: "疼痛沟通说明", openingMode: "怕疼先问", narrativeMode: "疼痛反馈",
+        bodyRole: "说明沟通节奏", imageRole: "cover", commentMode: "同题追问", voice: "克制",
+        sequence: ["疼痛", "沟通"], targetChannels: ["N.body", "Cref"],
+        applicability: { gapIds: [painGap.id], audienceStages: ["hesitating"] },
+      }],
+    });
+    for (const plan of plans) {
+      expect(plan.focusContract?.mode).toBe("focused");
+      expect(plan.dialogueThreads).toHaveLength(3);
+      expect(plan.dialogueThreads.filter((thread) => thread.coverageRole === "primary_gap")).toHaveLength(1);
+      expect(plan.dialogueThreads.filter((thread) => thread.coverageRole === "topic_anchor")).toHaveLength(2);
+      expect(plan.dialogueThreads.slice(1).every((thread) => thread.evidenceIds.length === 0)).toBe(true);
+      expect(plan.dialogueThreads.every((thread) => thread.auxiliaryGapIds.length === 0)).toBe(true);
+      expect(plan.dialogueThreads.every((thread) => thread.conversationPlan?.targetFollowUps === 0)).toBe(true);
+      expect(plan.gapCoverageLedger.effectiveThreadCount).toBe(3);
+    }
+  });
+
   it("does not allocate comment gaps or threads when comments are disabled", () => {
     const withoutComments = config();
     withoutComments.expressionWindow.channels = withoutComments.expressionWindow.channels.filter((channel) => channel !== "comments");
@@ -686,6 +722,223 @@ describe("non-vector orchestration planning", () => {
     expect(plans.every((plan) => voices.has(plan.strategy.voice))).toBe(true);
   });
 
+
+
+  it("filters incompatible project strategies and focuses a two-gap organization-information topic", () => {
+    const locationGaps: InformationGap[] = [
+      {
+        id: "org_info", label: "机构信息", question: "机构有哪些可公开信息？", category: "identity",
+        audienceStages: ["ready"], importance: 0.9, decisionLeverage: 0.9, proofability: 0.9,
+        answer: "机构类型为门诊，地址在锦华万达附近。", evidenceIds: ["evidence_org"], required: true,
+        preferredChannels: ["N.body", "Cref"],
+      },
+      {
+        id: "arrival", label: "到院信息", question: "具体位置、预约和交通怎么确认？", category: "location",
+        audienceStages: ["ready"], importance: 0.7, decisionLeverage: 0.8, proofability: 0.3,
+        answer: "地址在锦华万达附近。", evidenceIds: ["evidence_org"], required: false,
+        preferredChannels: ["N.body", "Cref"],
+      },
+    ];
+    const selected: TopicOpportunity = {
+      ...opportunity("arrival-focus", "锦华万达附近面诊前确认"),
+      angle: "以第一视角走一遍真实到店体验",
+      gapIds: locationGaps.map((gap) => gap.id),
+      audienceStage: "ready",
+      entry: "profile",
+      boundaries: ["不能虚构具体客户体验", "地址只公开到锦华万达附近"],
+    };
+    const strategies = [
+      {
+        id: "location_only", label: "到院信息核验", prototype: "narrow_request" as const,
+        openingMode: "直接问位置", narrativeMode: "地址范围与未知交通", bodyRole: "到院信息说明",
+        imageRole: "cover" as const, commentMode: "位置与预约问答", voice: "清楚克制",
+        sequence: ["地址范围", "预约未知", "交通未知"], targetChannels: ["N.title", "N.body", "Cref"] as const,
+      },
+      {
+        id: "recovery_sales", label: "第二天上班", prototype: "process_log" as const,
+        openingMode: "第二天能否见人", narrativeMode: "恢复时间线", bodyRole: "恢复效果说明",
+        imageRole: "before_after" as const, commentMode: "复发保障与恢复追问", voice: "营销自信",
+        sequence: ["不红不肿", "一周自然", "满意后付款"], targetChannels: ["N.title", "N.body", "Cref"] as const,
+      },
+      {
+        id: "price_sales", label: "价格透明", prototype: "narrow_request" as const,
+        openingMode: "多少钱", narrativeMode: "价格与优惠", bodyRole: "报价和团购",
+        imageRole: "cover" as const, commentMode: "价格加项", voice: "转化",
+        sequence: ["价格", "优惠", "预约"], targetChannels: ["N.title", "N.body", "Cref"] as const,
+      },
+    ];
+    for (const topology of ["creative_scenario", "institution_owned"] as const) {
+      const selectedConfig = config();
+      selectedConfig.task.publishingTopology = topology;
+      selectedConfig.task.audienceStage = "ready";
+      selectedConfig.task.entry = "profile";
+      selectedConfig.content.commentMultiTurnGrowthEnabled = true;
+      selectedConfig.content.followUpDepth = 2;
+      selectedConfig.parameters!.commentConversationRate = 75;
+      selectedConfig.parameters!.commentBranchingStrength = 80;
+      const plans = planTopicOrchestrations({
+        opportunity: selected, gaps: locationGaps, config: selectedConfig, seeds: [1, 2, 3],
+        expressionStrategies: strategies.map((strategy) => ({ ...strategy, targetChannels: [...strategy.targetChannels] })),
+      });
+      for (const plan of plans) {
+        expect(plan.focusContract).toMatchObject({
+          mode: "focused", allowSocialThreads: false, allowCrossGapBranching: false, allowMultiTurnGrowth: false,
+          strategySelection: { mode: "compatible_pool", compatibleStrategyIds: ["location_only"] },
+        });
+        expect(plan.strategy.id).toBe("location_only");
+        expect(plan.focusContract?.strategySelection.rejectedStrategyIds).toEqual(expect.arrayContaining(["recovery_sales", "price_sales"]));
+        expect(plan.dialogueThreads).toHaveLength(selectedConfig.content.commentThreadMin);
+        expect(plan.dialogueThreads.filter((thread) => thread.coverageRole === "primary_gap")).toHaveLength(2);
+        expect(plan.dialogueThreads.filter((thread) => thread.coverageRole === "topic_anchor")).toHaveLength(selectedConfig.content.commentThreadMin - 2);
+        expect(plan.dialogueThreads.every((thread) => thread.auxiliaryGapIds.length === 0)).toBe(true);
+        expect(plan.dialogueThreads.every((thread) => thread.conversationPlan?.targetFollowUps === 0)).toBe(true);
+        expect(plan.dialogueThreads.filter((thread) => thread.coverageRole === "primary_gap")
+          .every((thread) => thread.surfaceRoleCard?.displayRole === `${plan.gapPlanningCards?.find((card) => card.gapId === thread.primaryGapId)?.label}核实者`)).toBe(true);
+        expect(JSON.stringify(plan.dialogueThreads.map((thread) => thread.surfaceRoleCard))).not.toMatch(/价格|多少钱|加项|团购|优惠|效果|恢复/u);
+        expect(plan.personaScenePlan?.commentNetwork.multiTurnTarget).toEqual([0, 0]);
+        expect(plan.focusContract?.effectiveAngle).not.toContain("真实到店体验");
+        if (topology === "institution_owned") expect(plan.focusContract?.effectiveAngle).toContain("明确机构身份");
+        else expect(plan.focusContract?.effectiveAngle).toContain("不虚构已经到店");
+      }
+    }
+  });
+
+  it("gives a focused unresolved organization gap one comment owner and a neutral gap-specific role", () => {
+    const focusedConfig = config();
+    focusedConfig.task.publishingTopology = "institution_owned";
+    focusedConfig.content.commentMultiTurnGrowthEnabled = true;
+    focusedConfig.content.followUpDepth = 2;
+    const selectedGaps: InformationGap[] = [
+      {
+        id: "org_info", label: "机构信息", question: "机构有哪些可公开、可核验的信息？", category: "boundary",
+        audienceStages: ["ready"], importance: 0.9, decisionLeverage: 0.8, proofability: 0,
+        evidenceIds: [], required: true, preferredChannels: ["N.body", "Cref"],
+      },
+      {
+        id: "arrival", label: "到院信息", question: "具体位置和预约方式怎么确认？", category: "location",
+        audienceStages: ["ready"], importance: 0.8, decisionLeverage: 0.7, proofability: 0.8,
+        answer: "地址在锦华万达附近。", evidenceIds: ["evidence_location"], required: false,
+        preferredChannels: ["N.body", "Cref"],
+      },
+    ];
+    const plans = planTopicOrchestrations({
+      opportunity: {
+        ...opportunity("focused-owner"), topic: "面诊前确认机构和到院信息", angle: "先核实再出发",
+        gapIds: selectedGaps.map((gap) => gap.id), audienceStage: "ready", entry: "profile",
+        boundaries: ["不得公开机构全称", "不得虚构顾客体验"],
+      },
+      gaps: selectedGaps, config: focusedConfig, seeds: [31, 32, 33],
+    });
+    for (const plan of plans) {
+      const unknown = plan.gapPlanningCards?.find((card) => card.gapId === "org_info");
+      expect(unknown?.plannedPlacements).toEqual(["Cref"]);
+      expect(unknown?.obligation).toBe("network_required");
+      expect(plan.contentIntent?.bodyMustEstablish).not.toContain("org_info");
+      const thread = plan.dialogueThreads.find((item) => item.primaryGapId === "org_info")!;
+      expect(thread.surfaceRoleCard).toMatchObject({
+        displayRole: "机构信息核实者", interactionHook: "机构信息", lexicalCues: [],
+      });
+      expect(thread.roleCard.constraints).toEqual([]);
+      expect(JSON.stringify(thread.surfaceRoleCard)).not.toMatch(/价格|费用|优惠|效果|恢复/u);
+      expect(thread.auxiliaryGapIds).toEqual([]);
+      expect(thread.conversationPlan?.targetFollowUps).toBe(0);
+    }
+  });
+
+  it("does not treat audience-stage-only applicability as topical compatibility", () => {
+    const painGap: InformationGap = {
+      id: "pain", label: "疼痛体验", question: "过程中不舒服时如何沟通？", category: "outcome",
+      audienceStages: ["hesitating"], importance: 0.8, decisionLeverage: 0.8, proofability: 0.8,
+      answer: "过程中可沟通并调整节奏。", evidenceIds: ["evidence_pain"], required: true,
+    };
+    const painStrategy = {
+      id: "pain_explainer", label: "疼痛沟通说明", openingMode: "怕疼时先问什么",
+      narrativeMode: "疼痛反馈与沟通节奏", bodyRole: "说明疼痛边界", imageRole: "cover" as const,
+      commentMode: "疼痛反馈问答", voice: "克制", sequence: ["疼痛", "沟通", "边界"],
+      targetChannels: ["N.body", "Cref"] as const,
+      applicability: { audienceStages: ["hesitating"] as const },
+    };
+    const priceStrategy = {
+      id: "price_sales", label: "价格优惠", openingMode: "多少钱",
+      narrativeMode: "两档价格与团购优惠", bodyRole: "报价转化", imageRole: "cover" as const,
+      commentMode: "私信领优惠", voice: "促销", sequence: ["价格", "团购", "付款"],
+      targetChannels: ["N.body", "Cref"] as const,
+      applicability: { audienceStages: ["hesitating"] as const },
+    };
+    const selected = { ...opportunity("pain-topic", "术中疼痛沟通"), angle: "不舒服时可以沟通调整节奏", gapIds: [painGap.id], audienceStage: "hesitating" as const };
+    const plans = planTopicOrchestrations({
+      opportunity: selected, gaps: [painGap], config: config(), seeds: [1, 2, 3],
+      expressionStrategies: [painStrategy, priceStrategy].map((strategy) => ({ ...strategy, targetChannels: [...strategy.targetChannels], applicability: { audienceStages: [...strategy.applicability.audienceStages] } })),
+    });
+    expect(plans.every((plan) => plan.focusContract?.strategySelection.compatibleStrategyIds.includes("pain_explainer"))).toBe(true);
+    expect(plans.every((plan) => plan.focusContract?.strategySelection.rejectedStrategyIds.includes("price_sales"))).toBe(true);
+    expect(plans.every((plan) => !JSON.stringify(plan.strategy).match(/价格|团购|付款|优惠/u))).toBe(true);
+  });
+
+  it("uses a neutral focused strategy when every historical strategy introduces another topic", () => {
+    const selectedGap: InformationGap = {
+      id: "arrival_only", label: "到院信息", question: "位置和交通如何确认？", category: "location",
+      audienceStages: ["ready"], importance: 0.8, decisionLeverage: 0.8, proofability: 0.4,
+      evidenceIds: [], required: true, preferredChannels: ["Cref"],
+    };
+    const incompatible = {
+      id: "only_recovery", label: "术后恢复", prototype: "process_log" as const,
+      openingMode: "第二天上班", narrativeMode: "恢复时间线", bodyRole: "恢复效果",
+      imageRole: "before_after" as const, commentMode: "复发保障", voice: "营销",
+      sequence: ["恢复", "效果"], targetChannels: ["N.body", "Cref"] as const,
+    };
+    const plans = planTopicOrchestrations({
+      opportunity: { ...opportunity("neutral-arrival"), topic: "到院位置", angle: "确认路线", gapIds: [selectedGap.id], audienceStage: "ready" },
+      gaps: [selectedGap], config: config(), seeds: [4, 5, 6],
+      expressionStrategies: [{ ...incompatible, targetChannels: [...incompatible.targetChannels] }],
+    });
+    expect(plans.every((plan) => plan.focusContract?.strategySelection.mode === "neutral_fallback")).toBe(true);
+    expect(plans.every((plan) => plan.focusContract?.mode === "focused")).toBe(true);
+    expect(plans.every((plan) => plan.strategy.id.startsWith("neutral_focus_"))).toBe(true);
+    expect(plans.every((plan) => !JSON.stringify(plan.strategy).match(/恢复|复发/u))).toBe(true);
+    expect(plans.every((plan) => /到院信息/.test(JSON.stringify({
+      host: plan.personaScenePlan?.host,
+      event: plan.personaScenePlan?.event,
+    })))).toBe(true);
+    expect(plans.every((plan) => !JSON.stringify({
+      host: plan.personaScenePlan?.host,
+      event: plan.personaScenePlan?.event,
+    }).match(/恢复|复发|价格|优惠|效果/u))).toBe(true);
+  });
+
+  it("uses the same compatibility gate outside healthcare without a domain keyword taxonomy", () => {
+    const courseGap: InformationGap = {
+      id: "campus_route", label: "上课地点", question: "校区在哪里，地铁怎么走？", category: "location",
+      audienceStages: ["ready"], importance: 0.8, decisionLeverage: 0.8, proofability: 0.6,
+      answer: "校区在大学城附近。", evidenceIds: ["evidence_campus"], required: true,
+      preferredChannels: ["N.body", "Cref"],
+    };
+    const routeStrategy = {
+      id: "course_route", label: "校区路线核验", openingMode: "直接问校区位置",
+      narrativeMode: "地点与交通说明", bodyRole: "上课地点说明", imageRole: "cover" as const,
+      commentMode: "地铁路线问答", voice: "清楚", sequence: ["校区", "地铁", "路线"],
+      targetChannels: ["N.title", "N.body", "Cref"] as const,
+    };
+    const priceStrategy = {
+      id: "course_price", label: "课程价格优惠", openingMode: "学费多少钱",
+      narrativeMode: "报价与早鸟优惠", bodyRole: "价格转化", imageRole: "cover" as const,
+      commentMode: "费用问答", voice: "促销", sequence: ["学费", "优惠", "付款"],
+      targetChannels: ["N.title", "N.body", "Cref"] as const,
+    };
+    const plans = planTopicOrchestrations({
+      opportunity: {
+        ...opportunity("course-route", "大学城校区怎么走"), angle: "确认上课地点和地铁路线",
+        gapIds: [courseGap.id], audienceStage: "ready", entry: "profile",
+      },
+      gaps: [courseGap], config: config(), seeds: [71, 72, 73],
+      expressionStrategies: [routeStrategy, priceStrategy].map((strategy) => ({
+        ...strategy, targetChannels: [...strategy.targetChannels],
+      })),
+    });
+    expect(plans.every((plan) => plan.strategy.id === routeStrategy.id)).toBe(true);
+    expect(plans.every((plan) => plan.focusContract?.strategySelection.rejectedStrategyIds.includes(priceStrategy.id))).toBe(true);
+  });
+
   it("always returns three deterministic plans for an explicit exact lock across many seeds", () => {
     const locked = {
       id: "exact_locked_policy",
@@ -888,6 +1141,62 @@ describe("P3 comment orchestration contract", () => {
       expect(deployment.updatePolicy?.every((item) => item.length > 0)).toBe(true);
       // F03: aC operating rules stay on the deployment plan and never leak into Cref copy.
       expect(plan.dialogueThreads.every((thread) => !thread.questionIntent.includes("工作日 24h"))).toBe(true);
+    }
+  });
+});
+
+describe("speaker disclosure routing", () => {
+  it("keeps public organization facts for accountable comments but removes them from a consumer body allocation", () => {
+    const organizationGap: InformationGap = {
+      id: "org_public_info",
+      label: "机构信息",
+      question: "机构全称是否可以对外公开？",
+      category: "location",
+      audienceStages: ["comparing"],
+      importance: 0.9,
+      decisionLeverage: 0.8,
+      proofability: 0.9,
+      answer: "机构类型为门诊，地址在锦华万达附近；机构全称不对外公开。",
+      boundary: "不得公开机构全称，可公开地址和门诊类型。",
+      evidenceIds: ["evidence_org"],
+      required: true,
+      preferredChannels: ["N.body", "Cref"],
+    };
+    const selected = {
+      ...opportunity("organization-disclosure"),
+      gapIds: [organizationGap.id],
+      evidenceIds: ["evidence_org"],
+    };
+    const consumerConfig = config();
+    const institutionConfig = config();
+    institutionConfig.task.publishingTopology = "institution_owned";
+    const consumerPlans = planTopicOrchestrations({
+      opportunity: selected,
+      gaps: [organizationGap],
+      config: consumerConfig,
+      seeds: [101, 202, 303],
+    });
+    const institutionPlans = planTopicOrchestrations({
+      opportunity: selected,
+      gaps: [organizationGap],
+      config: institutionConfig,
+      seeds: [101, 202, 303],
+    });
+
+    expect(consumerPlans).toHaveLength(3);
+    expect(institutionPlans).toHaveLength(3);
+    for (const [plans, bodyAllowed] of [[consumerPlans, false], [institutionPlans, true]] as const) {
+      for (const plan of plans) {
+        const card = plan.gapPlanningCards?.find((item) => item.gapId === organizationGap.id);
+        expect(card?.disclosureScope).toBe("organization_only");
+        expect(card?.plannedPlacements).toContain("Cref");
+        if (bodyAllowed) expect(card?.plannedPlacements).toContain("N.body");
+        else expect(card?.plannedPlacements).not.toContain("N.body");
+        expect(card?.answer).toContain("锦华万达附近");
+        expect(card?.answer).not.toContain("不对外公开");
+        expect(card?.question).not.toMatch(/全称.*公开/u);
+        expect(card?.boundary ?? "").not.toContain("不得公开机构全称");
+      }
     }
   });
 });

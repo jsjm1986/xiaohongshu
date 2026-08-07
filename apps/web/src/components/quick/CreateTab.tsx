@@ -5,6 +5,7 @@ import { ResultTab } from './ResultTab';
 import type { QuickCandidateView } from '../../lib/quick-generation';
 import type { QuickTab } from '../../lib/quick-channel-state';
 import type { SimpleSettingOverrides } from '../../lib/simple-generation';
+import type { RetryPublishingContract } from '../../lib/quick-recipe';
 import type { ContentPreset, Project, TopicOpportunity } from '../../types';
 
 // 布局容器:现 TopicTab + ConfigTab + ResultTab 的 props 并集(壳传下),零业务逻辑重写
@@ -16,6 +17,7 @@ interface Props {
   presetId: string | undefined;
   overrides: SimpleSettingOverrides;
   imageAssetIds: string[];
+  publishing: RetryPublishingContract;
   jobId: string | undefined;
   results: QuickCandidateView[];
   busy: boolean;
@@ -47,7 +49,7 @@ interface Props {
 
 export function CreateTab(props: Props) {
   const {
-    project, opportunities, opportunityId, presets, presetId, overrides, imageAssetIds, jobId, results,
+    project, opportunities, opportunityId, presets, presetId, overrides, imageAssetIds, publishing, jobId, results,
     busy, setBusy, generating, setGenerating, fail,
     onPickTopic, onAnalyzed, setOpportunities, onOpportunityGone,
     setPresetId, setPresets, setOverrides, setImageAssetIds, onGenerated, goTo,
@@ -69,7 +71,7 @@ export function CreateTab(props: Props) {
       <div className="qc-create__main">
         <ConfigTab
           project={project} opportunityId={opportunityId} presets={presets} presetId={presetId}
-          overrides={overrides} imageAssetIds={imageAssetIds} busy={busy} setBusy={setBusy}
+          overrides={overrides} imageAssetIds={imageAssetIds} publishing={publishing} busy={busy} setBusy={setBusy}
           generating={generating} setGenerating={setGenerating} fail={fail}
           setPresetId={setPresetId} setPresets={setPresets} setOverrides={setOverrides}
           setImageAssetIds={setImageAssetIds} onGenerated={onGenerated}
@@ -81,7 +83,7 @@ export function CreateTab(props: Props) {
         {batchMode ? null : generating || results.length > 0 ? (
           <ResultTab
             project={project} opportunityId={opportunityId} presetId={presetId} overrides={overrides}
-            imageAssetIds={imageAssetIds} jobId={jobId}
+            imageAssetIds={imageAssetIds} publishing={publishing} jobId={jobId}
             results={results} busy={busy} setBusy={setBusy}
             generating={generating} setGenerating={setGenerating} fail={fail} onGenerated={onGenerated}
           />

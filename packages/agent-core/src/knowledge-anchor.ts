@@ -2,9 +2,10 @@ import {
   commentThreadKindOf,
   genericMeasuredClaim,
   marketingPromiseClaim,
+  splitEvidenceClaimAtoms,
   splitSensitiveStatements,
 } from "./content.js";
-import { conservativeEvidenceSupport } from "./knowledge.js";
+import { combinedEvidenceSupport, conservativeEvidenceSupport, evidenceReferenceCanSupportFact, exactEvidenceSupportSpans } from "./knowledge.js";
 import type {
   ClaimJudgment,
   ClaimJudgmentClassification,
@@ -34,7 +35,7 @@ export interface SensitiveClaimSurface {
   occurrence: ReasoningOccurrence;
 }
 
-/** AI 复核为 statements[statementIndex] 选出的一条支撑(evidenceId + 源内逐字片段)。 */
+/** 联合判官为 statements[statementIndex] 返回的一条可机械验证支撑。 */
 export interface KnowledgeAnchorSelection {
   statementIndex: number;
   evidenceId?: string;
@@ -47,40 +48,9 @@ interface AnchorAddition {
   evidenceId: string;
 }
 
-function comparableSpanText(value: string): string {
-  return value.normalize("NFKC").toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
-}
-
-/**
- * 在单个证据源文本中检索能支撑 statement 的精确连续片段:先逐字包含,再去
- * 归因前缀包含,最后按源句候选取词面重合最高且通过保守支持门的一段。找不到
- * 返回 undefined——锚定器不剪裁、不拼接、不改写源文本。
- */
-function anchorQuoteInSource(statement: string, source: string): string | undefined {
-  const trimmed = statement.trim();
-  if (trimmed.length >= 2 && source.includes(trimmed)) return trimmed;
-  const withoutAttribution = trimmed
-    .replace(/^(?:(?:项目资料|知识库|资料|研究|论文|报告|记录)(?:中)?(?:显示|表明|能确认|确认|记载|披露)?[：:,，]?\s*)+/iu, "")
-    .replace(/[。；;]+$/u, "");
-  if (withoutAttribution.length >= 2 && source.includes(withoutAttribution)
-    && conservativeEvidenceSupport(trimmed, withoutAttribution)) return withoutAttribution;
-  const claimComparable = comparableSpanText(trimmed);
-  if (claimComparable.length < 4) return undefined;
-  const claimPairs = new Set(Array.from({ length: Math.max(0, claimComparable.length - 1) }, (_, index) => claimComparable.slice(index, index + 2)));
-  const candidates = source
-    .split(/(?<=[。！？!?；;\n])/u)
-    .map((item) => item.trim())
-    .filter((item) => item.length >= 4 && item.length <= 320);
-  let best: { quote: string; score: number } | undefined;
-  for (const quote of candidates) {
-    if (!conservativeEvidenceSupport(trimmed, quote)) continue;
-    const comparable = comparableSpanText(quote);
-    const pairs = new Set(Array.from({ length: Math.max(0, comparable.length - 1) }, (_, index) => comparable.slice(index, index + 2)));
-    const overlap = [...claimPairs].filter((pair) => pairs.has(pair)).length;
-    const score = claimPairs.size ? overlap / claimPairs.size : 0;
-    if (!best || score > best.score) best = { quote, score };
-  }
-  return best && best.score >= 0.45 ? best.quote : undefined;
+/** Find one or more exact source spans that jointly support a visible atom. */
+function anchorQuotesInSource(statement: string, source: string): string[] {
+  return exactEvidenceSupportSpans(statement, source);
 }
 
 /**
@@ -97,18 +67,29 @@ export function knowledgeAnchorEvidencePool(
       if (!context.evidenceSources[evidenceId]) return false;
       if (!context.evidenceReferences) return true;
       const reference = referenceById.get(evidenceId);
-      return Boolean(reference && reference.kind === "fact" && ["observed", "user_supplied"].includes(reference.evidenceStatus));
+      return Boolean(reference && evidenceReferenceCanSupportFact(reference));
     })
     .map((evidenceId) => ({ evidenceId, quote: context.evidenceSources[evidenceId]! }));
 }
 
 // 与 content.ts 校验段相同的 grounded 判定:同 location、status="fact"、
 // 有 sourceSpans 且通过保守支持门。
-function groundedFact(reasoning: ReasoningEntry[], statement: string, location: ReasoningLocation): boolean {
+function groundedFact(
+  reasoning: ReasoningEntry[],
+  statement: string,
+  location: ReasoningLocation,
+  occurrence: ReasoningOccurrence,
+): boolean {
   return reasoning.some((item) => item.status === "fact"
     && item.location === location
+    && item.occurrence?.field === occurrence.field
+    && item.occurrence?.threadId === occurrence.threadId
+    && item.occurrence?.followUpIndex === occurrence.followUpIndex
     && (item.sourceSpans?.length ?? 0) > 0
-    && conservativeEvidenceSupport(statement, item.statement));
+    // Directional visible-claim coverage: a prior “门诊在 X” row must not make
+    // a later “我们在 X” occurrence disappear merely because they share X.
+    && combinedEvidenceSupport(statement, [item.statement])
+    && combinedEvidenceSupport(item.statement, (item.sourceSpans ?? []).map((span) => span.quote)));
 }
 
 // 幂等护栏:同一定位下 statement 已有等价 fact 记录(即便暂无 sourceSpans)
@@ -136,7 +117,7 @@ function controlledClaimSurfaces(
 ): SensitiveClaimSurface[] {
   const claims: SensitiveClaimSurface[] = [];
   const collect = (text: string, location: ReasoningLocation, occurrence: ReasoningOccurrence): void => {
-    for (const statement of splitSensitiveStatements(text)) {
+    for (const statement of splitEvidenceClaimAtoms(text)) {
       const controlledHit = genericMeasuredClaim.test(statement)
         || marketingPromiseClaim.test(statement)
         || controlledRules.some((rule) => rule.terms.some((term) => term && statement.includes(term)));
@@ -213,18 +194,18 @@ export function attachKnowledgeAnchors(draft: GenerationDraft, context: Knowledg
   const reasoning = [...draft.reasoning];
   const additions: AnchorAddition[] = [];
   for (const claim of controlledClaimSurfaces(draft, controlledRules)) {
-    if (groundedFact(reasoning, claim.statement, claim.location)
+    if (groundedFact(reasoning, claim.statement, claim.location, claim.occurrence)
       || recordedFact(reasoning, claim.statement, claim.location, claim.occurrence)) continue;
     for (const source of pool) {
-      const quote = anchorQuoteInSource(claim.statement, source.quote);
-      if (!quote) continue;
+      const quotes = anchorQuotesInSource(claim.statement, source.quote);
+      if (!quotes.length) continue;
       reasoning.push({
         statement: claim.statement,
         status: "fact",
         evidenceIds: [source.evidenceId],
         location: claim.location,
         occurrence: claim.occurrence,
-        sourceSpans: [{ evidenceId: source.evidenceId, quote }],
+        sourceSpans: quotes.map((quote) => ({ evidenceId: source.evidenceId, quote })),
       });
       additions.push({ location: claim.location, occurrence: claim.occurrence, evidenceId: source.evidenceId });
       break;
@@ -245,14 +226,14 @@ export function collectUnanchoredSensitiveClaims(
   const controlledRules = context.projectBlueprint?.claimPolicy.rules.filter((rule) => rule.requiresEvidence) ?? [];
   const pool = knowledgeAnchorEvidencePool(context);
   return controlledClaimSurfaces(draft, controlledRules).filter((claim) => {
-    if (groundedFact(draft.reasoning, claim.statement, claim.location)
+    if (groundedFact(draft.reasoning, claim.statement, claim.location, claim.occurrence)
       || recordedFact(draft.reasoning, claim.statement, claim.location, claim.occurrence)) return false;
-    return !pool.some((source) => anchorQuoteInSource(claim.statement, source.quote));
+    return !pool.some((source) => anchorQuotesInSource(claim.statement, source.quote).length > 0);
   });
 }
 
 /**
- * 挂载 AI 复核选择:AI 只"选"不"判",这里做系统机械校验——证据必须在
+ * 挂载联合判官的证据选择。这里做系统机械校验——证据必须在
  * 锚定池内(角色合规)、quote 必须是源文本逐字连续片段(source.includes)、
  * 且通过 conservativeEvidenceSupport 保守支持门;任一不过即作废不挂,
  * error 照旧由校验层报出。幂等:已 grounded/已记录的句子不重复挂。
@@ -275,7 +256,7 @@ export function attachKnowledgeAnchorSelections(
     const quote = selection.quote?.trim();
     if (!source || !quote || !source.includes(quote)) continue;
     if (!conservativeEvidenceSupport(claim.statement, quote)) continue;
-    if (groundedFact(reasoning, claim.statement, claim.location)
+    if (groundedFact(reasoning, claim.statement, claim.location, claim.occurrence)
       || recordedFact(reasoning, claim.statement, claim.location, claim.occurrence)) continue;
     reasoning.push({
       statement: claim.statement,
@@ -291,37 +272,12 @@ export function attachKnowledgeAnchorSelections(
   return commitAnchorAdditions(draft, reasoning, additions);
 }
 
-/**
- * 解析锚定复核模型输出({selections:[{statementIndex,support,evidenceId,quote}]})。
- * 形状异常、编号越界、support="none" 或缺字段的条目一律丢弃;整体不可解析
- * 时返回空数组,等价于全部 none——不挂不炸。
- */
-export function parseKnowledgeAnchorSelections(value: unknown, statementCount: number): KnowledgeAnchorSelection[] {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
-  const raw = (value as Record<string, unknown>).selections;
-  if (!Array.isArray(raw)) return [];
-  const seen = new Set<number>();
-  const selections: KnowledgeAnchorSelection[] = [];
-  for (const item of raw) {
-    if (typeof item !== "object" || item === null || Array.isArray(item)) continue;
-    const record = item as Record<string, unknown>;
-    const statementIndex = record.statementIndex;
-    if (typeof statementIndex !== "number" || !Number.isInteger(statementIndex)
-      || statementIndex < 0 || statementIndex >= statementCount || seen.has(statementIndex)) continue;
-    seen.add(statementIndex);
-    if (record.support === "none") continue;
-    if (typeof record.evidenceId !== "string" || !record.evidenceId.trim()
-      || typeof record.quote !== "string" || !record.quote.trim()) continue;
-    selections.push({ statementIndex, evidenceId: record.evidenceId, quote: record.quote });
-  }
-  return selections;
-}
-
 /** AI 判官对 statements[statementIndex] 的原始裁决(分类 + 支持判断 + 可选引文)。 */
 export interface ClaimJudgeVerdict {
   statementIndex: number;
   classification: ClaimJudgmentClassification;
   supported?: boolean;
+  evidenceId?: string;
   quote?: string;
 }
 
@@ -354,8 +310,15 @@ export function parseClaimJudgeVerdicts(value: unknown, statementCount: number):
       verdicts.push({ statementIndex, classification });
       continue;
     }
+    const evidenceId = typeof record.evidenceId === "string" && record.evidenceId.trim() ? record.evidenceId : undefined;
     const quote = typeof record.quote === "string" && record.quote.trim() ? record.quote : undefined;
-    verdicts.push({ statementIndex, classification, supported: record.supported as boolean, quote });
+    // A positive factual verdict is actionable only with a source identity and
+    // exact quote. Missing provenance is converted to unsupported, never trusted.
+    if (record.supported === true && (!evidenceId || !quote)) {
+      verdicts.push({ statementIndex, classification, supported: false });
+      continue;
+    }
+    verdicts.push({ statementIndex, classification, supported: record.supported as boolean, evidenceId, quote });
   }
   return verdicts;
 }
@@ -379,10 +342,13 @@ export function resolveClaimJudgments(
       judgments.push({ statement: claim.statement, classification: verdict.classification });
       continue;
     }
-    let supported = verdict.supported === true;
-    if (supported && verdict.quote !== undefined) {
-      supported = evidencePool.some((source) => source.quote.includes(verdict.quote!));
-    }
+    const source = verdict.evidenceId
+      ? evidencePool.find((candidate) => candidate.evidenceId === verdict.evidenceId)
+      : undefined;
+    const supported = verdict.supported === true
+      && Boolean(source && verdict.quote
+        && source.quote.includes(verdict.quote)
+        && conservativeEvidenceSupport(claim.statement, verdict.quote));
     judgments.push({ statement: claim.statement, classification: "factual_assertion", supported });
   }
   return judgments;

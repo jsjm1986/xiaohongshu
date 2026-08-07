@@ -91,6 +91,38 @@ const SOFT_MARKETING_ERROR_CODES = new Set([
   "marketing_bridge_ungrounded", "marketing_narrative_path", "hard_sell_language",
 ]);
 const HARD_SELL_LANGUAGE = /(限时|最后机会|赶紧|立刻下单|马上抢|错过(?:就|再等)|闭眼入|无脑冲|必做|必须做|不做就|全网最低|名额仅剩)/u;
+/*
+ * 成品形状偏离。三条都是 WARNING,只在 peer_seeding 下加。
+ *
+ * 为什么一律 WARNING 而不是 ERROR:形状是偏好,不是诚实边界。语料本身就有越界的
+ * 个例(见下面各条的实测命中),用 ERROR 会让整批候选不可导出,而形状问题人眼一看
+ * 就能判断。诚实性边界(伪造经历、硬推销、审核语泄漏)才用 ERROR,那些在上面。
+ *
+ * 三条的依据全部来自用户 67 篇真实对标语料(按笔记链接去重,原文件 70 行含 3 组重复),
+ * 三个数字是我自己跑出来的,不是估计:
+ *   PLANNING_VOCABULARY  标题+正文合计命中 1/67 篇(1.5%),命中的是正文里的「攻略」
+ *   READER_QUESTION_ENDING  去掉行尾话题标记后命中 4/67 篇(6%);不去标记时是 1 篇
+ *   INDUSTRY_HASHTAG  317 个真实标签里命中 0 个
+ */
+const PLANNING_VOCABULARY = /(清单|核验|攻略|避坑|对照|思路|三类|第一项)/u;
+/*
+ * 行业口吻标签。
+ *
+ * 「面诊」**故意不在**这个表里:语料里 4 个标签用了它(「#眼袋面诊」「#面诊眼袋」
+ * 「#面诊」),把它列进来会误伤真实形态。医美/轻医美/手术/整形/面诊攻略这五个才是
+ * 317 个标签里 0 命中的。
+ */
+const INDUSTRY_HASHTAG = /(医美|轻医美|手术|整形|面诊攻略)/u;
+/*
+ * 结尾反问读者。
+ *
+ * 必须允许行尾挂话题标记后再判:语料正文普遍以「#成都眼袋[话题]#」这类串收尾,
+ * 直接用 /[？?]\s*$/ 判原始正文只会命中 1 篇 —— 那不是「语料不这么写」,而是问号
+ * 被标签挡住了没看见。剥掉行尾标记后真实命中 4 篇(6%),这才是可比的数字。
+ * 生成内容的标签不写在正文里,所以剥离对它无副作用。
+ */
+const TRAILING_HASHTAGS = /(?:[#＃][^#＃\n]*[#＃]?|\[话题\]|\s)+$/u;
+const READER_QUESTION_ENDING = /[？?]\s*$/u;
 
 export function visibleCandidateText(candidate: HarnessCandidate): string {
   return [
@@ -473,6 +505,26 @@ export function validateHarnessCandidates(
      */
     const bodyMin = peerSeeding ? Math.min(bodyTarget.min, HARNESS_PEER_BODY_MIN) : bodyTarget.min;
     if (bodyChars < bodyMin || bodyChars > bodyTarget.max) add(index, "body_shape_drift", "warning", `正文为 ${bodyChars} 字，偏离${effectiveLength === "short" ? "短" : effectiveLength === "medium" ? "中" : "长"}篇 ${bodyMin}—${bodyTarget.max} 字的统一目标。`);
+    /*
+     * 三条成品形状偏离,只在 peer_seeding 下检查。
+     *
+     * brand_voice 一条都不加:机构以自己的口吻发布时,讲清判断标准、给核验路径、
+     * 用行业标签都是正常且应当的,那边的既有契约一个字节不动。
+     */
+    if (peerSeeding) {
+      const planningHit = PLANNING_VOCABULARY.exec(`${n.title}\n${n.body}`);
+      if (planningHit) {
+        add(index, "planning_vocabulary_in_copy", "warning", `标题或正文出现了策划口吻的词（${planningHit[0]}）。67 篇真实语料里这类词合计只命中 1 篇，读者一眼能看出是策划出来的，不是随手发的。`);
+      }
+      // 与语料测量同一套剥离逻辑:先去掉行尾话题标记再判,否则问号会被标签挡住。
+      if (READER_QUESTION_ENDING.test(n.body.trim().replace(TRAILING_HASHTAGS, ""))) {
+        add(index, "reader_question_ending", "warning", "正文以反问读者收尾。67 篇真实语料里只有 4 篇这么写（6%），而实测生成内容 100% 这么写——这是最容易被认出是生成文案的一处。");
+      }
+      const industryTags = candidate.content.H.hashtags.filter((tag) => INDUSTRY_HASHTAG.test(tag));
+      if (industryTags.length) {
+        add(index, "industry_register_hashtag", "warning", `标签用了行业口吻词（${industryTags.join("、")}）。317 个真实标签里 0 个这么用，素人的标签是品类词加城市词加生活词。`);
+      }
+    }
     for (const citation of candidate.citations) {
       if (!citation.statement.trim()) add(index, "empty_citation_statement", "error", "引用必须对应明确声明。");
       else if (!visible.includes(citation.statement)) add(index, "citation_not_visible", "error", `证据声明无法在可见内容中精确定位：${citation.statement}`);

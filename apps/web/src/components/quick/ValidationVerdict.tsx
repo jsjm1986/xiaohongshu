@@ -21,8 +21,8 @@ export function ValidationVerdict({ validation, manuallyConfirmed = false }: { v
       </p>
 
       {verdict.blocking.length > 0 && (
-        <div className="qc-verdict__group qc-verdict__group--blocking">
-          <h5>{manuallyConfirmed ? '自动校验仍未通过' : '须核对后确认交付'} · {verdict.blocking.length} 项</h5>
+        <details className="qc-verdict__group qc-verdict__group--blocking">
+          <summary>{manuallyConfirmed ? '自动校验仍未通过' : '须核对后确认交付'} · {verdict.blocking.length} 项</summary>
           <ul>
             {verdict.blocking.map((item) => (
               <li key={item.code ?? item.label}>
@@ -31,7 +31,7 @@ export function ValidationVerdict({ validation, manuallyConfirmed = false }: { v
               </li>
             ))}
           </ul>
-        </div>
+        </details>
       )}
 
       {verdict.advisory.length > 0 && (

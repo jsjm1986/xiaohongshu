@@ -55,7 +55,9 @@ const TURN_OUTPUTS: Record<number, Record<string, unknown>> = {
   }] },
   7: { expressionStrategies: [{
     name: 'TURN7_STRATEGY_NAME', label: 'TURN7_STRATEGY_NAME', prototype: 'option_comparison',
-    description: 'TURN7_STRATEGY_DESC', openingMode: 'reader_question',
+    description: 'TURN7_STRATEGY_DESC',
+    applicability: { gapCategories: ['decision'], audienceStages: ['collecting'], publishingTopologies: ['institution_owned'], topicTerms: ['TURN6_GAP'], requiresEvidence: true },
+    openingMode: 'reader_question',
     narrativeMode: 'question_framework_boundary', bodyRole: 'minimum_sufficient_information',
     imageRole: 'other', commentMode: 'gap_completion', voice: '克制', sequence: [], targetChannels: ['N.body'],
   }] },
@@ -280,6 +282,10 @@ test('eight-turn project analysis replays accepted JSON in order and persists in
     const strategy = strategies.find((item) => item.name === 'TURN7_STRATEGY_NAME')!;
     assert.ok(strategy.id);
     for (const key of ['openingMode', 'narrativeMode', 'bodyRole', 'commentMode', 'targetChannels']) assert.ok(key in strategy);
+    assert.deepEqual(strategy.applicability, {
+      gapIds: [], gapCategories: ['decision'], audienceStages: ['collecting'],
+      publishingTopologies: ['institution_owned'], topicTerms: ['TURN6_GAP'], requiresEvidence: true,
+    });
 
     const opportunities = result.topicOpportunities as Array<Record<string, unknown>>;
     const opportunity = opportunities.find((item) => item.title === 'TURN8_OPP_TITLE')!;

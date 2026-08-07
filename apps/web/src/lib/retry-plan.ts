@@ -1,6 +1,6 @@
 import type { ContentPreset, GenerationJob, TopicOpportunity } from '../types';
 import type { SimpleSettingOverrides } from './simple-generation';
-import { extractRecipe, resolveRecipeTargets } from './quick-recipe';
+import { extractRecipe, resolveRecipeTargets, type RetryPublishingContract } from './quick-recipe';
 
 /**
  * 批量重试的规划层。
@@ -17,6 +17,7 @@ export interface RetryTarget {
   presetId: string | undefined;
   overrides: SimpleSettingOverrides;
   imageAssetIds: string[];
+  publishing: RetryPublishingContract;
   /** 归并到这个目标的原任务 id(去重后可能多于一个) */
   jobIds: string[];
 }
@@ -63,9 +64,15 @@ export function planBatchRetry(
       continue;
     }
 
-    // 同选题 + 同预设视为同一配方:批量失败时常常是同一组任务重复失败,
-    // 不去重会把额度花在完全一样的请求上。
-    const key = `${targets.opportunityId}::${targets.presetId ?? ''}`;
+    // 发布视角和真实作者事实也是配方真值。机构稿、用户稿或不同作者素材
+    // 即使选题/预设相同也绝不能合并成一次重试。
+    const key = JSON.stringify([
+      targets.opportunityId,
+      targets.presetId ?? "",
+      targets.overrides,
+      targets.imageAssetIds,
+      targets.publishing,
+    ]);
     const existing = byKey.get(key);
     if (existing) {
       existing.jobIds.push(job.id);
@@ -77,6 +84,7 @@ export function planBatchRetry(
       presetId: targets.presetId,
       overrides: targets.overrides,
       imageAssetIds: targets.imageAssetIds,
+      publishing: targets.publishing,
       jobIds: [job.id],
     });
   }

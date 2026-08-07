@@ -298,7 +298,7 @@ describe("P4 comment identity and host-state validators", () => {
     }));
   });
 
-  it("lets a vague question-side experience mention pass, and only errors on testimonial shape", () => {
+  it("allows labelled simulated-reader experience and testimonial scenes without treating them as project evidence", () => {
     // 方法论 §1594:「职业、城市、经历等创作细节可以作为明确的拟人情境」——模糊
     // 的第一人称经历本身不违规,禁的是把它冒充项目事实、消费者证词或独立口碑。
     // 逐角色的「禁止代替的证据」由读者侧提示词按 personaRole 承担(标注制),
@@ -311,12 +311,13 @@ describe("P4 comment identity and host-state validators", () => {
     expect(codes(vague)).not.toContain("fabricated_operational_experience");
     expect(codes(vague)).not.toContain("comment_host_state_inconsistency");
 
-    // 证词形态(第一人称完成 + 效果背书)仍是硬 error:那是独立口碑,不是处境。
+    // 已标注的模拟读者可以承载消费者体验与效果感受，但只能保留为创作参考。
     const testimonial = validate(
       parseGenerationDraft(JSON.stringify(draftJson(intentBody, [thread({ question: "我做过一次，效果真的不错，你们呢？" })]))),
       config,
     );
-    expect(codes(testimonial)).toContain("fabricated_operational_experience");
+    expect(codes(testimonial)).not.toContain("fabricated_operational_experience");
+    expect(codes(testimonial)).toContain("creative_persona_experience");
 
     // A question side that only voices uncertainty stays clean.
     const cautious = validate(
@@ -463,6 +464,49 @@ describe("P4 unknown-path naming", () => {
       },
     } as any;
   }
+
+  it("accepts an organization-bound unknown thread that preserves uncertainty and points to a public verification channel", () => {
+    const config = validationConfig();
+    const card = {
+      gapId: "org_info", label: "机构信息", question: "机构有哪些可公开、可核验的信息？",
+      category: "boundary", audienceStages: ["ready"], importance: 0.8, decisionLeverage: 0.7,
+      proofability: 0, evidenceIds: [], required: true, obligation: "network_required",
+      disclosureScope: "organization_only", plannedPlacements: ["Cref"],
+    };
+    const plan = {
+      effectiveThreadCount: 1, targetThreadCount: 1, selectedGapIds: [card.gapId],
+      gapPlanningCards: [card],
+      dialogueThreads: [{
+        id: "t1", primaryGapId: card.gapId, auxiliaryGapIds: [], threadKind: "org_answer", postingIdentity: "publisher",
+        replyPlan: {
+          directAnswer: "机构可查性目前不能确认",
+          condition: "",
+          boundary: "",
+          unknown: "机构全称和卫健委可查性目前还不能确认",
+          nextQuestion: "到卫健委官网查询",
+        },
+      }],
+      gapCoverageLedger: {
+        entries: [{
+          gapId: card.gapId, label: card.label, status: "unknown_with_verification", required: true,
+          commentAllocated: true, bodyAllocated: false, plannedPlacements: ["Cref"],
+          primaryThreadIds: ["t1"], auxiliaryThreadIds: [], verificationPath: "通过卫健委官网核验",
+          actualRealizations: [],
+        }],
+        uncoveredGapIds: [], ledgerCompleteness: 1, closureRate: 1,
+        targetThreadCount: 1, effectiveThreadCount: 1,
+      },
+    } as any;
+    const output = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({
+      id: "t1", gap: card.gapId, primaryGapId: card.gapId,
+      question: "预约前怎么核实机构信息？",
+      answer: "机构全称和卫健委可查性目前还不能确认，可以按正式名称到卫健委官网核验。",
+      nextStep: "到卫健委官网查询",
+      postingIdentity: "publisher", answerIdentity: "publisher", claimStatus: "unknown",
+    })])));
+    const issues = validate(output, config, { orchestrationPlan: plan });
+    expect(issues).not.toContainEqual(expect.objectContaining({ code: "allocated_unknown_path_not_visible", channel: "Cref" }));
+  });
 
   it("accepts a contiguous 4+ character paraphrase of the gap label", () => {
     const config = validationConfig();
@@ -667,7 +711,12 @@ describe("P4 repair loop end-to-end", () => {
       expect(pkg.content.N.body).toBe(fixedBody);
       // Out-of-order patch merged by id: original order, new prose.
       expect(pkg.content.Cref.threads.map((item) => item.question)).toEqual(["哪些条件会影响适用性？", "不同做法具体按哪些点比较？"]);
-      expect(pkg.validation.valid).toBe(true);
+      // The repair itself converged and removed every blocker. A separate
+      // editorial review may still keep the candidate non-deliverable under
+      // the tri-state delivery contract.
+      expect(pkg.validation.issues.some((issue) => issue.disposition === "block" || issue.severity === "error")).toBe(false);
+      expect(pkg.validation.qualityStatus).toBe("needs_review");
+      expect(pkg.validation.valid).toBe(false);
     }
   });
 

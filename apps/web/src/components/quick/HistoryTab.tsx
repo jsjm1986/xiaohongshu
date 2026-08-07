@@ -107,6 +107,7 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
           presets: presets.items.filter((p) => p.id === target.presetId),
           overrides: target.overrides,
           imageAssetIds: target.imageAssetIds,
+          publishing: target.publishing,
         });
       });
       if (jobs.length === 0) throw new Error('原预设均已不存在，请回创作区重新配置');

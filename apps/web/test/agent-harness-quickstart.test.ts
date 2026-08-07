@@ -15,13 +15,17 @@ test('Agent 快速开始默认已有推荐选择，不要求用户填写主题',
   const input = resolveHarnessQuickStart({ projectId: 'p1', approvedImageAssetIds: ['a1', 'a2'] });
   assert.equal(input.topicMode, 'agent_discovery');
   assert.equal(input.methodProfileId, DEFAULT_HARNESS_METHOD_ID);
-  assert.equal(input.creativeIntent, 'project_value');
+  assert.equal(input.creativeIntent, 'ask_peers');
   assert.equal(input.audienceStage, 'discovering');
   assert.equal(input.entryPoint, '推荐流中的状态与生活线索');
   assert.equal(input.bodyLength, 'short');
   assert.equal(input.topic, undefined, '自主发现模式不应伪造主题字符串');
-  assert.match(input.goal ?? '', /种草成品/u);
-  assert.match(input.tone ?? '', /不写说明书/u);
+  /*
+   * 默认体裁从「讲出项目价值」换成「求问过来人」：67 篇语料里最多的形态是
+   * 一个处境加一个窄问题，而不是讲项目特色。断言跟着换成新默认的目标与语气。
+   */
+  assert.match(input.goal ?? '', /窄问题/u);
+  assert.match(input.tone ?? '', /像随手发的/u);
   assert.ok(input.audience);
   assert.ok(input.entryPoint);
   assert.ok(input.tone);
@@ -30,10 +34,53 @@ test('Agent 快速开始默认已有推荐选择，不要求用户填写主题',
 });
 
 test('用户只需点选意图和阶段，系统自动换成完整任务设置', () => {
-  const input = resolveHarnessQuickStart({ projectId: 'p1', intentId: 'checklist', audienceStageId: 'ready' });
-  assert.match(input.goal ?? '', /行动清单/u);
+  /* 原用例点选的是已删除的 checklist 体裁；换成语料里真实存在的「面诊/看诊记录」。 */
+  const input = resolveHarnessQuickStart({ projectId: 'p1', intentId: 'consult_log', audienceStageId: 'ready' });
+  assert.match(input.goal ?? '', /面诊/u);
   assert.match(input.audience ?? '', /准备采取下一步/u);
-  assert.match(input.callToAction ?? '', /保存清单/u);
+  assert.match(input.callToAction ?? '', /不给行动清单/u);
+});
+
+test('五个体裁都能解析，篇幅一律落到 short', () => {
+  /*
+   * 语料正文中位 74 字，落在 short 档（放宽后下限 30）。旧实现只给 project_value
+   * 这一个体裁写死 short，其余体裁跟方法档走，于是选了别的体裁就会拿到 medium/long
+   * 的目标字数——那是产出变成小作文的一条独立来源，与提示词无关。
+   */
+  for (const option of HARNESS_INTENTS) {
+    const input = resolveHarnessQuickStart({ projectId: 'p1', intentId: option.id });
+    assert.equal(input.creativeIntent, option.id, `${option.id} 没有透传成 creativeIntent`);
+    assert.equal(input.bodyLength, 'short', `${option.id} 的篇幅不是 short`);
+    assert.ok(input.goal, `${option.id} 缺少目标`);
+    assert.ok(input.tone, `${option.id} 缺少语气`);
+    assert.ok(input.callToAction, `${option.id} 缺少收尾`);
+  }
+});
+
+test('任何体裁的收尾都不含策划案措辞', () => {
+  /*
+   * 67 篇语料里「清单」「核验」「对照」「攻略」「避坑」在标题与正文合计只命中 1 篇，
+   * 「保存」「收藏」0 篇。旧 checklist 体裁的收尾直接写着「邀请读者保存清单，并从
+   * 第一项开始核验」——意图层就在要求方法论，下游放开多少约束都盖不住。
+   *
+   * 「不给行动清单」「不引导保存」这类**否定式**表述是合格的，所以断言不能用裸词
+   * 匹配（那会把如实的否定句判红，本仓在「禁止经历词表」上踩过同一个坑）。
+   * 这里改成要求：出现这些词时必须紧跟在否定词之后。
+   */
+  for (const option of HARNESS_INTENTS) {
+    const cta = resolveHarnessQuickStart({ projectId: 'p1', intentId: option.id }).callToAction ?? '';
+    for (const word of ['清单', '核验', '对照', '保存', '收藏', '攻略', '避坑']) {
+      if (!cta.includes(word)) continue;
+      assert.match(cta, new RegExp(`(?:不|别|无需|不要)[^，。；]{0,6}${word}`, 'u'),
+        `${option.id} 的收尾以肯定语气要求了「${word}」：${cta}`);
+    }
+  }
+});
+
+test('默认体裁是求问过来人', () => {
+  /* 语料里占比最高的形态。默认值走错，绝大多数运行就都从方法论那一头起步。 */
+  assert.equal(resolveHarnessQuickStart({ projectId: 'p1' }).creativeIntent, 'ask_peers');
+  assert.equal(HARNESS_INTENTS.find((item) => item.recommended)?.id, 'ask_peers');
 });
 
 test('只有明确选择自定义主题时才采用用户输入，并允许关闭自动素材', () => {

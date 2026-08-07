@@ -1011,3 +1011,121 @@ describe("发布前清单的软营销那一行", () => {
     }
   });
 });
+
+/*
+  成品形状偏离的三条 WARNING。
+
+  这三条盯的是「模型退回自己的默认审美」那个方向:前面九个任务只放开了「允许什么」,
+  没有一条说明该写成什么样,于是产出全是方法论小作文。实测新生成 3 篇 vs 语料 67 篇:
+  正文含方法论词 100% vs 1.5%、结尾反问读者 100% vs 6%、标签含行业词 44% vs 0%。
+
+  全部 WARNING 不用 ERROR:形状是偏好而非诚实边界,语料本身也有离群样本(结尾反问
+  4/67 确实存在)。拿风格启发式阻断整批候选的代价远大于问题本身,而形状问题人眼一看
+  就能判断。所以每条都额外断言「错误码集合与不含时相同」—— 那才是「不阻断导出」。
+*/
+describe("成品形状偏离只给提示不阻断", () => {
+  /** 只取 error 级别的码,用来证明新 WARNING 没有改变阻断集合。 */
+  function errorCodesOf(candidate: HarnessCandidate, seedingMode: HarnessSeedingMode): string[] {
+    return validateHarnessCandidates([candidate], [], new Set<string>(), { seedingMode })
+      .filter((issue) => issue.severity === "error").map((issue) => issue.code).sort();
+  }
+
+  function issuesFor(body: string, seedingMode: HarnessSeedingMode, hashtags: string[] = []): HarnessValidationIssue[] {
+    return validateHarnessCandidates([minimalCandidate([], body, hashtags)], [], new Set<string>(), { seedingMode });
+  }
+
+  function codesFor(body: string, seedingMode: HarnessSeedingMode, hashtags: string[] = []): string[] {
+    return issuesFor(body, seedingMode, hashtags).map((issue) => issue.code);
+  }
+
+  it("peer_seeding:正文含方法论词 → planning_vocabulary_in_copy，且是 warning", () => {
+    const withVocabulary = issuesFor("先照着这份核验清单走一遍。", "peer_seeding");
+    const hit = withVocabulary.find((issue) => issue.code === "planning_vocabulary_in_copy");
+    expect(hit, "正文出现「核验清单」却没有提示").toBeTruthy();
+    expect(hit!.severity, "形状偏好必须是 warning,ERROR 会让整批候选不可导出").toBe("warning");
+    /*
+     * 「不阻断导出」不能靠 severity 一条断言:add(...) 的 severity 参数被改成 "error"
+     * 时,上面那条会红,但把码加进某个阻断集合、或让它连带触发别的 error 时不会。
+     * 所以直接比对 error 码集合 —— 命中与不命中必须完全一致。
+     */
+    expect(errorCodesOf(minimalCandidate([], "先照着这份核验清单走一遍。"), "peer_seeding"))
+      .toEqual(errorCodesOf(minimalCandidate([], "昨天刚拆的胶带，今天化妆轻松多了。"), "peer_seeding"));
+  });
+
+  it("brand_voice:同一份正文不加 planning_vocabulary_in_copy", () => {
+    /* 红线:机构口吻的既有行为逐字不变。清单式表达在那边是正常写法。 */
+    expect(codesFor("先照着这份核验清单走一遍。", "brand_voice"))
+      .not.toContain("planning_vocabulary_in_copy");
+  });
+
+  it("peer_seeding:正文以反问读者结尾 → reader_question_ending", () => {
+    expect(codesFor("八千多有点犹豫，你会先确认哪一项？", "peer_seeding"))
+      .toContain("reader_question_ending");
+  });
+
+  it("peer_seeding:正文以句号结尾不报 reader_question_ending", () => {
+    /*
+     * 必须钉「以句号结尾但正文中间有问号」这一形态,不是随便一句陈述句:
+     * 语料里「想问问一般请几天合适？后来还是请了三天。」这种句中带问、结尾陈述的写法
+     * 是常态。正则漏掉 `$` 锚点时才会误伤它,而单纯的陈述句杀不掉那个变异。
+     */
+    expect(codesFor("本来想问问要请几天假？后来自己请了三天。", "peer_seeding"))
+      .not.toContain("reader_question_ending");
+  });
+
+  it("peer_seeding:标签含行业词 → industry_register_hashtag", () => {
+    const issues = issuesFor("昨天刚拆的胶带。", "peer_seeding", ["#眼袋", "#轻医美"]);
+    const hit = issues.find((issue) => issue.code === "industry_register_hashtag");
+    expect(hit, "标签出现「轻医美」却没有提示").toBeTruthy();
+    expect(hit!.severity).toBe("warning");
+    expect(hit!.message, "提示没指出是哪个标签命中").toContain("轻医美");
+  });
+
+  it("peer_seeding:品类词加城市词加生活词的标签不报", () => {
+    expect(codesFor("昨天刚拆的胶带。", "peer_seeding", ["#眼袋", "#成都眼袋", "#记录"]))
+      .not.toContain("industry_register_hashtag");
+  });
+
+  it("brand_voice:同一组标签与正文一条形状提示都不加", () => {
+    /* 三条一起钉住「只在素人模式生效」,漏任何一条到 brand_voice 都是行为变更。 */
+    const codes = codesFor("先照着这份核验清单走一遍，你会先确认哪一项？", "brand_voice", ["#轻医美"]);
+    for (const code of ["planning_vocabulary_in_copy", "reader_question_ending", "industry_register_hashtag"]) {
+      expect(codes, `brand_voice 漏进了形状提示 ${code}`).not.toContain(code);
+    }
+  });
+
+  it("三条形状检查的词表与阈值都从源码解析得到,不在测试里另抄一份", () => {
+    /*
+     * 源码断言。这三条的价值全在词表本身,而词表一旦在测试里抄一份,源码删词时
+     * 测试仍绿 —— 本仓踩过的「脚本内联自己那份正则会报告过时数字」是同一类问题。
+     * 这里解析源码正则,再逐词构造正文/标签实测,所以删词必红。
+     */
+    const source = readFileSync(new URL("./validation.ts", import.meta.url), "utf8");
+    const planning = source.match(/const PLANNING_VOCABULARY = \/\(([^)]+)\)\/u;/u);
+    const industry = source.match(/const INDUSTRY_HASHTAG = \/\(([^)]+)\)\/u;/u);
+    expect(planning, "没解析到 PLANNING_VOCABULARY").toBeTruthy();
+    expect(industry, "没解析到 INDUSTRY_HASHTAG").toBeTruthy();
+    for (const word of planning![1]!.split("|")) {
+      expect(codesFor(`今天说说${word}这件事。`, "peer_seeding"), `方法论词 ${word} 没被检出`)
+        .toContain("planning_vocabulary_in_copy");
+    }
+    for (const word of industry![1]!.split("|")) {
+      expect(codesFor("昨天刚拆的胶带。", "peer_seeding", [`#${word}`]), `行业标签 ${word} 没被检出`)
+        .toContain("industry_register_hashtag");
+    }
+    // 结尾锚点必须真的锚在结尾:源码里的正则含 `$`,去掉它第 4 条会红。
+    expect(source, "READER_QUESTION_ENDING 丢了结尾锚点").toMatch(/const READER_QUESTION_ENDING = \/\[？\?\]\\s\*\$\/u;/u);
+  });
+
+  it("标题命中方法论词同样提示 —— 不是只查正文", () => {
+    /*
+     * 实测差距里标题那一项是**反向**的:语料 0% 带「清单/核验/攻略」,新生成 33% 带。
+     * 只查正文的话标题里的「避坑攻略」照旧放过,而标题是读者第一眼看到的地方。
+     */
+    const candidate = minimalCandidate([], "昨天刚拆的胶带。");
+    candidate.content.N.title = "眼袋避坑攻略";
+    const codes = validateHarnessCandidates([candidate], [], new Set<string>(), { seedingMode: "peer_seeding" })
+      .map((issue) => issue.code);
+    expect(codes, "标题里的方法论词没被检出").toContain("planning_vocabulary_in_copy");
+  });
+});

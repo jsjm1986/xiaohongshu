@@ -131,6 +131,8 @@ export interface EvidenceReference {
   evidenceStatus: EvidenceStatus;
   scope: string[];
   caveats: string[];
+  /** Exact source clauses marked as internal/confidential and forbidden in public copy. */
+  publicationRestrictions?: string[];
 }
 
 export interface KnowledgeClaim {
@@ -767,7 +769,7 @@ export type CommentSpeakerType = "simulated_reader" | "accountable_responder";
 /**
  * 线程答复的**结论强度**,与证据来源等级(EvidenceStatus)是两个不同的轴:
  *   EvidenceStatus(observed/user_supplied/inferred/unknown) = 这条证据从哪来,
- *     由知识台账定,claim_judge / knowledge_anchor_review 用它筛证据池。
+ *     由知识台账定,claim_judge 用它筛证据池。
  *   CommentClaimStatus = 给定证据后这条线程的答复能站到多硬,由规划层按 gap
  *     派生(有答案+有证据→verified;只有答案或框架→bounded;都没有→unknown)。
  *
@@ -1321,11 +1323,33 @@ export interface InformationGap {
     reason: "missing_ledger" | "invalid_source_status" | "unknown_evidence" | "unsupported_statement";
     evidenceIds?: string[];
   }>;
+  /** Runtime result of re-validating the approved answer against the frozen generation evidence catalogue. */
+  evidenceBindingStatus?: "supported" | "partial" | "downgraded" | "not_applicable";
   required: boolean;
   preferredChannels?: ContentChannel[];
+  /** Derived at generation planning time; approved source records may omit it. */
+  disclosureScope?: "organization_only" | "shared";
+  /** Server-only governance clauses retained during planning; never expose to writers. */
+  publicationRestrictions?: string[];
 }
 
 export type InformationGapPriority = "required" | "high" | "standard";
+
+/** Where a selected gap must be realized. New plans populate this; historical snapshots may omit it. */
+export type GapObligation = "body_required" | "network_required" | "optional_context";
+
+/** Domain-neutral, server-compiled contract for one candidate's editorial purpose. */
+export interface ContentIntentCard {
+  readerDecision: string;
+  singleTakeaway: string;
+  openingQuestion: string;
+  bodyOwnedGapIds: string[];
+  commentOwnedGapIds: string[];
+  bodyMustEstablish: string[];
+  bodyMustNotExpand: string[];
+  imageRole: "explain_concept" | "show_process" | "show_evidence" | "set_scene" | "summarize_decision";
+  completionMode: "answer" | "clarify" | "compare" | "preserve_unknown" | "route_next_step";
+}
 
 /**
  * The canonical planning card for one information gap.
@@ -1346,11 +1370,34 @@ export interface InformationGapPlanningCard {
   proofability: number;
   required: boolean;
   priority: InformationGapPriority;
+  /** Channel-level completion responsibility compiled by the planner. */
+  obligation?: GapObligation;
   answer?: string;
   framework?: string;
   boundary?: string;
   evidenceIds: string[];
+  /** Runtime result of re-validating the approved answer against frozen evidence. */
+  evidenceBindingStatus?: "supported" | "partial" | "downgraded" | "not_applicable";
+  /** Who may state this project information as fact in visible copy. */
+  disclosureScope?: "organization_only" | "shared";
+  /** Server-only governance clauses retained for contradiction checks; never expose to writers. */
+  publicationRestrictions?: string[];
   plannedPlacements: ContentChannel[];
+}
+
+export interface ExpressionStrategyApplicability {
+  /** Exact approved gap IDs this strategy was designed to serve. */
+  gapIds?: string[];
+  /** Domain-neutral gap categories this strategy can serve. */
+  gapCategories?: string[];
+  /** Audience stages explicitly reviewed for this strategy. */
+  audienceStages?: ResolvedGenerationConfig["task"]["audienceStage"][];
+  /** Publishing identities explicitly reviewed for this strategy. */
+  publishingTopologies?: ResolvedGenerationConfig["task"]["publishingTopology"][];
+  /** Topic terms that must remain visible in the selected opportunity/gaps. */
+  topicTerms?: string[];
+  /** Strategy requires at least one selected gap with factual evidence. */
+  requiresEvidence?: boolean;
 }
 
 export interface ExpressionStrategy {
@@ -1358,6 +1405,8 @@ export interface ExpressionStrategy {
   label: string;
   /** Reference-corpus surface prototype; optional for historical/custom strategies. */
   prototype?: ContentPrototype;
+  /** Optional for historical rows; new analysis should populate it. */
+  applicability?: ExpressionStrategyApplicability;
   openingMode: string;
   narrativeMode: string;
   bodyRole: string;
@@ -1838,6 +1887,25 @@ export interface DeploymentPlan {
   stopRules: string[];
 }
 
+export interface EditorialFocusContract {
+  mode: "focused" | "standard";
+  reason: string;
+  allowedGapIds: string[];
+  /** Writer-facing angle after publishing-identity and evidence feasibility checks. */
+  effectiveAngle: string;
+  /** Original approved angle is retained for audit; writers follow effectiveAngle. */
+  originalAngle: string;
+  allowSocialThreads: boolean;
+  allowCrossGapBranching: boolean;
+  allowMultiTurnGrowth: boolean;
+  /** Human-readable audit of strategy compatibility/fallback selection. */
+  strategySelection: {
+    mode: "compatible_pool" | "explicit_lock" | "neutral_fallback";
+    compatibleStrategyIds: string[];
+    rejectedStrategyIds: string[];
+  };
+}
+
 export interface OrchestrationPlan {
   id: string;
   topicOpportunityId: string;
@@ -1852,6 +1920,10 @@ export interface OrchestrationPlan {
   selectedGapIds: string[];
   /** Canonical source of truth for gap content and channel placement. */
   gapPlanningCards?: InformationGapPlanningCard[];
+  /** Single-purpose editorial contract compiled before any copy is written. */
+  contentIntent?: ContentIntentCard;
+  /** Candidate-level effective policy; it may conservatively narrow saved parameters. */
+  focusContract?: EditorialFocusContract;
   /** Backwards-compatible rendered view; gap:* entries derive from gapPlanningCards. */
   channelAllocation: Record<ContentChannel, string[]>;
   imagePlan: ImagePlan;
@@ -1987,6 +2059,12 @@ export interface CommentEditorialAssessment {
   summary: string;
 }
 
+export interface CoreEditorialAssessment {
+  status: "pass" | "review";
+  reasons: string[];
+  summary: string;
+}
+
 export interface ContentReasoningEntry {
   statement: string;
   status: "fact" | "human_confirmed_author_fact" | "sample" | "inference" | "hypothesis" | "unknown";
@@ -2055,8 +2133,10 @@ export interface ContentPackage {
    * 「sensitive_claim_without_evidence 是判官判了 unsupported」还是「判官没覆盖到」。
    */
   claimJudgments?: ClaimJudgment[];
-  /** Agent editorial result for reader-side semantic quality; absent on historical packages. */
+  /** Agent editorial result for the final complete comment network; absent on historical packages. */
   commentEditorialAssessment?: CommentEditorialAssessment;
+  /** Agent editorial result for title/body/image-brief alignment; absent on historical packages. */
+  coreEditorialAssessment?: CoreEditorialAssessment;
   unknowns: UnknownItem[];
   conflicts: KnowledgeConflict[];
   diagnostics: ContentDiagnostic[];
@@ -2120,8 +2200,10 @@ export interface GenerationDraft {
   unknowns: UnknownItem[];
   /** AI 判官裁决旁路;无裁决(未调用/调用失败)时缺省,校验层走词面旧逻辑。 */
   claimJudgments?: ClaimJudgment[];
-  /** Reader-copy editor result. It records semantic review without becoming evidence. */
+  /** Complete-comment-network editor result. It records semantic review without becoming evidence. */
   commentEditorialAssessment?: CommentEditorialAssessment;
+  /** Core title/body/image editor result. */
+  coreEditorialAssessment?: CoreEditorialAssessment;
 }
 
 export interface GenerationValidationTelemetrySummary {
@@ -2166,7 +2248,7 @@ export type GenerationTelemetryEvent =
   | {
     type: "candidate_repair_skipped";
     candidateIndex: number;
-    reason: "terminal_blocker" | "repair_disabled";
+    reason: "terminal_blocker" | "repair_disabled" | "no_progress";
     summary: GenerationValidationTelemetrySummary;
   }
   | {
@@ -2180,7 +2262,8 @@ export type GenerationTelemetryEvent =
     type: "candidate_failed";
     candidateIndex: number;
     errorName: string;
-  };
+  }
+;
 
 export interface GenerationInput {
   jobId: string;

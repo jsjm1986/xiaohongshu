@@ -16,6 +16,7 @@ const MANAGED_ENV = [
   'CONTENT_AGENT_SECURE_COOKIES',
   'CONTENT_AGENT_BYOK_ALLOW_HTTP',
   'CONTENT_AGENT_BYOK_ALLOW_PRIVATE_NETWORK',
+  'CONTENT_AGENT_BYOK_ALLOW_PROXY_FAKE_IP',
 ] as const;
 
 const originalEnv = new Map(MANAGED_ENV.map((name) => [name, process.env[name]]));
@@ -105,6 +106,7 @@ test('boolean environment variables accept only true or false and identify the b
     'CONTENT_AGENT_SECURE_COOKIES',
     'CONTENT_AGENT_BYOK_ALLOW_HTTP',
     'CONTENT_AGENT_BYOK_ALLOW_PRIVATE_NETWORK',
+    'CONTENT_AGENT_BYOK_ALLOW_PROXY_FAKE_IP',
   ]) {
     withEnv(name, 'yes', () => {
       assert.throws(() => options(), (error: unknown) =>
@@ -116,6 +118,15 @@ test('boolean environment variables accept only true or false and identify the b
     () => options({ secureCookies: 'false' as unknown as boolean }),
     /secureCookies/u,
   );
+});
+
+
+test('proxy fake-IP compatibility is explicit and defaults off', () => {
+  assert.equal(options().byokAllowProxyFakeIp, false);
+  assert.equal(options({ byokAllowProxyFakeIp: true }).byokAllowProxyFakeIp, true);
+  withEnv('CONTENT_AGENT_BYOK_ALLOW_PROXY_FAKE_IP', 'true', () => {
+    assert.equal(options().byokAllowProxyFakeIp, true);
+  });
 });
 
 test('production defaults to secure cookies but permits an explicit trusted HTTP override', () => {

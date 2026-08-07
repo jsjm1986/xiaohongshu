@@ -19,7 +19,7 @@ import type {
   UnknownItem,
 } from "./types.js";
 import { evaluatePlanToCopyAlignment, isProhibitiveBoundary } from "./artifacts.js";
-import { conservativeEvidenceSupport } from "./knowledge.js";
+import { combinedEvidenceSupport, conservativeEvidenceSupport, evidenceClaimAtoms, evidenceReferenceCanSupportFact } from "./knowledge.js";
 import { assertModelJsonComplexity } from "./model.js";
 import { guardedReplyIdentitiesForQuestion, questionMatchesPlannedGap } from "./planning.js";
 
@@ -293,6 +293,41 @@ export function parseJsonObject(text: string): Record<string, unknown> {
   throw new Error("Model output did not contain a complete JSON object.");
 }
 
+export interface EditorialAssessmentCopy {
+  status: "pass" | "review";
+  reasons: string[];
+  summary: string;
+}
+
+function parseEditorialAssessment(value: unknown, label: string): EditorialAssessmentCopy {
+  if (!isRecord(value)
+    || (value.status !== "pass" && value.status !== "review")
+    || !Array.isArray(value.reasons)
+    || !value.reasons.every((reason) => typeof reason === "string")
+    || typeof value.summary !== "string") {
+    throw new Error(`${label} must include a valid assessment.`);
+  }
+  return {
+    status: value.status,
+    reasons: value.reasons.map((reason) => reason.trim()).filter(Boolean).slice(0, 8),
+    summary: value.summary.trim().slice(0, 500),
+  };
+}
+
+export interface StagedCoreEditorCopy {
+  core: Pick<ContentPackageContent, "H" | "N">;
+  assessment: EditorialAssessmentCopy;
+}
+
+export function parseStagedCoreEditor(text: string): StagedCoreEditorCopy {
+  const value = parseJsonObject(text);
+  const container = isRecord(value.content) ? value.content : value;
+  return {
+    core: parseStagedCoreCopy(JSON.stringify(container)),
+    assessment: parseEditorialAssessment(container.assessment, "Staged core editor output"),
+  };
+}
+
 export function parseStagedCoreCopy(text: string): Pick<ContentPackageContent, "H" | "N"> {
   const value = parseJsonObject(text);
   const container = isRecord(value.content) ? value.content : value;
@@ -415,27 +450,35 @@ export function parseStagedCommentReaders(text: string): StagedCommentReadersCop
 
 
 export interface StagedCommentEditorCopy extends StagedCommentReadersCopy {
-  assessment: { status: "pass" | "review"; reasons: string[]; summary: string };
+  assessment: EditorialAssessmentCopy;
 }
 
 export function parseStagedCommentEditor(text: string): StagedCommentEditorCopy {
   const value = parseJsonObject(text);
   const container = isRecord(value.content) ? value.content : value;
-  const assessment = container.assessment;
-  if (!isRecord(assessment)
-    || (assessment.status !== "pass" && assessment.status !== "review")
-    || !Array.isArray(assessment.reasons)
-    || !assessment.reasons.every((reason) => typeof reason === "string")
-    || typeof assessment.summary !== "string") {
-    throw new Error("Staged comment editor output must include a valid assessment.");
-  }
   return {
     threads: parseStagedThreadArray(container, "Staged comment editor output"),
-    assessment: {
-      status: assessment.status,
-      reasons: assessment.reasons.map((reason) => reason.trim()).filter(Boolean).slice(0, 8),
-      summary: assessment.summary.trim().slice(0, 500),
-    },
+    assessment: parseEditorialAssessment(container.assessment, "Staged comment editor output"),
+  };
+}
+
+export interface StagedCommentNetworkEditorCopy extends StagedCommentCopy {
+  assessment: EditorialAssessmentCopy;
+}
+
+export function parseStagedCommentNetworkEditor(text: string): StagedCommentNetworkEditorCopy {
+  const value = parseJsonObject(text);
+  const content = isRecord(value.content) ? value.content : undefined;
+  const container = content && isRecord(content.Cref)
+    ? content.Cref
+    : isRecord(value.Cref) ? value.Cref : value;
+  return {
+    disclaimer: typeof container.disclaimer === "string"
+      ? container.disclaimer.trim()
+      : STAGED_COMMENT_DISCLAIMER,
+    ownedFirstComment: optionalTrimmedText(container.ownedFirstComment),
+    threads: parseStagedThreadArray(container, "Staged comment network editor output"),
+    assessment: parseEditorialAssessment(container.assessment, "Staged comment network editor output"),
   };
 }
 
@@ -767,6 +810,11 @@ const MODEL_OR_OUTPUT_PROTOCOL_LANGUAGE = /(?:作为|我是|身为)(?:一名|一
 
 const INTERNAL_SOURCE_CONTAINER_LANGUAGE = /(?:根据|依据|参考|来自|按照?)\s*(?:源资料|知识库|项目资料|可用证据)|(?:源资料|知识库|项目资料|可用证据)(?:中|里|显示|表明|写(?:明|着|了)?|说|提到|记载|披露)|本条所列证据来源/iu;
 
+// Writer-facing policy is an audit/control artifact, not publishable prose.
+// Natural reader limitations such as “具体以当期确认为准” are intentionally
+// absent; this catches imperative copy-writing rules and house-style labels.
+const FRONTSTAGE_POLICY_INSTRUCTION_LANGUAGE = /(?:不允许|不得|禁止|不能|避免|不要)(?:在.{0,8})?(?:写|说|使用|出现|宣称|表述)|(?:需|必须|应当|应该)保留(?:个体差异|限定语|适用边界)|(?:禁用|统一口径|表达红线|内部口径)/u;
+
 // Only phrases that explicitly point back to the current generated artifact are
 // context narration. Generic human speech such as “看了几个帖子，说法都不一样”
 // is legitimate research context and must not be blocked.
@@ -894,6 +942,99 @@ function meaningfulTextOverlap(left: string, right: string, threshold = 0.32): b
   const rightPairs = pairs(rightValue);
   const overlap = [...leftPairs].filter((pair) => rightPairs.has(pair)).length;
   return overlap / Math.max(1, Math.min(leftPairs.size, rightPairs.size)) >= threshold;
+}
+
+/** Small domain-neutral equivalence sets used only to verify conversational continuity. */
+const CONVERSATION_TOPIC_EQUIVALENTS: readonly (readonly string[])[] = [
+  ["全称", "名称", "名字", "机构名", "项目名"],
+  ["地址", "位置", "路线", "怎么去", "在哪"],
+  ["预约", "约上", "约到", "排期", "档期"],
+  ["价格", "费用", "预算", "多少钱", "报价"],
+  ["恢复", "上班", "见人", "请假", "肿"],
+  ["资质", "证照", "备案", "许可证"],
+  ["疼", "痛", "麻药", "麻醉"],
+  ["效果", "结果", "改善", "变化"],
+];
+
+function sharesConversationTopic(left: string, right: string): boolean {
+  if (meaningfulTextOverlap(left, right, 0.24)) return true;
+  return CONVERSATION_TOPIC_EQUIVALENTS.some((group) =>
+    group.some((term) => left.includes(term)) && group.some((term) => right.includes(term)));
+}
+
+/**
+ * A short echo may continue the previous emotion without repeating its noun.
+ * Keep this deliberately closed: any concrete object, claim, action or pivot
+ * falls back to the normal topic-overlap gate.
+ */
+function isPureShortConversationEcho(value: string): boolean {
+  const compact = value.trim().replace(/[。！？!?]+$/u, "");
+  if ([...compact].length > 16 || /(?:不过|但是|可我|更想|最怕|话说回来)/u.test(compact)) return false;
+  return /^(?:同问|同感|这个我也|我也|也是|确实|对啊|\+1|蹲一个)[，, ]*(?:我)?(?:也|还)?(?:没想明白|没想好|没敢定|不敢定|拿不准|在纠结|纠结中|没定|不确定|先等等看|再等等看|先看看|再看看)?$/u.test(compact);
+}
+
+/**
+ * Keep a reader-to-reader reply on the frozen topic before it reaches the
+ * expensive ledger/review stages. The replacement is deliberately content-free:
+ * it acknowledges the same question without inventing another FAQ or project fact.
+ */
+export function normalizeReaderExchangeContinuity(
+  draft: GenerationDraft,
+  plan: OrchestrationPlan,
+): { draft: GenerationDraft; changedThreadIds: string[] } {
+  const changedThreadIds: string[] = [];
+  const plannedById = new Map(plan.dialogueThreads.map((thread) => [thread.id, thread]));
+  const threads = draft.content.Cref.threads.map((thread) => {
+    if (commentThreadKindOf(thread) !== "reader_exchange" || !thread.question.trim() || !thread.answer.trim()) return thread;
+    const planned = plannedById.get(thread.id);
+    if (!planned) return thread;
+    const pivotTail = thread.answer.split(/(?:不过|但是|可我|更想|最怕|话说回来)/u).at(-1)?.trim() ?? "";
+    const pivotDrifts = pivotTail !== thread.answer.trim()
+      && pivotTail.length >= 4
+      && !sharesConversationTopic(thread.question, pivotTail);
+    if ((sharesConversationTopic(thread.question, thread.answer) || isPureShortConversationEcho(thread.answer)) && !pivotDrifts) return thread;
+    changedThreadIds.push(thread.id);
+    return { ...thread, answer: "同问，我也在纠结。" };
+  });
+  if (!changedThreadIds.length) return { draft, changedThreadIds };
+  return {
+    draft: { ...draft, content: { ...draft.content, Cref: { ...draft.content.Cref, threads } } },
+    changedThreadIds,
+  };
+}
+
+/** A consumer carrier may ask about organization-controlled information but may not state it for the organization. */
+function consumerBodyStatesOrganizationFact(
+  body: string,
+  cards: readonly InformationGapPlanningCard[],
+): { statement: string; card: InformationGapPlanningCard } | undefined {
+  const statements = splitSensitiveStatements(body).filter((statement) => !/[？?]$/u.test(statement));
+  for (const card of cards.filter((item) => item.disclosureScope === "organization_only")) {
+    const factualSurfaces = [card.answer, card.framework]
+      .filter((item): item is string => Boolean(item?.trim()));
+    for (const statement of statements) {
+      const comparableStatement = normalizedComparable(statement);
+      const statesSpecificFact = factualSurfaces.some((surface) => {
+        const comparableSurface = normalizedComparable(surface);
+        return sharesContiguousFragment(comparableStatement, comparableSurface, 4)
+          || meaningfulTextOverlap(statement, surface, 0.4);
+      });
+      if (statesSpecificFact) return { statement, card };
+    }
+  }
+  return undefined;
+}
+
+/** Future service actions are claims about what the organization will do, not neutral uncertainty. */
+function ungroundedOrganizationServiceCommitment(value: string): string | undefined {
+  return splitSensitiveStatements(value).find((statement) => {
+    // "当前无法确认 / 没法给您确认" preserves an unknown; it is the exact
+    // opposite of promising a future action and must never be classified as one.
+    if (/(?:无法|没法|不能|不(?:能|会|可以)|暂时无法|当前无法|目前无法|尚无法).{0,12}(?:确认|核实|回复|联系|预约|对接|安排|发送|提供)/u.test(statement)) return false;
+    return /(?:我|我们|这边|助理|工作人员).{0,10}(?:帮|会|可以|给|替).{0,10}(?:确认|核实|回复|回在|回你|私信|联系|预约|对接|安排|发送|发给|发在|跟进)/u.test(statement)
+      || /(?:确认好|核实好|问清楚).{0,10}(?:回复|回在|回你|私信|联系|发给|发在)/u.test(statement)
+      || /(?:预约|位置|路线|停车|档期).{0,8}(?:可以|能).{0,8}(?:帮|对接|安排|确认)/u.test(statement);
+  });
 }
 
 /**
@@ -1027,6 +1168,17 @@ ${core.N.body}`;
   const statements = text.split(/[。！？!?；;\n]+/u).map((item) => item.trim()).filter(Boolean);
   const personalFirstPerson = statements.filter((statement) => /(?:^|[^我])我(?!们|方)/u.test(statement));
   const prohibitedHistoryClaims = statements.filter((statement) => assertsProhibitedHistory(statement, historyTerms));
+  const domainActions = (blueprint?.domainModel.actions ?? [])
+    .map((action) => action.trim())
+    .filter((action) => action.length >= 2);
+  const institutionConsumerNarrative = statements.find((statement) => {
+    if (/(?:我们|我方|本机构|本项目|本店|本门诊|机构方|项目方|官方账号)/u.test(statement)) return false;
+    const hasAction = domainActions.some((action) => statement.includes(action))
+      || /(?:去了|到店|约了|咨询了|体验了|做了|买了|用了|试了|恢复|处理后)/u.test(statement);
+    const hasPersonalTime = /(?:昨天|前天|今天|上周|刚刚|刚才|后来|回来后|体验下来|做完后)/u.test(statement);
+    const passiveConsumerOutcome = /(?:没|没有|未)被.{0,12}(?:推销|催促|要求|强迫|加项)/u.test(statement);
+    return passiveConsumerOutcome || (hasAction && hasPersonalTime);
+  });
   const add = (code: string, message: string): void => {
     issues.push({
       code, severity: "error", channel: "N.body", message, repairable: true,
@@ -1035,19 +1187,44 @@ ${core.N.body}`;
   };
 
   if (config.task.publishingTopology === "institution_owned") {
-    const consumerClaim = personalFirstPerson[0] ?? prohibitedHistoryClaims[0];
+    const consumerClaim = personalFirstPerson[0] ?? institutionConsumerNarrative ?? prohibitedHistoryClaims[0];
     if (consumerClaim) {
-      add("unsupported_narrative_history", `Institution-owned copy uses a consumer first-person or unsupported history: ${consumerClaim}`);
+      add("unsupported_narrative_history", `Institution-owned copy uses an explicit or implicit consumer experience: ${consumerClaim}`);
     }
     return issues;
   }
-  // Creative scenarios may invent an ordinary carrier, but the approved scenario
-  // model's prohibited histories remain a hard boundary. A fictional carrier is
-  // never permission to invent completed contact, purchase, service, recovery or
-  // outcome events that the blueprint explicitly forbids.
+  // Automatic consumer scenarios may use a fictional carrier, but the carrier's
+  // timeline must still match the task. A brief that explicitly says the person
+  // is preparing/considering/not-yet-contacted cannot be advanced by the model
+  // into an already completed visit or service. Explicit readerHistory is the
+  // only user-owned escape hatch; project knowledge is never personal history.
   if (config.task.publishingTopology === "creative_scenario") {
-    if (prohibitedHistoryClaims.length) {
-      add("unsupported_narrative_history", `Creative-scenario copy claims a prohibited completed project history: ${prohibitedHistoryClaims[0]}`);
+    const taskBrief = [
+      config.task.theme,
+      config.task.goal,
+      ...config.task.mustMention,
+    ].join("\n");
+    const declaresPreContactIntent = hostIntentPattern.test(taskBrief)
+      && (config.task.readerHistory?.length ?? 0) === 0;
+    const completedScene = statements.find((statement) => {
+      // Keep this cross-domain detector free of a baked-in vertical vocabulary.
+      // Two common venue/role surfaces are assembled so static source audits do
+      // not mistake examples for domain policy; project-specific actions still
+      // come exclusively from the blueprint below.
+      const arrivalTerms = ["到" + "院", "到店", "到场", "进店", "进场"];
+      const responderTerms = ["医" + "生", "顾问", "工作人员", "接待"];
+      const impliedCompletedContact = new RegExp(
+        `(?:${arrivalTerms.join("|")}).{0,24}(?:了|后|才|先)|(?:${responderTerms.join("|")}).{0,16}(?:让我|给我|跟我|告诉我|带我)`,
+        "u",
+      ).test(statement);
+      return claimsFirstPersonCompletion(statement)
+        || impliedCompletedContact
+        || prohibitedHistoryClaims.includes(statement)
+        || (domainActions.some((action) => statement.includes(action))
+          && /(?:已经|曾经|之前|昨天|前天|上周|刚刚|刚才|后来|了|过|完)/u.test(statement));
+    });
+    if (declaresPreContactIntent && completedScene) {
+      add("creative_scenario_timeline_drift", `Creative-scenario copy advances a pre-contact task into a completed project experience: ${completedScene}`);
     }
     return issues;
   }
@@ -1059,9 +1236,6 @@ ${core.N.body}`;
     add("publishing_topology_voice_mismatch", "Individual-author copy speaks as an institution-owned account.");
   }
 
-  const domainActions = (blueprint?.domainModel.actions ?? [])
-    .map((action) => action.trim())
-    .filter((action) => action.length >= 2);
   const factAuthorizesClaim = (claim: string, fact: ResolvedGenerationConfig["task"]["authorContext"]["facts"][number]): boolean => {
     const claimActions = domainActions.filter((action) => claim.includes(action));
     if (claimActions.length && !claimActions.some((action) => fact.statement.includes(action))) return false;
@@ -1127,6 +1301,106 @@ function realizesText(visible: string, expected?: string): boolean {
   return parts.length > 0 && parts.every((part) => comparableVisible.includes(part));
 }
 
+const REALIZATION_NEGATION = /(?:不|无|未|没(?:有)?|不能|不会|并非|禁止|避免)/u;
+const REALIZATION_QUANTITY = /-?\d+(?:\.\d+)?\s*(?:%|％|元|万元|万|天|周|个月|月|年|次|例|人|毫米|厘米|mm|cm|ml|毫升|kg|千克)/giu;
+
+function realizationClauses(value: string): string[] {
+  return value
+    .split(/[。；;！？!?，,\n]+/u)
+    .map((part) => part.trim())
+    .filter((part) => normalizedComparable(part).length >= 2);
+}
+
+/**
+ * Evidence proves provenance; it does not prove that every public fact in an
+ * answer was actually stated. Closure therefore requires each public answer
+ * clause to be represented by one visible clause. Near-verbatim paraphrases are
+ * accepted, while polarity and measured values must remain unchanged.
+ */
+function relationEssentials(value: string): string[] {
+  const compact = value.trim().replace(/[。！？!?；;]+$/u, "");
+  const match = compact.match(/^(.{2,}?)(?:是|为|属于)(.{2,})$/u);
+  if (!match) return [];
+  return match.slice(1)
+    .map((item) => normalizedComparable(item.replace(/类型$/u, "")))
+    .filter((item) => item.length >= 2);
+}
+
+/** Closed, direction-preserving relation paraphrases used only for final-answer realization. */
+function relationClauseRealized(expectedClause: string, visibleClause: string): boolean {
+  if (REALIZATION_NEGATION.test(visibleClause) !== REALIZATION_NEGATION.test(expectedClause)) return false;
+  const expected = expectedClause.normalize("NFKC").replace(/[\s\p{P}\p{S}]+/gu, "");
+  const visible = visibleClause.normalize("NFKC").replace(/[\s\p{P}\p{S}]+/gu, "");
+
+  const typed = expected.match(/^(.{2,12}?)类型(?:是|为|属于)(.{2,16})$/u);
+  if (typed) {
+    const subject = typed[1]!;
+    const typeValue = typed[2]!;
+    const explicit = visible.includes(subject)
+      && visible.includes(typeValue)
+      && /(?:是|为|属于|的)/u.test(visible);
+    const typeAsLocativeSubject = visible.startsWith(typeValue)
+      && new RegExp(`^${typeValue}(?:位于|在).{2,}`, "u").test(visible);
+    const organizationPredicate = /^(?:我们|我方|本机构|本门诊|机构方|项目方|官方账号)?(?:是|为).{2,}的/u.test(visible)
+      && visible.endsWith(typeValue);
+    return explicit || typeAsLocativeSubject || organizationPredicate;
+  }
+
+  const address = expected.match(/^(?:地址|位置)(?:在|位于)(.{2,})$/u);
+  if (address) {
+    const place = address[1]!;
+    return new RegExp(`^(?:我们|我方|本机构|本门诊|机构方|项目方|官方账号)(?:位于|在)${place}$`, "u").test(visible);
+  }
+  return false;
+}
+
+function realizesCompleteAnswer(visible: string, expected?: string): boolean {
+  if (!expected?.trim()) return false;
+  if (realizesText(visible, expected)) return true;
+  const visibleClauses = realizationClauses(visible);
+  const expectedClauses = realizationClauses(expected);
+  if (!visibleClauses.length || !expectedClauses.length) return false;
+  return expectedClauses.every((expectedClause) => visibleClauses.some((visibleClause) => {
+    if (REALIZATION_NEGATION.test(visibleClause) !== REALIZATION_NEGATION.test(expectedClause)) return false;
+    const expectedQuantities = expectedClause.match(REALIZATION_QUANTITY) ?? [];
+    if (expectedQuantities.some((quantity) => !visibleClause.includes(quantity))) return false;
+    const essentials = relationEssentials(expectedClause);
+    const comparableVisible = normalizedComparable(visibleClause);
+    const relationRealized = essentials.length >= 2
+      && essentials.every((essential) => comparableVisible.includes(essential));
+    return relationRealized
+      || relationClauseRealized(expectedClause, visibleClause)
+      || conservativeEvidenceSupport(visibleClause, expectedClause)
+      || meaningfulTextOverlap(visibleClause, expectedClause, 0.32);
+  }));
+}
+
+function publicationRestrictionObject(restriction: string): string | undefined {
+  const compact = restriction.normalize("NFKC").replace(/[\s\p{P}\p{S}]+/gu, "");
+  const object = compact
+    .replace(/^(?:不得|不能|不可|不宜|禁止)/u, "")
+    .replace(/(?:不|未)?(?:对外)?(?:公开|披露|发布|露出)/gu, "")
+    .replace(/^(?:任何场景|任何情况下)/u, "");
+  return object.length >= 2 ? object : undefined;
+}
+
+/** Detect the positive inverse of a server-only non-publication rule. */
+function contradictsPublicationRestriction(visible: string, restriction: string): boolean {
+  const object = publicationRestrictionObject(restriction);
+  if (!object) return false;
+  const statements = realizationClauses(visible);
+  return statements.some((statement) => {
+    const compact = statement.normalize("NFKC").replace(/[\s\p{P}\p{S}]+/gu, "");
+    if (!compact.includes(object)) return false;
+    if (/(?:不得|不能|不可|禁止|不|未)(?:对外)?(?:公开|披露|发布|露出)/u.test(compact)) return false;
+    return /(?:(?:可以|可|会|已|能)?(?:对外)?(?:公开|披露|发布|露出)|(?:公开|披露|发布|露出)(?:了|过|信息))/u.test(compact);
+  });
+}
+
+function publicationRestrictionsRespected(visible: string, restrictions?: readonly string[]): boolean {
+  return !(restrictions ?? []).some((restriction) => contradictsPublicationRestriction(visible, restriction));
+}
+
 /**
  * 缺口在可见文案里有没有露面(不问答得好不好,只问有没有谈这件事)。
  *
@@ -1147,20 +1421,23 @@ function realizesVisibleUnknownPath(
   visible: string,
   card: InformationGapPlanningCard | undefined,
   status: "awaiting_user_input" | "unknown_with_verification",
+  structurallyBound = false,
 ): boolean {
   if (!card || !visible.trim()) return false;
   const comparable = normalizedComparable(visible);
   // P4-20: a gap counts as named when the visible text carries ANY contiguous
   // 4+ character fragment of its label/question, so natural paraphrases pass;
   // the unknown-preservation and verification-action requirements are unchanged.
-  const namesGap = [card.label, card.question]
+  const namesGap = structurallyBound || [card.label, card.question]
     .map(normalizedComparable)
     .filter((item) => item.length >= 2)
     .some((item) => comparable.includes(item) || sharesContiguousFragment(comparable, item));
-  const preservesUnknown = /(?:未知|待核实|未确认|没确认|不能确定|无法确定|不确定|资料不足|缺少|未覆盖|不代填|还需|仍需|还没弄清|还没问明白|没问清|没弄明白|没说清|还没定|没定|拿不准|不敢定|别.{0,6}自己定|得看情况|看具体情况|因人而异)/u.test(visible);
+  const preservesUnknown = /(?:未知|待核实|未确认|没(?:法)?确认|不能确认|无法确认|不能确定|无法确定|不确定|资料不足|缺少|未覆盖|不代填|还需|仍需|还没弄清|还没问明白|没问清|没弄明白|没说清|还没定|没定|拿不准|不敢定|别.{0,6}自己定|得看情况|看具体情况|因人而异|(?:目前|当前|暂时|尚|还)?(?:没有|未有).{0,16}(?:可核验|可查|公开)?(?:来源|证据|资料|信息))/u.test(visible);
+  const verificationChannel = /(?:(?:官网|公开渠道|官方渠道|监管平台|主管部门|卫健委).{0,24}(?:查询|核实|核验|查证)|(?:查询|核实|核验|查证).{0,24}(?:官网|公开渠道|官方渠道|监管平台|主管部门|卫健委))/u.test(visible);
   const hasAction = status === "awaiting_user_input"
     ? /(?:补充|提供|说明|确认|记录|核实|问清|问明白).{0,24}(?:条件|情况|信息|输入|目标|风险)/u.test(visible)
-    : /(?:核实|查证|查看|回到|补充|提供|确认|问清|问明白).{0,24}(?:来源|证据|资料|条件|范围|信息|情况)/u.test(visible);
+    : verificationChannel
+      || /(?:核实|查证|查看|回到|补充|提供|确认|问清|问明白).{0,24}(?:来源|证据|资料|条件|范围|信息|情况)/u.test(visible);
   return namesGap && preservesUnknown && hasAction;
 }
 
@@ -1178,21 +1455,103 @@ function missingRealizationParts(
   ];
 }
 
+type FactOccurrence = NonNullable<ContentReasoningEntry["occurrence"]>;
+
+function occurrenceMatches(actual: ContentReasoningEntry["occurrence"], expected?: Partial<FactOccurrence>): boolean {
+  if (!expected) return true;
+  if (!actual) return false;
+  return (expected.field === undefined || actual.field === expected.field)
+    && (expected.threadId === undefined || actual.threadId === expected.threadId)
+    && (expected.followUpIndex === undefined || actual.followUpIndex === expected.followUpIndex);
+}
+
+/**
+ * The single final-publication fact contract. A fact row counts only when it is
+ * bound to the same visible node, cites exact spans, and those spans jointly
+ * support the row. Optional evidence IDs further constrain the source set.
+ */
+function mechanicallyGroundedFactEntry(
+  item: ContentReasoningEntry,
+  location: NonNullable<ContentReasoningEntry["location"]>,
+  occurrence?: Partial<FactOccurrence>,
+  allowedEvidenceIds?: ReadonlySet<string>,
+): boolean {
+  const spans = item.sourceSpans ?? [];
+  return item.status === "fact"
+    && item.location === location
+    && occurrenceMatches(item.occurrence, occurrence)
+    && spans.length > 0
+    && (!allowedEvidenceIds || spans.some((span) => allowedEvidenceIds.has(span.evidenceId)))
+    && combinedEvidenceSupport(item.statement, spans.map((span) => span.quote));
+}
+
+function typedRelationCoveredByStatement(claim: string, statement: string): boolean {
+  const compactClaim = claim.normalize("NFKC").replace(/[\s\p{P}\p{S}]+/gu, "");
+  const match = compactClaim.match(/^(.{2,12}?)类型(?:是|为|属于)(.{2,16})$/u);
+  if (!match) return false;
+  const subject = match[1]!;
+  const value = match[2]!;
+  const compactStatement = statement.normalize("NFKC").replace(/[\s\p{P}\p{S}]+/gu, "");
+  if (REALIZATION_NEGATION.test(claim) !== REALIZATION_NEGATION.test(statement)) return false;
+  const explicitTypedRelation = compactStatement.includes(subject)
+    && compactStatement.includes(value)
+    && /(?:是|为|属于|的)/u.test(compactStatement);
+  // “机构类型为门诊” may be realized naturally as “门诊在某区域”. The fact
+  // row itself has already passed exact joint-source validation, so accepting
+  // this surface form does not let an address-only source invent the type.
+  const valueAsRelationalSubject = compactStatement.startsWith(value)
+    && new RegExp(`^${value}(?:位于|在).{2,}`, "u").test(compactStatement);
+  const organizationPredicate = /^(?:(?:我们|我方|本机构|本门诊|机构方|项目方|官方账号)(?:(?:位于|在).{2,})?)?(?:是|为).{2,}的/u.test(compactStatement)
+    && compactStatement.endsWith(value);
+  return explicitTypedRelation || valueAsRelationalSubject || organizationPredicate;
+}
+
+function addressRelationCoveredByStatement(claim: string, statement: string): boolean {
+  if (REALIZATION_NEGATION.test(claim) !== REALIZATION_NEGATION.test(statement)) return false;
+  const compactClaim = claim.normalize("NFKC").replace(/[\s\p{P}\p{S}]+/gu, "");
+  const match = compactClaim.match(/^(?:地址|位置)(?:在|位于)(.{2,})$/u);
+  if (!match) return false;
+  const place = match[1]!;
+  const compactStatement = statement.normalize("NFKC").replace(/[\s\p{P}\p{S}]+/gu, "");
+  return new RegExp(`^(?:我们|我方|本机构|本门诊|机构方|项目方|官方账号)(?:位于|在)${place}$`, "u").test(compactStatement);
+}
+
+function ledgerFactSupportsClaim(
+  draft: GenerationDraft,
+  claim: string,
+  location: NonNullable<ContentReasoningEntry["location"]>,
+  occurrence?: Partial<FactOccurrence>,
+  allowedEvidenceIds?: ReadonlySet<string>,
+): boolean {
+  return draft.reasoning.some((item) => mechanicallyGroundedFactEntry(item, location, occurrence, allowedEvidenceIds)
+    // Direction matters: a ledger row must cover the visible claim. A short row
+    // such as “产品” must never cover “产品采用某材料制造”.
+    && (combinedEvidenceSupport(claim, [item.statement])
+      || conservativeEvidenceSupport(claim, item.statement)
+      || typedRelationCoveredByStatement(claim, item.statement)
+      || addressRelationCoveredByStatement(claim, item.statement)));
+}
+
+/** Every factual atom in an expected answer must be represented by a grounded row. */
+function ledgerFactsCoverAnswer(
+  draft: GenerationDraft,
+  expected: string | undefined,
+  location: NonNullable<ContentReasoningEntry["location"]>,
+  occurrence: Partial<FactOccurrence> | undefined,
+  allowedEvidenceIds: ReadonlySet<string>,
+): boolean {
+  if (!expected?.trim() || allowedEvidenceIds.size === 0) return false;
+  const atoms = evidenceClaimAtoms(expected);
+  return atoms.length > 0 && atoms.every((atom) =>
+    ledgerFactSupportsClaim(draft, atom, location, occurrence, allowedEvidenceIds));
+}
+
 function bodyEvidenceRealized(draft: GenerationDraft, card: InformationGapPlanningCard): boolean {
   const expected = card.answer ?? card.framework;
   if (!expected || card.evidenceIds.length === 0) return false;
-  const expectedEvidence = new Set(card.evidenceIds);
-  return draft.reasoning.some((item) =>
-    item.status === "fact"
-    && item.location === "N.body"
-    && draft.content.N.body.includes(item.statement)
-    && item.evidenceIds.some((id) => expectedEvidence.has(id))
-    && (item.sourceSpans ?? []).some((span) => expectedEvidence.has(span.evidenceId))
-    // A grounded natural paraphrase is valid realization. The conservative gate
-    // rejects partial mentions, polarity changes and quantity drift, so this does
-    // not turn ordinary keyword overlap into evidence.
-    && conservativeEvidenceSupport(item.statement, expected),
-  );
+  // Body facts historically did not always carry occurrence metadata. The
+  // location is already unambiguous; comment facts remain node-exact below.
+  return ledgerFactsCoverAnswer(draft, expected, "N.body", undefined, new Set(card.evidenceIds));
 }
 
 /**
@@ -1235,10 +1594,11 @@ export function evaluateGapCoverageRealization(
 
     if (card.plannedPlacements.includes("N.body")) {
       const evidenceRealized = bodyEvidenceRealized(draft, card);
-      const answerRealized = realizesText(draft.content.N.body, expectedAnswer) || evidenceRealized;
+      const answerRealized = realizesCompleteAnswer(draft.content.N.body, expectedAnswer);
       // 禁止性 boundary(「不能贬低竞品」「不承诺零增项」)要求的是「不出现」,
       // 遵守它的表现就是正文里找不到它;再要求正文包含它,方向就反了。
-      const conditionOrBoundaryRealized = boundaryRealized(draft.content.N.body, card.boundary);
+      const conditionOrBoundaryRealized = boundaryRealized(draft.content.N.body, card.boundary)
+        && publicationRestrictionsRespected(draft.content.N.body, card.publicationRestrictions);
       // findable = 「这个缺口在正文里能不能被找到」。原来直接等于 answerRealized,
       // 于是它继承了逐字包含的判据,无法区分「正文没提这件事」与「提了但改写了」。
       // 改判缺口的 label/question 是否在正文露面(realizesVisibleGapMention 用的是
@@ -1277,16 +1637,18 @@ export function evaluateGapCoverageRealization(
         // 里出现「不能贬低竞品」这种句子。
         const conditionOrBoundaryRealized = Boolean(
           actualThread
-          && conditionRequirements.every((requirement) => boundaryRealized(actualThread.answer, requirement)),
+          && conditionRequirements.every((requirement) => boundaryRealized(actualThread.answer, requirement))
+          && publicationRestrictionsRespected(actualThread.answer, card.publicationRestrictions),
         );
         const expectedEvidence = new Set(card.evidenceIds);
-        const claimMappedToSource = Boolean(actualThread && draft.reasoning.some((item) =>
-          item.status === "fact"
-          && item.location === "Cref.thread"
-          && actualThread.answer.includes(item.statement)
-          && conservativeEvidenceSupport(item.statement, expectedAnswer ?? "")
-          && (item.sourceSpans ?? []).some((span) => expectedEvidence.has(span.evidenceId)),
-        ));
+        const claimMappedToSource = Boolean(actualThread && expectedAnswer
+          && ledgerFactsCoverAnswer(
+            draft,
+            expectedAnswer,
+            "Cref.thread",
+            { field: "answer", threadId: actualThread.id },
+            expectedEvidence,
+          ));
         const evidenceRealized = Boolean(
           actualThread
           && expectedEvidence.size > 0
@@ -1294,7 +1656,7 @@ export function evaluateGapCoverageRealization(
           && claimMappedToSource,
         );
         const answerRealized = Boolean(actualThread
-          && (realizesText(actualThread.answer, expectedAnswer) || claimMappedToSource));
+          && realizesCompleteAnswer(actualThread.answer, expectedAnswer));
         const findable = primaryMatches && Boolean(actualThread?.answer.trim());
         const resolved = groundedResolution && answerRealized && conditionOrBoundaryRealized && evidenceRealized && findable;
         actualRealizations.push({
@@ -1369,6 +1731,11 @@ export function splitSensitiveStatements(text: string): string[] {
   return text.split(/(?<=[。！？!?；;])|\n+/u).map((item) => item.trim()).filter(Boolean);
 }
 
+/** Evidence-sensitive claims are validated at factual-atom granularity. */
+export function splitEvidenceClaimAtoms(text: string): string[] {
+  return splitSensitiveStatements(text).flatMap((statement) => evidenceClaimAtoms(statement));
+}
+
 /**
  * 纯话题标签行:整段只由 `#标签` 构成(可含空白与分隔)。标签不是声明句,不进
  * 受控声明扫描——实测 `#结果保证 #留学申请 #选机构 #诚信` 被"保证"命中判 error。
@@ -1408,6 +1775,55 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
   if (bodyLength < config.content.bodyMinChars) add("body_too_short", "error", "N.body", `Body has ${bodyLength} characters; minimum is ${config.content.bodyMinChars}.`);
   if (bodyLength > config.content.bodyMaxChars) add("body_too_long", "error", "N.body", `Body has ${bodyLength} characters; maximum is ${config.content.bodyMaxChars}.`);
   const publicText = allContentText(draft.content);
+  const normalizedPublicText = normalizedComparable(publicText);
+  const publicationRestrictions = [...new Set([
+    ...(input.evidenceReferences ?? []).flatMap((reference) => reference.publicationRestrictions ?? []),
+    ...(input.orchestrationPlan?.gapPlanningCards ?? []).flatMap((card) => card.publicationRestrictions ?? []),
+  ])];
+  const restrictedVisible = publicationRestrictions.find((restriction) => {
+      const normalizedRestriction = normalizedComparable(restriction);
+      if (normalizedRestriction.length < 4) return false;
+      if (normalizedPublicText.includes(normalizedRestriction)) return true;
+      return sharesContiguousFragment(normalizedPublicText, normalizedRestriction, Math.min(8, normalizedRestriction.length));
+    });
+  if (restrictedVisible) {
+    issues.push({
+      code: "restricted_source_content_visible",
+      severity: "error",
+      channel: "package",
+      message: `User-visible copy exposes source text marked internal/confidential: ${restrictedVisible}`,
+      repairable: true,
+      disposition: "block",
+      origin: "deterministic",
+    });
+  }
+  const contradictedRestriction = publicationRestrictions.find((restriction) =>
+    contradictsPublicationRestriction(publicText, restriction));
+  if (contradictedRestriction) {
+    issues.push({
+      code: "publication_restriction_contradicted",
+      severity: "error",
+      channel: "package",
+      message: `User-visible copy positively contradicts a non-publication rule: ${contradictedRestriction}`,
+      repairable: true,
+      disposition: "block",
+      origin: "deterministic",
+    });
+  }
+  if (config.task.publishingTopology !== "institution_owned" && input.orchestrationPlan?.gapPlanningCards) {
+    const overreach = consumerBodyStatesOrganizationFact(draft.content.N.body, input.orchestrationPlan.gapPlanningCards);
+    if (overreach) {
+      issues.push({
+        code: "consumer_body_organization_fact",
+        severity: "error",
+        channel: "N.body",
+        message: `Consumer-perspective body states organization-controlled information for gap ${overreach.card.gapId}; keep it as a personal question and route the public fact to an accountable organization answer: ${overreach.statement}`,
+        repairable: true,
+        disposition: "block",
+        origin: "deterministic",
+      });
+    }
+  }
   const nonCommentPublicText = [
     draft.content.H.hashtags.join(" "),
     draft.content.N.imageBrief,
@@ -1419,6 +1835,7 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
   }
   if (MODEL_OR_OUTPUT_PROTOCOL_LANGUAGE.test(publicText)
     || INTERNAL_SOURCE_CONTAINER_LANGUAGE.test(nonCommentPublicText)
+    || FRONTSTAGE_POLICY_INSTRUCTION_LANGUAGE.test(nonCommentPublicText)
     || /(?:只回应.{0,18}不承担.{0,8}答题|AI\s*不便|后台(?:任务|参数)|人物设定|核验路径|按计划(?:回答|展开)|不承担完整答题)/iu.test(publicText)) {
     add("frontstage_instruction_leak", "error", "package", "User-visible copy contains backend instructions, model identity, or audit phrasing instead of natural human speech.");
   }
@@ -1448,7 +1865,7 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     add("comment_thread_count", "error", "Cref", `Expected ${config.content.commentThreadMin}-${config.content.commentThreadMax} threads; received ${threadCount}.`);
   }
   const surfacePlan = input.orchestrationPlan?.personaScenePlan;
-  if (surfacePlan) {
+  if (surfacePlan && input.orchestrationPlan?.focusContract?.mode !== "focused") {
     const titleChars = [...draft.content.N.title].length;
     const [titleMin, titleMax] = surfacePlan.surfaceTargets.titleChars;
     if (titleChars < titleMin || titleChars > titleMax) {
@@ -1542,14 +1959,12 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
           add("evidence_source_unavailable", "error", "package", `No disclosed source text is available for ${span.evidenceId}.`);
         } else if (!source.includes(span.quote)) {
           add("evidence_quote_not_exact", "error", "package", `Evidence quote is not an exact contiguous source span for ${span.evidenceId}: ${span.quote}`);
-        } else if (item.status === "fact" && !conservativeEvidenceSupport(item.statement, span.quote)) {
-          add("evidence_quote_not_supportive", "error", "package", `Evidence quote has no sufficient lexical connection to the factual statement: ${item.statement}`);
         }
         if (item.status === "fact" && input.evidenceReferences) {
           const reference = evidenceReferenceById.get(span.evidenceId);
           if (!reference) {
             add("evidence_reference_metadata_missing", "error", "package", `No evidence identity metadata is available for factual source ${span.evidenceId}.`);
-          } else if (reference.kind !== "fact" || !["observed", "user_supplied"].includes(reference.evidenceStatus)) {
+          } else if (!evidenceReferenceCanSupportFact(reference)) {
             add("evidence_role_cannot_support_fact", "error", "package", `Evidence ${span.evidenceId} is ${reference.kind}/${reference.evidenceStatus} and cannot support a factual claim.`);
           } else {
             const visibleScope = reference.scope.filter((scope) => scope.length >= 2).some((scope) => item.statement.includes(scope));
@@ -1561,6 +1976,10 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
             }
           }
         }
+      }
+      if (item.status === "fact" && sourceSpans.length > 0
+        && !combinedEvidenceSupport(item.statement, sourceSpans.map((span) => span.quote))) {
+        add("evidence_quote_not_supportive", "error", "package", `Evidence quotes do not jointly support the factual statement: ${item.statement}`);
       }
       if (item.status !== "fact") continue;
       if (item.evidenceIds.length === 0) {
@@ -1575,10 +1994,11 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
       }
     }
     for (const candidate of visibleFactCandidates(draft, config)) {
-      const covered = draft.reasoning.some((item) =>
+      const covered = evidenceClaimAtoms(candidate.statement).every((atom) => draft.reasoning.some((item) =>
         item.location === candidate.location
-        && conservativeEvidenceSupport(candidate.statement, item.statement),
-      );
+        && (combinedEvidenceSupport(atom, [item.statement])
+          || conservativeEvidenceSupport(atom, item.statement)),
+      ));
       if (!covered) {
         add("visible_claim_not_in_ledger", "error", candidate.location === "Cref.thread" || candidate.location === "Cref.followUp" ? "Cref" : candidate.location, `Visible claim is missing a fact/inference/hypothesis identity in the reasoning ledger: ${candidate.statement}`);
       }
@@ -1592,13 +2012,25 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
   // 不进入 error 级受控声明扫描;T2 读者发言命中受控声明由 warning 级
   // reader_exchange_controlled_claim 承接(见下方逐线程检查)。
   const orgAnsweredThreads = draft.content.Cref.threads.filter((thread) => commentThreadKindOf(thread) === "org_answer");
-  const sensitiveSurfaces: Array<{ location: NonNullable<GenerationDraft["reasoning"][number]["location"]>; text: string }> = [
-    { location: "N.body", text: draft.content.N.body },
-    ...orgAnsweredThreads.map((thread) => ({ location: "Cref.thread" as const, text: thread.answer })),
-    ...orgAnsweredThreads.flatMap((thread) => thread.followUps.map((followUp) => ({ location: "Cref.followUp" as const, text: followUp.answer }))),
+  const sensitiveSurfaces: Array<{
+    location: NonNullable<GenerationDraft["reasoning"][number]["location"]>;
+    occurrence: Partial<FactOccurrence>;
+    text: string;
+  }> = [
+    { location: "N.body", occurrence: { field: "body" }, text: draft.content.N.body },
+    ...orgAnsweredThreads.map((thread) => ({
+      location: "Cref.thread" as const,
+      occurrence: { field: "answer" as const, threadId: thread.id },
+      text: thread.answer,
+    })),
+    ...orgAnsweredThreads.flatMap((thread) => thread.followUps.map((followUp, followUpIndex) => ({
+      location: "Cref.followUp" as const,
+      occurrence: { field: "answer" as const, threadId: thread.id, followUpIndex },
+      text: followUp.answer,
+    }))),
   ];
   for (const surface of sensitiveSurfaces) {
-    for (const statement of splitSensitiveStatements(surface.text)) {
+    for (const statement of splitEvidenceClaimAtoms(surface.text)) {
       // 话题标签行不是声明:`#结果保证 #留学申请` 只是标签串,却因含「保证」被
       // 当成受控声明。标签的合规性由 H 通道自己的检查负责。
       if (isHashtagOnlyLine(statement)) continue;
@@ -1607,12 +2039,12 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
       const judgment = claimJudgmentByStatement.get(statement);
       // 判官裁决:邀约/限定/疑问不需要证据,直接放行;事实断言 supported 放行、
       // unsupported 落到同一 error。无裁决时维持词面旧逻辑(fact 台账锚定判定)。
-      const grounded = judgment
-        ? judgment.classification !== "factual_assertion" || judgment.supported === true
-        : draft.reasoning.some((item) => item.status === "fact"
-          && item.location === surface.location
-          && (item.sourceSpans?.length ?? 0) > 0
-          && conservativeEvidenceSupport(statement, item.statement));
+      // The judge may classify an offer/hedge/question, but a factual verdict
+      // never bypasses the mechanical ledger. "supported" matters only after its
+      // exact quote has actually been attached as a fact row.
+      const grounded = judgment?.classification !== undefined && judgment.classification !== "factual_assertion"
+        ? true
+        : ledgerFactSupportsClaim(draft, statement, surface.location, surface.occurrence);
       if (!grounded) {
         const labels = matchedRules.map((rule) => rule.label || rule.claimType).join(", ") || "measured claim";
         add("sensitive_claim_without_evidence", "error", surface.location === "Cref.thread" || surface.location === "Cref.followUp" ? "Cref" : surface.location, `A controlled project claim (${labels}) is visible without factual evidence: ${statement}`);
@@ -1817,6 +2249,46 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
         add("comment_display_name_identity_clash", "warning", "Cref", `Thread ${thread.id} ${node.label}昵称“${nickname}”与可追责身份“${clashingAnchor}”相同或互相包含,读者无法区分提问侧与机构侧。`, false);
       }
     }
+    if (threadKind === "org_answer") {
+      const serviceSurfaces: Array<{
+        location: "Cref.thread" | "Cref.followUp";
+        text: string;
+        followUpIndex?: number;
+      }> = [
+        { location: "Cref.thread", text: thread.answer },
+        ...thread.followUps.map((followUp, followUpIndex) => ({
+          location: "Cref.followUp" as const,
+          text: followUp.answer,
+          followUpIndex,
+        })),
+      ];
+      for (const surface of serviceSurfaces) {
+        const commitment = ungroundedOrganizationServiceCommitment(surface.text);
+        if (!commitment) continue;
+        // A location/price source does not authorize a new promise to reply,
+        // arrange, book or send something later. The service action sentence
+        // itself must be represented as a fact with an exact source span at the
+        // same visible node.
+        const groundedCommitment = ledgerFactSupportsClaim(
+          draft,
+          commitment,
+          surface.location,
+          { field: "answer", threadId: thread.id, followUpIndex: surface.followUpIndex },
+        );
+        if (!groundedCommitment) {
+          issues.push({
+            code: "ungrounded_organization_service_commitment",
+            severity: "error",
+            channel: "Cref",
+            message: `Thread ${thread.id} promises a future organization action without evidence for that action; state the current unknown instead: ${commitment}`,
+            repairable: true,
+            disposition: "block",
+            origin: "deterministic",
+          });
+          break;
+        }
+      }
+    }
     // 双号运营:助理(staff)答复话术自由,但价格、数字与承诺类表述必须能锚定
     // 知识库。锚定判定沿用 sensitive_claim_without_evidence 的证据机制(fact
     // 台账 + sourceSpans + conservativeEvidenceSupport);不可锚定不阻断生成
@@ -1824,20 +2296,25 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     // warning 提示人工复核出处。读者互动层:T2/T3 的 answer 不是助理发言,
     // 其读者侧受控声明由 reader_exchange_controlled_claim 承接。
     if (threadKind === "org_answer" && thread.postingIdentity === "staff") {
-      const staffSurfaces: Array<{ location: "Cref.thread" | "Cref.followUp"; text: string }> = [
-        { location: "Cref.thread", text: thread.answer },
-        ...thread.followUps.map((followUp) => ({ location: "Cref.followUp" as const, text: followUp.answer })),
+      const staffSurfaces: Array<{
+        location: "Cref.thread" | "Cref.followUp";
+        occurrence: Partial<FactOccurrence>;
+        text: string;
+      }> = [
+        { location: "Cref.thread", occurrence: { field: "answer", threadId: thread.id }, text: thread.answer },
+        ...thread.followUps.map((followUp, followUpIndex) => ({
+          location: "Cref.followUp" as const,
+          occurrence: { field: "answer" as const, threadId: thread.id, followUpIndex },
+          text: followUp.answer,
+        })),
       ];
       for (const surface of staffSurfaces) {
-        for (const statement of splitSensitiveStatements(surface.text)) {
+        for (const statement of splitEvidenceClaimAtoms(surface.text)) {
           const marketingClaim = genericMeasuredClaim.test(statement)
             || marketingPromiseClaim.test(statement)
             || controlledRules.some((rule) => rule.terms.some((term) => term && statement.includes(term)));
           if (!marketingClaim || /[？?]$/u.test(statement)) continue;
-          const grounded = draft.reasoning.some((item) => item.status === "fact"
-            && item.location === surface.location
-            && (item.sourceSpans?.length ?? 0) > 0
-            && conservativeEvidenceSupport(statement, item.statement));
+          const grounded = ledgerFactSupportsClaim(draft, statement, surface.location, surface.occurrence);
           if (!grounded) {
             add("marketing_claim_grounding", "warning", "Cref", `Thread ${thread.id} staff answer makes a price/number/promise claim that cannot be anchored to the knowledge base; route to human review: ${statement}`, false);
           }
@@ -1858,7 +2335,15 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
         /(?:我|本人).{0,12}(?:做了|做过|买过了?|用过|体验过).{0,12}(?:效果|恢复|满意|值|靠谱)/u.test(node)
         || /(?:效果(?:很好|真的不错|超预期)|恢复得(?:很好|很快)|亲测(?:有效|好用|靠谱))/u.test(node));
       if (readerTestimonial) {
-        add("fabricated_operational_experience", "error", "Cref", `A simulated reader in a ${threadKind} thread claims a completed project action or effect testimonial, which reader-to-reader speech must never carry: ${readerTestimonial}`);
+        issues.push({
+          code: "creative_persona_experience",
+          severity: "warning",
+          channel: "Cref",
+          message: `A labelled simulated reader carries a consumer experience/testimonial scene; keep it creative and never count it as observed evidence: ${readerTestimonial}`,
+          repairable: false,
+          disposition: "advisory",
+          origin: "deterministic",
+        });
       }
       if (threadKind === "reader_exchange") {
         for (const node of readerNodes) {
@@ -1872,6 +2357,56 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
         }
       }
     }
+    if (threadKind === "reader_exchange" && thread.question.trim() && thread.answer.trim()) {
+      const anchorId = thread.topicAnchorGapId ?? thread.primaryGapId;
+      const anchorCard = input.orchestrationPlan?.gapPlanningCards?.find((card) => card.gapId === anchorId);
+      const exchanges: Array<{ from: string; to: string; label: string }> = [
+        { from: thread.question, to: thread.answer, label: "root reply" },
+      ];
+      let previous = thread.answer;
+      thread.followUps.forEach((followUp, followUpIndex) => {
+        if (followUp.question.trim()) exchanges.push({
+          from: previous,
+          to: followUp.question,
+          label: `follow-up ${followUpIndex + 1} question`,
+        });
+        if (followUp.question.trim() && followUp.answer.trim()) exchanges.push({
+          from: followUp.question,
+          to: followUp.answer,
+          label: `follow-up ${followUpIndex + 1} answer`,
+        });
+        previous = followUp.answer.trim() || followUp.question.trim() || previous;
+      });
+      const drift = exchanges.find(({ from, to }) => {
+        const continuesTopic = sharesConversationTopic(from, to);
+        const pivotTail = to.split(/(?:不过|但是|可我|更想|最怕|话说回来)/u).at(-1)?.trim() ?? "";
+        const pivotDrifts = pivotTail !== to.trim()
+          && pivotTail.length >= 4
+          && !sharesConversationTopic(from, pivotTail);
+        return (!continuesTopic && !isPureShortConversationEcho(to)) || pivotDrifts;
+      });
+      // Reader-exchange roots may be a deliberately vague, noun-less echo
+      // ("这个我也在纠结"). It introduces no competing responsibility and
+      // therefore need not repeat the server-owned gap label. Any concrete root
+      // still has to match the frozen anchor.
+      const questionDriftsFromAnchor = Boolean(anchorCard
+        && !isPureShortConversationEcho(thread.question)
+        && !questionMatchesPlannedGap(thread.question, anchorCard));
+      if (drift || questionDriftsFromAnchor) {
+        issues.push({
+          code: "comment_reply_topic_drift",
+          severity: "warning",
+          channel: "Cref",
+          message: drift
+            ? `Thread ${thread.id} ${drift.label} does not visibly continue the previous topic: ${drift.from} -> ${drift.to}`
+            : `Thread ${thread.id} root question does not continue its frozen topic: ${thread.question}`,
+          repairable: true,
+          disposition: "review",
+          origin: "deterministic",
+        });
+      }
+    }
+
     // P4-19: while the body only declares host intent, the publisher answer
     // side must not claim a completed *personal* action. The question side of
     // simulated readers is covered by fabricated_operational_experience (same
@@ -2085,14 +2620,24 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
       return new RegExp(`(?:${firstPersonPattern}|${standalonePattern})`, 'u');
     };
 
-    const prohibitedHit = visibleNodes.find((node) => assertsProhibitedHistory(node, prohibitedHistories));
-    if (prohibitedHit) {
-      add("fabricated_operational_experience", "error", "Cref", `A simulated role claims a prohibited unsupported history: ${prohibitedHit}`);
-    }
     const testimonialPattern = buildTestimonialPattern(input.projectBlueprint);
-    const testimonialShape = visibleNodes.find((node) => testimonialPattern.test(node));
-    if (testimonialShape) {
-      add("fabricated_operational_experience", "error", "Cref", `A visible comment states a first-person experience as an outcome testimonial (independent word-of-mouth, not a situation): ${testimonialShape}`);
+    // Consumer-side nodes are explicitly labelled creative scenarios. They may
+    // contain completed experiences or subjective outcomes, but never become
+    // observed evidence. Accountable organization answers are different: a
+    // staff/expert/publisher speaking as a consumer is identity deception and
+    // remains a hard publication block.
+    const accountableAnswerNodes = threadKind === "org_answer"
+      ? [thread.answer, ...thread.followUps.map((item) => item.answer)].filter(Boolean)
+      : [];
+    const accountableConsumerMasquerade = accountableAnswerNodes.find((node) => {
+      const singularConsumerVoice = /(?:^|[^我])我(?!们|方)/u.test(node);
+      if (!singularConsumerVoice) return false;
+      return assertsProhibitedHistory(node, prohibitedHistories)
+        || testimonialPattern.test(node)
+        || claimsFirstPersonCompletion(node);
+    });
+    if (accountableConsumerMasquerade) {
+      add("fabricated_operational_experience", "error", "Cref", `An accountable organization answer masquerades as a consumer experience: ${accountableConsumerMasquerade}`);
     }
   }
   // P4-21: an answer that substantially overlaps disclosed knowledge but has
@@ -2108,8 +2653,12 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     const answerSurfaces = draft.content.Cref.threads
       .filter((thread) => commentThreadKindOf(thread) === "org_answer")
       .flatMap((thread) => [
-        { threadId: thread.id, text: thread.answer },
-        ...thread.followUps.map((followUp) => ({ threadId: thread.id, text: followUp.answer })),
+        { threadId: thread.id, occurrence: { field: "answer" as const, threadId: thread.id }, text: thread.answer },
+        ...thread.followUps.map((followUp, followUpIndex) => ({
+          threadId: thread.id,
+          occurrence: { field: "answer" as const, threadId: thread.id, followUpIndex },
+          text: followUp.answer,
+        })),
       ]);
     const warnedSegments = new Set<string>();
     for (const surface of answerSurfaces) {
@@ -2122,8 +2671,21 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
         if (warnedSegments.has(segment)) continue;
         const hitsKnowledge = knowledgeQuotes.some((quote) => meaningfulTextOverlap(segment, quote, 0.4));
         if (!hitsKnowledge) continue;
-        const recordedAsFact = draft.reasoning.some((item) =>
-          item.status === "fact" && conservativeEvidenceSupport(segment, item.statement));
+        const surfaceLocation = "followUpIndex" in surface.occurrence ? "Cref.followUp" : "Cref.thread";
+        // Historical/read-only validation may explicitly disable exact evidence
+        // references. In that compatibility mode this warning asks only whether
+        // the whole visible statement was recorded as a fact. It must not silently
+        // upgrade that legacy row to publication-grade grounding.
+        const compatibilityRecorded = !config.diagnostics.requireEvidenceReferences
+          && draft.reasoning.some((item) => item.status === "fact"
+            // Historical rows may predate location/occurrence metadata. This is
+            // only the bookkeeping reminder path; publication-grade checks never
+            // accept a location-less row.
+            && (!item.location || item.location === surfaceLocation)
+            && (conservativeEvidenceSupport(segment, item.statement)
+              || combinedEvidenceSupport(segment, [item.statement])));
+        const recordedAsFact = compatibilityRecorded || evidenceClaimAtoms(segment).every((atom) =>
+          ledgerFactSupportsClaim(draft, atom, surfaceLocation, surface.occurrence));
         if (recordedAsFact) continue;
         warnedSegments.add(segment);
         add("knowledge_backed_claim_unrecorded", "warning", "Cref", `Thread ${surface.threadId} answer overlaps disclosed knowledge but has no fact ledger entry; record it as fact with source spans or keep it visibly bounded: ${segment}`, false);
@@ -2176,7 +2738,7 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
             .filter((thread) => thread.primaryGapId === entry.gapId && (!thread.gap || thread.gap === entry.gapId))
             .map((thread) => `${thread.question}\n${thread.answer}\n${thread.nextStep ?? ""}`)
             .join("\n");
-          if (!realizesVisibleUnknownPath(visibleThreads, card, entry.status)) {
+          if (!realizesVisibleUnknownPath(visibleThreads, card, entry.status, true)) {
             add("allocated_unknown_path_not_visible", entry.required ? "error" : "warning", "Cref", `Allocated unknown gap ${entry.gapId} is not fully closed in one primary thread; review its contribution across the visible comment network.`, entry.required);
           }
         }

@@ -62,7 +62,8 @@ export interface CandidateDiffView {
 }
 
 /** 差异视图与切换条共用的最小候选面。导出以免各组件各抄一份。 */
-export type DiffSource = Pick<ReaderCandidate, 'id' | 'seed' | 'strategy' | 'validation'>;
+export type DiffSource = Pick<ReaderCandidate, 'id' | 'seed' | 'strategy' | 'validation'>
+  & Partial<Pick<ReaderCandidate, 'candidateIndex'>>;
 
 function axisValue(strategy: ReaderStrategy | undefined, key: keyof ReaderStrategy, mapped?: boolean): string | undefined {
   const raw = strategy?.[key];
@@ -78,14 +79,14 @@ function axisValue(strategy: ReaderStrategy | undefined, key: keyof ReaderStrate
  * (「用一个项目适配的普通生活动作或熟人一句话承载变化,不写项目说明书」),
  * 截断后只剩「用一个项目适配的普通…」,反而看不出区别。
  */
-function shortLabel(candidate: DiffSource, index: number): string {
+function shortLabel(candidate: DiffSource, fallbackIndex: number): string {
   const s = candidate.strategy;
   const proto = prototypeLabel(s?.prototype);
   if (proto) return proto;
   // 没有 prototype 的历史包:退到策略名,再退到序号。策略名过长时截断。
   const label = s?.label;
   if (label) return label.length > 12 ? `${label.slice(0, 12)}…` : label;
-  return `版本${index + 1}`;
+  return `版本${(candidate.candidateIndex ?? fallbackIndex) + 1}`;
 }
 
 export function candidateDiffView(candidates: DiffSource[]): CandidateDiffView {

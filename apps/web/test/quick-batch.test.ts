@@ -100,3 +100,16 @@ test('liveBatchStatus falls back to the server status when jobs are not loaded y
   assert.equal(liveBatchStatus('queued', []), 'queued');
   assert.equal(liveBatchStatus('partial', []), 'partial');
 });
+
+test('buildBatchJobs reapplies the frozen publishing contract only for retries', () => {
+  const jobs = buildBatchJobs({
+    project,
+    opportunities: [opp('o1', 'T1')],
+    presets: [preset('pr1')],
+    overrides: {},
+    imageAssetIds: [],
+    publishing: { publishingTopology: 'institution_owned' },
+  });
+  assert.equal(jobs[0]?.publishingTopology, 'institution_owned');
+  assert.equal(jobs[0]?.authorFacts, undefined);
+});

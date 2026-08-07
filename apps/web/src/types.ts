@@ -1133,6 +1133,8 @@ export interface ReaderJob {
 
 export interface Candidate {
   id: string;
+  /** Immutable 0-based generation slot; remains stable when a sibling candidate fails. */
+  candidateIndex: number;
   label?: string;
   /** Current user's candidate-scoped manual delivery confirmation. Does not change validation.valid. */
   manualDeliveryConfirmation?: {
@@ -1162,8 +1164,17 @@ export interface Candidate {
   conflicts?: string[];
   validation?: {
     valid: boolean;
+    qualityStatus?: CandidateQualityStatus;
     repairAttempts: number;
-    issues: Array<{ code?: string; severity: "error" | "warning"; channel?: string; message: string }>;
+    issues: Array<{
+      code?: string;
+      severity: "error" | "warning";
+      channel?: string;
+      message: string;
+      repairable?: boolean;
+      disposition?: ContentIssueDisposition;
+      origin?: ContentIssueOrigin;
+    }>;
   };
   imagePlan?: ImagePlan;
   /** Optional for historical packages; absence must not be interpreted as execution. */

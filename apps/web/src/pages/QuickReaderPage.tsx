@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, CheckCircle2, ChevronLeft, ChevronRight, RotateCcw } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, RotateCcw } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Button, useToast } from '../components/Ui';
 import { CandidateSwitch } from '../components/quick/CandidateSwitch';
@@ -10,6 +10,7 @@ import { WaitCard } from '../components/quick/WaitCard';
 import { api } from '../lib/api';
 import { clampCandidateIndex } from '../lib/note-view';
 import { readerPath } from '../lib/quick-nav';
+import { publishOrderText } from '../lib/publish-copy';
 import { areaPath, QUICK_HOME_PATH } from '../lib/quick-routes';
 import { failureReason } from '../lib/retry-plan';
 import { retryJobOnce } from '../lib/single-retry';
@@ -153,7 +154,7 @@ export function QuickReaderPage() {
       await api.generations.confirmManualDelivery(jobId, activeCandidate.id);
       setJob(await api.generations.reader(jobId));
       setManualConfirmChecked(false);
-      toast.push('已记录人工交付确认，当前候选可以复制与导出');
+      // 成功状态在原交付栏内持续呈现，不再让用户追右上角提示。
     } catch (e) {
       fail(e, '人工交付确认失败');
     } finally {
@@ -175,6 +176,15 @@ export function QuickReaderPage() {
       for (const w of result.warnings) toast.push(w, 'info');
       toast.push('已按同款重新提交，消耗 1 次额度');
     } catch (e) { fail(e, '重试失败'); } finally { setRetrying(false); }
+  };
+
+  const copyConfirmedCandidate = async (candidate: ReaderCandidate) => {
+    try {
+      await navigator.clipboard.writeText(publishOrderText(candidate));
+      toast.push('已复制全文');
+    } catch {
+      toast.push('复制失败，请手动选择文本', 'error');
+    }
   };
 
   const exportAs = (candidate: ReaderCandidate, format: ExportFormat) => {
@@ -311,6 +321,7 @@ export function QuickReaderPage() {
         const current = job.candidates[clampCandidateIndex(activeIndex, job.candidates.length)]!;
         return (
           <>
+
             {/* 标签走 candidateDiffView,与工作区差异表同源;单候选时组件自己不渲染 */}
             <CandidateSwitch candidates={job.candidates} activeIndex={activeIndex} onPick={setActiveIndex} />
 
@@ -322,14 +333,26 @@ export function QuickReaderPage() {
 
             {current.validation?.valid !== true && (
               <section className={`manual-delivery-confirmation qc-manual-delivery${current.manualDeliveryConfirmation?.confirmed ? ' is-confirmed' : ''}`} aria-label="人工交付确认">
-                <div>
-                  <strong>{current.manualDeliveryConfirmation?.confirmed ? '当前候选已由你人工确认交付' : '人工核对后允许复制与导出'}</strong>
-                  <p>自动校验结果不会改变。确认仅绑定当前用户与当前候选；改稿生成新候选后需要重新确认。</p>
-                  {current.manualDeliveryConfirmation?.confirmed && (
-                    <small>确认时间：{new Date(current.manualDeliveryConfirmation.confirmedAt).toLocaleString()}</small>
-                  )}
+                <div className="manual-delivery-confirmation__summary">
+                  <strong>
+                    {current.manualDeliveryConfirmation?.confirmed && <CheckCircle2 size={15} />}
+                    {current.manualDeliveryConfirmation?.confirmed ? '已人工确认，可复制与导出' : '人工核对后解锁复制与导出'}
+                  </strong>
+                  <small>{current.manualDeliveryConfirmation?.confirmed ? '当前候选已解锁，自动校验结论仍保留' : '仅限当前用户与候选，自动校验结论保留'}</small>
                 </div>
-                {!current.manualDeliveryConfirmation?.confirmed && (
+                {current.manualDeliveryConfirmation?.confirmed ? (
+                  <div className="manual-delivery-confirmation__action manual-delivery-confirmation__action--ready">
+                    <Button variant="secondary" icon={<Copy size={15} />} onClick={() => void copyConfirmedCandidate(current)}>复制全文</Button>
+                    <div className="export-menu">
+                      <Button icon={<Download size={15} />}>导出 <ChevronDown size={13} /></Button>
+                      <div className="export-menu__dropdown">
+                        {(['markdown', 'json', 'docx', 'pdf'] as const).map((format) => (
+                          <button type="button" key={format} onClick={() => exportAs(current, format)}>{format === 'markdown' ? 'Markdown' : format.toUpperCase()}</button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
                   <div className="manual-delivery-confirmation__action">
                     <label>
                       <input
@@ -337,7 +360,7 @@ export function QuickReaderPage() {
                         checked={manualConfirmChecked}
                         onChange={(event) => setManualConfirmChecked(event.target.checked)}
                       />
-                      <span>我已逐条核对事实、证据、身份与风险，并承担本次人工交付决定。</span>
+                      <span>我已核对事实、证据、身份与风险，并承担本次交付决定。</span>
                     </label>
                     <Button
                       variant="secondary"

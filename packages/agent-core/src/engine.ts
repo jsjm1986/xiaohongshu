@@ -10,14 +10,17 @@ import {
   diagnosticsFromValidation,
   evaluateGapCoverageRealization,
   mergeCrefPatchById,
+  normalizeReaderExchangeContinuity,
   parseGenerationDraft,
   parseGenerationPatch,
   parseJsonObject,
   parseStagedCommentCopy,
-  parseStagedCommentEditor,
+  parseStagedCommentNetworkEditor,
   parseStagedCommentReaders,
   parseStagedCoreCopy,
+  parseStagedCoreEditor,
   parseStagedOrgAnswers,
+  splitSensitiveStatements,
   STAGED_COMMENT_DISCLAIMER,
   type StagedCommentCopy,
   type StagedOrgAnswersCopy,
@@ -34,11 +37,19 @@ import {
 } from "./formula.js";
 import {
   buildKnowledgeLedger,
+  combinedEvidenceSupport,
   conservativeEvidenceSupport,
   createSectionEvidenceReferences,
+  evidenceReferenceCanSupportFact,
   evidenceIdForSection,
+  exactEvidenceSupportSpans,
   estimateTokens,
   findSupportingSectionEvidenceIds,
+  organizationNamePublicationRestricted,
+  redactRestrictedProjectIdentity,
+  resolveCanonicalEvidenceId,
+  redactPublicationRestrictedText,
+  publicationRestrictionsFromText,
   sectionEvidenceText,
   selectKnowledgeContext,
 } from "./knowledge.js";
@@ -48,12 +59,16 @@ import {
   collectUnanchoredSensitiveClaims,
   knowledgeAnchorEvidencePool,
   parseClaimJudgeVerdicts,
-  parseKnowledgeAnchorSelections,
   resolveClaimJudgments,
   type KnowledgeAnchorContext,
 } from "./knowledge-anchor.js";
 import { ModelProviderError, type ModelProvider } from "./model.js";
-import { GENERATION_CORE_OUTPUT_TOKENS, GENERATION_SHORT_OUTPUT_TOKENS } from "./output-budget.js";
+import {
+  GENERATION_CORE_OUTPUT_TOKENS,
+  GENERATION_LEDGER_OUTPUT_TOKENS,
+  GENERATION_REVIEW_OUTPUT_TOKENS,
+  GENERATION_SHORT_OUTPUT_TOKENS,
+} from "./output-budget.js";
 import { buildParameterDiagnostics, compileGenerationParameters } from "./parameters.js";
 import {
   assignCommentDisplayName,
@@ -66,14 +81,14 @@ import {
 } from "./planning.js";
 import {
   buildClaimJudgePrompt,
-  buildKnowledgeAnchorReviewPrompt,
   buildRepairPrompt,
   buildStagedCommentGrowthPrompt,
-  buildStagedCommentEditorPrompt,
+  buildStagedCommentNetworkEditorPrompt,
   buildStagedCommentReadersCorrectionPrompt,
   buildStagedCommentReadersPrompt,
   buildStagedCommentReadersRegenerationPrompt,
   buildStagedCorePrompt,
+  buildStagedCoreEditorPrompt,
   buildStagedCoreIdentityRepairPrompt,
   buildStagedHostAnswersPrompt,
   buildStagedLedgerPrompt,
@@ -83,7 +98,9 @@ import {
 } from "./prompt.js";
 import { analyzeRevisionDependencies, mergeContentByChannels } from "./revision.js";
 import type {
+  ContentChannel,
   ContentPackage,
+  CommentGapCoverageLedger,
   ContentValidationIssue,
   EvidenceReference,
   FormulaVersion,
@@ -203,55 +220,12 @@ export interface ContentGenerationEngineOptions {
   modelProvider?: ModelProvider;
   now?: () => Date;
   systemPromptTokenEstimate?: number;
+  /** Formal API delivery requires an actual model run and complete required-gap realization. */
+  deliveryReadinessPolicy?: "structural" | "formal";
 }
 
 /**
- * AI 锚定复核兜底(混合锚定第二路):仅对机械锚定未命中的敏感声明批量发起
- * 一次模型调用,模型只"选"不"判"——系统对每条选择做机械校验(源内逐字连续
- * 片段 + conservativeEvidenceSupport + 证据角色闸门)后才挂台账。机械全命中
- * 时不发起调用(零成本);模型调用或输出解析失败视为全部 none,不挂不炸,
- * error 照旧由校验层报出。
- */
-export async function reviewKnowledgeAnchorsWithModel(
-  provider: ModelProvider,
-  draft: GenerationDraft,
-  context: KnowledgeAnchorContext,
-  request: {
-    model?: string;
-    seed?: number;
-    temperature?: number;
-    maxOutputTokens?: number;
-    metadata?: Record<string, string | number | boolean>;
-  },
-): Promise<GenerationDraft> {
-  const claims = collectUnanchoredSensitiveClaims(draft, context);
-  if (!claims.length) return draft;
-  const evidenceSources = knowledgeAnchorEvidencePool(context);
-  if (!evidenceSources.length) return draft;
-  const prompt = buildKnowledgeAnchorReviewPrompt({
-    statements: claims.map((claim) => claim.statement),
-    evidenceSources,
-  });
-  try {
-    const response = await provider.generate({
-      messages: prompt.messages,
-      responseSchema: prompt.responseSchema,
-      schemaName: "knowledge_anchor_review",
-      model: request.model,
-      seed: request.seed,
-      temperature: request.temperature,
-      maxOutputTokens: request.maxOutputTokens,
-      metadata: request.metadata,
-    });
-    const selections = parseKnowledgeAnchorSelections(parseJsonObject(response.text), claims.length);
-    return attachKnowledgeAnchorSelections(draft, context, claims, selections);
-  } catch {
-    return draft;
-  }
-}
-
-/**
- * AI 判官(敏感声明校验的语义裁决层):机械锚定(含 AI 选段兜底)后仍未锚定的
+ * AI 判官(敏感声明校验与证据挂账的联合语义层):机械锚定后仍未锚定的
  * 词表命中句,批量一次模型调用做分类与支持判断。裁决经机械校验(引文必须是
  * 证据源内逐字连续片段,不过改判无据)后以文本匹配形式并入 draft.claimJudgments,
  * 由校验层消费:邀约/限定/疑问放行,事实断言 supported 放行、unsupported 报
@@ -299,7 +273,16 @@ export async function judgeSensitiveClaimsWithModel(
       metadata: request.metadata,
     });
     const verdicts = parseClaimJudgeVerdicts(parseJsonObject(response.text), claims.length);
-    return { ...draft, claimJudgments: resolveClaimJudgments(claims, verdicts, evidencePool) };
+    const anchored = attachKnowledgeAnchorSelections(
+      draft,
+      context,
+      claims,
+      verdicts.flatMap((verdict) => verdict.classification === "factual_assertion"
+        && verdict.supported === true && verdict.evidenceId && verdict.quote
+        ? [{ statementIndex: verdict.statementIndex, evidenceId: verdict.evidenceId, quote: verdict.quote }]
+        : []),
+    );
+    return { ...anchored, claimJudgments: resolveClaimJudgments(claims, verdicts, evidencePool) };
   } catch (error) {
     request.onFailure?.(error);
     return clear();
@@ -479,41 +462,13 @@ function generationEvidenceSources(
     generationEvidenceReferences(config, documents, context, planningContext, approvedImageAnalyses)
       .map((reference) => [
         reference.id,
+        // Section references carry a server-sanitized public quote. Prefer it
+        // over the raw selected section so internal/non-public sibling clauses
+        // can never be selected into sourceSpans or persisted quotedSpans.
         reference.quote ?? sectionEvidenceText(context, reference.id) ?? "",
       ] as const)
       .filter(([, source]) => source.length > 0),
   );
-}
-
-function comparableSpanText(value: string): string {
-  return value.normalize("NFKC").toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
-}
-
-function closestExactSourceSpan(source: string, claim: string): string | undefined {
-  const trimmedClaim = claim.trim();
-  if (trimmedClaim.length >= 2 && source.includes(trimmedClaim) && conservativeEvidenceSupport(trimmedClaim, trimmedClaim)) return trimmedClaim;
-  const withoutAttribution = trimmedClaim
-    .replace(/^(?:(?:项目资料|知识库|资料|研究|论文|报告|记录)(?:中)?(?:显示|表明|能确认|确认|记载|披露)?[：:,，]?\s*)+/iu, "")
-    .replace(/[。；;]+$/u, "");
-  if (withoutAttribution.length >= 2 && source.includes(withoutAttribution)
-    && conservativeEvidenceSupport(trimmedClaim, withoutAttribution)) return withoutAttribution;
-  const claimComparable = comparableSpanText(trimmedClaim);
-  if (claimComparable.length < 4) return undefined;
-  const claimPairs = new Set(Array.from({ length: Math.max(0, claimComparable.length - 1) }, (_, index) => claimComparable.slice(index, index + 2)));
-  const candidates = source
-    .split(/(?<=[。！？!?；;\n])/u)
-    .map((item) => item.trim())
-    .filter((item) => item.length >= 4 && item.length <= 320);
-  let best: { quote: string; score: number } | undefined;
-  for (const quote of candidates) {
-    if (!conservativeEvidenceSupport(trimmedClaim, quote)) continue;
-    const comparable = comparableSpanText(quote);
-    const pairs = new Set(Array.from({ length: Math.max(0, comparable.length - 1) }, (_, index) => comparable.slice(index, index + 2)));
-    const overlap = [...claimPairs].filter((pair) => pairs.has(pair)).length;
-    const score = claimPairs.size ? overlap / claimPairs.size : 0;
-    if (!best || score > best.score) best = { quote, score };
-  }
-  return best && best.score >= 0.45 ? best.quote : undefined;
 }
 
 function sourceSpansForClaim(
@@ -524,8 +479,8 @@ function sourceSpansForClaim(
   for (const evidenceId of evidenceIds) {
     const source = evidenceSources[evidenceId];
     if (!source) continue;
-    const quote = closestExactSourceSpan(source, claim);
-    if (quote) return [{ evidenceId, quote }];
+    const quotes = exactEvidenceSupportSpans(claim, source);
+    if (quotes.length) return quotes.map((quote) => ({ evidenceId, quote }));
   }
   return [];
 }
@@ -544,8 +499,12 @@ function citedEvidenceSnapshot(
     .filter((reference) => spansByEvidence.has(reference.id))
     .map((reference) => {
       const quotedSpans = spansByEvidence.get(reference.id) ?? [];
+      // Publication restrictions are generation-time server guards. Persisting
+      // their exact internal clauses would expose them through package audit or
+      // export surfaces, so both initial and revised evidence snapshots omit them.
+      const { publicationRestrictions: _publicationRestrictions, ...persistableReference } = reference;
       return {
-        ...reference,
+        ...persistableReference,
         quote: reference.quote ?? quotedSpans[0],
         quotedSpans,
       };
@@ -587,29 +546,71 @@ function bindGapEvidence(
   input: GenerationInput,
   context: KnowledgeContextSelection,
 ): InformationGap {
+  const references = generationEvidenceReferences(input.config, input.knowledge, context, input.planningContext);
+  const sources = generationEvidenceSources(input.config, input.knowledge, context, input.planningContext);
+  const approvedIds = [...new Set(gap.evidenceIds
+    .map((id) => resolveCanonicalEvidenceId(id, references))
+    .filter((id): id is string => Boolean(id)))];
   const evidenceFor = (statement: string | undefined, field: HumanApprovedField): string[] => {
     if (!statement?.trim()) return [];
-    const mapped = findSupportingSectionEvidenceIds([statement], context);
+    // Preserve an approved citation when the same current, immutable source
+    // still supports the reviewed wording. Only then search the rest of the
+    // disclosed catalogue. This prevents a valid approval from being silently
+    // detached merely because a later retrieval order changed.
+    const mapped = approvedIds.filter((id) => {
+      const source = sources[id];
+      return source ? combinedEvidenceSupport(statement, [source]) : false;
+    });
+    mapped.push(...findSupportingSectionEvidenceIds([statement], context));
     if (taskEvidenceSupports(input.config, [statement])) mapped.push(TASK_PROJECT_EVIDENCE_ID);
     const humanEvidenceId = humanApprovedEvidenceId(input.config.project.id, gap, field, statement.trim());
     if (humanEvidenceId) mapped.push(humanEvidenceId);
     return [...new Set(mapped)];
   };
-  const answerEvidenceIds = evidenceFor(gap.answer, "answer");
-  const frameworkEvidenceIds = evidenceFor(gap.framework, "framework");
-  const answer = gap.answer && answerEvidenceIds.length ? gap.answer : undefined;
-  const framework = gap.framework && frameworkEvidenceIds.length ? gap.framework : undefined;
-  const evidenceIds = [...new Set([
-    ...(answer ? answerEvidenceIds : []),
-    ...(framework ? frameworkEvidenceIds : []),
-  ])];
-  const hasProposedAnswer = Boolean(gap.answer?.trim() || gap.framework?.trim());
+  const retainSupportedSentences = (value: string, field: HumanApprovedField): { text?: string; evidenceIds: string[]; partial: boolean } => {
+    const fullIds = evidenceFor(value, field);
+    if (fullIds.length) return { text: value, evidenceIds: fullIds, partial: false };
+    // Fail soft at sentence/semicolon boundaries. Each retained sentence must
+    // independently pass the same evidence gate; unsupported siblings remain
+    // visible in the audit issue instead of erasing supported facts.
+    const sentences = value
+      .split(/(?<=[。！？!?；;])|\n+/u)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const retained = sentences.map((sentence) => ({ sentence, ids: evidenceFor(sentence, field) }))
+      .filter((item) => item.ids.length > 0);
+    return retained.length
+      ? { text: retained.map((item) => item.sentence).join(""), evidenceIds: [...new Set(retained.flatMap((item) => item.ids))], partial: true }
+      : { evidenceIds: [], partial: false };
+  };
+  // Governance-only clauses are not factual answer atoms. Bind the public
+  // remainder first; otherwise a compound value such as “public address + name
+  // must not be disclosed” fails evidence matching as a whole and is wrongly
+  // downgraded to unknown before planning can separate its visible duties.
+  const publicAnswer = gap.answer ? redactPublicationRestrictedText(gap.answer).trim() : "";
+  const publicFramework = gap.framework ? redactPublicationRestrictedText(gap.framework).trim() : "";
+  const answerBinding = publicAnswer ? retainSupportedSentences(publicAnswer, "answer") : { evidenceIds: [], partial: false };
+  const frameworkBinding = publicFramework ? retainSupportedSentences(publicFramework, "framework") : { evidenceIds: [], partial: false };
+  const answer = answerBinding.text;
+  const framework = frameworkBinding.text;
+  const evidenceIds = [...new Set([...answerBinding.evidenceIds, ...frameworkBinding.evidenceIds])];
+  const hasProposedAnswer = Boolean(publicAnswer || publicFramework);
+  const degraded = hasProposedAnswer && (!answer && !framework);
+  const partial = answerBinding.partial || frameworkBinding.partial;
+  const runtimeIssues = partial || degraded ? [{
+    path: "generation.bindGapEvidence",
+    statement: [publicAnswer, publicFramework].filter(Boolean).join("\n"),
+    reason: "unsupported_statement" as const,
+    evidenceIds: [...gap.evidenceIds],
+  }] : [];
   return {
     ...gap,
     answer,
     framework,
     evidenceIds,
-    proofability: hasProposedAnswer && evidenceIds.length === 0 ? 0 : gap.proofability,
+    proofability: degraded ? 0 : gap.proofability,
+    evidenceValidationIssues: [...(gap.evidenceValidationIssues ?? []), ...runtimeIssues],
+    evidenceBindingStatus: degraded ? "downgraded" : partial ? "partial" : hasProposedAnswer ? "supported" : "not_applicable",
   };
 }
 
@@ -866,6 +867,13 @@ function fitBody(fragments: string[], config: ResolvedGenerationConfig): string 
   return body;
 }
 
+function publicCopyBoundary(value: string): boolean {
+  // Policy instructions constrain the writer but are not audience-facing copy.
+  // Keep natural limitations (for example “具体以当期确认为准”), while hiding
+  // backend wording such as “不允许写/禁止使用/统一口径”.
+  return !/(?:不允许|不得|禁止|不能|避免|不要)(?:写|说|使用|出现|宣称)|(?:禁用|统一口径|表达红线|内部口径)/u.test(value);
+}
+
 function deterministicDraft(
   config: ResolvedGenerationConfig,
   context: KnowledgeContextSelection,
@@ -899,7 +907,8 @@ function deterministicDraft(
   ];
   const method = config.parameters!;
   const planBoundaries = orchestrationPlan?.boundaries ?? [];
-  const boundaries = [...new Set([...config.informationWindow.boundaries, ...planBoundaries])];
+  const boundaries = [...new Set([...config.informationWindow.boundaries, ...planBoundaries])]
+    .filter(publicCopyBoundary);
   const boundaryText = boundaries.length
     ? `边界要提前写明：${boundaries.join("；")}。`
     : "判断只在资料明确的范围内成立；个体结果和平台触达都不能由文案公式保证。";
@@ -909,7 +918,7 @@ function deterministicDraft(
     : "现有资料不足以支持具体结果，只能先给核验方向。";
   const bodyGapRequirements = bodyGapCards.map((card) => {
     const resolution = card.answer ?? card.framework;
-    const cardBoundary = card.boundary;
+    const cardBoundary = card.boundary && publicCopyBoundary(card.boundary) ? card.boundary : undefined;
     const separator = resolution && /[。！？!?；;]$/u.test(resolution) ? "" : "；";
     return resolution
       ? `${card.label}：${resolution}${cardBoundary ? `${separator}边界：${cardBoundary}` : ""}`
@@ -921,8 +930,20 @@ function deterministicDraft(
   const personaScene = orchestrationPlan?.personaScenePlan;
   const host = personaScene?.host;
   const event = personaScene?.event;
-  const primaryGap = bodyGapCards[0]?.question ?? gaps[0] ?? `关于${topic}到底该先看什么？`;
-  const openQuestion = primaryGap.replace(/[。！!]+$/u, "").replace(/^[：:]/u, "");
+  const primaryGapCard = bodyGapCards[0];
+  const primaryGap = primaryGapCard?.question ?? gaps[0] ?? `关于${topic}到底该先看什么？`;
+  const primaryGapHasEvidence = Boolean(
+    primaryGapCard
+    && (primaryGapCard.answer || primaryGapCard.framework)
+    && primaryGapCard.evidenceIds.length,
+  );
+  // An unresolved question may itself contain example claims (“短暂刺痛、酸胀…”).
+  // Repeating it in deterministic body copy turns a question premise into a
+  // visible factual fragment. Keep only the gap label and an explicit question;
+  // comment questions may still quote the reader's actual uncertainty.
+  const openQuestion = primaryGapCard && !primaryGapHasEvidence
+    ? `关于${primaryGapCard.label}，目前有哪些信息可以公开核实？`
+    : primaryGap.replace(/[。！!]+$/u, "").replace(/^[：:]/u, "");
   const individualAuthor = config.task.publishingTopology === "confirmed_individual_author";
   const institutionOwned = config.task.publishingTopology === "institution_owned";
   const authorFactStatements = config.task.authorContext.facts.map((fact) => fact.statement.trim()).filter(Boolean);
@@ -932,13 +953,21 @@ function deterministicDraft(
     "按同一组条件整理比较口径",
     "把最影响判断的一项单独说清",
   ][candidateIndex]!;
-  const institutionFragments = [
-    `${config.project.name}官方账号就“${topic}”整理一项说明：${institutionFocus}。`,
+  const nameGovernance = [
+    config.task.goal,
+    config.informationWindow.boundaries,
+    orchestrationPlan?.gapPlanningCards?.flatMap((card) => card.publicationRestrictions ?? []),
+  ];
+  const publicProjectName = organizationNamePublicationRestricted(...nameGovernance)
+    ? "本机构"
+    : config.project.name;
+  const institutionFragments = redactRestrictedProjectIdentity([
+    `${publicProjectName}官方账号就“${topic}”整理一项说明：${institutionFocus}。`,
     requiredOpenGap ? `${requiredOpenGap.label}目前仍待核实。` : "",
     decisionText,
     factText,
     boundaryText,
-  ];
+  ], config.project.name, ...nameGovernance);
   const authorFragments = [
     ...authorFactStatements,
     `关于“${topic}”，本次只保留一个问题：${openQuestion}`,
@@ -1003,41 +1032,77 @@ function deterministicDraft(
     // a casual sentence; long formal gap questions would produce stilted copy.
     // Uniqueness among threads is carried by template cycling below, not by weaving.
     const weave = shortGapCore.length <= 10 ? shortGapCore : "";
-    const questions: Record<string, string> = {
+    const userQuestions: Record<string, string> = {
       direct_question: shortGap.endsWith("？") ? shortGap : `${shortGap}？`,
       shared_concern: weave ? `我也卡在${weave}，越看越不敢定` : "我也卡在这个，越看越不敢定",
       experience_fragment: `我也在查这个，${shortGapCore}还没弄明白`,
       counterexample: weave ? `我不会只看一个答案，${weave}还得问条件不一样怎么办` : "我不会只看一个答案，还会问条件不一样怎么办",
       social_reaction: "这个状态看着真的轻松了一点",
-      detail_spotter: weave ? `我才看到你说的这个细节，${weave}是不是也得单独问` : "我才看到你说的这个细节，是不是也得单独问",
+      detail_spotter: weave ? `我才看到这个细节，${weave}是不是也得单独问` : "我才看到这个细节，是不是也得单独问",
       knowledge_translation: "这个简单说主要看哪一点呀",
       identity_route: "这个具体找谁或去哪里核实呀",
       service_answer: "这个现在怎么确认比较准呀",
     };
-    const answers: Record<string, string> = {
+    const institutionQuestions: Record<string, string> = {
+      direct_question: `想确认一个具体问题：${shortGap.endsWith("？") ? shortGap : `${shortGap}？`}`,
+      shared_concern: weave ? `如果现实条件不同，${weave}的判断会怎么变` : "如果现实条件不同，判断范围会怎么变",
+      experience_fragment: `准备咨询前，${shortGapCore}需要带哪些情况说明`,
+      counterexample: weave ? `${weave}不能只看一个结论，还要核实哪些前提` : "同一个结论不一定适用，还要核实哪些前提",
+      social_reaction: "这个边界说明很有必要",
+      detail_spotter: weave ? `${weave}涉及的条件范围能再说具体一点吗` : "这里的条件范围能再说具体一点吗",
+      knowledge_translation: "能用一句话说明判断顺序吗",
+      identity_route: "这项应该由哪个明确身份来确认",
+      service_answer: "行动前还要再次确认哪些动态信息",
+    };
+    const questions = institutionOwned ? institutionQuestions : userQuestions;
+    const userAnswers: Record<string, string> = {
       direct_question: "我也还没定，就是怕这个才发出来问",
       shared_concern: weave ? `对，${weave}我现在也是信息越多越纠结` : "对，我现在也是信息越多越纠结",
       experience_fragment: "这个办法好，我也把自己的现实安排一起带去问",
       counterexample: "对，先把条件不一样的情况问出来，心里更有数",
       social_reaction: "哈哈我也是今天才后知后觉",
-      detail_spotter: "对，我也是看素材才注意到，准备去的时候一起问",
+      detail_spotter: "对，我也是刚注意到，准备去的时候一起问",
       knowledge_translation: "我打算先把自己的情况说清楚，让对方按情况讲人话",
       identity_route: "我还在看，等确定了具体问谁再回你",
       service_answer: "这个会变，我行动前再确认一下比较稳",
     };
+    const institutionAnswers: Record<string, string> = {
+      direct_question: "先把会改变判断的个人条件说清，再核对当前口径。",
+      shared_concern: "条件变化时不能沿用同一结论，需要重新确认适用范围。",
+      experience_fragment: "可以带上现实安排和已知情况，避免只问一个抽象结论。",
+      counterexample: "对，先确认前提和例外，再看结论是否适用。",
+      social_reaction: "边界会直接影响判断，这一项应单独说明。",
+      detail_spotter: "需要把条件范围拆开确认，不能从一个细节直接推结论。",
+      knowledge_translation: "先确认条件，再核对依据，最后保留仍未知的部分。",
+      identity_route: "应由能对该项负责的明确身份按现有依据确认。",
+      service_answer: "动态信息要在行动前按当期情况再次确认。",
+    };
+    const answers = institutionOwned ? institutionAnswers : userAnswers;
     const rawQuestion = questions[surface.utteranceMode] ?? shortGap;
     const ungroundedGap = !((gapCard?.answer || gapCard?.framework) && (gapCard?.evidenceIds.length ?? 0) > 0);
-    const unknownAnswerVariants: Record<string, string> = {
+    const userUnknownAnswers: Record<string, string> = {
       direct_question: "这点我也还没问明白，得再确认具体情况",
       shared_concern: "我现在也拿不准，准备再问清情况",
       experience_fragment: "每个人情况不一样，我不敢照自己的替你定",
       counterexample: "对，所以最好把自己的情况再确认一下",
       social_reaction: "这个我也想知道，等问明白了再说",
-      detail_spotter: "我也只是刚注意到，先别按一张图自己定",
+      detail_spotter: "我也只是刚注意到，先别按一个细节自己定",
       knowledge_translation: "这点得看具体情况，我现在还不敢替你定",
-      identity_route: "我还没问清，确定了来回你",
+      identity_route: "我还没问清，先确认应该向谁核实",
       service_answer: "具体情况还没确认，采取行动前再问一下比较稳",
     };
+    const institutionUnknownAnswers: Record<string, string> = {
+      direct_question: "这项目前无法确认，需要先核实会改变判断的具体情况。",
+      shared_concern: "当前没有统一结论，条件不同就要重新确认适用范围。",
+      experience_fragment: "现有信息不足，先补充个人情况和现实限制再判断。",
+      counterexample: "这个反例会改变答案，目前只能保留未知并核实前提。",
+      social_reaction: "这一项仍未确认，不能从当前信息直接得出结论。",
+      detail_spotter: "单个细节不足以判断，还需要核实完整条件范围。",
+      knowledge_translation: "简单说就是依据不足，目前不能替个人确定。",
+      identity_route: "当前无法确认，应向对该项负责的明确身份核实。",
+      service_answer: "动态信息尚未确认，行动前应按当期情况核实。",
+    };
+    const unknownAnswerVariants = institutionOwned ? institutionUnknownAnswers : userUnknownAnswers;
     const rawAnswer = ungroundedGap
       ? (unknownAnswerVariants[surface.utteranceMode] ?? "这点我也还没问明白，得再确认具体情况")
       : (answers[surface.utteranceMode] ?? "我也是想先把这个问明白");
@@ -1057,12 +1122,17 @@ function deterministicDraft(
     };
     // 读者互动层:T3 漂浮短反应从 4-20 字短共鸣池取开口,answer 为空(无回答
     // 需求);T2 读者互聊的 answer 是读者 B 的接话,不用机构答复模板。
+    const organicReactionPool = institutionOwned
+      ? ["这条边界先记下", "条件范围很重要", "先看判断前提", "未知项要保留", "等明确口径"]
+      : ["蹲一个", "姐妹我也是", "码住慢慢看", "先收藏了", "看看后续怎么说"];
     const organicReactionTable = Object.fromEntries(utteranceModePool.map((mode, modeIndex) =>
-      [mode, ["蹲一个", "姐妹我也是", "码住慢慢看", "先收藏了", "看看后续怎么说"][modeIndex % 5]!]));
+      [mode, organicReactionPool[modeIndex % organicReactionPool.length]!]));
     const generatedQuestion = threadKind === "organic_reaction"
       ? pickDistinct(organicReactionTable, usedNaturalQuestions, "蹲一个")
       : threadKind === "reader_exchange"
-        ? ["我也卡在这一步", "同问，我也没想明白", "这个我也在纠结", "先蹲蹲大家怎么想"][index % 4]!
+        ? (institutionOwned
+          ? ["我想确认的也是这个条件", "这个判断前提我也没弄清", "这里的适用范围我也在问", "先看看条件不同怎么处理"][index % 4]!
+          : ["我也卡在这一步", "同问，我也没想明白", "这个我也在纠结", "先蹲蹲大家怎么想"][index % 4]!)
         : threadKind === "host_reply"
           ? "所以你现在还是没定下来吗？"
           : pickDistinct(questions, usedNaturalQuestions, rawQuestion);
@@ -1087,19 +1157,30 @@ function deterministicDraft(
     const answer = threadKind === "organic_reaction"
       ? ""
       : threadKind === "reader_exchange"
-        ? ["我也是，准备再多问一句。", "同感，我还没敢定。", "我也先等等看。", "这个确实容易纠结。"][index % 4]!
+        ? (institutionOwned
+          ? ["对，我也想先确认判断前提。", "同感，条件范围还得问清。", "我先把动态信息单独核实。", "确实，不能省掉适用边界。"][index % 4]!
+          : ["我也是，准备再多问一句。", "同感，我还没敢定。", "我也先等等看。", "这个确实容易纠结。"][index % 4]!)
         : threadKind === "host_reply"
           ? (config.task.authorContext.facts.find((fact) => (planned?.authorFactIds ?? []).includes(fact.id))?.statement
             ?? "我现在还没定下来。")
           : groundedGapAnswer
-            ? `${groundedGapAnswer}${gapCard?.boundary ? `；${gapCard.boundary}` : ""}`
-            : `${gapCard?.label ?? "这件事"}还没确认，先问清具体情况再定。`;
+            ? (institutionOwned
+              ? `现有口径是：${groundedGapAnswer}${gapCard?.boundary ? `；适用边界：${gapCard.boundary}` : ""}`
+              : `${groundedGapAnswer}${gapCard?.boundary ? `；${gapCard.boundary}` : ""}`)
+            : (institutionOwned
+              ? `${gapCard?.label ?? "这件事"}目前无法确认，需要先核实具体条件和适用范围。`
+              : `${gapCard?.label ?? "这件事"}还没确认，先问清具体情况再定。`);
     usedNaturalAnswers.add(comparable(answer));
     const plannedFollowUps = planned?.conversationPlan?.targetFollowUps ?? 0;
-    const fallbackFollowUpLines = [
-      { question: "等等，你说的是紧接着就有重要安排吗", answer: "对，我最怕的就是现实时间对不上" },
-      { question: "那我懂了，我还得把自己的安排也算进去", answer: "是，先把时间卡点说清楚会好问很多" },
-    ];
+    const fallbackFollowUpLines = institutionOwned
+      ? [
+          { question: "如果现实安排不同，原来的判断还适用吗", answer: "不一定，需要把时间条件重新纳入确认。" },
+          { question: "那行动前最后要核实哪一项", answer: "先核实会改变结论的条件和当期动态信息。" },
+        ]
+      : [
+          { question: "等等，你说的是紧接着就有重要安排吗", answer: "对，我最怕的就是现实时间对不上" },
+          { question: "那我懂了，我还得把自己的安排也算进去", answer: "是，先把时间卡点说清楚会好问很多" },
+        ];
     const followUps = threadKind === "org_answer"
       ? Array.from({ length: Math.min(config.content.followUpDepth, plannedFollowUps) }, (_, followUpIndex) => {
       const visible = fallbackFollowUpLines[followUpIndex % fallbackFollowUpLines.length]!;
@@ -1272,7 +1353,9 @@ function deterministicDraft(
     const answer = threadKind === "organic_reaction"
       ? ""
       : threadKind === "reader_exchange"
-        ? ["我也是，准备再多问一句。", "同感，我还没敢定。", "我也先等等看。", "这个确实容易纠结。"][index % 4]!
+        ? (institutionOwned
+          ? ["对，我也想先确认判断前提。", "同感，条件范围还得问清。", "我先把动态信息单独核实。", "确实，不能省掉适用边界。"][index % 4]!
+          : ["我也是，准备再多问一句。", "同感，我还没敢定。", "我也先等等看。", "这个确实容易纠结。"][index % 4]!)
         : threadKind === "host_reply"
           ? (config.task.authorContext.facts.find((fact) => (planned?.authorFactIds ?? []).includes(fact.id))?.statement
             ?? "我现在还没定下来。")
@@ -1334,17 +1417,17 @@ function deterministicDraft(
       replySurfaceRoleCard: planned?.replySurfaceRoleCard,
     };
   });
-  // Cref contract v1.1 (demo): assemble a deterministic publisher-owned first
-  // comment from the first two thread Q&As. Only the persona-scene path
-  // produces publisher-voice copy clean enough to pin; the FAQ fallback stays
-  // without one rather than dressing audit language up as a publishable
-  // comment, and no threads means no first comment.
-  const ownedFirstComment = personaScene && threads.length
-    ? `常见问题整理——${threads.slice(0, 2).map((thread) => {
-        const q = thread.question.trim().replace(/[。！!；;]+$/u, "");
-        const a = thread.answer.trim().replace(/[。！!；;]+$/u, "");
-        return `问：${q}，答：${a}`;
-      }).join("；")}。以上为常见问题整理，具体情况以当面评估为准。`
+  // Publisher-owned copy is a separate publishable asset, never a synthesis of
+  // simulated reader questions. Keep one or two accountable answer points and
+  // omit the field when no organization answer can safely carry it.
+  const ownedFirstCommentParts = threads
+    .filter((thread) => (thread.threadKind ?? "org_answer") === "org_answer"
+      && thread.postingIdentity !== "author" && thread.answer.trim())
+    .map((thread) => thread.answer.trim().replace(/[。！!；;]+$/u, ""))
+    .filter((answer, index, all) => all.indexOf(answer) === index)
+    .slice(0, 2);
+  const ownedFirstComment = ownedFirstCommentParts.length
+    ? `补充一个会影响判断的点：${ownedFirstCommentParts.join("；")}。先结合自己的条件看是否适用，不需要急着做决定。`
     : undefined;
   const titleTarget = Math.max(1, method.titleTargetChars);
   const titleOptions = [`${topic}：先核实什么`, `${topic}：怎么比较`, `${topic}：别急着定`];
@@ -1494,7 +1577,46 @@ function answerFromPlan(planned: OrchestrationPlan["dialogueThreads"][number]): 
   const plan = planned.replyPlan;
   const spoken = [plan?.directAnswer, plan?.condition].map((part) => part?.trim()).filter(Boolean);
   if (spoken.length) return `${spoken.join("；")}。`;
-  return "这一项我先不下结论，我帮你跟专人确认后再回你。";
+  return "这一项目前无法确认，先不下结论。";
+}
+
+const ORGANIZATION_UNKNOWN_ANSWER = "这一项当前无法确认，先不下结论。";
+
+function factualEvidenceForThread(
+  planned: OrchestrationPlan["dialogueThreads"][number],
+  plan: OrchestrationPlan,
+  references: EvidenceReference[],
+): EvidenceReference[] {
+  const card = plan.gapPlanningCards?.find((item) => item.gapId === planned.primaryGapId);
+  const pinned = new Set(card?.evidenceIds ?? []);
+  return references.filter((reference) => pinned.has(reference.id)
+    && evidenceReferenceCanSupportFact(reference)
+    && Boolean(reference.quote?.trim()));
+}
+
+function organizationAnswerSupported(answer: string, references: EvidenceReference[]): boolean {
+  if (!answer.trim()) return false;
+  const sources = references.flatMap((reference) => reference.quote?.trim() ? [reference.quote] : []);
+  return splitSensitiveStatements(answer).every((statement) => {
+    if (!statement.trim()) return true;
+    // Unknown preservation and a short conversational acknowledgement do not
+    // assert an organization fact and need no source.
+    if (/(?:当前|目前|暂时|尚)?(?:无法|没法|不能|不确定|不清楚|不知道|没有准确信息|还不能).{0,16}(?:确认|核实|提供|说明|判断|确定)|先不下结论/u.test(statement)) return true;
+    if (/^(?:理解|明白|确实|这个担心|您这个担心|先别急|可以理解)/u.test(statement)
+      && [...statement].length <= 18) return true;
+    return sources.some((source) => conservativeEvidenceSupport(statement, source));
+  });
+}
+
+function safeOrganizationFallback(
+  planned: OrchestrationPlan["dialogueThreads"][number],
+  references: EvidenceReference[],
+): string {
+  if (!references.length) return ORGANIZATION_UNKNOWN_ANSWER;
+  const plannedAnswer = answerFromPlan(planned);
+  return organizationAnswerSupported(plannedAnswer, references)
+    ? plannedAnswer
+    : ORGANIZATION_UNKNOWN_ANSWER;
 }
 
 function bindDialogueProvenance(
@@ -1502,7 +1624,37 @@ function bindDialogueProvenance(
   plan: OrchestrationPlan,
   allowedEvidenceIds: string[],
   evidenceSources: Record<string, string>,
+  evidenceReferences?: EvidenceReference[],
 ): GenerationDraft {
+  const canonicalize = (id: string): string => evidenceReferences
+    ? (resolveCanonicalEvidenceId(id, evidenceReferences) ?? id)
+    : id;
+  draft = {
+    ...draft,
+    evidenceIds: [...new Set(draft.evidenceIds.map(canonicalize))],
+    reasoning: draft.reasoning.map((item) => ({
+      ...item,
+      evidenceIds: [...new Set(item.evidenceIds.map(canonicalize))],
+      sourceSpans: (item.sourceSpans ?? []).map((span) => ({
+        ...span,
+        evidenceId: canonicalize(span.evidenceId),
+      })),
+    })),
+    content: {
+      ...draft.content,
+      Cref: {
+        ...draft.content.Cref,
+        threads: draft.content.Cref.threads.map((thread) => ({
+          ...thread,
+          evidenceIds: [...new Set(thread.evidenceIds.map(canonicalize))],
+          followUps: thread.followUps.map((followUp) => ({
+            ...followUp,
+            evidenceIds: [...new Set(followUp.evidenceIds.map(canonicalize))],
+          })),
+        })),
+      },
+    },
+  };
   const allowed = new Set(allowedEvidenceIds);
   const originalThreadIds = new Map(
     draft.content.Cref.threads.map((thread, index) => [thread.id, plan.dialogueThreads[index]?.id ?? thread.id]),
@@ -1687,7 +1839,7 @@ function bindDialogueProvenance(
       },
     },
   };
-  const reconciled = reconcileReasoningEvidence(bound, allowedEvidenceIds, evidenceSources);
+  const reconciled = reconcileReasoningEvidence(bound, allowedEvidenceIds, evidenceSources, evidenceReferences);
   return {
     ...reconciled,
     content: {
@@ -1824,8 +1976,15 @@ function reconcileReasoningEvidence(
   draft: GenerationDraft,
   allowedEvidenceIds: string[],
   evidenceSources: Record<string, string>,
+  evidenceReferences?: EvidenceReference[],
 ): GenerationDraft {
-  const allowed = new Set(allowedEvidenceIds);
+  const referenceById = new Map((evidenceReferences ?? []).map((reference) => [reference.id, reference]));
+  const allowed = new Set(allowedEvidenceIds.filter((id) => {
+    if (!evidenceReferences) return true;
+    const reference = referenceById.get(id);
+    return Boolean(reference && evidenceReferenceCanSupportFact(reference));
+  }));
+  const factualAllowedIds = allowedEvidenceIds.filter((id) => allowed.has(id));
   const reasoning: GenerationDraft["reasoning"] = [];
   for (const item of draft.reasoning) {
     const visible = visibleTextForReasoning(draft, item);
@@ -1837,7 +1996,7 @@ function reconcileReasoningEvidence(
     const preferred = [...new Set([
       ...(item.sourceSpans ?? []).map((span) => span.evidenceId),
       ...item.evidenceIds,
-      ...allowedEvidenceIds,
+      ...factualAllowedIds,
     ])].filter((id) => allowed.has(id));
     const sourceSpans = sourceSpansForClaim(item.statement, preferred, evidenceSources);
     if (!sourceSpans.length) continue;
@@ -1851,8 +2010,9 @@ function reconcileReasoningEvidence(
     if (reasoning.some((item) => item.status === "fact" && item.location === segment.location
       && item.occurrence?.threadId === segment.occurrence.threadId
       && item.occurrence?.followUpIndex === segment.occurrence.followUpIndex
-      && conservativeEvidenceSupport(segment.statement, item.statement))) continue;
-    const sourceSpans = sourceSpansForClaim(segment.statement, allowedEvidenceIds, evidenceSources);
+      && conservativeEvidenceSupport(segment.statement, item.statement)
+      && combinedEvidenceSupport(item.statement, (item.sourceSpans ?? []).map((span) => span.quote)))) continue;
+    const sourceSpans = sourceSpansForClaim(segment.statement, factualAllowedIds, evidenceSources);
     if (!sourceSpans.length) continue;
     reasoning.push({
       statement: segment.statement,
@@ -1953,7 +2113,12 @@ function keepCriticalBoundariesInBody(
   };
   const selectedGapBoundaries = (plan.gapPlanningCards ?? [])
     .filter((card) => card.required && card.plannedPlacements.includes("N.body"))
-    .flatMap((card) => card.boundary?.trim() ? [card.boundary.trim()] : []);
+    // A boundary may be a writer policy ("不允许写…/统一口径") rather
+    // than reader-facing information. It remains in the plan and validation
+    // contract, but must never be appended verbatim to public body copy.
+    .flatMap((card) => card.boundary?.trim() && publicCopyBoundary(card.boundary)
+      ? [card.boundary.trim()]
+      : []);
   const selectedGapAnswers = (plan.gapPlanningCards ?? [])
     .filter((card) => card.required && card.plannedPlacements.includes("N.body"))
     .flatMap((card) => (card.answer ?? card.framework)?.trim() ? [(card.answer ?? card.framework)!.trim()] : []);
@@ -1990,6 +2155,23 @@ function keepCriticalBoundariesInBody(
     ...draft,
     content: { ...draft.content, N: { ...draft.content.N, body } },
   };
+}
+
+/**
+ * Repair small model length overshoots before the ledger sees the text. This is
+ * intentionally narrow: larger overruns still surface as body_too_long and go
+ * through the normal repair path instead of being silently truncated.
+ */
+function trimMinorBodyOverflowBeforeLedger(
+  draft: GenerationDraft,
+  plan: OrchestrationPlan,
+  config: ResolvedGenerationConfig,
+): GenerationDraft {
+  const length = [...draft.content.N.body].length;
+  const limit = config.content.bodyMaxChars;
+  const tolerance = Math.max(24, Math.floor(limit * 0.1));
+  if (length <= limit || length > limit + tolerance) return draft;
+  return keepCriticalBoundariesInBody(draft, plan, config);
 }
 
 function packageId(jobId: string, candidateIndex: number, seed: number): string {
@@ -2047,6 +2229,222 @@ function completeIssueMetadata(issues: readonly ContentValidationIssue[]): Conte
   }));
 }
 
+/** Formal-delivery review gates derived only after final visible-copy realization. */
+function formalDeliveryReviewIssues(
+  plan: OrchestrationPlan | undefined,
+  coverage: CommentGapCoverageLedger | undefined,
+  modelInvoked: boolean,
+  modelMessage: string,
+): ContentValidationIssue[] {
+  const issues: ContentValidationIssue[] = [];
+  if (!modelInvoked) {
+    issues.push({
+      code: "model_not_invoked", severity: "warning", channel: "package",
+      disposition: "review", origin: "infrastructure", message: modelMessage, repairable: false,
+    });
+  }
+  const degradedCards = (plan?.gapPlanningCards ?? []).filter((card) =>
+    card.evidenceBindingStatus === "partial" || card.evidenceBindingStatus === "downgraded");
+  if (degradedCards.length) {
+    issues.push({
+      code: "gap_evidence_binding_degraded", severity: "warning", channel: "package",
+      disposition: "review", origin: "deterministic",
+      message: `${degradedCards.length} 个选中信息缺口的审批答案在运行时仅部分匹配或已降级，发布前需核对证据。`,
+      repairable: false,
+    });
+  }
+  if (plan && coverage) {
+    const requiredUnresolved = coverage.entries.filter((entry) => entry.required
+      && entry.status !== "body_resolved" && entry.status !== "thread_resolved");
+    if (requiredUnresolved.length || (plan.selectedGapIds.length > 0 && coverage.realizedResolvedRate === 0)) {
+      issues.push({
+        code: "required_information_not_realized", severity: "warning", channel: "package",
+        disposition: "review", origin: "deterministic",
+        message: requiredUnresolved.length
+          ? `${requiredUnresolved.length} 个必要信息缺口未在最终正文或正确评论线程中完整实现。`
+          : "最终实际解决率为 0%，选中信息缺口均未在可见内容中完整实现。",
+        repairable: false,
+      });
+    }
+  }
+  return issues;
+}
+
+/**
+ * Stable convergence state for the repair loop. It includes only publication-
+ * relevant output and blocking contracts; model prose, prompts and diagnostics
+ * are deliberately excluded. Equal fingerprints mean another identical repair
+ * cannot improve publishability.
+ */
+function repairConvergenceFingerprint(
+  draft: GenerationDraft,
+  issues: readonly ContentValidationIssue[],
+): string {
+  const factualReasoning = draft.reasoning
+    .filter((item) => item.status === "fact" || item.status === "human_confirmed_author_fact")
+    .map((item) => ({
+      statement: item.statement,
+      status: item.status,
+      evidenceIds: [...item.evidenceIds].sort(),
+      authorFactId: item.authorFactId,
+      location: item.location,
+      occurrence: item.occurrence,
+      sourceSpans: [...(item.sourceSpans ?? [])]
+        .map((span) => ({ evidenceId: span.evidenceId, quote: span.quote }))
+        .sort((left, right) => `${left.evidenceId}:${left.quote}`.localeCompare(`${right.evidenceId}:${right.quote}`)),
+    }))
+    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  const blockers = issues
+    .filter((issue) => issueDisposition(issue) === "block")
+    .map((issue) => ({ code: issue.code, channel: issue.channel, repairable: issue.repairable }))
+    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  return createHash("sha256").update(JSON.stringify({
+    content: draft.content,
+    evidenceIds: [...draft.evidenceIds].sort(),
+    factualReasoning,
+    blockers,
+  }), "utf8").digest("hex");
+}
+
+function compactEditorialText(value: string): string {
+  return value.normalize("NFKC").toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+}
+
+/**
+ * A body obligation needs a specific visible anchor, not a generic two-character
+ * overlap such as “判断” or “条件”. The full planner label is sufficient; otherwise
+ * one contiguous 3—6 character fragment from the approved answer/framework must
+ * survive in the copy. This stays domain-neutral while preventing false closure.
+ */
+function bodyRealizesPlanningCard(
+  visible: string,
+  card: NonNullable<OrchestrationPlan["gapPlanningCards"]>[number],
+): boolean {
+  const compactVisible = compactEditorialText(visible);
+  const compactLabel = compactEditorialText(card.label);
+  if (compactLabel.length >= 2 && compactVisible.includes(compactLabel)) return true;
+  return [card.answer, card.framework]
+    .filter((value): value is string => Boolean(value?.trim()))
+    .some((source) => {
+      const chars = [...compactEditorialText(source)];
+      for (let size = Math.min(6, chars.length); size >= 3; size -= 1) {
+        for (let index = 0; index + size <= chars.length; index += 1) {
+          if (compactVisible.includes(chars.slice(index, index + size).join(""))) return true;
+        }
+      }
+      return false;
+    });
+}
+
+/** Server-owned trigger for a focused core edit; it is not a quality score. */
+export function coreEditorialReasons(
+  core: Pick<ContentPackage["content"], "H" | "N">,
+  plan: OrchestrationPlan,
+): string[] {
+  const cards = plan.gapPlanningCards ?? [];
+  const required = new Set(plan.contentIntent?.bodyMustEstablish ?? cards
+    .filter((card) => card.obligation === "body_required")
+    .map((card) => card.gapId));
+  return cards.flatMap((card) => {
+    if (!required.has(card.gapId)) return [];
+    const visible = `${core.N.title}
+${core.N.body}`;
+    return bodyRealizesPlanningCard(visible, card)
+      ? []
+      : [`正文没有可见承载 body_required gap ${card.gapId}（${card.label}）`];
+  });
+}
+
+/** Server-owned trigger for complete-network editing; no vocabulary is treated as a quality score. */
+export function commentNetworkEditorialReasons(
+  comments: StagedCommentCopy,
+  plan: OrchestrationPlan,
+): string[] {
+  const reasons: string[] = [];
+  const seenAnswers = new Map<string, string>();
+  const seenQuestions = new Map<string, string>();
+  const normalize = (value: string): string => value.normalize("NFKC").toLocaleLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, "");
+  comments.threads.forEach((thread, index) => {
+    const planned = plan.dialogueThreads[index];
+    if (!planned || thread.id !== planned.id) {
+      reasons.push(`线程顺序或ID与冻结计划不一致：${thread.id}`);
+      return;
+    }
+    const compactQuestion = normalize(thread.question);
+    if (compactQuestion.length >= 6) {
+      const prior = seenQuestions.get(compactQuestion);
+      if (prior) reasons.push(`线程 ${thread.id} 与 ${prior} 的根问题重复`);
+      else seenQuestions.set(compactQuestion, thread.id);
+    }
+    const compactAnswer = normalize(thread.answer);
+    if (compactAnswer.length >= 8) {
+      const prior = seenAnswers.get(compactAnswer);
+      if (prior) reasons.push(`线程 ${thread.id} 与 ${prior} 的根答复重复`);
+      else seenAnswers.set(compactAnswer, thread.id);
+    }
+    if ((planned.threadKind ?? "org_answer") === "org_answer") {
+      const card = plan.gapPlanningCards?.find((item) => item.gapId === planned.primaryGapId);
+      if (card && !questionMatchesPlannedGap(thread.question, card)) {
+        reasons.push(`线程 ${thread.id} 的问题偏离冻结主缺口 ${card.gapId}`);
+      }
+    }
+    let previous = thread.answer || thread.question;
+    thread.followUps.forEach((followUp, followUpIndex) => {
+      const next = `${followUp.question}
+${followUp.answer}`;
+      if (previous.trim() && next.trim()) {
+        const priorTokens = new Set((previous.match(/[\p{L}\p{N}]{2,4}/gu) ?? []));
+        const continues = [...priorTokens].some((token) => next.includes(token));
+        if (!continues && next.length > 16) reasons.push(`线程 ${thread.id} 追问 ${followUpIndex + 1} 没有承接上一句的可见对象或条件`);
+      }
+      previous = followUp.answer || followUp.question || previous;
+    });
+  });
+  return [...new Set(reasons)];
+}
+
+/** Atomic acceptance of a complete-network edit. */
+function acceptCommentNetworkEdit(
+  original: StagedCommentCopy,
+  edited: ReturnType<typeof parseStagedCommentNetworkEditor>,
+  plan: OrchestrationPlan,
+  references: EvidenceReference[],
+): StagedCommentCopy {
+  if (edited.disclaimer !== original.disclaimer) throw new CommentEditorContractError("Comment editor changed the deterministic disclaimer.");
+  if (edited.threads.length !== original.threads.length) throw new CommentEditorContractError("Comment editor changed thread count.");
+  const cards = new Map((plan.gapPlanningCards ?? []).map((card) => [card.gapId, card]));
+  const threads = edited.threads.map((thread, index) => {
+    const before = original.threads[index]!;
+    const planned = plan.dialogueThreads[index]!;
+    if (thread.id !== before.id || thread.id !== planned.id) throw new CommentEditorContractError(`Comment editor changed thread identity at ${index}.`);
+    if (thread.followUps.length > before.followUps.length) throw new CommentEditorContractError(`Comment editor added follow-ups to ${thread.id}.`);
+    const kind = planned.threadKind ?? "org_answer";
+    if (kind === "org_answer") {
+      const card = cards.get(planned.primaryGapId);
+      if (!card || !questionMatchesPlannedGap(thread.question, card)) throw new CommentEditorContractError(`Comment editor changed the primary responsibility of ${thread.id}.`);
+      const guarded = guardedReplyIdentitiesForQuestion(thread.question, []);
+      if ([...guarded].some((identity) => identity !== planned.postingIdentity)) throw new CommentEditorContractError(`Comment editor changed the responder of ${thread.id}.`);
+      const evidence = factualEvidenceForThread(planned, plan, references);
+      if (!organizationAnswerSupported(thread.answer, evidence)) throw new CommentEditorContractError(`Comment editor expanded unsupported organization copy in ${thread.id}.`);
+      for (const followUp of thread.followUps) {
+        if (followUp.answer.trim() && !organizationAnswerSupported(followUp.answer, evidence)) {
+          throw new CommentEditorContractError(`Comment editor expanded unsupported organization follow-up in ${thread.id}.`);
+        }
+      }
+    }
+    if (kind === "organic_reaction" && (thread.answer.trim() || thread.followUps.length)) throw new CommentEditorContractError(`Comment editor expanded organic reaction ${thread.id}.`);
+    if (kind === "host_reply" && thread.followUps.length) throw new CommentEditorContractError(`Comment editor expanded host thread ${thread.id}.`);
+    return {
+      ...before,
+      question: thread.question,
+      answer: thread.answer,
+      followUps: thread.followUps.map((followUp, followUpIndex) => ({ ...before.followUps[followUpIndex]!, ...followUp })),
+    };
+  });
+  return { ...original, threads };
+}
+
 /** The editor returned valid JSON but attempted to renegotiate a server-owned contract. */
 class CommentEditorContractError extends Error {
   constructor(message: string) {
@@ -2060,9 +2458,12 @@ class CommentEditorContractError extends Error {
 export function shouldRegenerateCommentReadersFailure(error: unknown): boolean {
   if (!(error instanceof ModelProviderError) || error.status !== 200 || error.retryable !== false) return false;
   const diagnostics = error.responseDiagnostics;
-  if (diagnostics?.emptyOutputRecoveryAttempted) return false;
+  // Provider-level empty-output recovery only asks the same response to expose
+  // its final text. If that still returns empty, the comment stage gets one
+  // full, lower-temperature regeneration from the original frozen task.
   return diagnostics?.contentKind === "missing"
     || diagnostics?.contentChars === 0
+    || diagnostics?.emptyOutputRecoveryAttempted === true
     || /did not contain output text/iu.test(error.message);
 }
 
@@ -2071,10 +2472,47 @@ export function shouldCorrectCommentReadersFailure(error: unknown, originalRespo
   return originalResponse.trim().length > 0 && !(error instanceof ModelProviderError);
 }
 
-/** A patch cannot make a candidate publishable while any terminal hard error remains. */
+export type RepairResponsibility = "none" | "ledger_only" | "visible_copy" | "replan_required";
+
+const LEDGER_REPAIR_CODES = new Set([
+  // These codes can be repaired without changing public copy: they describe
+  // source-span identity, occurrence mapping or ledger completeness. Scope,
+  // caveat and unsupported-claim errors deliberately stay visible-copy work.
+  "evidence_quote_empty", "evidence_quote_not_exact", "evidence_quote_not_supportive",
+  "fact_source_id_mismatch", "fact_source_span_missing",
+  "followup_evidence_ledger_mismatch", "package_evidence_ledger_mismatch",
+  "thread_evidence_ledger_mismatch", "ungrounded_fact", "unknown_evidence",
+  "visible_claim_not_in_ledger",
+]);
+
+const REPLAN_REQUIRED_CODES = new Set([
+  "comment_gap_missing_primary", "comment_gap_primary_thread_mismatch",
+  "comment_gap_primary_thread_missing", "comment_gap_silently_dropped",
+  "comment_primary_gap_mismatch", "reply_display_role_plan_drift",
+  "reply_identity_plan_drift", "reply_question_plan_drift",
+]);
+
+/** Route blockers to their owner instead of asking one generic copy patch to hide every problem. */
+export function repairResponsibilityForIssues(
+  issues: readonly ContentValidationIssue[],
+): { responsibility: RepairResponsibility; channels: ContentChannel[] } {
+  const blockers = issues.filter((issue) => issueDisposition(issue) === "block");
+  if (!blockers.length || blockers.some((issue) => !issue.repairable)) {
+    return { responsibility: "none", channels: [] };
+  }
+  if (blockers.some((issue) => REPLAN_REQUIRED_CODES.has(issue.code))) {
+    return { responsibility: "replan_required", channels: [] };
+  }
+  if (blockers.every((issue) => LEDGER_REPAIR_CODES.has(issue.code))) {
+    return { responsibility: "ledger_only", channels: [] };
+  }
+  return { responsibility: "visible_copy", channels: channelsForIssues([...issues]) };
+}
+
+/** A patch cannot make a candidate publishable while any terminal or planning blocker remains. */
 export function shouldAttemptGenerationRepair(issues: readonly ContentValidationIssue[]): boolean {
-  return issues.some((item) => issueDisposition(item) === "block" && item.repairable)
-    && !issues.some((item) => issueDisposition(item) === "block" && !item.repairable);
+  const responsibility = repairResponsibilityForIssues(issues).responsibility;
+  return responsibility === "ledger_only" || responsibility === "visible_copy";
 }
 
 function validationTelemetrySummary(
@@ -2114,11 +2552,13 @@ export class ContentGenerationAgent implements GenerationEngine {
   private readonly provider?: ModelProvider;
   private readonly now: () => Date;
   private readonly systemPromptTokenEstimate: number;
+  private readonly deliveryReadinessPolicy: "structural" | "formal";
 
   constructor(options: ContentGenerationEngineOptions = {}) {
     this.provider = options.modelProvider;
     this.now = options.now ?? (() => new Date());
     this.systemPromptTokenEstimate = options.systemPromptTokenEstimate ?? 900;
+    this.deliveryReadinessPolicy = options.deliveryReadinessPolicy ?? "structural";
   }
 
   async generate(input: GenerationInput): Promise<GenerationResult> {
@@ -2242,16 +2682,32 @@ export class ContentGenerationAgent implements GenerationEngine {
       if (coreStartBarrier) await coreStartBarrier;
       let coreResponse;
       try {
-        coreResponse = await this.provider.generate({
-          messages: corePrompt.messages,
-          responseSchema: corePrompt.responseSchema,
-          schemaName: "content_candidate_core",
-          model: input.config.model.model,
-          seed,
-          temperature: input.config.model.temperature,
-          maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_CORE_OUTPUT_TOKENS),
-          metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_core", stage: 1 },
-        });
+        const generateCore = (purpose: "generate_core" | "regenerate_core", retrySeed: number, temperature: number) =>
+          this.provider!.generate({
+            messages: corePrompt.messages,
+            responseSchema: corePrompt.responseSchema,
+            schemaName: "content_candidate_core",
+            model: input.config.model.model,
+            seed: retrySeed,
+            temperature,
+            maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_CORE_OUTPUT_TOKENS),
+            metadata: { jobId: input.jobId, candidateIndex, purpose, stage: purpose === "generate_core" ? 1 : 1.01 },
+          });
+        try {
+          coreResponse = await generateCore("generate_core", seed, input.config.model.temperature);
+        } catch (error) {
+          if (!shouldRegenerateCommentReadersFailure(error)) throw error;
+          stageIssues.push({
+            code: "model_core_regenerated",
+            severity: "warning",
+            disposition: "advisory",
+            origin: "infrastructure",
+            channel: "package",
+            message: "核心图文首次只返回内部推理而没有可见正文，已按同一冻结任务完整重生成一次。",
+            repairable: false,
+          });
+          coreResponse = await generateCore("regenerate_core", seed + 101, Math.min(input.config.model.temperature, 0.35));
+        }
       } finally {
         onCoreSettled?.();
       }
@@ -2275,6 +2731,57 @@ export class ContentGenerationAgent implements GenerationEngine {
           throw new Error(`Publishing-topology preflight failed after one focused repair: ${remainingIdentityIssues.map((issue) => issue.code).join(", ")}`);
         }
       }
+      // Stage 1E: only a server-proven unmet body obligation triggers semantic editing.
+      // The editor cannot redefine the task; identity, body budget and the same
+      // content-intent card are rechecked before accepting the complete H/N atomically.
+      const unmetCoreObligations = coreEditorialReasons(core, orchestrationPlan);
+      if (unmetCoreObligations.length) {
+        try {
+          const editorPrompt = buildStagedCoreEditorPrompt(promptInput, core, unmetCoreObligations);
+          const editorResponse = await this.provider.generate({
+            messages: editorPrompt.messages,
+            responseSchema: editorPrompt.responseSchema,
+            schemaName: "content_candidate_core_editor",
+            model: input.config.model.model,
+            seed: seed + 104,
+            temperature: Math.min(input.config.model.temperature, 0.35),
+            maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_CORE_OUTPUT_TOKENS),
+            metadata: { jobId: input.jobId, candidateIndex, purpose: "edit_core", stage: 1.2 },
+          });
+          const edited = parseStagedCoreEditor(editorResponse.text);
+          const identityIssues = validatePublishingTopologyCopy(edited.core, input.config, input.planningContext?.projectBlueprint);
+          const remaining = coreEditorialReasons(edited.core, orchestrationPlan);
+          const bodyLength = [...edited.core.N.body].length;
+          if (identityIssues.length || remaining.length
+            || bodyLength < input.config.content.bodyMinChars
+            || bodyLength > input.config.content.bodyMaxChars) {
+            throw new CommentEditorContractError(`Core editor did not satisfy the frozen contract: ${[
+              ...identityIssues.map((issue) => issue.code), ...remaining,
+              ...(bodyLength < input.config.content.bodyMinChars || bodyLength > input.config.content.bodyMaxChars ? ["body_length"] : []),
+            ].join(", ")}`);
+          }
+          core = edited.core;
+          if (edited.assessment.status === "review") {
+            stageIssues.push({
+              code: "core_editor_review", severity: "warning", channel: "N.body",
+              message: edited.assessment.summary || edited.assessment.reasons.join("；") || "核心图文编辑仍建议人工复核。",
+              repairable: false, disposition: "review", origin: "agent",
+            });
+          }
+        } catch (error) {
+          const rejected = error instanceof CommentEditorContractError;
+          stageIssues.push({
+            code: rejected ? "core_editor_contract_rejected" : "core_editor_unavailable",
+            severity: "warning", channel: "N.body",
+            message: rejected
+              ? `核心编辑越过或未完成冻结内容意图，已原子拒收并保留原图文：${error.message}`
+              : `核心编辑阶段未完成，保留原图文：${error instanceof Error ? error.message : String(error)}`,
+            repairable: false, disposition: rejected ? "review" : "advisory",
+            origin: rejected ? "deterministic" : "infrastructure",
+          });
+        }
+      }
+
       // 存量蓝图的可追责身份体检:审批层校验只挡新模块,已批准的不合规
       // role_model 会让答复展示名静默回落到通用兜底名。这里显性记 warning。
       for (const message of diagnoseAccountableIdentities(input.planningContext?.projectBlueprint)) {
@@ -2380,6 +2887,7 @@ export class ContentGenerationAgent implements GenerationEngine {
       }
       const gapCardById = new Map((orchestrationPlan.gapPlanningCards ?? []).map((card) => [card.gapId, card]));
       const claimRules = input.planningContext?.projectBlueprint?.claimPolicy.rules ?? [];
+      let commentEditorialAssessment: import("./types.js").CommentEditorialAssessment | undefined;
       let readerSide = {
         ...parsedReaderSide,
         threads: parsedReaderSide.threads.map((thread, index) => {
@@ -2415,75 +2923,6 @@ export class ContentGenerationAgent implements GenerationEngine {
           return { ...thread, question: `关于${label}，具体要看什么条件？` };
         }),
       };
-
-      // Editorial agent: directly improve reader-side semantic quality before any
-      // accountable responder sees the questions. It cannot change IDs, duties,
-      // identities, evidence or institutional answers. A failed editorial call is
-      // non-blocking infrastructure telemetry; deterministic gates still run later.
-      try {
-        const editorPrompt = buildStagedCommentEditorPrompt(promptInput, core, readerSide);
-        const editorResponse = await this.provider.generate({
-          messages: editorPrompt.messages,
-          responseSchema: editorPrompt.responseSchema,
-          schemaName: "content_candidate_comment_editor",
-          model: input.config.model.model,
-          seed: seed + 103,
-          temperature: Math.min(input.config.model.temperature, 0.45),
-          maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_SHORT_OUTPUT_TOKENS),
-          metadata: { jobId: input.jobId, candidateIndex, purpose: "edit_comment_readers", stage: 2.04 },
-        });
-        const edited = parseStagedCommentEditor(editorResponse.text);
-        const parsedEdited = parseReaders(JSON.stringify({ threads: edited.threads }));
-        // The editor may improve wording, never renegotiate the frozen question
-        // responsibility or responder. Reject the whole edit atomically when any
-        // org-answer question crosses its planned gap or routes to another identity.
-        for (const [index, thread] of parsedEdited.threads.entries()) {
-          const planned = orchestrationPlan.dialogueThreads[index]!;
-          const threadKind = planned.threadKind ?? "org_answer";
-          if (threadKind === "host_reply") {
-            if (guardedReplyIdentitiesForQuestion(thread.question, claimRules).size > 0) {
-              throw new CommentEditorContractError(`Comment editor moved host thread ${planned.id} into a project-controlled question.`);
-            }
-            continue;
-          }
-          if (threadKind !== "org_answer") continue;
-          const gap = gapCardById.get(planned.primaryGapId);
-          if (!gap || !questionMatchesPlannedGap(thread.question, gap)) {
-            throw new CommentEditorContractError(`Comment editor changed the frozen primary responsibility of thread ${planned.id}.`);
-          }
-          const guarded = guardedReplyIdentitiesForQuestion(thread.question, claimRules);
-          if ([...guarded].some((identity) => identity !== planned.postingIdentity)) {
-            throw new CommentEditorContractError(`Comment editor changed the frozen responder of thread ${planned.id}.`);
-          }
-        }
-        readerSide = { threads: parsedEdited.threads };
-        if (edited.assessment.status === "review") {
-          stageIssues.push({
-            code: "comment_editor_review",
-            severity: "warning",
-            channel: "Cref",
-            message: edited.assessment.summary || edited.assessment.reasons.join("；") || "评论编辑仍发现无法在冻结职责内解决的语义问题。",
-            repairable: false,
-            disposition: "review",
-            origin: "agent",
-          });
-        }
-        // Persist the assessment later with the draft; no issue is emitted on pass.
-        (readerSide as typeof readerSide & { assessment?: typeof edited.assessment }).assessment = edited.assessment;
-      } catch (error) {
-        const contractRejected = error instanceof CommentEditorContractError;
-        stageIssues.push({
-          code: contractRejected ? "comment_editor_contract_rejected" : "comment_editor_unavailable",
-          severity: "warning",
-          channel: "Cref",
-          message: contractRejected
-            ? `评论编辑稿越过冻结职责，已原子拒收并保留原始读者文案：${error.message}`
-            : `评论编辑增强阶段未完成，保留原始读者文案：${error instanceof Error ? error.message : String(error)}`,
-          repairable: false,
-          disposition: "advisory",
-          origin: contractRejected ? "deterministic" : "infrastructure",
-        });
-      }
 
       // postingIdentity、replyDisplayRole 与 routingReason 已在线程规划时冻结。
       // 读者模型只负责在该线程 questionIntent / gap 职责内写可见问题；这里不再
@@ -2543,12 +2982,24 @@ export class ContentGenerationAgent implements GenerationEngine {
       for (const identity of ["publisher", "staff", "expert"] as const) {
         const identityThreads = orgAnswerThreads.filter(({ planned }) => planned.postingIdentity === identity);
         if (!identityThreads.length) continue;
+        const evidenceByThread = new Map(identityThreads.map(({ planned }) => [
+          planned.id,
+          factualEvidenceForThread(planned, orchestrationPlan, availableEvidence),
+        ]));
+        const modelEligibleThreads = identityThreads.filter(({ planned }) => (evidenceByThread.get(planned.id)?.length ?? 0) > 0);
+        for (const { planned } of identityThreads.filter(({ planned }) => !modelEligibleThreads.some((item) => item.planned.id === planned.id))) {
+          orgAnswersById.set(planned.id, { id: planned.id, answer: ORGANIZATION_UNKNOWN_ANSWER });
+        }
+        // No factual source means there is nothing an accountable organization
+        // answer model may safely add. Skip the call instead of paying it to
+        // hallucinate a website, licence, route, booking flow or future service.
+        if (!modelEligibleThreads.length) continue;
         try {
           const orgPrompt = buildStagedOrgAnswersPrompt(
             promptInput,
             core,
             identity,
-            identityThreads.map(({ planned, reader }) => ({ planned, question: reader.question })),
+            modelEligibleThreads.map(({ planned, reader }) => ({ planned, question: reader.question })),
           );
           const orgResponse = await this.provider.generate({
             messages: orgPrompt.messages,
@@ -2561,18 +3012,44 @@ export class ContentGenerationAgent implements GenerationEngine {
             metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_org_answers", stage: 2.1, identity },
           });
           const orgSide = parseStagedOrgAnswers(orgResponse.text);
-          if (identity === "publisher") ownedFirstComment = orgSide.ownedFirstComment;
-          for (const { planned } of identityThreads) {
-            const found = orgSide.answers.find((answer) => answer.id === planned.id);
-            if (found) {
-              orgAnswersById.set(planned.id, found);
+          if (identity === "publisher" && orgSide.ownedFirstComment) {
+            const publisherReferences = [...new Map(modelEligibleThreads
+              .flatMap(({ planned }) => evidenceByThread.get(planned.id) ?? [])
+              .map((reference) => [reference.id, reference])).values()];
+            if (organizationAnswerSupported(orgSide.ownedFirstComment, publisherReferences)) {
+              ownedFirstComment = orgSide.ownedFirstComment;
             } else {
               stageIssues.push({
                 code: "model_org_answer_failed",
                 severity: "warning",
                 channel: "Cref",
-                message: `机构答复（${identity}）未覆盖线程 ${planned.id}，该线程答复已回落规划口径。`,
+                message: "机构首评新增了证据未支持的事实或服务动作，已确定性丢弃。",
                 repairable: false,
+                disposition: "advisory",
+                origin: "deterministic",
+              });
+            }
+          }
+          for (const { planned } of modelEligibleThreads) {
+            const found = orgSide.answers.find((answer) => answer.id === planned.id);
+            const references = evidenceByThread.get(planned.id) ?? [];
+            if (found && organizationAnswerSupported(found.answer, references)) {
+              orgAnswersById.set(planned.id, found);
+            } else {
+              orgAnswersById.set(planned.id, {
+                id: planned.id,
+                answer: safeOrganizationFallback(planned, references),
+              });
+              stageIssues.push({
+                code: "model_org_answer_failed",
+                severity: "warning",
+                channel: "Cref",
+                message: found
+                  ? `机构答复（${identity}）在线程 ${planned.id} 新增了证据未支持的事实或服务动作，已确定性回落安全口径。`
+                  : `机构答复（${identity}）未覆盖线程 ${planned.id}，该线程答复已回落安全口径。`,
+                repairable: false,
+                disposition: "advisory",
+                origin: "deterministic",
               });
             }
           }
@@ -2606,7 +3083,10 @@ export class ContentGenerationAgent implements GenerationEngine {
                 ? reader.answer
                 : threadKind === "host_reply"
                   ? (hostAnswer?.answer ?? hostFallback(planned))
-                  : (orgAnswer?.answer ?? answerFromPlan(planned)),
+                  : (orgAnswer?.answer ?? safeOrganizationFallback(
+                    planned,
+                    factualEvidenceForThread(planned, orchestrationPlan, availableEvidence),
+                  )),
             kind: reader.kind,
             answerKind: hostAnswer?.answerKind ?? orgAnswer?.answerKind ?? reader.answerKind,
             boundary: threadKind === "host_reply" ? undefined : (orgAnswer?.boundary ?? reader.boundary),
@@ -2632,7 +3112,9 @@ export class ContentGenerationAgent implements GenerationEngine {
       // root comments are used directly — an equally valid output, identical to the
       // pre-existing graceful-degradation path. See design 组件E(E2) / Error Handling.
       const growthConversationRate = input.config.parameters?.commentConversationRate ?? 48;
-      const shouldGrowComments = input.config.content.commentMultiTurnGrowthEnabled === true
+      const shouldGrowComments = orchestrationPlan.focusContract?.allowMultiTurnGrowth !== false
+        && orchestrationPlan.dialogueThreads.some((thread) => (thread.conversationPlan?.targetFollowUps ?? 0) > 0)
+        && input.config.content.commentMultiTurnGrowthEnabled === true
         && input.config.content.followUpDepth > 0
         && growthConversationRate > 0;
       let comments = normalizedRoots;
@@ -2687,12 +3169,23 @@ export class ContentGenerationAgent implements GenerationEngine {
         for (const identity of ["publisher", "staff", "expert"] as const) {
           const items = pendingOrgFollowUps.filter(({ planned }) => planned.postingIdentity === identity);
           if (!items.length) continue;
+          const evidenceByRequestId = new Map(items.map(({ planned, thread, followUpIndex }) => [
+            `${thread.id}:fu:${followUpIndex}`,
+            factualEvidenceForThread(planned, orchestrationPlan, availableEvidence),
+          ]));
+          const modelEligibleItems = items.filter(({ thread, followUpIndex }) =>
+            (evidenceByRequestId.get(`${thread.id}:fu:${followUpIndex}`)?.length ?? 0) > 0);
+          for (const { thread, followUpIndex } of items.filter(({ thread, followUpIndex }) =>
+            !modelEligibleItems.some((item) => item.thread.id === thread.id && item.followUpIndex === followUpIndex))) {
+            filledAnswers.set(`${thread.id}:fu:${followUpIndex}`, ORGANIZATION_UNKNOWN_ANSWER);
+          }
+          if (!modelEligibleItems.length) continue;
           try {
             const followUpPrompt = buildStagedOrgFollowUpAnswersPrompt(
               promptInput,
               core,
               identity,
-              items.map(({ planned, thread, followUp, followUpIndex }) => ({
+              modelEligibleItems.map(({ planned, thread, followUp, followUpIndex }) => ({
                 planned,
                 rootQuestion: thread.question,
                 rootAnswer: thread.answer,
@@ -2711,18 +3204,24 @@ export class ContentGenerationAgent implements GenerationEngine {
               metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_org_followup_answers", stage: 2.3, identity },
             });
             const followUpSide = parseStagedOrgAnswers(followUpResponse.text);
-            for (const { thread, followUpIndex } of items) {
+            for (const { planned, thread, followUpIndex } of modelEligibleItems) {
               const requestId = `${thread.id}:fu:${followUpIndex}`;
               const found = followUpSide.answers.find((answer) => answer.id === requestId);
-              if (found?.answer.trim()) {
+              const references = evidenceByRequestId.get(requestId) ?? [];
+              if (found?.answer.trim() && organizationAnswerSupported(found.answer, references)) {
                 filledAnswers.set(requestId, found.answer);
               } else {
+                filledAnswers.set(requestId, safeOrganizationFallback(planned, references));
                 stageIssues.push({
                   code: "model_org_answer_failed",
                   severity: "warning",
                   channel: "Cref",
-                  message: `机构补答（${identity}）未覆盖线程 ${thread.id} 的第 ${followUpIndex + 1} 条追问，该追问已确定性丢弃。`,
+                  message: found
+                    ? `机构补答（${identity}）在线程 ${thread.id} 的第 ${followUpIndex + 1} 条追问新增了证据未支持的内容，已回落安全口径。`
+                    : `机构补答（${identity}）未覆盖线程 ${thread.id} 的第 ${followUpIndex + 1} 条追问，已回落安全口径。`,
                   repairable: false,
+                  disposition: "advisory",
+                  origin: "deterministic",
                 });
               }
             }
@@ -2759,10 +3258,56 @@ export class ContentGenerationAgent implements GenerationEngine {
             ? { ...thread, followUps: [] }
             : thread),
       };
+      // Stage 2E: edit the complete network only when deterministic structure
+      // exposes a concrete problem. All answers and follow-ups are now visible;
+      // server acceptance keeps IDs, responsibilities, evidence and unknowns frozen.
+      const networkReasons = commentNetworkEditorialReasons(comments, orchestrationPlan);
+      if (networkReasons.length) {
+        try {
+          const editorPrompt = buildStagedCommentNetworkEditorPrompt(promptInput, core, comments, networkReasons);
+          const editorResponse = await this.provider.generate({
+            messages: editorPrompt.messages,
+            responseSchema: editorPrompt.responseSchema,
+            schemaName: "content_candidate_comment_network_editor",
+            model: input.config.model.model,
+            seed: seed + 103,
+            temperature: Math.min(input.config.model.temperature, 0.4),
+            maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_SHORT_OUTPUT_TOKENS),
+            metadata: { jobId: input.jobId, candidateIndex, purpose: "edit_comment_readers", stage: 2.4 },
+          });
+          const edited = parseStagedCommentNetworkEditor(editorResponse.text);
+          const accepted = acceptCommentNetworkEdit(comments, edited, orchestrationPlan, availableEvidence);
+          const remainingNetworkReasons = commentNetworkEditorialReasons(accepted, orchestrationPlan);
+          if (edited.assessment.status === "pass" && remainingNetworkReasons.length) {
+            throw new CommentEditorContractError(`Comment editor reported pass with unresolved network problems: ${remainingNetworkReasons.join("; ")}`);
+          }
+          comments = accepted;
+          commentEditorialAssessment = edited.assessment;
+          if (edited.assessment.status === "review") {
+            stageIssues.push({
+              code: "comment_editor_review", severity: "warning", channel: "Cref",
+              message: edited.assessment.summary || edited.assessment.reasons.join("；") || "完整评论网络仍建议人工复核。",
+              repairable: false, disposition: "review", origin: "agent",
+            });
+          }
+        } catch (error) {
+          const rejected = error instanceof CommentEditorContractError;
+          stageIssues.push({
+            code: rejected ? "comment_editor_contract_rejected" : "comment_editor_unavailable",
+            severity: "warning", channel: "Cref",
+            message: rejected
+              ? `完整评论终编越过冻结职责，已原子拒收并保留原评论：${error.message}`
+              : `完整评论终编未完成，保留原评论：${error instanceof Error ? error.message : String(error)}`,
+            repairable: false, disposition: rejected ? "review" : "advisory",
+            origin: rejected ? "deterministic" : "infrastructure",
+          });
+        }
+      }
+
       const maxVisibleCommentLines = orchestrationPlan.personaScenePlan?.surfaceTargets.visibleCommentLines[1]
         ?? comments.threads.length * 2 + input.config.content.followUpDepth * 2;
       let remainingFollowUps = Math.max(0, Math.floor((maxVisibleCommentLines - comments.threads.length * 2) / 2));
-      const stagedContent: GenerationDraft["content"] = {
+      let stagedContent: GenerationDraft["content"] = {
         H: core.H,
         N: core.N,
         Cref: {
@@ -2772,7 +3317,10 @@ export class ContentGenerationAgent implements GenerationEngine {
           ownedFirstComment: comments.ownedFirstComment,
           threads: deterministicBase.content.Cref.threads.map((base, threadIndex) => {
             const visible = comments.threads[threadIndex]!;
-            const root = normalizedRoots.threads[threadIndex]!;
+            // Stage 2E may edit root wording after all replies are visible. Use the
+            // accepted complete-network node here; normalizedRoots is only the
+            // pre-growth input and must not overwrite the terminal edit.
+            const root = visible;
             // T3 漂浮短反应不生长:模型多写了也确定性截为空。
             const followUps = base.threadKind === "organic_reaction" || base.threadKind === "host_reply"
               ? []
@@ -2838,12 +3386,43 @@ export class ContentGenerationAgent implements GenerationEngine {
           }),
         },
       };
+      const continuity = normalizeReaderExchangeContinuity(
+        { ...deterministicBase, content: stagedContent },
+        orchestrationPlan,
+      );
+      stagedContent = continuity.draft.content;
+      if (continuity.changedThreadIds.length) {
+        stageIssues.push({
+          code: "comment_reply_topic_normalized",
+          severity: "warning",
+          disposition: "advisory",
+          origin: "deterministic",
+          channel: "Cref",
+          message: `读者互聊中 ${continuity.changedThreadIds.length} 条跨题接话已在进入证据台账前收束为同题共鸣。`,
+          repairable: false,
+        });
+      }
+      const beforeLength = [...stagedContent.N.body].length;
+      const preLedgerDraft = trimMinorBodyOverflowBeforeLedger(
+        { ...deterministicBase, content: stagedContent },
+        orchestrationPlan,
+        input.config,
+      );
+      stagedContent = preLedgerDraft.content;
+      if ([...stagedContent.N.body].length < beforeLength) {
+        stageIssues.push({
+          code: "body_minor_overflow_trimmed",
+          severity: "warning",
+          disposition: "advisory",
+          origin: "deterministic",
+          channel: "N.body",
+          message: `正文轻微超过 ${input.config.content.bodyMaxChars} 字，已在证据台账前按句界确定性收束。`,
+          repairable: false,
+        });
+      }
       draft = {
-        ...deterministicBase,
-        content: stagedContent,
-        ...((readerSide as typeof readerSide & { assessment?: import("./types.js").CommentEditorialAssessment }).assessment
-          ? { commentEditorialAssessment: (readerSide as typeof readerSide & { assessment: import("./types.js").CommentEditorialAssessment }).assessment }
-          : {}),
+        ...preLedgerDraft,
+        ...(commentEditorialAssessment ? { commentEditorialAssessment } : {}),
       };
       const ledgerPrompt = buildStagedLedgerPrompt(promptInput, stagedContent);
       try {
@@ -2854,7 +3433,7 @@ export class ContentGenerationAgent implements GenerationEngine {
           model: input.config.model.model,
           seed: seed + 3,
           temperature: Math.min(input.config.model.temperature, 0.2),
-          maxOutputTokens: input.config.model.maxOutputTokens,
+          maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_LEDGER_OUTPUT_TOKENS),
           metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_ledger", stage: 3 },
         });
         const ledgerObject = parseJsonObject(ledgerResponse.text);
@@ -2892,26 +3471,18 @@ export class ContentGenerationAgent implements GenerationEngine {
     if (!this.provider || !useProvider) {
       draft = keepCriticalBoundariesInBody(draft, orchestrationPlan, input.config);
     }
-    draft = bindDialogueProvenance(draft, orchestrationPlan, allowedEvidenceIds, evidenceSources);
+    draft = bindDialogueProvenance(draft, orchestrationPlan, allowedEvidenceIds, evidenceSources, availableEvidence);
     const anchorContext: KnowledgeAnchorContext = { allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, projectBlueprint: input.planningContext?.projectBlueprint };
     // 证据自动锚定:bind 完成后、校验前,为敏感面上可精确锚定的受控声明补
     // fact 台账;锚不到的声明不挂,仍由校验层 error 拦截。
     draft = attachKnowledgeAnchors(draft, anchorContext);
     if (this.provider && useProvider) {
-      // AI 复核兜底:仅对机械未命中句子批量一次调用;AI 只选不判,系统机械校验后才挂。
-      draft = await reviewKnowledgeAnchorsWithModel(this.provider, draft, anchorContext, {
-        model: input.config.model.model,
-        seed: seed + 4,
-        temperature: Math.min(input.config.model.temperature, 0.2),
-        maxOutputTokens: input.config.model.maxOutputTokens,
-        metadata: { jobId: input.jobId, candidateIndex, purpose: "knowledge_anchor_review", stage: 3.5 },
-      });
       // AI 判官兜底:仍未锚定的句子批量一次裁决,邀约/限定/疑问与有据断言放行。
       draft = await judgeSensitiveClaimsWithModel(this.provider, draft, anchorContext, {
         model: input.config.model.model,
         seed: seed + 5,
         temperature: Math.min(input.config.model.temperature, 0.2),
-        maxOutputTokens: input.config.model.maxOutputTokens,
+        maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_REVIEW_OUTPUT_TOKENS),
         metadata: { jobId: input.jobId, candidateIndex, purpose: "claim_judge", stage: 3.6 },
         onFailure: (error) => recordClaimJudgeFailure(stageIssues, error),
       });
@@ -2947,11 +3518,14 @@ export class ContentGenerationAgent implements GenerationEngine {
     // A model patch cannot make a candidate publishable while any terminal hard
     // error remains. Skip expensive repairs instead of spending tens of thousands
     // of tokens on a candidate that must still be reviewed.
+    const maxAutomaticRepairAttempts = Math.min(input.config.generation.maxRepairAttempts, 1);
     while (shouldAttemptGenerationRepair(issues)
-      && repairAttempts < input.config.generation.maxRepairAttempts) {
+      && repairAttempts < maxAutomaticRepairAttempts) {
       repairAttempts += 1;
-      const channels = channelsForIssues(issues);
-      if (!channels.length) break;
+      const repairRoute = repairResponsibilityForIssues(issues);
+      const channels = repairRoute.channels;
+      if (repairRoute.responsibility !== "ledger_only" && !channels.length) break;
+      const beforeRepairFingerprint = repairConvergenceFingerprint(draft, issues);
       emitGenerationTelemetry(input, {
         type: "candidate_repair_started",
         candidateIndex,
@@ -3013,7 +3587,7 @@ export class ContentGenerationAgent implements GenerationEngine {
               severity: "error",
               channel: "package",
               message: error instanceof Error ? error.message : String(error),
-              repairable: repairAttempts < input.config.generation.maxRepairAttempts,
+              repairable: repairAttempts < maxAutomaticRepairAttempts,
             },
           ];
           continue;
@@ -3022,24 +3596,16 @@ export class ContentGenerationAgent implements GenerationEngine {
       if (!this.provider || !useProvider) {
         draft = keepCriticalBoundariesInBody(draft, orchestrationPlan, input.config);
       }
-      draft = bindDialogueProvenance(draft, orchestrationPlan, allowedEvidenceIds, evidenceSources);
+      draft = bindDialogueProvenance(draft, orchestrationPlan, allowedEvidenceIds, evidenceSources, availableEvidence);
       // 修复回路同样在校验前做证据自动锚定(幂等,已挂的不会重复挂)。
       draft = attachKnowledgeAnchors(draft, anchorContext);
       if (this.provider && useProvider) {
-        // 修复后仍机械未命中的句子,再走一次 AI 复核兜底(无未命中则不调用)。
-        draft = await reviewKnowledgeAnchorsWithModel(this.provider, draft, anchorContext, {
-          model: input.config.model.model,
-          seed: seed + repairAttempts + 100,
-          temperature: Math.min(input.config.model.temperature, 0.2),
-          maxOutputTokens: input.config.model.maxOutputTokens,
-          metadata: { jobId: input.jobId, candidateIndex, purpose: "knowledge_anchor_review", attempt: repairAttempts },
-        });
         // 修复后重跑判官:旧裁决已随 patch 丢弃,这里按当前句面重新裁决。
         draft = await judgeSensitiveClaimsWithModel(this.provider, draft, anchorContext, {
           model: input.config.model.model,
           seed: seed + repairAttempts + 200,
           temperature: Math.min(input.config.model.temperature, 0.2),
-          maxOutputTokens: input.config.model.maxOutputTokens,
+          maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_REVIEW_OUTPUT_TOKENS),
           metadata: { jobId: input.jobId, candidateIndex, purpose: "claim_judge", attempt: repairAttempts },
           onFailure: (error) => recordClaimJudgeFailure(stageIssues, error),
         });
@@ -3060,8 +3626,26 @@ export class ContentGenerationAgent implements GenerationEngine {
         repairAttempt: repairAttempts,
         summary: validationTelemetrySummary(issues),
       });
+      if (repairConvergenceFingerprint(draft, issues) === beforeRepairFingerprint) {
+        emitGenerationTelemetry(input, {
+          type: "candidate_repair_skipped",
+          candidateIndex,
+          reason: "no_progress",
+          summary: validationTelemetrySummary(issues),
+        });
+        break;
+      }
     }
 
+    const realizedCoverage = evaluateGapCoverageRealization(draft, orchestrationPlan);
+    if (this.deliveryReadinessPolicy === "formal") {
+      issues.push(...formalDeliveryReviewIssues(
+        orchestrationPlan,
+        realizedCoverage,
+        Boolean(this.provider && useProvider),
+        "本候选由确定性兜底生成，未执行配置的模型；可查看结构，但发布前必须人工确认或重新生成。",
+      ));
+    }
     issues = completeIssueMetadata(issues);
     const finalQualityStatus = candidateQualityStatus({ issues });
     emitGenerationTelemetry(input, {
@@ -3079,7 +3663,7 @@ export class ContentGenerationAgent implements GenerationEngine {
         surfaceRoleCard: draft.content.Cref.threads[index]?.surfaceRoleCard ?? thread.surfaceRoleCard,
         conversationPlan: draft.content.Cref.threads[index]?.conversationPlan ?? thread.conversationPlan,
       })),
-      gapCoverageLedger: evaluateGapCoverageRealization(draft, orchestrationPlan),
+      gapCoverageLedger: realizedCoverage,
     };
     const productionArtifacts = buildProductionArtifacts({
       plan: realizedPlanWithoutArtifacts,
@@ -3134,7 +3718,7 @@ export class ContentGenerationAgent implements GenerationEngine {
       resolutionSnapshot,
       impactReport,
       validation: (() => {
-        return { valid: finalQualityStatus !== "blocked", qualityStatus: finalQualityStatus, repairAttempts, issues };
+        return { valid: finalQualityStatus === "passed", qualityStatus: finalQualityStatus, repairAttempts, issues };
       })(),
       revisions: [],
     };
@@ -3213,7 +3797,8 @@ export class ContentGenerationAgent implements GenerationEngine {
         maxOutputTokens: config.model.maxOutputTokens,
         metadata: { jobId: input.package.jobId, candidateIndex: input.package.candidateIndex, purpose: "revision" },
       });
-      const patched = applyGenerationPatch(current, parseGenerationPatch(response.text));
+      const parsedPatch = parseGenerationPatch(response.text);
+      const patched = applyGenerationPatch(current, parsedPatch);
       const contentRevision = dependency.rerunChannels.some((channel) => channel !== "H");
       revised = {
         ...patched,
@@ -3241,30 +3826,34 @@ export class ContentGenerationAgent implements GenerationEngine {
     const allowedEvidenceIds = availableEvidence.map((reference) => reference.id);
     if (input.package.orchestrationSnapshot) {
       if (!this.provider) revised = keepCriticalBoundariesInBody(revised, input.package.orchestrationSnapshot, config);
-      revised = bindDialogueProvenance(revised, input.package.orchestrationSnapshot, allowedEvidenceIds, evidenceSources);
+      revised = bindDialogueProvenance(revised, input.package.orchestrationSnapshot, allowedEvidenceIds, evidenceSources, availableEvidence);
       // 修订路径同样在校验前做证据自动锚定。
       revised = attachKnowledgeAnchors(revised, { allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, projectBlueprint: input.planningContext?.projectBlueprint });
       if (this.provider) {
-        // 修订路径的 AI 复核兜底:仅机械未命中时调用一次,选择经机械校验后才挂。
-        revised = await reviewKnowledgeAnchorsWithModel(this.provider, revised, { allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, projectBlueprint: input.planningContext?.projectBlueprint }, {
-          model: config.model.model,
-          seed: input.package.seed + input.package.revisions.length + 101,
-          temperature: Math.min(config.model.temperature, 0.2),
-          maxOutputTokens: config.model.maxOutputTokens,
-          metadata: { jobId: input.package.jobId, candidateIndex: input.package.candidateIndex, purpose: "knowledge_anchor_review" },
-        });
         // 修订路径的 AI 判官兜底:同上,仍未锚定的句子批量一次裁决。
         revised = await judgeSensitiveClaimsWithModel(this.provider, revised, { allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, projectBlueprint: input.planningContext?.projectBlueprint }, {
           model: config.model.model,
           seed: input.package.seed + input.package.revisions.length + 202,
           temperature: Math.min(config.model.temperature, 0.2),
-          maxOutputTokens: config.model.maxOutputTokens,
+          maxOutputTokens: Math.min(config.model.maxOutputTokens, GENERATION_REVIEW_OUTPUT_TOKENS),
           metadata: { jobId: input.package.jobId, candidateIndex: input.package.candidateIndex, purpose: "claim_judge" },
         });
       }
       revised = refreshCreativeScenarioIdentities(revised);
     }
-    const issues = completeIssueMetadata(validateGenerationDraft({ draft: revised, config, ledger, allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, orchestrationPlan: input.package.orchestrationSnapshot, projectBlueprint: input.planningContext?.projectBlueprint }));
+    const revisionIssues = validateGenerationDraft({ draft: revised, config, ledger, allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, orchestrationPlan: input.package.orchestrationSnapshot, projectBlueprint: input.planningContext?.projectBlueprint });
+    const revisionCoverage = input.package.orchestrationSnapshot
+      ? evaluateGapCoverageRealization(revised, input.package.orchestrationSnapshot)
+      : undefined;
+    if (this.deliveryReadinessPolicy === "formal") {
+      revisionIssues.push(...formalDeliveryReviewIssues(
+        input.package.orchestrationSnapshot,
+        revisionCoverage,
+        Boolean(this.provider),
+        "本次修改未执行配置的模型，结果需人工确认后交付。",
+      ));
+    }
+    const issues = completeIssueMetadata(revisionIssues);
     const now = this.now().toISOString();
     const revision: RevisionRecord = {
       id: `rev_${createHash("sha256").update(`${input.package.id}:${input.instruction}:${input.package.revisions.length}`).digest("hex").slice(0, 16)}`,
@@ -3278,7 +3867,7 @@ export class ContentGenerationAgent implements GenerationEngine {
     const revisionPlanWithoutArtifacts: OrchestrationPlan | undefined = input.package.orchestrationSnapshot
       ? {
         ...input.package.orchestrationSnapshot,
-        gapCoverageLedger: evaluateGapCoverageRealization(revised, input.package.orchestrationSnapshot),
+        gapCoverageLedger: revisionCoverage!,
       }
       : undefined;
     const productionArtifacts = buildProductionArtifacts({
@@ -3318,7 +3907,7 @@ export class ContentGenerationAgent implements GenerationEngine {
       impactReport,
       validation: (() => {
         const qualityStatus = candidateQualityStatus({ issues });
-        return { valid: qualityStatus !== "blocked", qualityStatus, repairAttempts: 0, issues };
+        return { valid: qualityStatus === "passed", qualityStatus, repairAttempts: 0, issues };
       })(),
       revisions: [...input.package.revisions, revision],
     };

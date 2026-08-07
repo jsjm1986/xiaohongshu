@@ -1,8 +1,10 @@
 import type { Candidate, CommentThread, GenerateInput, GenerationJob, Project, TopicOpportunity } from '../types';
 import { api } from './api';
 import { isRevisionInFlight } from './revision-progress';
+import { isOpportunityAvailableForCreation } from './quick-channel-state';
 import { buildSimpleGenerateInput, resolveSimpleGenerationSettings } from './simple-generation';
 import type { SimpleSettingOverrides } from './simple-generation';
+import type { RetryPublishingContract } from './quick-recipe';
 
 type ApiClient = typeof api;
 
@@ -206,21 +208,27 @@ export async function approveOpportunitiesForBatch(args: {
   const projectId = args.project.id;
   const d = args.deps ?? (await defaultDeps());
 
-  // 1. 审批蓝图（仅未审批项，与选题数无关，只做一次）
+  // 1. Validate every target before any approval write. A stale cached card
+  // must not partially approve blueprint modules or dependencies.
+  const opps = await d.api.opportunities.list(projectId);
+  const targets = args.opportunityIds.map((id) => {
+    const found = opps.items.find((opportunity) => opportunity.id === id);
+    if (!found || !isOpportunityAvailableForCreation(found)) {
+      throw new Error('选题不存在、已失效或已被阻断，请换一个当前选题');
+    }
+    return found;
+  });
+
+  // 2. 审批蓝图（仅未审批项，与选题数无关，只做一次）
   const modules = await d.api.blueprintModules.list(projectId);
   await Promise.all(
     modules
-      .filter((m) => m.status !== 'approved')
+      // Only drafts are actionable. Historical stale versions may coexist with
+      // the current approved module for the same key; approving stale rows is
+      // rejected by the server and used to block every quick generation.
+      .filter((m) => m.status === 'draft')
       .map((m) => d.api.blueprintModules.approve(projectId, m.id)),
   );
-
-  // 2. 定位全部目标选题（任一缺失即整批拒绝，不做静默丢弃）
-  const opps = await d.api.opportunities.list(projectId);
-  const targets = args.opportunityIds.map((id) => {
-    const found = opps.items.find((o) => o.id === id);
-    if (!found) throw new Error('选题不存在或已过期，请换一个选题');
-    return found;
-  });
 
   // 3. 审批全部选题合并后的依赖 gaps / strategies（去重，一轮批准）
   const [gaps, strategies] = await Promise.all([
@@ -260,6 +268,8 @@ export async function autoApproveAndGenerate(args: {
   presetId?: string;
   overrides?: SimpleSettingOverrides;
   imageAssetIds?: string[];
+  /** Frozen publishing truth when replaying a historical recipe. */
+  publishing?: RetryPublishingContract;
   onProgress?: (job: GenerationJob) => void;
   pollIntervalMs?: number;
   maxPolls?: number;
@@ -288,17 +298,20 @@ export async function autoApproveAndGenerate(args: {
     preset = presets.items.find((p) => p.id === presetId);
   }
   const settings = d.resolveSettings({ project, preset, opportunity, overrides });
-  const input: GenerateInput = d.buildInput({
-    projectId,
-    opportunity,
-    settings,
-    imageAssetIds: args.imageAssetIds ?? [],
-    lockedGapIds: [],
-    presetId,
-    localFieldsEnabled: false,
-    overrides: overrides as Record<string, unknown> | undefined,
-    randomizationDimensions: [],
-  });
+  const input: GenerateInput = {
+    ...d.buildInput({
+      projectId,
+      opportunity,
+      settings,
+      imageAssetIds: args.imageAssetIds ?? [],
+      lockedGapIds: [],
+      presetId,
+      localFieldsEnabled: false,
+      overrides: overrides as Record<string, unknown> | undefined,
+      randomizationDimensions: [],
+    }),
+    ...args.publishing,
+  };
 
   // 7. 发起生成
   const created = await d.api.generations.create(input);

@@ -73,6 +73,25 @@ async function cloneProductionData(): Promise<void> {
   }
 }
 
+/**
+ * Offline smoke must not inherit BYOK credentials from the cloned production
+ * database. Clearing only APP_OPTIONS.platformApiKey is insufficient because
+ * SettingsService resolves workspace BYOK first. Mutate the disposable clone
+ * before Nest starts, then additionally fail any unexpected fetch below.
+ */
+function disableClonedModelCredentials(): void {
+  if (persistToDevelopmentDatabase) {
+    throw new Error('SMOKE_DISABLE_MODEL cannot be combined with SMOKE_PERSIST_DEVELOPMENT_DATA.');
+  }
+  const clone = new DatabaseSync(join(cloneDataDir, 'app.db'));
+  try {
+    clone.prepare(`UPDATE workspace_settings
+      SET provider_mode='platform', encrypted_api_key=NULL, updated_at=?`).run(new Date().toISOString());
+  } finally {
+    clone.close();
+  }
+}
+
 function principalFrom(database: DatabaseService): SessionPrincipal {
   const user = database.prepare("SELECT id,username,system_role,user_kind,must_change_password FROM users WHERE disabled_at IS NULL ORDER BY created_at LIMIT 1").get() as JsonObject;
   return {
@@ -204,7 +223,12 @@ async function approvePlanningResources(
 async function main(): Promise<void> {
   await mkdir(runDir, { recursive: true });
   if (!persistToDevelopmentDatabase) await cloneProductionData();
+  const modelDisabled = process.env.SMOKE_DISABLE_MODEL === 'true';
+  if (modelDisabled) disableClonedModelCredentials();
   globalThis.fetch = async (input, init) => {
+    if (modelDisabled) {
+      throw new Error('Offline smoke blocked an unexpected outbound model request.');
+    }
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
     let body: JsonObject = {};
     try { body = typeof init?.body === 'string' ? JSON.parse(init.body) : {}; } catch { /* leave empty */ }
@@ -470,10 +494,26 @@ async function main(): Promise<void> {
       const completed = await waitForJob(generation, String(created.id));
       report.generations.push({ name: scenario.name, elapsedMs: Date.now() - started, input: scenario.input, job: completed });
     }
+    const generatedJobIds = report.generations
+      .map((item: JsonObject) => item?.job?.id)
+      .filter((id: unknown): id is string => typeof id === 'string');
+    const generatedJobPlaceholders = generatedJobIds.map(() => '?').join(',');
     report.databaseEvidence = {
-      generationEvents: database.prepare("SELECT job_id,event,details_json,created_at FROM generation_events ORDER BY id").all(),
-      packageCount: database.prepare("SELECT COUNT(*) value FROM content_packages").get(),
-      coverageCount: database.prepare("SELECT COUNT(*) value FROM coverage_records").get(),
+      // Scope every mutable count and event to this smoke run. The cloned
+      // production database contains historical packages/events, which are
+      // useful planning inputs but must not be reported as this run's output.
+      generationEvents: generatedJobIds.length
+        ? database.prepare(`SELECT job_id,event,details_json,created_at FROM generation_events
+            WHERE job_id IN (${generatedJobPlaceholders}) ORDER BY id`).all(...generatedJobIds)
+        : [],
+      packageCount: generatedJobIds.length
+        ? database.prepare(`SELECT COUNT(*) value FROM content_packages
+            WHERE job_id IN (${generatedJobPlaceholders})`).get(...generatedJobIds)
+        : { value: 0 },
+      coverageCount: generatedJobIds.length
+        ? database.prepare(`SELECT COUNT(*) value FROM coverage_records
+            WHERE generation_job_id IN (${generatedJobPlaceholders}) AND deleted_at IS NULL`).get(...generatedJobIds)
+        : { value: 0 },
       knowledge: database.prepare("SELECT id,filename,bytes,sha256,category,evidence_status FROM knowledge_files WHERE project_id=? AND deleted_at IS NULL").all(project.id),
       activeFormula: database.prepare("SELECT id,version,status FROM formula_versions WHERE project_id=? AND status='active'").get(project.id),
       activeRelease: database.prepare("SELECT id,version,status FROM release_manifests WHERE project_id=? AND status='active'").get(project.id),

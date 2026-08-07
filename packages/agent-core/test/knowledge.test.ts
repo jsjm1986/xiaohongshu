@@ -7,12 +7,16 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   buildKnowledgeIndexMarkdown,
   buildKnowledgeLedger,
+  combinedEvidenceSupport,
   createSectionEvidenceReferences,
   estimateTokens,
   evidenceIdForSection,
+  evidenceReferenceCanSupportFact,
+  exactEvidenceSupportSpans,
   findSupportingSectionEvidenceIds,
   indexKnowledgeSource,
   loadKnowledgeDirectory,
+  redactPublicationRestrictedText,
   sectionEvidenceText,
   selectKnowledgeContext,
 } from "../src/index.js";
@@ -134,6 +138,56 @@ describe("context budgeting without vectors", () => {
     expect(references.filter((reference) => reference.path === "cases/case.md").map((reference) => reference.id)).not.toContain(supporting!.id);
   });
 
+  it("binds the production clinic table to compound public facts while rejecting invented navigation detail", () => {
+    const source = [
+      "# 医生与机构背书",
+      "| 机构定位 | 专注眼周年轻化，尤其擅长眼袋；机构类型为门诊；机构全称不对外公开（内部须知） |",
+      "| 地址 | 成都锦江区，锦华万达附近 |",
+    ].join("\n");
+    const document = indexKnowledgeSource({ projectId: "p", id: "clinic", path: "clinic.md", content: source });
+    const selected = selectKnowledgeContext({
+      documents: [document], query: "机构 地址 门诊",
+      budget: { maxInputTokens: 2_000, systemPromptTokens: 10, formulaPromptTokens: 10, outputReserveTokens: 100, safetyMarginTokens: 0 },
+    });
+    const evidenceId = evidenceIdForSection(selected.sections[0]!);
+    const publicSource = redactPublicationRestrictedText(selected.sections[0]!.content);
+    const compound = "机构类型为门诊，专注眼周年轻化，地址在成都锦江区锦华万达附近。";
+
+    expect(findSupportingSectionEvidenceIds([compound], selected)).toEqual([evidenceId]);
+    expect(combinedEvidenceSupport(compound, [publicSource])).toBe(true);
+    const addressQuotes = exactEvidenceSupportSpans("位置在成都锦江区锦华万达附近", publicSource);
+    const organizationQuotes = exactEvidenceSupportSpans("我们是一家专注眼周年轻化的门诊", publicSource);
+    expect(addressQuotes.length).toBeGreaterThan(0);
+    expect(organizationQuotes.length).toBeGreaterThan(0);
+    expect(addressQuotes.every((quote) => publicSource.includes(quote))).toBe(true);
+    expect(organizationQuotes.every((quote) => publicSource.includes(quote))).toBe(true);
+    expect(addressQuotes.join(" ")).toContain("锦华万达附近");
+    expect(organizationQuotes.join(" ")).toContain("专注眼周年轻化");
+    expect(organizationQuotes.join(" ")).toContain("机构类型为门诊");
+
+    expect(findSupportingSectionEvidenceIds(["地址在锦华万达A座12楼"], selected)).toEqual([]);
+    expect(exactEvidenceSupportSpans("地铁2号线直达并提供免费停车", publicSource)).toEqual([]);
+  });
+
+  it("binds bounded frequency paraphrases without weakening quantity, polarity or universality guards", () => {
+    const source = [
+      "# SOFT 疼痛管理",
+      "打麻药的时候有短暂的进针刺痛感，之后操作无痛感，些许人会有酸胀、牵拉或压迫感；过程中可沟通并根据情况调整节奏，客户常常睡着或在聊天中结束。",
+    ].join("\n");
+    const document = indexKnowledgeSource({ projectId: "p", id: "soft", path: "soft.md", content: source });
+    const selected = selectKnowledgeContext({
+      documents: [document], query: "SOFT 疼痛 酸胀",
+      budget: { maxInputTokens: 2_000, systemPromptTokens: 10, formulaPromptTokens: 10, outputReserveTokens: 100, safetyMarginTokens: 0 },
+    });
+    const evidenceId = evidenceIdForSection(selected.sections[0]!);
+    const answer = "打麻药时有短暂进针刺痛感，之后操作无痛感，部分人有酸胀、牵拉或压迫感；过程中可沟通调整节奏，常有人睡着或聊天中结束。";
+
+    expect(combinedEvidenceSupport(answer, [source])).toBe(true);
+    expect(findSupportingSectionEvidenceIds([answer], selected)).toEqual([evidenceId]);
+    expect(combinedEvidenceSupport("所有人都完全无痛。", [source])).toBe(false);
+    expect(combinedEvidenceSupport("恢复期为7天。", ["恢复期为70天。"])) .toBe(false);
+  });
+
   it("content-addresses section evidence and refuses a 7-day claim against a 70-day source", () => {
     const firstDocument = indexKnowledgeSource({ projectId: "p", id: "stable-doc", path: "facts.md", content: "# 恢复\n恢复期为70天。" });
     const changedDocument = indexKnowledgeSource({ projectId: "p", id: "stable-doc", path: "facts.md", content: "# 恢复\n恢复期为7天。" });
@@ -243,6 +297,21 @@ describe("full mode section disclosure", () => {
     expect(selected.selectedDocumentIds).toEqual([emptyDoc.id, noHeadingMd.id, plain.id]);
     const references = createSectionEvidenceReferences([plain, noHeadingMd, emptyDoc], selected);
     expect(references.map((reference) => reference.id)).toEqual(selected.sections.map((section) => evidenceIdForSection(section)));
+  });
+});
+
+describe("factual evidence role matrix", () => {
+  it("allows exactly fact/observed and fact/user_supplied across the closed enum product", () => {
+    const kinds = [
+      "fact", "case", "user_view", "methodology",
+      "inference", "hypothesis", "unknown", "prohibited",
+    ] as const;
+    const statuses = ["observed", "user_supplied", "inferred", "unknown"] as const;
+    const accepted = kinds.flatMap((kind) => statuses
+      .filter((evidenceStatus) => evidenceReferenceCanSupportFact({ kind, evidenceStatus }))
+      .map((evidenceStatus) => `${kind}/${evidenceStatus}`));
+
+    expect(accepted).toEqual(["fact/observed", "fact/user_supplied"]);
   });
 });
 

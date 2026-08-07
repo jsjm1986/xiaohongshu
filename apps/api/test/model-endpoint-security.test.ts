@@ -80,6 +80,62 @@ test('DNS 解析失败、空结果、混合私网结果和 IPv4-mapped IPv6 均�
   }
 });
 
+
+test('Clash fake-IP compatibility is off by default and narrowly scoped', async () => {
+  const fakeIp = '198.18.0.42';
+  const targets: PinnedModelTarget[] = [];
+  let requests = 0;
+
+  const blockedByDefault = createSafeModelFetch({
+    lookup: async () => [{ address: fakeIp, family: 4 }],
+    dispatcherFactory: fakeDispatcherFactory(),
+    transportFetch: async () => { requests += 1; return new Response('unexpected'); },
+  });
+  await assert.rejects(() => blockedByDefault('https://api.example.com/v1'));
+  assert.equal(requests, 0);
+
+  const allowed = createSafeModelFetch({
+    allowProxyFakeIp: true,
+    lookup: async () => [{ address: fakeIp, family: 4 }],
+    dispatcherFactory: (target) => {
+      targets.push(target);
+      return { dispatcher: {} as Dispatcher, close: async () => undefined };
+    },
+    transportFetch: async () => { requests += 1; return new Response('ok'); },
+  });
+  assert.equal(await (await allowed('https://api.example.com/v1')).text(), 'ok');
+  assert.equal(requests, 1);
+  assert.equal(targets[0]?.address, fakeIp);
+  assert.equal(targets[0]?.hostname, 'api.example.com');
+
+  for (const url of ['https://198.18.0.42/v1', 'https://127.0.0.1/v1']) {
+    await assert.rejects(() => allowed(url), undefined, url);
+  }
+
+  const httpFakeIp = createSafeModelFetch({
+    allowHttp: true,
+    allowProxyFakeIp: true,
+    lookup: async () => [{ address: fakeIp, family: 4 }],
+    dispatcherFactory: fakeDispatcherFactory(),
+    transportFetch: async () => new Response('unexpected'),
+  });
+  await assert.rejects(() => httpFakeIp('http://api.example.com/v1'));
+
+  for (const answers of [
+    [{ address: '10.0.0.8', family: 4 }],
+    [{ address: fakeIp, family: 4 }, { address: PUBLIC_V4, family: 4 }],
+    [{ address: fakeIp, family: 4 }, { address: '127.0.0.1', family: 4 }],
+  ]) {
+    const guarded = createSafeModelFetch({
+      allowProxyFakeIp: true,
+      lookup: async () => answers,
+      dispatcherFactory: fakeDispatcherFactory(),
+      transportFetch: async () => new Response('unexpected'),
+    });
+    await assert.rejects(() => guarded('https://api.example.com/v1'));
+  }
+});
+
 test('已验证的 DNS 地址传给固定连接 dispatcher，并在请求完成后关闭', async () => {
   const targets: PinnedModelTarget[] = [];
   let closed = 0;

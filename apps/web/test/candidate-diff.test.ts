@@ -108,6 +108,14 @@ test("没有表达轴的历史包退到策略名,再退到「版本N」", () => 
   assert.equal(view.tabs[1]!.label, "版本2");
 });
 
+test("部分成功时优先使用原始候选槽位，不把候选3压缩成候选2", () => {
+  const view = candidateDiffView([
+    { id: "a", candidateIndex: 0, seed: 1 },
+    { id: "c", candidateIndex: 2, seed: 3 },
+  ]);
+  assert.deepEqual(view.tabs.map((tab) => tab.label), ["版本1", "版本3"]);
+});
+
 test("可发布性带进 tab,让用户切换前就知道哪个能用", () => {
   const view = candidateDiffView(REAL_THREE);
   assert.deepEqual(view.tabs.map((t) => t.publishable), [true, false, true]);
