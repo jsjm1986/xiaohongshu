@@ -1332,6 +1332,7 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
         ? createSafeModelFetch({
             allowHttp: this.options.byokAllowHttp,
             allowPrivateNetwork: this.options.byokAllowPrivateNetwork,
+            allowProxyFakeIp: this.options.byokAllowProxyFakeIp,
           })
         : undefined,
       maxOutputTokenLimit: modelOutputTokenLimit(settings),

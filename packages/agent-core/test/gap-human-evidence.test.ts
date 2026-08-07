@@ -113,6 +113,30 @@ describe("人工确认的缺口答案", () => {
     expect((card?.evidenceIds ?? []).some((id) => id.startsWith("evidence_human_"))).toBe(false);
   });
 
+
+  it("keeps a reviewed SOFT pain answer bound across harmless frequency paraphrases", async () => {
+    const softKnowledge = [indexKnowledgeSource({
+      projectId: "p1",
+      path: "soft.md",
+      content: [
+        "# SOFT 分层双麻缓释技术",
+        "术中体验：打麻药的时候有短暂的进针刺痛感，之后操作无痛感，些许人会有酸胀、牵拉或压迫感；过程中可沟通并根据情况调整节奏，客户常常睡着或在聊天中结束。",
+      ].join("\n"),
+    })];
+    const answer = "打麻药时有短暂进针刺痛感，之后操作无痛感，部分人有酸胀、牵拉或压迫感；过程中可沟通调整节奏，常有人睡着或聊天中结束。";
+    const result = await new ContentGenerationAgent().generate({
+      jobId: "soft-reviewed-gap",
+      config: config(),
+      formulaVersion: DEFAULT_FORMULA_VERSION,
+      knowledge: softKnowledge,
+      planningContext: { informationGaps: [gap({ answer, sourceStatus: "supplied_fact", proofability: 0.3 })] },
+    });
+    const card = result.packages[0]?.orchestrationSnapshot?.gapPlanningCards?.find((item) => item.gapId === "g1");
+    expect(card?.answer).toBe(answer);
+    expect(card?.proofability).toBe(0.3);
+    expect(card?.evidenceIds.some((id) => id.startsWith("evidence_section_"))).toBe(true);
+  });
+
   it("人工证据进入正式引用池并随最终包冻结", async () => {
     const answer = "门店确认：编号 A-1024";
     const { card, packageResult } = await generatedGap(gap({ answer, sourceStatus: "user_supplied", humanConfirmation: confirmation }));

@@ -44,6 +44,7 @@ import {
 } from '@content-agent/agent-core';
 import sharp from 'sharp';
 import {
+  analysisEvidenceSupportsStatement,
   blueprintEvidenceIssues,
   validateAnalysisEvidence,
   type AnalysisEvidenceEntry,
@@ -2425,7 +2426,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       && evidenceIds.every((id) => catalog.has(id))
       && evidenceIds.some((id) => {
         const text = catalog.get(id);
-        return text ? conservativeEvidenceSupport(statement, text) : false;
+        return text ? analysisEvidenceSupportsStatement(statement, text) : false;
       });
     if (supplied && !supported) {
       gap.sourceStatus = 'inference';
@@ -3056,6 +3057,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       ? createSafeModelFetch({
           allowHttp: this.options.byokAllowHttp,
           allowPrivateNetwork: this.options.byokAllowPrivateNetwork,
+          allowProxyFakeIp: this.options.byokAllowProxyFakeIp,
         })
       : globalThis.fetch;
     const timeoutMs = Math.max(10_000, Math.min(300_000, this.options.modelRequestTimeoutMs));
@@ -4028,7 +4030,8 @@ function projectConversationTurnPrompt(turnKey: string): string {
     'expression-strategies': [
       'TURN 7/8: EXPRESSION STRATEGIES.',
       'Return exactly {"expressionStrategies":[...]}. Produce exactly 8 materially different strategies.',
-      'Each item={"name":"","description":"","label":"","prototype":"narrow_request|live_moment|expectation_reversal|process_log|outcome_observation|retrospective_update|relationship_moment|option_comparison","openingMode":"","narrativeMode":"","bodyRole":"","imageRole":"","commentMode":"","voice":"","sequence":[],"targetChannels":["H","N.imageBrief","N.title","N.body","Cref"]}.',
+      'Each item={"name":"","description":"","label":"","prototype":"narrow_request|live_moment|expectation_reversal|process_log|outcome_observation|retrospective_update|relationship_moment|option_comparison","applicability":{"gapCategories":[],"audienceStages":[],"publishingTopologies":["creative_scenario|institution_owned|confirmed_individual_author"],"topicTerms":[],"requiresEvidence":false},"openingMode":"","narrativeMode":"","bodyRole":"","imageRole":"","commentMode":"","voice":"","sequence":[],"targetChannels":["H","N.imageBrief","N.title","N.body","Cref"]}.',
+      'applicability is mandatory and narrow: use only exact Turn 6 gap categories, reviewed audience stages and publishing identities for which the strategy is safe. topicTerms are concrete topic anchors, not generic marketing words. Set requiresEvidence=true whenever the strategy premise depends on a project fact, result, number, credential, location, price, schedule or service promise.',
       'Ground every strategy in prior decision tasks, audience states, scenario families, role model, claim policy, hard boundaries and information gaps. Make the 8 strategies materially different in prototype, opening, narrative progression, body role, image role, comment behavior, voice or channel plan—not cosmetic renamings. Keep unanswered gaps visible, preserve factual qualifiers, never turn a simulated role/history into testimony, and never invent a claim or strategy premise outside accepted context.',
     ],
     'topic-opportunities': [
@@ -4548,10 +4551,27 @@ function normalizeStrategy(row: Record<string, unknown>): Record<string, unknown
   const targets = contentChannels(data.targetChannels);
   const randomization = isRecord(data.randomization) ? data.randomization : {};
   const prototype = textFrom(data.prototype, 100);
+  const applicabilityData = isRecord(data.applicability) ? data.applicability : {};
+  const applicability = {
+    gapIds: uniqueStrings(applicabilityData.gapIds),
+    gapCategories: uniqueStrings(applicabilityData.gapCategories),
+    audienceStages: audienceStages(applicabilityData.audienceStages),
+    publishingTopologies: uniqueStrings(applicabilityData.publishingTopologies)
+      .filter((item) => ['creative_scenario', 'institution_owned', 'confirmed_individual_author'].includes(item)),
+    topicTerms: uniqueStrings(applicabilityData.topicTerms),
+    requiresEvidence: applicabilityData.requiresEvidence === true,
+  };
+  const hasApplicability = applicability.gapIds.length > 0
+    || applicability.gapCategories.length > 0
+    || applicability.audienceStages.length > 0
+    || applicability.publishingTopologies.length > 0
+    || applicability.topicTerms.length > 0
+    || applicability.requiresEvidence;
   return {
     id: String(row.id),
     label: textFrom(data.label ?? row.name, 200) || '未命名表达策略',
     ...(CONTENT_PROTOTYPES.has(prototype) ? { prototype } : {}),
+    ...(hasApplicability ? { applicability } : {}),
     openingMode,
     narrativeMode,
     bodyRole,

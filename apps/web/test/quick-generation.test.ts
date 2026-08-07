@@ -226,6 +226,68 @@ test('autoApproveAndGenerate forwards overrides into buildInput and resolveSetti
   assert.deepEqual(seen.buildOverrides, overrides);
 });
 
+test('autoApproveAndGenerate merges a replay publishing contract into the final create request', async () => {
+  const base = makeDeps().deps;
+  let submitted: Record<string, unknown> | undefined;
+  const deps = {
+    ...base,
+    api: {
+      ...base.api,
+      generations: {
+        create: async (input: Record<string, unknown>) => {
+          submitted = input;
+          return { id: 'job1', status: 'completed', projectId: 'proj1', topic: 't', mode: 'simple', candidates: [] };
+        },
+        get: base.api.generations.get,
+      },
+    },
+  };
+  const publishing = {
+    publishingTopology: 'confirmed_individual_author' as const,
+    authorFactsConfirmed: true,
+    authorFacts: [{ id: 'fact-1', statement: '我目前还没决定', category: 'current_state' as const }],
+  };
+  await autoApproveAndGenerate({
+    project: { id: 'proj1', name: 'p' } as any,
+    opportunityId: 'o1',
+    publishing,
+    pollIntervalMs: 1,
+    maxPolls: 1,
+    deps: deps as any,
+  });
+  assert.equal(submitted?.publishingTopology, 'confirmed_individual_author');
+  assert.equal(submitted?.authorFactsConfirmed, true);
+  assert.deepEqual(submitted?.authorFacts, publishing.authorFacts);
+});
+
+test('autoApproveAndGenerate does not invent a publishing contract for a fresh request', async () => {
+  const base = makeDeps().deps;
+  let submitted: Record<string, unknown> | undefined;
+  const deps = {
+    ...base,
+    api: {
+      ...base.api,
+      generations: {
+        create: async (input: Record<string, unknown>) => {
+          submitted = input;
+          return { id: 'job1', status: 'completed', projectId: 'proj1', topic: 't', mode: 'simple', candidates: [] };
+        },
+        get: base.api.generations.get,
+      },
+    },
+  };
+  await autoApproveAndGenerate({
+    project: { id: 'proj1', name: 'p' } as any,
+    opportunityId: 'o1',
+    pollIntervalMs: 1,
+    maxPolls: 1,
+    deps: deps as any,
+  });
+  assert.equal(Object.hasOwn(submitted ?? {}, 'publishingTopology'), false);
+  assert.equal(Object.hasOwn(submitted ?? {}, 'authorFacts'), false);
+  assert.equal(Object.hasOwn(submitted ?? {}, 'authorFactsConfirmed'), false);
+});
+
 test('autoApproveAndGenerate calls onProgress with each polled job', async () => {
   const base = makeDeps().deps;
   let n = 0;
@@ -483,6 +545,69 @@ test('approveOpportunitiesForBatch approves blueprint/intelligence once and ever
   // intelligence 必须在任一选题审批之前
   assert.ok(calls.indexOf('intel.approve:i1') < calls.indexOf('opp.approve:o1'));
   assert.ok(calls.indexOf('intel.approve:i1') < calls.indexOf('opp.approve:o2'));
+});
+
+test('approveOpportunitiesForBatch skips historical stale blueprint versions', async () => {
+  const calls: string[] = [];
+  const deps = {
+    api: {
+      blueprintModules: {
+        list: async () => [
+          { id: 'current', moduleKey: 'role_model', status: 'approved' },
+          { id: 'historical', moduleKey: 'role_model', status: 'stale' },
+          { id: 'draft', moduleKey: 'claim_policy', status: 'draft' },
+        ],
+        approve: async (_projectId: string, id: string) => { calls.push(id); return { id }; },
+      },
+      intelligence: { get: async () => ({ id: 'i1', approvalStatus: 'approved' }), approve: async () => ({}) },
+      informationGaps: { list: async () => ({ items: [], total: 0 }), approve: async () => ({}) },
+      expressionStrategies: { list: async () => ({ items: [], total: 0 }), approve: async () => ({}) },
+      opportunities: {
+        list: async () => ({ items: [{ id: 'o1', title: 'A', gapIds: [] }], total: 1 }),
+        approve: async () => ({}),
+      },
+    },
+  };
+
+  await approveOpportunitiesForBatch({
+    project: { id: 'proj1', name: 'p' } as any,
+    opportunityIds: ['o1'],
+    deps: deps as any,
+  });
+
+  assert.deepEqual(calls, ['draft']);
+});
+
+test('approveOpportunitiesForBatch rejects a stale opportunity before any approval write', async () => {
+  const calls: string[] = [];
+  const deps = {
+    api: {
+      opportunities: {
+        list: async () => ({ items: [{ id: 'stale-o', status: 'stale', gapIds: [] }], total: 1 }),
+        approve: async () => { calls.push('opportunity.approve'); return {}; },
+      },
+      blueprintModules: {
+        list: async () => { calls.push('blueprint.list'); return [{ id: 'draft', status: 'draft' }]; },
+        approve: async () => { calls.push('blueprint.approve'); return {}; },
+      },
+      intelligence: {
+        get: async () => { calls.push('intelligence.get'); return { id: 'i1', approvalStatus: 'draft' }; },
+        approve: async () => { calls.push('intelligence.approve'); return {}; },
+      },
+      informationGaps: { list: async () => { calls.push('gaps.list'); return { items: [], total: 0 }; }, approve: async () => ({}) },
+      expressionStrategies: { list: async () => { calls.push('strategies.list'); return { items: [], total: 0 }; }, approve: async () => ({}) },
+    },
+  };
+
+  await assert.rejects(
+    () => approveOpportunitiesForBatch({
+      project: { id: 'proj1', name: 'p' } as any,
+      opportunityIds: ['stale-o'],
+      deps: deps as any,
+    }),
+    /失效|阻断/,
+  );
+  assert.deepEqual(calls, []);
 });
 
 test('approveOpportunitiesForBatch does not approve compatible strategy suggestions', async () => {

@@ -40,6 +40,7 @@ import {
   toggleGapEvidenceId,
 } from "../lib/gap-evidence";
 import { inspectOpportunityApprovalDependencies, opportunityRequiresReview } from "../lib/opportunity-approval";
+import { isOpportunityAvailableForCreation } from "../lib/quick-channel-state";
 import { resolveOpportunityRankView } from "../lib/opportunity-rank";
 import { TREND_FIT_SIMPLE_BOUNDARY_COPY } from "../lib/trend-fit";
 import { KnowledgeEnrichmentModal } from "../components/knowledge/KnowledgeEnrichmentModal";
@@ -48,6 +49,7 @@ import {
   buildSimpleGenerateInput,
   COMMENT_RICHNESS_PROFILES,
   resolveSimpleGenerationSettings,
+  simpleGenerationNotices,
   shouldShowSimpleLocalFields,
   type CommentRichnessLevel,
   type SimpleSettingOverrides,
@@ -621,9 +623,11 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const visibleEvidenceDocuments = gapEvidenceDocuments ? filterEvidenceDocuments(gapEvidenceDocuments, gapEvidenceSearch) : [];
   const evidenceSectionTotal = gapEvidenceDocuments ? countEvidenceSections(gapEvidenceDocuments) : 0;
 
-  const selectedOpportunity = opportunities.find((item) => item.id === selectedOpportunityId);
+  const selectedOpportunity = opportunities.find((item) =>
+    item.id === selectedOpportunityId && isOpportunityAvailableForCreation(item));
   const visibleOpportunities = useMemo(
     () => opportunities.filter((item) => {
+      if (!isOpportunityAvailableForCreation(item)) return false;
       const status = item.collectionStatus ?? "active";
       if (collectionFilter === "all") return status !== "archived";
       return status === collectionFilter;
@@ -635,6 +639,7 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
     let collected = 0;
     let archived = 0;
     for (const item of opportunities) {
+      if (!isOpportunityAvailableForCreation(item)) continue;
       const status = item.collectionStatus ?? "active";
       if (status === "collected") collected += 1;
       else if (status === "archived") archived += 1;
@@ -678,6 +683,14 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
   const missingDependencyCount = opportunityDependencies.missingGapIds.length
     + opportunityDependencies.missingStrategyIds.length;
   const lockedStrategy = strategies.find((strategy) => strategy.enabled && strategy.locked && strategy.status === "approved");
+  const generationNotices = useMemo(() => simpleGenerationNotices({
+    audienceStage: resolvedSettings.audienceStage.value,
+    opportunity: selectedOpportunity,
+    gaps: opportunityGaps,
+    compatibleStrategyCount: compatibleStrategies.length,
+    hasLockedStrategy: Boolean(lockedStrategy || selectedOpportunity?.strategyId),
+    preset: selectedPreset,
+  }), [compatibleStrategies.length, lockedStrategy, opportunityGaps, resolvedSettings.audienceStage.value, selectedOpportunity, selectedPreset]);
   // 只有分析器明确判定可整理或需用户回答的项目事实，才进入知识完善流程。
   const isGapPending = (gap: InformationGap) =>
     gap.knowledgeAction === "organize_existing" || gap.knowledgeAction === "ask_user";
@@ -1371,6 +1384,18 @@ export function IntelligentSimpleFlow({ projects, projectId, selectedPresetId, s
               </button>
             </div>
           </section>
+
+          {generationNotices.length > 0 && <div className="simple-generation-contract" aria-label="本次生成合同">
+            {generationNotices.map((notice) => <div key={notice.code} className={`simple-generation-contract__item is-${notice.tone}`}>
+              {notice.tone === "warning" ? <TriangleAlert size={14} /> : <Info size={14} />}
+              <span><strong>{notice.title}</strong><small>{notice.message}</small></span>
+            </div>)}
+          </div>}
+
+          {generationNotices.length > 0 && <section className="simple-generation-notices" aria-label="本次生成合同提示">
+            <strong><ListChecks size={15} /> 生成前确认</strong>
+            <ul>{generationNotices.map((notice) => <li key={notice.code} className={`is-${notice.tone}`}>{notice.message}</li>)}</ul>
+          </section>}
 
           <div className="simple-settings-grid">
             <label className="simple-setting-field"><span><strong>读者阶段</strong><SettingSourceBadge source={resolvedSettings.audienceStage.source} /></span><select value={resolvedSettings.audienceStage.value} onChange={(event) => setSettingOverrides((current) => ({ ...current, audienceStage: event.target.value }))}>{simpleStages.map((stage) => <option key={stage.id} value={stage.id}>{stage.title}</option>)}</select><small>决定正文与评论先补哪一类决策信息。</small></label>

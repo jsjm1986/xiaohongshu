@@ -1,6 +1,7 @@
 import { createContext, useContext, useMemo, useState, type ReactNode } from 'react';
 import type { QuickCandidateView } from '../../lib/quick-generation';
 import type { SimpleSettingOverrides } from '../../lib/simple-generation';
+import type { RetryPublishingContract } from '../../lib/quick-recipe';
 import type { ContentPreset, GenerationJob, Project, TopicOpportunity } from '../../types';
 
 /**
@@ -33,6 +34,9 @@ export interface QuickWorkspaceValue {
   setOverrides: (o: SimpleSettingOverrides) => void;
   imageAssetIds: string[];
   setImageAssetIds: (ids: string[]) => void;
+  /** Present only while replaying a historical recipe; cleared on a new creative choice. */
+  publishing: RetryPublishingContract;
+  setPublishing: (value: RetryPublishingContract) => void;
 
   /** 刚生成、用户还没处理的结果 */
   results: QuickCandidateView[];
@@ -66,6 +70,7 @@ export function QuickWorkspaceProvider({ project, children }: { project: Project
   const [presetId, setPresetId] = useState<string | undefined>(undefined);
   const [overrides, setOverrides] = useState<SimpleSettingOverrides>({});
   const [imageAssetIds, setImageAssetIds] = useState<string[]>([]);
+  const [publishing, setPublishing] = useState<RetryPublishingContract>({});
   const [results, setResults] = useState<QuickCandidateView[]>([]);
   const [jobId, setJobId] = useState<string | undefined>(undefined);
   const [history, setHistory] = useState<GenerationJob[]>([]);
@@ -83,6 +88,7 @@ export function QuickWorkspaceProvider({ project, children }: { project: Project
       presetId, setPresetId,
       overrides, setOverrides,
       imageAssetIds, setImageAssetIds,
+      publishing, setPublishing,
       results, setResults,
       jobId, setJobId,
       history, setHistory,
@@ -92,7 +98,7 @@ export function QuickWorkspaceProvider({ project, children }: { project: Project
       activeBatchId, setActiveBatchId,
     }),
     [
-      project, opportunities, opportunityId, presets, presetId, overrides, imageAssetIds,
+      project, opportunities, opportunityId, presets, presetId, overrides, imageAssetIds, publishing,
       results, jobId, history, checkedIds, batchMode, batchPresetIds, activeBatchId,
     ],
   );

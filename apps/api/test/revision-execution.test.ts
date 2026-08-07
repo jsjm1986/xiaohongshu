@@ -152,8 +152,16 @@ after(async () => {
   if (dataDir) await rm(dataDir, { recursive: true, force: true });
 });
 
-test('修改任务被认领、推进进度、最终完成', async () => {
+test('修改任务被认领、推进进度、最终完成，旧人工确认不跨内容版本继承', async () => {
   const { jobId, candidateId } = await createRealJob('改稿执行-完成');
+  const confirmed = await request(
+    `/api/generations/${jobId}/candidates/${encodeURIComponent(candidateId)}/manual-delivery-confirmation`,
+    { method: 'POST', body: JSON.stringify({ acknowledged: true }) },
+  );
+  assert.equal(confirmed.response.status, 201, JSON.stringify(confirmed.body));
+  const beforeRevision = await request(`/api/generations/${jobId}`);
+  assert.equal(beforeRevision.body.candidates.find((item: any) => item.id === candidateId)?.manualDeliveryConfirmation?.confirmed, true);
+
   await request(`/api/generations/${jobId}/revise`, {
     method: 'POST', body: JSON.stringify({ candidateId, instruction: '正文不要有价格' }),
   });
@@ -169,6 +177,13 @@ test('修改任务被认领、推进进度、最终完成', async () => {
   const revised = detail.body.candidates.find((item: any) => item.packageId === revision.resultPackageId);
   assert.ok(revised, `结果包应出现在候选里，实际：${detail.body.candidates.map((c: any) => c.packageId).join(',')}`);
   assert.equal(revised.revisions.length, 1, '执行落地后要有一条改稿记录');
+  assert.equal(revised.manualDeliveryConfirmation, undefined, '旧内容包的人工确认不得解锁改稿后的新包');
+  const db = app.get(DatabaseService);
+  const oldConfirmation = db.prepare(
+    `SELECT COUNT(*) AS n FROM audit_logs
+       WHERE action='generation.manual-delivery-confirm' AND entity_id<>?`,
+  ).get(revision.resultPackageId) as { n: number };
+  assert.ok(Number(oldConfirmation.n) >= 1, '旧确认审计应保留，但不能绑定新包 ID');
 });
 
 test('执行期间 job.status 始终是 completed,旧候选一直可读', async () => {

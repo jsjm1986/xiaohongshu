@@ -1296,37 +1296,25 @@ test('planning CRUD, explicit approvals, image safety and generation snapshots w
   const coverage = await request(`/api/projects/${projectId}/coverage`);
   assert.equal(coverage.body.length, 3);
 
-  /**
-   * 本段断言的是「选题排序审计」,但下游还要求至少有一个候选通过校验才能导出。
-   *
-   * 候选种子由 deriveCandidateSeed(baseSeed, formulaDigest, jobId, index) 得出,
-   * 而 jobId 是 randomUUID()——所以「三个候选里至少一个通过」本身是概率事件。
-   * 实测这条用例约 1/5 的运行里三个候选全带 error(audit_language_surface_leak /
-   * allocated_unknown_path_not_visible 等),于是断言 exportableAutomaticCandidate
-   * 存在时失败。这不是被测行为坏了,是用例把随机种子当确定输入。
-   *
-   * 处理办法是重投而不是赌一把:审计字段每次都对(下面立即断言),只有可导出候选
-   * 需要多试几次。最多 4 次,仍拿不到就如实报出三次的校验结果。
-   */
-  let automaticGeneration: Awaited<ReturnType<typeof request>> | undefined;
-  let automaticCompleted: any;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    automaticGeneration = await request('/api/generations', {
-      method: 'POST',
-      body: JSON.stringify({
-        projectId,
-        topic: 'automatic opportunity selection audit',
-        goal: 'verify that only Core supplies the applied ranking audit',
-        orchestrationOptions: { minStructureDistance: 0 },
-      }),
-    });
-    assert.equal(automaticGeneration.response.status, 201, JSON.stringify(automaticGeneration.body));
-    assert.equal(automaticGeneration.body.opportunitySelectionAudit, undefined);
-    automaticCompleted = await waitForJob(request, automaticGeneration.body.id);
-    assert.equal(automaticCompleted.status, 'completed', automaticCompleted.error);
-    if (automaticCompleted.candidates?.some((item: any) => item.validation?.valid === true)) break;
-  }
+  // 正式 API 在没有模型 provider 时保留确定性草稿，但不会把它标成可直接交付。
+  const automaticGeneration = await request('/api/generations', {
+    method: 'POST',
+    body: JSON.stringify({
+      projectId,
+      topic: 'automatic opportunity selection audit',
+      goal: 'verify that only Core supplies the applied ranking audit',
+      orchestrationOptions: { minStructureDistance: 0 },
+    }),
+  });
+  assert.equal(automaticGeneration.response.status, 201, JSON.stringify(automaticGeneration.body));
+  assert.equal(automaticGeneration.body.opportunitySelectionAudit, undefined);
+  const automaticCompleted = await waitForJob(request, automaticGeneration.body.id);
   assert.equal(automaticCompleted.status, 'completed', automaticCompleted.error);
+  assert.equal(automaticCompleted.qualityStatus, 'needs_review');
+  assert.ok(automaticCompleted.candidates.every((item: any) => item.validation?.valid === false
+    && item.validation?.qualityStatus === 'needs_review'
+    && item.validation?.issues.some((issue: any) => issue.code === 'model_not_invoked' && issue.disposition === 'review')),
+  JSON.stringify(automaticCompleted.candidates.map((item: any) => item.validation)));
   const automaticAudit = automaticCompleted.opportunitySelectionAudit;
   assert.equal(automaticCompleted.opportunitySnapshot.score, undefined);
   assert.equal(automaticAudit.selectionMode, 'heuristic_ranked');
@@ -1366,11 +1354,18 @@ test('planning CRUD, explicit approvals, image safety and generation snapshots w
     JSON.parse(storedAutomaticPackage.content_json).opportunitySnapshot.opportunitySelectionAudit.rankStatus,
     'applied',
   );
-  const exportableAutomaticCandidate = automaticCompleted.candidates.find((item: any) => item.validation?.valid === true);
-  assert.ok(exportableAutomaticCandidate, JSON.stringify(automaticCompleted.candidates.map((item: any) => item.validation)));
-  const exportedAutomatic = await request(
-    `/api/generations/${automaticCompleted.id}/candidates/${exportableAutomaticCandidate.id}/export?format=json`,
+  const reviewCandidate = automaticCompleted.candidates[0];
+  assert.ok(reviewCandidate);
+  const automaticExportPath = `/api/generations/${automaticCompleted.id}/candidates/${reviewCandidate.id}/export?format=json`;
+  const blockedAutomaticExport = await request(automaticExportPath);
+  assert.equal(blockedAutomaticExport.response.status, 400);
+  assert.match(String(blockedAutomaticExport.body.message), /人工交付确认/u);
+  const confirmedAutomatic = await request(
+    `/api/generations/${automaticCompleted.id}/candidates/${reviewCandidate.id}/manual-delivery-confirmation`,
+    { method: 'POST', body: JSON.stringify({ acknowledged: true }) },
   );
+  assert.equal(confirmedAutomatic.response.status, 201, JSON.stringify(confirmedAutomatic.body));
+  const exportedAutomatic = await request(automaticExportPath);
   assert.equal(exportedAutomatic.response.status, 200);
   assert.equal(exportedAutomatic.body.opportunitySnapshot.opportunitySelectionAudit.selectionMode, 'heuristic_ranked');
   assert.equal(

@@ -96,10 +96,10 @@ const fallbackParameters: GenerationParameterDefinition[] = [
     increaseEffect: '增加候选差异和非预期表达机会。', decreaseEffect: '提高可复现性和结构稳定性。', risk: '过高会增加偏离风格或产生边缘表达的概率。',
   },
   {
-    id: 'repair-rounds', path: 'config.repairRounds', label: '自动修复轮数', shortLabel: '修复轮数', group: 'runtime', control: 'select', defaultValue: 2, formulaIds: ['F32', 'F33'],
-    description: '系统规则校验发现问题后允许 Agent 局部重做几次。', noviceExplanation: '它不会无限循环。每轮只修正检查出的问题，不重写已经合格的部分。', equation: 'Diagnose → Repair(affected channels) → Revalidate',
-    options: [{ label: '不自动修复', value: 0 }, { label: '1 轮', value: 1 }, { label: '2 轮（推荐）', value: 2 }],
-    increaseEffect: '更多机会修复证据、重复与结构问题。', decreaseEffect: '生成更快，但需要人工检查诊断警告。', risk: '修复只能改善表达与约束符合度，不能弥补知识库中不存在的事实。',
+    id: 'repair-rounds', path: 'config.repairRounds', label: '自动修复轮数', shortLabel: '修复轮数', group: 'runtime', control: 'select', defaultValue: 1, formulaIds: ['F32', 'F33'],
+    description: '系统规则校验发现问题后允许 Agent 局部重做一次。', noviceExplanation: '它不会无限循环。每轮只修正检查出的问题，不重写已经合格的部分。', equation: 'Diagnose → Repair(affected channels) → Revalidate',
+    options: [{ label: '不自动修复', value: 0 }, { label: '1 轮（推荐）', value: 1 }],
+    increaseEffect: '开启后提供一次修复证据、重复与结构问题的机会。', decreaseEffect: '生成更快，但需要人工检查诊断警告。', risk: '修复只能改善表达与约束符合度，不能弥补知识库中不存在的事实。',
   },
 ];
 

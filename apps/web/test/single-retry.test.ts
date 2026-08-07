@@ -67,9 +67,20 @@ test("原选题已不在选题池时明确报错,不提交打向幽灵选题的�
   const { deps: d, created } = deps({ opps: [] });
   await assert.rejects(
     () => retryJobOnce({ project, job: job(), deps: d }),
-    /原选题已不在选题池/,
+    /原选题已不在当前选题池|原选题已不在选题池/,
   );
   assert.equal(created.length, 0, "不该提交任何批次");
+});
+
+test("原选题已失效时明确报错,不审批也不提交", async () => {
+  const stale = { ...opportunity, status: 'stale', approvalStatus: 'stale' } as TopicOpportunity;
+  const { deps: d, created, approvedWith } = deps({ opps: [stale] });
+  await assert.rejects(
+    () => retryJobOnce({ project, job: job(), deps: d }),
+    /失效|当前选题池/,
+  );
+  assert.equal(created.length, 0);
+  assert.equal(approvedWith.length, 0);
 });
 
 test("原预设已不存在时报错,而且在审批之前就判掉", async () => {
@@ -122,4 +133,37 @@ test("任务没有 opportunityId 时也不硬提交", async () => {
     /选题/,
   );
   assert.equal(created.length, 0);
+});
+
+test('机构任务同款重试继续提交机构视角', async () => {
+  const { deps: d, created } = deps();
+  await retryJobOnce({
+    project,
+    job: job({ resolvedConfig: { task: { publishingTopology: 'institution_owned' } } }),
+    deps: d,
+  });
+  const retried = created[0]?.jobs[0] as Record<string, unknown>;
+  assert.equal(retried.publishingTopology, 'institution_owned');
+  assert.equal(retried.authorFacts, undefined);
+});
+
+test('真实作者任务同款重试携带原子事实并请求服务端重新冻结确认', async () => {
+  const { deps: d, created } = deps();
+  await retryJobOnce({
+    project,
+    job: job({ resolvedConfig: { task: {
+      publishingTopology: 'confirmed_individual_author',
+      authorContext: { status: 'confirmed', facts: [{
+        id: 'af1', statement: '我只能周末安排', category: 'constraint',
+        confirmedBy: 'old-user', confirmedAt: '2025-01-01T00:00:00.000Z', confirmationId: 'old-id',
+      }] },
+    } } }),
+    deps: d,
+  });
+  const retried = created[0]?.jobs[0] as Record<string, unknown>;
+  assert.equal(retried.publishingTopology, 'confirmed_individual_author');
+  assert.deepEqual(retried.authorFacts, [{ id: 'af1', statement: '我只能周末安排', category: 'constraint' }]);
+  assert.equal(retried.authorFactsConfirmed, true);
+  assert.equal(JSON.stringify(retried).includes('old-user'), false);
+  assert.equal(JSON.stringify(retried).includes('old-id'), false);
 });

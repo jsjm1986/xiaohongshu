@@ -14,7 +14,8 @@
     "test": "npm run test -w @content-agent/agent-core && npm run test -w @content-agent/agent-harness-core && npm run test -w @content-agent/web && npm run test -w @content-agent/api",
     "typecheck": "npm run typecheck -w @content-agent/agent-core && npm run typecheck -w @content-agent/agent-harness-core && npm run typecheck -w @content-agent/web && npm run typecheck -w @content-agent/api",
     "import:legacy": "tsx scripts/import-legacy.ts",
-    "analyze:style": "tsx scripts/analyze-style-corpus.ts"
+    "analyze:style": "tsx scripts/analyze-style-corpus.ts",
+    "smoke:full": "tsx --tsconfig apps/api/tsconfig.json scripts/full-generation-smoke.mts"
   },
   "engines": {
     "node": ">=24.0"

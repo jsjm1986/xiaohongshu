@@ -93,8 +93,13 @@ test('filterOpportunities:all = 非归档,collected / archived 精确匹配', ()
     { id: '2', collectionStatus: 'active' },
     { id: '3', collectionStatus: 'collected' },
     { id: '4', collectionStatus: 'archived' },
+    { id: '5', status: 'stale' },
+    { id: '6', approvalStatus: 'stale', collectionStatus: 'collected' },
+    { id: '7', eligibilityStatus: 'blocked' },
+    { id: '8', effectiveEligibility: 'ineligible', collectionStatus: 'archived' },
+    { id: '9', effectiveEligibility: 'review_required' },
   ];
-  assert.deepEqual(filterOpportunities(items, 'all').map((i) => i.id), ['1', '2', '3']);
+  assert.deepEqual(filterOpportunities(items, 'all').map((i) => i.id), ['1', '2', '3', '9']);
   assert.deepEqual(filterOpportunities(items, 'collected').map((i) => i.id), ['3']);
   assert.deepEqual(filterOpportunities(items, 'archived').map((i) => i.id), ['4']);
 });

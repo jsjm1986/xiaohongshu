@@ -8,6 +8,7 @@ import { buildPresetValuesFromOverrides } from '../../lib/preset-save';
 import { quotaExhausted, type QuotaSnapshot } from '../../lib/quota-view';
 import { SUPPORT_HINT } from '../../lib/support';
 import type { CommentRichnessLevel, SimpleSettingOverrides } from '../../lib/simple-generation';
+import type { RetryPublishingContract } from '../../lib/quick-recipe';
 import type { ContentPreset, Project } from '../../types';
 import { QuickImagePicker } from './QuickImagePicker';
 import { PresetCards } from './PresetCards';
@@ -40,6 +41,7 @@ interface Props {
   presetId: string | undefined;
   overrides: SimpleSettingOverrides;
   imageAssetIds: string[];
+  publishing: RetryPublishingContract;
   busy: boolean;
   setBusy: (b: boolean) => void;
   /** 仅「正在生成文案」为真;收藏/归档等普通操作只动 busy,不驱动生成进度条 */
@@ -60,7 +62,7 @@ interface Props {
   onCancelBatch: () => void;
 }
 
-export function ConfigTab({ project, opportunityId, presets, presetId, overrides, imageAssetIds, busy, setBusy, generating, setGenerating, fail, setPresetId, setPresets, setOverrides, setImageAssetIds, onGenerated, batchMode, batchPresetIds, onToggleBatchPreset, batchTopicCount, onSubmitBatch, onCancelBatch }: Props) {
+export function ConfigTab({ project, opportunityId, presets, presetId, overrides, imageAssetIds, publishing, busy, setBusy, generating, setGenerating, fail, setPresetId, setPresets, setOverrides, setImageAssetIds, onGenerated, batchMode, batchPresetIds, onToggleBatchPreset, batchTopicCount, onSubmitBatch, onCancelBatch }: Props) {
   const toast = useToast();
   const [progress, setProgress] = useState<number | undefined>(undefined);
   const [presetWorking, setPresetWorking] = useState(false);
@@ -139,6 +141,7 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
         presetId,
         overrides,
         imageAssetIds,
+        publishing,
         onProgress: (j) => setProgress(j.progress),
       });
       const results = (job.candidates ?? []).map(quickCandidateFields);
@@ -208,8 +211,22 @@ export function ConfigTab({ project, opportunityId, presets, presetId, overrides
     }
   };
 
+  const replayTopologyLabel = publishing.publishingTopology === 'institution_owned'
+    ? '机构账号说明'
+    : publishing.publishingTopology === 'confirmed_individual_author'
+      ? '真实作者事实'
+      : publishing.publishingTopology === 'creative_scenario'
+        ? '自动用户情景'
+        : undefined;
+
   return (
     <div className="qc-step">
+      {replayTopologyLabel && (
+        <div className="qc-replay-contract" role="status">
+          <strong>正在复用原发布视角：{replayTopologyLabel}</strong>
+          <small>这是“再来一篇同款”的冻结合同；主动改选新选题或重新分析后会自动清除。</small>
+        </div>
+      )}
       {batchMode ? (
         <>
           <div className="qc-batch-head">

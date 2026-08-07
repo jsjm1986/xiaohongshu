@@ -50,6 +50,24 @@ test('resolveRecipeTargets warns and clears opportunity when it is gone', () => 
   assert.match(r.warnings[0]!, /选题/);
 });
 
+test('resolveRecipeTargets treats stale or blocked opportunities as unavailable', () => {
+  const presets = [{ id: 'pr1', name: 'P' }] as unknown as ContentPreset[];
+  for (const opportunity of [
+    { id: 'o1', status: 'stale' },
+    { id: 'o1', approvalStatus: 'stale' },
+    { id: 'o1', eligibilityStatus: 'blocked' },
+    { id: 'o1', effectiveEligibility: 'ineligible' },
+  ]) {
+    const result = resolveRecipeTargets(
+      { opportunityId: 'o1', presetId: 'pr1', overrides: {}, imageAssetIds: [] },
+      [opportunity] as unknown as TopicOpportunity[],
+      presets,
+    );
+    assert.equal(result.opportunityId, '');
+    assert.match(result.warnings[0]!, /失效|当前选题池/);
+  }
+});
+
 test('resolveRecipeTargets falls back to default preset when preset deleted', () => {
   const opps = [{ id: 'o1', title: 'T' }] as unknown as TopicOpportunity[];
   const presets = [{ id: 'prDefault', name: 'D', isDefault: true }] as unknown as ContentPreset[];
@@ -116,4 +134,45 @@ test('extractRecipe collects source image asset ids from imageContext', () => {
     imageContext: [{ assetId: 'a1' }, { assetId: 'a2' }],
   } as unknown as GenerationJob;
   assert.deepEqual(extractRecipe(withImages).imageAssetIds, ['a1', 'a2']);
+});
+
+test('extractRecipe preserves institution publishing topology for retry', () => {
+  const institution = {
+    id: 'j-institution', projectId: 'p1', topic: 'T', mode: 'simple', status: 'failed',
+    opportunityId: 'o1', presetId: 'pr1',
+    resolvedConfig: { task: { publishingTopology: 'institution_owned', authorContext: { status: 'not_provided', facts: [] } } },
+  } as unknown as GenerationJob;
+  assert.deepEqual(extractRecipe(institution).publishing, { publishingTopology: 'institution_owned' });
+});
+
+test('extractRecipe preserves confirmed author facts but drops old confirmation identity', () => {
+  const individual = {
+    id: 'j-author', projectId: 'p1', topic: 'T', mode: 'simple', status: 'failed',
+    opportunityId: 'o1', presetId: 'pr1',
+    resolvedConfig: { task: {
+      publishingTopology: 'confirmed_individual_author',
+      authorContext: { status: 'confirmed', facts: [{
+        id: 'af1', statement: '我只能周末安排', category: 'constraint',
+        confirmedBy: 'old-user', confirmedAt: '2025-01-01T00:00:00.000Z', confirmationId: 'old-confirmation',
+      }] },
+    } },
+  } as unknown as GenerationJob;
+  assert.deepEqual(extractRecipe(individual).publishing, {
+    publishingTopology: 'confirmed_individual_author',
+    authorFacts: [{ id: 'af1', statement: '我只能周末安排', category: 'constraint' }],
+    authorFactsConfirmed: true,
+  });
+  assert.equal(JSON.stringify(extractRecipe(individual).publishing).includes('old-user'), false);
+  assert.equal(JSON.stringify(extractRecipe(individual).publishing).includes('old-confirmation'), false);
+});
+
+test('historical recipes without publishing topology remain retryable with an empty contract', () => {
+  const opps = [{ id: 'o1', title: 'T' }] as unknown as TopicOpportunity[];
+  const presets = [{ id: 'pr1', name: 'P' }] as unknown as ContentPreset[];
+  const resolved = resolveRecipeTargets(
+    { opportunityId: 'o1', presetId: 'pr1', overrides: {}, imageAssetIds: [] },
+    opps,
+    presets,
+  );
+  assert.deepEqual(resolved.publishing, {});
 });

@@ -380,10 +380,10 @@ const EXTRA_PARAMETERS: GenerationParameterDefinition[] = [
   },
   {
     id: "repair_attempts", path: "generation.maxRepairAttempts", label: "最多局部修复次数", group: "operation",
-    control: { kind: "number", min: 0, max: 2, step: 1, unit: "次", simpleMode: false, advanced: true }, defaultValue: 2,
-    noviceExplanation: "校验失败后只重写受影响通道，最多两次。",
+    control: { kind: "number", min: 0, max: 1, step: 1, unit: "次", simpleMode: false, advanced: true }, defaultValue: 1,
+    noviceExplanation: "校验失败后只重写受影响通道，最多一次。",
     increaseEffect: "增加会提高修复机会，也增加调用成本。", decreaseEffect: "减少更快，但可能保留可修复错误。",
-    formulaIds: ["F25", "F36"], channels: ["H", "N.imageBrief", "N.title", "N.body", "Cref"], evidenceStatus: "operational_default", evidenceNote: "两次是工程上限，不是效果规律。",
+    formulaIds: ["F25", "F36"], channels: ["H", "N.imageBrief", "N.title", "N.body", "Cref"], evidenceStatus: "operational_default", evidenceNote: "一次是当前自动执行上限，不是效果规律；历史配置值 2 仍可读取但不会触发第二轮。",
   },
   ...([
     ["require_evidence_references", "diagnostics.requireEvidenceReferences", "要求事实引用证据", true, "事实没有来源ID时判为错误。", ["F06", "F34"]],
@@ -788,6 +788,15 @@ function setPath(root: Record<string, unknown>, path: string, value: ParameterVa
   });
 }
 
+/**
+ * Keep historical repair configurations readable while enforcing the current
+ * one-pass execution contract. New controls emit only 0/1; a stored value of 2
+ * is folded to 1 before validation and compilation, never into a second call.
+ */
+function normalizeParameterValue(definition: GenerationParameterDefinition, value: unknown): unknown {
+  return definition.id === "repair_attempts" && value === 2 ? 1 : value;
+}
+
 function assertParameterValue(definition: GenerationParameterDefinition, value: unknown): asserts value is ParameterValue {
   const kind = definition.control.kind;
   if ((kind === "slider" || kind === "number") && (typeof value !== "number" || !Number.isFinite(value))) throw new Error(`${definition.id} must be a finite number.`);
@@ -813,8 +822,9 @@ function applyValues(
   for (const [id, value] of Object.entries(values)) {
     const definition = definitions.get(id);
     if (!definition) throw new Error(`Unknown generation parameter: ${id}`);
-    assertParameterValue(definition, value);
-    setPath(config, definition.path, value);
+    const normalized = normalizeParameterValue(definition, value);
+    assertParameterValue(definition, normalized);
+    setPath(config, definition.path, normalized);
     sourceByParameter[id] = source;
   }
 }
@@ -893,7 +903,7 @@ function explicitBehavior(id: string, value: ParameterValue, config: ResolvedGen
     case "knowledge_mode": return [`知识上下文采用 ${config.knowledge.mode} 模式；无论披露多少，未进入上下文的事实都不能猜。`];
     case "model_temperature": return [`模型随机性为 ${config.model.temperature}；只允许表达变化，事实与硬约束保持一致。`];
     case "max_output_tokens": return [`模型完整JSON输出预算为 ${config.model.maxOutputTokens} tokens，不能把该预算当成正文长度目标。`];
-    case "repair_attempts": return [`校验失败时最多局部修复 ${config.generation.maxRepairAttempts} 次，只重算受影响通道。`];
+    case "repair_attempts": return [config.generation.maxRepairAttempts > 0 ? "校验失败时最多局部修复 1 次，只重算受影响通道。" : "校验失败时不自动修复，保留校验结论供人工处理。"];
     case "require_evidence_references": return [config.diagnostics.requireEvidenceReferences ? "事实推理必须附可用evidenceId。" : "未强制每条事实带ID，但无依据内容仍不能写成事实。"]; 
     case "reject_unknown_as_fact": return [config.diagnostics.rejectUnknownAsFact ? "unknown不得以事实身份出现。" : "即使关闭自动拒绝，也必须显式标记未知身份。"]; 
     case "reject_prohibited_claims": return [config.diagnostics.rejectProhibitedClaims ? "命中禁止声明时拒绝候选并局部修复。" : "项目禁用检查关闭，但系统安全红线仍生效。"]; 
@@ -1146,7 +1156,9 @@ export function compileGenerationParameters(
       setPath(configRecord, definition.path, definition.defaultValue);
       sourceByParameter[definition.id] = { source: "default" };
     } else {
-      assertParameterValue(definition, existing);
+      const normalized = normalizeParameterValue(definition, existing);
+      assertParameterValue(definition, normalized);
+      if (normalized !== existing) setPath(configRecord, definition.path, normalized);
       sourceByParameter[definition.id] = { source: "config" };
     }
   }

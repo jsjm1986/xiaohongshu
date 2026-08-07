@@ -114,13 +114,14 @@ describe("Cref contract v1.1 binding", () => {
     expect(result.packages).toHaveLength(3);
     for (const pkg of result.packages) {
       expect(pkg.schemaVersion).toBe("1.1");
-      // The deterministic draft now assembles a publisher-owned first comment
-      // from the first two thread Q&As; it stays visible copy with no
-      // internal vocabulary.
+      // The deterministic draft keeps the publisher-owned first comment
+      // separate from simulated reader questions. It is a low-pressure
+      // accountable supplement, not an FAQ synthesis.
       const owned = pkg.content.Cref.ownedFirstComment;
       expect(owned).toBeDefined();
-      expect(owned).toContain("以上为常见问题整理，具体情况以当面评估为准");
-      expect(owned).not.toMatch(/evidence_|sourceCluster|replyPlan|discoveryPlan|本线程/u);
+      expect(owned).toContain("补充一个会影响判断的点");
+      expect(owned).toContain("不需要急着做决定");
+      expect(owned).not.toMatch(/问[：:]|答[：:]|常见问题整理|私信|预约|到店|evidence_|sourceCluster|replyPlan|discoveryPlan|本线程/u);
       const plannedById = new Map((pkg.dialogueThreads ?? []).map((thread) => [thread.id, thread]));
       for (const thread of pkg.content.Cref.threads) {
         expect(thread.kind).toBe("question");
@@ -172,9 +173,9 @@ describe("Cref contract v1.1 binding", () => {
         }
       }
       const owned = pkg.content.Cref.ownedFirstComment ?? "";
-      expect(owned.startsWith("常见问题整理")).toBe(true);
-      expect(owned).toContain("以上为常见问题整理，具体情况以当面评估为准");
-      expect(owned).not.toMatch(/evidence_|sourceCluster|replyPlan|discoveryPlan|本线程|核验路径|资料未覆盖/u);
+      expect(owned.startsWith("补充一个会影响判断的点")).toBe(true);
+      expect(owned).toContain("不需要急着做决定");
+      expect(owned).not.toMatch(/问[：:]|答[：:]|常见问题整理|私信|预约|到店|evidence_|sourceCluster|replyPlan|discoveryPlan|本线程|核验路径|资料未覆盖/u);
     }
   });
 
@@ -248,16 +249,10 @@ describe("Cref contract v1.1 binding", () => {
       expect(first.kind).toBe("follow_up");
       expect(first.answerKind).toBe("clarification");
       expect(first.boundary).toBe("模特声明的边界");
-      // Owned first comment is kept, cleaned like any other visible copy. 按角色
-      // 隔离后首评只可能由 publisher 答复调用产出:该候选没有 publisher 机构线程
-      // 时(全部线程落在读者侧)跳过该角色调用,首评自然缺省,不凭空合成。
-      const hasPublisherOrgThread = (pkg.dialogueThreads ?? [])
-        .some((thread) => (thread.threadKind ?? "org_answer") === "org_answer" && thread.postingIdentity === "publisher");
-      if (hasPublisherOrgThread) {
-        expect(pkg.content.Cref.ownedFirstComment).toBe("置顶：价格以当期为准，详见 资料原文。");
-      } else {
-        expect(pkg.content.Cref.ownedFirstComment).toBeUndefined();
-      }
+      // The model first comment contains an internal evidence ID and a claim
+      // that is not fully supported by the thread evidence. It must be rejected
+      // atomically rather than cleaned into a source-sounding public claim.
+      expect(pkg.content.Cref.ownedFirstComment).toBeUndefined();
       for (const [threadIndex, thread] of threads.entries()) {
         if (threadIndex > 0) {
           const planned = (pkg.dialogueThreads ?? []).find((candidate) => candidate.id === thread.id);
@@ -413,8 +408,8 @@ describe("Cref contract v1.1 parse compatibility", () => {
 
 describe("Cref contract v1.1 prompt contract", () => {
   it("bumps the prompt contract version and exposes the new optional staged-schema fields", () => {
-    // 2.5.0: all public-copy stages share the same anti-leak language contract.
-    expect(PROMPT_CONTRACT_VERSION).toBe("2.5.0");
+    // 2.7.0: topology-specific projection and low-pressure organization disclosure cards.
+    expect(PROMPT_CONTRACT_VERSION).toBe("2.7.0");
     const properties = STAGED_COMMENTS_JSON_SCHEMA.properties as Record<string, any>;
     expect(STAGED_COMMENTS_JSON_SCHEMA.required).toEqual(["disclaimer", "threads"]);
     expect(properties.ownedFirstComment).toEqual({ type: "string" });
@@ -647,9 +642,10 @@ describe("Cref contract v1.1 staged prompt text", () => {
       N: { imageBrief: "", title: "先核实信息", body: "正文。" },
     }, "staff", threads);
     const text = promptFullText(prompt);
-    // 话术自由,但价格数字承诺锚定口径;无口径转人工;动态信息带限定。
+    // 话术自由,但价格数字承诺必须锚定口径；无证据时明确保留未知；动态信息带限定。
     expect(text).toContain("拾光助理");
-    expect(text).toContain("我帮你跟专人确认");
+    expect(text).toContain("没有证据的细节只能明确“当前无法确认”");
+    expect(text).not.toContain("需要转人工时只说“我帮你跟专人确认”");
     expect(text).toContain("以当期确认为准");
     expect(text).toContain("你只知道下方列出的口径");
     expect(text).toContain("禁止每条都写");

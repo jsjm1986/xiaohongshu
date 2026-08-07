@@ -35,6 +35,14 @@ test('选题已不在池里的任务进 skipped 并带原因,不静默丢弃', (
   assert.match(plan.skipped[0].reason, /选题/);
 });
 
+test('失效选题的失败任务进入 skipped，不重复消耗额度', () => {
+  const stale = [{ id: 'o1', status: 'stale' }] as any[];
+  const plan = planBatchRetry([job()], stale, presets);
+  assert.equal(plan.retryable.length, 0);
+  assert.equal(plan.skipped.length, 1);
+  assert.match(plan.skipped[0]!.reason, /失效|当前选题池/);
+});
+
 test('同一选题+同一预设的重复失败去重,只重试一次', () => {
   // 批量里同一配方失败多次很常见(实测三个批次是同一组 10 篇),
   // 不去重会把额度花在完全相同的任务上
@@ -51,6 +59,26 @@ test('选题相同但预设不同不算重复', () => {
     [job({ id: 'j1', presetId: 'pre1' }), job({ id: 'j2', presetId: 'pre2' })],
     opps, presets,
   );
+  assert.equal(plan.retryable.length, 2);
+  assert.equal(plan.deduped, 0);
+});
+
+
+test('同选题同预设但发布视角不同不去重', () => {
+  const plan = planBatchRetry([
+    job({ id: 'consumer', resolvedConfig: { task: { publishingTopology: 'creative_scenario' } } }),
+    job({ id: 'institution', resolvedConfig: { task: { publishingTopology: 'institution_owned' } } }),
+  ], opps, presets);
+  assert.equal(plan.retryable.length, 2);
+  assert.deepEqual(plan.retryable.map((item) => item.publishing.publishingTopology).sort(), ['creative_scenario', 'institution_owned']);
+  assert.equal(plan.deduped, 0);
+});
+
+test('同选题同预设但参数或图片不同不去重', () => {
+  const plan = planBatchRetry([
+    job({ id: 'beijing', resolvedConfig: { task: { city: '北京' } }, imageContext: [{ assetId: 'a1' }] }),
+    job({ id: 'shanghai', resolvedConfig: { task: { city: '上海' } }, imageContext: [{ assetId: 'a2' }] }),
+  ], opps, presets);
   assert.equal(plan.retryable.length, 2);
   assert.equal(plan.deduped, 0);
 });

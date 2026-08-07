@@ -212,6 +212,67 @@ export function shouldShowSimpleLocalFields(audienceStage: string, presetId?: st
   return audienceStage === "ready" || presetId === "local_choice";
 }
 
+export interface SimpleGenerationNotice {
+  code: "stage_coverage" | "strategy_fallback" | "comment_contract";
+  tone: "info" | "warning";
+  title: string;
+  message: string;
+}
+
+/** Explain the hidden planning contracts before a simple-mode request is sent. */
+export function simpleGenerationNotices({
+  audienceStage,
+  opportunity,
+  gaps,
+  compatibleStrategyCount,
+  hasLockedStrategy = false,
+  preset,
+}: {
+  audienceStage: string;
+  opportunity?: TopicOpportunity;
+  gaps: Array<{ audienceStages?: string[]; stages?: string[] }>;
+  compatibleStrategyCount: number;
+  hasLockedStrategy?: boolean;
+  preset?: ContentPreset;
+}): SimpleGenerationNotice[] {
+  if (!opportunity) return [];
+  const reviewedForStage = gaps.filter((gap) => {
+    const stages = gap.audienceStages?.length ? gap.audienceStages : gap.stages ?? [];
+    return stages.includes(audienceStage);
+  }).length;
+  const commentThreadMin = Math.max(0, Math.round(presetNumber(preset, "comment_thread_min") ?? 3));
+  return [
+    {
+      code: "stage_coverage",
+      tone: reviewedForStage === gaps.length && gaps.length > 0 ? "info" : "warning",
+      title: "读者阶段覆盖",
+      message: gaps.length === 0
+        ? `当前选题没有可用缺口卡；“${audienceStage}”只会作为写作阶段，不能补出项目事实。`
+        : reviewedForStage === gaps.length
+          ? `${gaps.length} 个选中缺口均已审核“${audienceStage}”阶段。`
+          : `仅 ${reviewedForStage}/${gaps.length} 个选中缺口审核过“${audienceStage}”阶段；未覆盖项会保留边界，不会自动改写成该阶段事实。`,
+    },
+    {
+      code: "strategy_fallback",
+      tone: hasLockedStrategy || compatibleStrategyCount > 0 ? "info" : "warning",
+      title: "表达策略",
+      message: hasLockedStrategy
+        ? "将使用已锁定策略；若它与选题硬约束冲突，生成会停止而不是静默换题。"
+        : compatibleStrategyCount > 0
+          ? `将仅从 ${compatibleStrategyCount} 个主题兼容策略中选择。`
+          : "没有已确认的主题兼容策略；系统将使用中立聚焦策略，不引入价格、效果或恢复等相邻主题。",
+    },
+    {
+      code: "comment_contract",
+      tone: "info",
+      title: "评论最低合同",
+      message: commentThreadMin > 0
+        ? `模板要求至少 ${commentThreadMin} 条根线程；信息职责不足时只补同题、无项目事实的互动席位，不复制同一答案。`
+        : "当前模板不要求评论根线程；信息缺口将由正文或显式核验路径承担。",
+    },
+  ];
+}
+
 const cleanText = (value: string) => value.trim();
 
 export function mergeCommentRichnessOverrides(existing: Record<string, unknown> = {}, level: CommentRichnessLevel) {

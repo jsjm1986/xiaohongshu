@@ -98,7 +98,7 @@ export function createDefaultGenerationConfig(
     generation: {
       candidateCount: 3,
       baseSeed: 20_260_712,
-      maxRepairAttempts: 2,
+      maxRepairAttempts: 1,
     },
     diagnostics: {
       requireEvidenceReferences: true,

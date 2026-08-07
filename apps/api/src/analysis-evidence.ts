@@ -1,4 +1,8 @@
-import { conservativeEvidenceSupport } from '@content-agent/agent-core';
+import {
+  conservativeEvidenceSupport,
+  containsPublicationRestriction,
+  redactPublicationRestrictedText,
+} from '@content-agent/agent-core';
 
 export type EvidenceValidationReason =
   | 'missing_ledger'
@@ -38,6 +42,46 @@ function normalized(value: string): string {
   return value.normalize('NFKC').replace(/\s+/gu, ' ').trim().toLocaleLowerCase();
 }
 
+/** Compact only formatting and a closed set of relation spellings.
+ *
+ * Analysis is the authority that may promote model output to `supplied_fact`,
+ * so it deliberately does not use the generation binder's reviewed-paraphrase
+ * aliases (for example 部分人/些许人). A model paraphrase must remain an
+ * inference until a principal explicitly approves it.
+ */
+function strictAnalysisComparable(value: string): string {
+  return value
+    .normalize('NFKC')
+    .toLocaleLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, '')
+    .replace(/^(?:我们|我方|本机构|本门诊|机构方|项目方|官方账号)/u, '')
+    .replace(/^(地址|位置)(?:位于|在|是|为)/u, '地址');
+}
+
+function strictPublicAtoms(value: string): string[] {
+  return value
+    .split(/[\n。！？!?；;，,、|]+/u)
+    .map((item) => strictAnalysisComparable(item))
+    .filter((item) => item.length >= 2);
+}
+
+/**
+ * Validate analysis output against disclosed bytes at factual-atom granularity.
+ * Exact atoms may be reordered, and a structured address may join adjacent
+ * table cells ("地址 | 成都锦江区，锦华万达附近"). Lexical paraphrases are
+ * intentionally rejected here even when the runtime binder can revalidate an
+ * already-approved answer with a controlled alias.
+ */
+export function analysisEvidenceSupportsStatement(statement: string, sourceText: string): boolean {
+  if (containsPublicationRestriction(statement)) {
+    return conservativeEvidenceSupport(statement, sourceText);
+  }
+  const publicSource = redactPublicationRestrictedText(sourceText);
+  const compactSource = strictAnalysisComparable(publicSource);
+  const atoms = strictPublicAtoms(statement);
+  return atoms.length > 0 && atoms.every((atom) => compactSource.includes(atom));
+}
+
 function supportedByCatalog(
   statement: string,
   evidenceIds: string[],
@@ -47,7 +91,7 @@ function supportedByCatalog(
   return evidenceIds.some((id) => {
     const evidence = catalog.get(id);
     return evidence?.sourceStatus === expectedStatus
-      ? conservativeEvidenceSupport(statement, evidence.text)
+      ? analysisEvidenceSupportsStatement(statement, evidence.text)
       : false;
   });
 }

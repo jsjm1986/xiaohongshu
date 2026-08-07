@@ -40,6 +40,8 @@ export interface ApiOptions {
   platformTransport: 'responses' | 'chat_completions';
   byokAllowHttp: boolean;
   byokAllowPrivateNetwork: boolean;
+  /** Explicit compatibility for Clash-style 198.18.0.0/15 DNS fake IPs. Default off. */
+  byokAllowProxyFakeIp: boolean;
   modelRequestTimeoutMs: number;
   modelRetryAttempts: number;
   /** 重试退避基数(毫秒);指数退避,用于跨过中继断流的故障窗口。 */
@@ -230,6 +232,12 @@ export function resolveOptions(input: ApiOptionsInput = {}): ApiOptions {
       input.byokAllowPrivateNetwork,
       'byokAllowPrivateNetwork',
       'CONTENT_AGENT_BYOK_ALLOW_PRIVATE_NETWORK',
+      false,
+    ),
+    byokAllowProxyFakeIp: booleanOption(
+      input.byokAllowProxyFakeIp,
+      'byokAllowProxyFakeIp',
+      'CONTENT_AGENT_BYOK_ALLOW_PROXY_FAKE_IP',
       false,
     ),
     modelRequestTimeoutMs,

@@ -18,9 +18,45 @@ test("全部候选未通过时仍展示草稿，人工确认后按候选解锁�
   assert.match(page, /selected\.body[\s\S]*?split\("\\n"\)/u);
   assert.match(page, /selected\.comments\.map/u);
   assert.match(page, /const deliverable = publishable \|\| manuallyConfirmed/u);
-  assert.match(page, /disabled=\{!deliverable\}/u);
-  assert.match(page, /我已逐条核对事实、证据、身份与风险/u);
-  assert.match(page, /确认仅绑定当前用户与当前候选/u);
+  assert.match(page, /!publishable && \(/u);
+  assert.match(page, /manuallyConfirmed \? "已人工确认，可复制与导出"/u);
+  assert.match(page, /我已核对事实、证据、身份与风险/u);
+  assert.match(page, /仅限当前用户与候选，自动校验结论保留/u);
   assert.match(page, /setManualConfirmChecked\(false\)/u);
   assert.match(page, /自动校验未通过 · 确认后可复制与导出/u);
+});
+
+test("结果页把校验、人工确认和运行版本压缩为按需展开信息", () => {
+  assert.match(page, /<details className="validation-summary">/u);
+  assert.match(page, /<details className="generation-release-proof">/u);
+  assert.doesNotMatch(page, /没有候选通过自动校验，可以怎么用/u);
+  assert.match(page, /manual-delivery-confirmation__action--ready/u);
+  assert.match(page, />复制全部<\/Button>/u);
+  assert.match(page, /api\.generations\.exportUrl\(job\.id, selected\.id/u);
+  assert.doesNotMatch(page, /没有候选通过自动校验，可以怎么用/u);
+  assert.match(css, /\.manual-delivery-confirmation \{[^}]*display: flex/u);
+  assert.match(css, /\.manual-delivery-confirmation\.is-confirmed/u);
+});
+
+
+test("部分候选成功时按实际数量展示，不把降级交付误报成完整三候选", () => {
+  assert.match(page, /const candidateCount = job\?\.candidates\?\.length \?\? 0/u);
+  assert.match(page, /const partiallyGenerated = candidateCount > 0 && candidateCount < 3/u);
+  assert.match(page, /<h2>\{candidateCount\} 个候选版本<\/h2>/u);
+  assert.match(page, /目标生成 3 个，实际完成 \$\{candidateCount\} 个/u);
+  assert.match(page, /部分生成完成/u);
+  assert.match(page, /对比 \{candidateCount\} 个候选/u);
+  assert.match(page, /candidate\.candidateIndex \+ 1/u);
+  assert.match(css, /repeat\(var\(--candidate-count, 3\), 1fr\)/u);
+});
+
+
+test("正式交付降级原因在首屏单独展示，而不是埋在一般 warning 中", () => {
+  assert.match(page, /formalReviewIssues/u);
+  assert.match(page, /issue\.disposition === "review"/u);
+  assert.match(page, /model_not_invoked/u);
+  assert.match(page, /gap_evidence_binding_degraded/u);
+  assert.match(page, /required_information_not_realized/u);
+  assert.match(page, /当前是可查看草稿，不是可直接交付成品/u);
+  assert.match(css, /\.formal-delivery-review/u);
 });

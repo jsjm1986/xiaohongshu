@@ -192,7 +192,9 @@ describe("dialoguePlans threadKind assignment", () => {
       status: "confirmed",
       facts: [{ id: "af1", statement: "我目前还没决定", category: "current_state", confirmedBy: "u1", confirmedAt: "2026-08-04T12:00:00Z" }],
     };
-    for (const plan of planTopicOrchestrations({ opportunity: opportunity("host"), gaps, config: value, seeds: [11, 22, 33] })) {
+    const plans = planTopicOrchestrations({ opportunity: opportunity("host"), gaps, config: value, seeds: [11, 22, 33] });
+    expect(plans).toHaveLength(3);
+    for (const plan of plans) {
       const hosts = plan.dialogueThreads.filter((thread) => thread.threadKind === "host_reply");
       expect(hosts).toHaveLength(1);
       expect(hosts[0]).toMatchObject({ postingIdentity: "author", coverageRole: "topic_anchor", evidenceIds: [], authorFactIds: ["af1"] });
@@ -369,13 +371,157 @@ describe("threadKind validation (读者互动层)", () => {
     expect(codes(issues)).not.toContain("sensitive_claim_without_evidence");
   });
 
-  it("T2 读者接话出现证词形态(做过了/效果很好)→ error,复用 fabricated_operational_experience", () => {
+  it("T2 已标注模拟读者可以讲消费者亲历，但只能作为创作参考", () => {
     const issues = validate(draftWithKind("reader_exchange", "纠结中", "这个我做过了，效果很好"));
     expect(issues).toContainEqual(expect.objectContaining({
-      code: "fabricated_operational_experience",
-      severity: "error",
+      code: "creative_persona_experience",
+      severity: "warning",
+      disposition: "advisory",
       channel: "Cref",
     }));
+    expect(codes(issues)).not.toContain("fabricated_operational_experience");
+  });
+
+  it("T2 读者B必须承接同一话题，不能从机构透明度突然跳到另一份FAQ", () => {
+    const drift = validate(draftWithKind(
+      "reader_exchange",
+      "机构全称为什么不能公开？我想先查资质。",
+      "我连自己是什么情况都分不清，能先看看适不适合吗？",
+    ));
+    expect(drift).toContainEqual(expect.objectContaining({
+      code: "comment_reply_topic_drift",
+      disposition: "review",
+      channel: "Cref",
+    }));
+
+    const coherent = validate(draftWithKind(
+      "reader_exchange",
+      "机构全称为什么不能公开？我想先查资质。",
+      "我也是，名字都查不到的话会有点不敢约。",
+    ));
+    expect(codes(coherent)).not.toContain("comment_reply_topic_drift");
+
+    const pureEcho = validate(draftWithKind(
+      "reader_exchange",
+      "同问，我也没想明白",
+      "同感，我还没敢定。",
+    ));
+    expect(codes(pureEcho)).not.toContain("comment_reply_topic_drift");
+
+    const waitEcho = validate(draftWithKind(
+      "reader_exchange",
+      "这个我也在纠结",
+      "我也先等等看。",
+    ));
+    expect(codes(waitEcho)).not.toContain("comment_reply_topic_drift");
+
+    const pivotDrift = validate(draftWithKind(
+      "reader_exchange",
+      "我泪沟挺深，面诊能一起给个方案吗？",
+      "泪沟深我也怕，不过我最怕的还是麻药，你帮我问问怎么打行不？",
+    ));
+    expect(pivotDrift).toContainEqual(expect.objectContaining({
+      code: "comment_reply_topic_drift",
+      disposition: "review",
+      channel: "Cref",
+    }));
+  });
+
+  it("用户可以说自己约了面诊，但不能替机构陈述地址定位；机构也不能凭地址证据承诺后续服务", () => {
+    const organizationGap: InformationGap = {
+      id: "org_location",
+      label: "机构位置",
+      question: "机构全称是否可以公开？",
+      category: "location",
+      audienceStages: ["comparing"],
+      importance: 0.9,
+      decisionLeverage: 0.8,
+      proofability: 0.9,
+      answer: "机构类型为门诊，专注眼周年轻化，地址在锦华万达附近；机构全称不对外公开。",
+      boundary: "不得公开机构全称，可公开地址和门诊类型。",
+      evidenceIds: ["ev_org"],
+      required: true,
+      preferredChannels: ["N.body", "Cref"],
+    };
+    const selected: TopicOpportunity = {
+      ...opportunity("organization-gate"),
+      gapIds: [organizationGap.id],
+      evidenceIds: ["ev_org"],
+    };
+    const validationConfig = config();
+    validationConfig.content.bodyMinChars = 2;
+    validationConfig.content.hashtagMin = 1;
+    const plan = planTopicOrchestrations({
+      opportunity: selected,
+      gaps: [organizationGap],
+      config: validationConfig,
+      seeds: [101, 202, 303],
+    })[0]!;
+    const planned = plan.dialogueThreads.find((thread) => thread.threadKind === "org_answer")!;
+    const candidate = draftWithKind(undefined, "具体位置在哪里？", "当前只能确认公开范围。");
+    const actual = candidate.content.Cref.threads[0]!;
+    Object.assign(actual, {
+      id: planned.id,
+      threadKind: "org_answer",
+      primaryGapId: planned.primaryGapId,
+      gap: planned.gapId,
+      postingIdentity: planned.postingIdentity,
+      answerIdentity: planned.postingIdentity,
+      surfaceRoleCard: planned.surfaceRoleCard,
+    });
+
+    candidate.content.N.body = "我约了周末面诊，具体信息准备再问清楚。";
+    let issues = validateGenerationDraft({
+      draft: candidate,
+      config: validationConfig,
+      ledger: buildKnowledgeLedger([]),
+      allowedEvidenceIds: ["ev_org"],
+      evidenceSources: { ev_org: "机构类型为门诊，专注眼周年轻化，地址在锦华万达附近。" },
+      orchestrationPlan: plan,
+    });
+    expect(codes(issues)).not.toContain("consumer_body_organization_fact");
+
+    candidate.content.N.body = "我约了锦华万达附近这家眼周门诊面诊。";
+    issues = validateGenerationDraft({
+      draft: candidate,
+      config: validationConfig,
+      ledger: buildKnowledgeLedger([]),
+      allowedEvidenceIds: ["ev_org"],
+      evidenceSources: { ev_org: "机构类型为门诊，专注眼周年轻化，地址在锦华万达附近。" },
+      orchestrationPlan: plan,
+    });
+    expect(issues).toContainEqual(expect.objectContaining({
+      code: "consumer_body_organization_fact",
+      disposition: "block",
+      channel: "N.body",
+    }));
+
+    candidate.content.N.body = "我约了周末面诊，具体信息准备再问清楚。";
+    actual.answer = "具体位置我帮您跟专人确认，确认好就回在这条评论下面；预约也可以一并帮您对接。";
+    issues = validateGenerationDraft({
+      draft: candidate,
+      config: validationConfig,
+      ledger: buildKnowledgeLedger([]),
+      allowedEvidenceIds: ["ev_org"],
+      evidenceSources: { ev_org: "机构类型为门诊，专注眼周年轻化，地址在锦华万达附近。" },
+      orchestrationPlan: plan,
+    });
+    expect(issues).toContainEqual(expect.objectContaining({
+      code: "ungrounded_organization_service_commitment",
+      disposition: "block",
+      channel: "Cref",
+    }));
+
+    actual.answer = "具体位置目前无法确认，只能以当期信息为准。";
+    issues = validateGenerationDraft({
+      draft: candidate,
+      config: validationConfig,
+      ledger: buildKnowledgeLedger([]),
+      allowedEvidenceIds: ["ev_org"],
+      evidenceSources: { ev_org: "机构类型为门诊，专注眼周年轻化，地址在锦华万达附近。" },
+      orchestrationPlan: plan,
+    });
+    expect(codes(issues)).not.toContain("ungrounded_organization_service_commitment");
   });
 
   it("T2 读者互聊不承担机构问答的 Gap、Next、replyPlan 或 discoveryPlan", () => {
@@ -394,11 +540,12 @@ describe("threadKind validation (读者互动层)", () => {
     expect(issueCodes).not.toContain("comment_discovery_plan_missing");
   });
 
-  it("T3 漂浮短反应只查证词形态:证词 → error;受控声明不触发 warning", () => {
+  it("T3 漂浮短反应中的亲历保持创作标注；受控声明不触发机构事实错误", () => {
     const testimonial = validate(draftWithKind("organic_reaction", "亲测有效，效果很好", ""));
     expect(testimonial).toContainEqual(expect.objectContaining({
-      code: "fabricated_operational_experience",
-      severity: "error",
+      code: "creative_persona_experience",
+      severity: "warning",
+      disposition: "advisory",
     }));
     const claimOnly = validate(draftWithKind("organic_reaction", "听说要3000元", ""));
     expect(codes(claimOnly)).not.toContain("reader_exchange_controlled_claim");
@@ -448,14 +595,47 @@ describe("publishing topology and host-reply hard gates", () => {
         .toContainEqual(expect.objectContaining({ code: "unsupported_narrative_history", channel: "N.body" }));
     }
     expect(validatePublishingTopologyCopy({ N: { imageBrief: "", title: "机构说明", body: "本次先说明适用条件，未知信息仍需核实。" } }, value, blueprint)).toEqual([]);
+    expect(validatePublishingTopologyCopy({
+      N: { imageBrief: "", title: "没被推销", body: "昨天去附近约了家门诊，价格分档讲明白，没被推销。" },
+    }, value, blueprint)).toContainEqual(expect.objectContaining({ code: "unsupported_narrative_history" }));
   });
 
-  it("自动用户情景由选题与场景模型驱动，不要求作者事实确认", () => {
+  it("自动用户情景允许消费者当前处境和已发生亲历，不要求作者事实确认", () => {
     const value = config();
     expect(value.task.publishingTopology).toBe("creative_scenario");
     expect(value.task.authorContext).toEqual({ status: "not_provided", facts: [] });
+    for (const body of [
+      "我还没去，最近越看越纠结，想先把问题问清楚。",
+      "我昨天已经去面诊了，回来后把自己最在意的几项记了下来。",
+    ]) {
+      expect(validatePublishingTopologyCopy({
+        N: { imageBrief: "", title: "我的记录", body },
+      }, value, blueprint)).toEqual([]);
+    }
+  });
+
+  it("准备面诊的创作任务不得被推进成已到店亲历", () => {
+    const value = config();
+    value.task.publishingTopology = "creative_scenario";
+    value.task.theme = "第一次准备去面诊，我先把哪些问题问明白";
+    value.task.goal = "写准备动作和想问的问题，不确定时先不下结论";
+    value.task.readerHistory = undefined;
+
+    const issues = validatePublishingTopologyCopy({
+      N: {
+        imageBrief: "问题清单",
+        title: "先问清楚",
+        body: "到院先填了情况登记表，拍了照片才进面诊室。医生让我拿镜子自己看。",
+      },
+    }, value, blueprint);
+    expect(issues).toContainEqual(expect.objectContaining({
+      code: "creative_scenario_timeline_drift",
+      disposition: "block",
+      channel: "N.body",
+    }));
+
     expect(validatePublishingTopologyCopy({
-      N: { imageBrief: "", title: "还在比较", body: "我还没去，最近越看越纠结，想先把问题问清楚。" },
+      N: { imageBrief: "问题清单", title: "先问清楚", body: "我还没去，先把最在意的问题列下来，不确定时先不下结论。" },
     }, value, blueprint)).toEqual([]);
   });
 

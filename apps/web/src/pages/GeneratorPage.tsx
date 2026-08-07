@@ -124,7 +124,7 @@ const defaultAdvanced: AdvancedGenerationConfig = {
   titleStyle: "疑问与缺口",
   model: "项目默认",
   temperature: 0.75,
-  repairRounds: 2,
+  repairRounds: 1,
   evidenceMode: "balanced",
 };
 

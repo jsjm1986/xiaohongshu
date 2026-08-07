@@ -8,12 +8,13 @@ const note = readFileSync(new URL('../src/components/quick/NoteCard.tsx', import
 const comments = readFileSync(new URL('../src/components/quick/NoteComments.tsx', import.meta.url), 'utf8');
 const alert = readFileSync(new URL('../src/components/quick/NoteAlertBar.tsx', import.meta.url), 'utf8');
 
-test('极简阅读页在首屏展示候选级人工交付确认', () => {
-  assert.match(page, /人工核对后允许复制与导出/u);
-  assert.match(page, /我已逐条核对事实、证据、身份与风险/u);
+test('极简阅读页紧凑展示候选级人工交付确认', () => {
+  assert.match(page, /current\.validation\?\.valid !== true && \(/u);
+  assert.match(page, /人工核对后解锁复制与导出/u);
+  assert.match(page, /我已核对事实、证据、身份与风险/u);
   assert.match(page, /api\.generations\.confirmManualDelivery\(jobId, activeCandidate\.id\)/u);
   assert.match(page, /setJob\(await api\.generations\.reader\(jobId\)\)/u);
-  assert.match(page, /确认仅绑定当前用户与当前候选/u);
+  assert.match(page, /仅限当前用户与候选，自动校验结论保留/u);
   assert.match(page, /setManualConfirmChecked\(false\)/u);
 });
 
@@ -32,4 +33,12 @@ test('人工确认不伪装成自动校验通过', () => {
   assert.match(alert, /自动校验未通过 · 已人工确认，可复制与导出/u);
   assert.match(detail, /自动校验结论仍保留/u);
   assert.doesNotMatch(page, /validation\.valid\s*=\s*true/u);
+});
+
+test('极简阅读页确认操作原地切换为交付入口，校验问题默认折叠', () => {
+  assert.match(page, /已人工确认，可复制与导出/u);
+  assert.match(page, /copyConfirmedCandidate\(current\)/u);
+  assert.match(page, /exportAs\(current, format\)/u);
+  assert.match(detail, /<ValidationVerdict/u);
+  assert.match(readFileSync(new URL('../src/components/quick/ValidationVerdict.tsx', import.meta.url), 'utf8'), /<details className="qc-verdict__group qc-verdict__group--blocking">/u);
 });

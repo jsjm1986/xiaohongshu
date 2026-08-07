@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
 
+import { containsPublicationRestriction, publicationRestrictionsFromText, redactPublicationRestrictedText } from "./knowledge.js";
 import type {
   CommentSurfaceRoleCard,
   CommentThreadKind,
   ContentChannel,
+  ContentIntentCard,
   CoverageSignature,
   DialogueThreadPlan,
+  EditorialFocusContract,
   ExpressionStrategy,
   ImageAssetAnalysis,
   ImageAssetRole,
@@ -605,38 +608,199 @@ function weightedStrategy(
   return pool[pool.length - 1]!;
 }
 
+const LEGACY_STRATEGY_GENERIC_TERMS = /(?:策略|表达|叙事|正文|标题|评论|图片|配图|开头|收尾|语气|口吻|短句|长句|自然|真实|具体|清楚|克制|直接|温和|专业|客观|共情|说明|讲解|问答|提问|回答|追问|核验|边界|条件|未知|信息|问题|流程|步骤|场景|人物|身份|关系|读者|用户|项目|选择|比较|判断|行动|下一步|入口|主线|结构|内容|方式|模式|当前|一个|必要|公开|可见|引导|强调|突出|展示|记录|补充|建立|围绕|先|再|最后|不引入|不新增|保持|允许|要求|渠道|知识|事实|证据|适用|范围|差异|反例|线索|结果前置|问题前置|生活化|日常|现场|随手|日记|打卡|反馈|变化|纠结|考虑|重新|极简|完整|最小|充分|可信|稳妥|转化)/gu;
+
+/**
+ * Historical strategies have no applicability card. Remove domain-neutral
+ * drafting vocabulary before comparing their remaining business premise with
+ * the selected opportunity. This deliberately avoids an industry taxonomy.
+ */
+function legacyStrategyBusinessText(strategy: ExpressionStrategy): string {
+  return strategyText(strategy)
+    .replace(LEGACY_STRATEGY_GENERIC_TERMS, " ")
+    .replace(/(?:narrow|request|live|moment|expectation|reversal|process|log|outcome|observation|retrospective|relationship|option|comparison|opening|narrative|body|comment|voice|sequence|channel|role|mode|strategy)/giu, " ")
+    .replace(/[\s_\-]+/gu, " ")
+    .trim();
+}
+
+function strategyText(strategy: ExpressionStrategy): string {
+  return [strategy.id, strategy.label, strategy.openingMode, strategy.narrativeMode, strategy.bodyRole,
+    strategy.commentMode, strategy.voice, ...strategy.sequence].join("\n");
+}
+
+function opportunityPlanningText(input: PlanTopicOrchestrationsInput): string {
+  const gapIds = new Set(input.opportunity.gapIds);
+  const gaps = input.gaps.filter((gap) => gapIds.has(gap.id));
+  return [input.opportunity.topic, input.opportunity.angle, ...input.opportunity.tags,
+    ...gaps.flatMap((gap) => [gap.id, gap.category, gap.label, gap.question])].join("\n");
+}
+
+function exactApplicabilityMatches(strategy: ExpressionStrategy, input: PlanTopicOrchestrationsInput): boolean | undefined {
+  const applicability = strategy.applicability;
+  if (!applicability) return undefined;
+  const selected = input.gaps.filter((gap) => input.opportunity.gapIds.includes(gap.id));
+  if (applicability.gapIds?.length && !selected.some((gap) => applicability.gapIds!.includes(gap.id))) return false;
+  if (applicability.gapCategories?.length && !selected.some((gap) => applicability.gapCategories!.includes(gap.category))) return false;
+  if (applicability.audienceStages?.length && !applicability.audienceStages.includes(input.opportunity.audienceStage)) return false;
+  if (applicability.publishingTopologies?.length
+    && !applicability.publishingTopologies.includes(input.config.task.publishingTopology)) return false;
+  if (applicability.requiresEvidence && !selected.some((gap) => gap.evidenceIds.length > 0)) return false;
+  if (applicability.topicTerms?.length) {
+    const topic = normalizedText(opportunityPlanningText(input));
+    if (!applicability.topicTerms.some((term) => topic.includes(normalizedText(term)))) return false;
+  }
+  // Audience stage, publishing topology and evidence availability are hard
+  // constraints, not proof that the strategy belongs to this topic. Historical
+  // analysis rows often contain only audienceStages; returning true here made
+  // every same-stage price/recovery/outcome strategy mutually compatible.
+  const hasTopicAnchor = Boolean(
+    applicability.gapIds?.length
+    || applicability.gapCategories?.length
+    || applicability.topicTerms?.length,
+  );
+  return hasTopicAnchor ? true : undefined;
+}
+
+/**
+ * Historical strategies predate applicability metadata. Keep genuinely generic
+ * strategies, but reject a strategy that introduces a concrete topic family the
+ * selected opportunity/gaps never asked for. This is a conservative lexical
+ * compatibility gate, not semantic ranking.
+ */
+export function expressionStrategyIsCompatible(
+  strategy: ExpressionStrategy,
+  input: PlanTopicOrchestrationsInput,
+): boolean {
+  const explicit = exactApplicabilityMatches(strategy, input);
+  if (explicit !== undefined) return explicit;
+  const strategyProbe = strategyText(strategy);
+  const businessText = legacyStrategyBusinessText(strategy);
+  const opportunityProbe = opportunityPlanningText(input);
+  // Technical IDs and historical English placeholders (approved_open_a,
+  // project_specific_voice, etc.) are not business premises. Old rows had no
+  // applicability metadata, so only natural-language CJK phrases left after
+  // removing drafting vocabulary are strong enough to restrict reuse. New
+  // non-CJK strategies receive explicit applicability from project analysis.
+  const businessSegments = businessText.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]{2,}/gu) ?? [];
+  // No concrete premise remains: this is a reusable structural strategy.
+  if (businessSegments.length === 0) return true;
+  const businessAnchors = semanticAnchors(businessText);
+  const opportunityAnchors = semanticAnchors(opportunityProbe);
+  const overlappingAnchors = [...businessAnchors].filter((anchor) => opportunityAnchors.has(anchor));
+  const overlap = overlappingAnchors.length;
+  const coverage = overlap / Math.max(1, businessAnchors.size);
+  // Historical strategies often carry a long amount of presentation wording,
+  // which makes ratio-only coverage reject an otherwise exact business anchor
+  // such as an approved product term or location-information phrase. One exact 4+ character anchor is strong enough
+  // to establish topic identity; shorter generic overlaps still need the
+  // conservative ratio so a shared word such as “预约” cannot import price,
+  // recovery or outcome premises.
+  const normalizedOpportunity = normalizedText(opportunityProbe);
+  const completeBusinessAnchor = businessSegments.some((segment) => {
+    const normalizedSegment = normalizedText(segment);
+    return [...normalizedSegment].length >= 4 && normalizedOpportunity.includes(normalizedSegment);
+  });
+  // Product/method tokens written in Latin characters (for example “SOFT”)
+  // are often the only stable historical anchor. Require the complete token,
+  // never an arbitrary four-character CJK n-gram, which could accidentally
+  // overlap unrelated prose such as a recovery strategy and an arrival topic.
+  const visibleStrategyText = [strategy.label, strategy.openingMode, strategy.narrativeMode,
+    strategy.bodyRole, strategy.commentMode, strategy.voice, ...strategy.sequence].join("\n");
+  const visibleOpportunityText = [input.opportunity.topic, input.opportunity.angle, ...input.opportunity.tags,
+    ...input.gaps.filter((gap) => input.opportunity.gapIds.includes(gap.id))
+      .flatMap((gap) => [gap.category, gap.label, gap.question])].join("\n");
+  const latinBusinessTerms = visibleStrategyText.match(/[a-z][a-z0-9]{3,}/giu) ?? [];
+  const normalizedVisibleOpportunity = normalizedText(visibleOpportunityText);
+  const exactLatinAnchor = latinBusinessTerms.some((term) =>
+    normalizedVisibleOpportunity.includes(normalizedText(term)));
+  const strongTopicAnchor = completeBusinessAnchor || exactLatinAnchor;
+  if (overlap === 0 || (!strongTopicAnchor && coverage < 0.28)) return false;
+  const forbidsExperience = input.opportunity.boundaries.some((boundary) => /(?:不能|不得|禁止).{0,10}(?:体验|亲历|案例|顾客)/u.test(boundary));
+  if (forbidsExperience && /(?:真实体验|到店体验|亲历|客户体验|回忆记录|成果展示|全过程体验)/u.test(strategyProbe)) return false;
+  if (input.config.task.publishingTopology === "institution_owned"
+    && /(?:素人|顾客|客户|亲历|真实体验|我做完|我到店)/u.test(strategyProbe)) return false;
+  return true;
+}
+
+function neutralFocusStrategy(input: PlanTopicOrchestrationsInput): ExpressionStrategy {
+  const selected = input.gaps.filter((gap) => input.opportunity.gapIds.includes(gap.id));
+  const labels = selected.map((gap) => gap.label).filter(Boolean).slice(0, 2).join("、") || "当前问题";
+  return {
+    id: `neutral_focus_${stableHash([input.opportunity.id, ...selected.map((gap) => gap.id)]).slice(0, 10)}`,
+    label: `${labels}核验`,
+    prototype: "narrow_request",
+    applicability: {
+      gapIds: selected.map((gap) => gap.id),
+      audienceStages: [input.opportunity.audienceStage],
+      publishingTopologies: [input.config.task.publishingTopology],
+    },
+    openingMode: "current_question_direct_opening",
+    narrativeMode: "known_unknown_boundary",
+    bodyRole: "只推进当前选题中的已知、未知与必要边界，不引入相邻营销主题",
+    imageRole: "other",
+    commentMode: "one_accountable_answer_per_selected_gap",
+    voice: "清楚、克制、直接",
+    sequence: ["current_question", "supported_answer", "remaining_unknown"],
+    targetChannels: ["N.title", "N.body", "Cref", "H", "N.imageBrief"],
+    enabled: true,
+    randomization: { enabled: false, weight: 1 },
+  };
+}
+
+interface StrategySelectionContext {
+  pool: ExpressionStrategy[];
+  compatibleIds: string[];
+  rejectedIds: string[];
+  mode: "compatible_pool" | "explicit_lock" | "neutral_fallback";
+}
+
+function strategySelectionContext(input: PlanTopicOrchestrationsInput, options: ResolvedPlanningOptions): StrategySelectionContext {
+  const custom = (input.expressionStrategies ?? []).filter((strategy) => strategy.enabled !== false);
+  const usingBuiltInDefaults = custom.length === 0;
+  const all = usingBuiltInDefaults ? STRATEGIES : custom;
+  const locked = options.lockedStrategyId
+    ? all.find((strategy) => strategy.id === options.lockedStrategyId)
+    : all.find((strategy) => strategy.locked);
+  if (options.lockedStrategyId && !locked) throw new Error(`Locked expression strategy does not exist: ${options.lockedStrategyId}`);
+  if (locked) return { pool: [locked], compatibleIds: [locked.id], rejectedIds: all.filter((item) => item.id !== locked.id).map((item) => item.id), mode: "explicit_lock" };
+  const compatible = usingBuiltInDefaults
+    ? all
+    : all.filter((strategy) => expressionStrategyIsCompatible(strategy, input));
+  if (compatible.length) return {
+    pool: compatible,
+    compatibleIds: compatible.map((item) => item.id),
+    rejectedIds: all.filter((item) => !compatible.includes(item)).map((item) => item.id),
+    mode: "compatible_pool",
+  };
+  const fallback = neutralFocusStrategy(input);
+  return { pool: [fallback], compatibleIds: [], rejectedIds: all.map((item) => item.id), mode: "neutral_fallback" };
+}
+
 function sampleExpressionStrategy(
   input: PlanTopicOrchestrationsInput,
   options: ResolvedPlanningOptions,
-  candidateIndex: number,
+  candidateIndex: 0 | 1 | 2,
   attempt: number,
   recent: CoverageSignature[],
+  selection = strategySelectionContext(input, options),
 ): ExpressionStrategy {
-  const custom = (input.expressionStrategies ?? []).filter((strategy) => strategy.enabled !== false);
-  // Project-approved strategies are the complete visible pool. Built-ins are
-  // defaults only, never hidden competitors once a project pool exists.
-  const pool = custom.length ? custom : STRATEGIES;
-  const locked = options.lockedStrategyId
-    ? pool.find((strategy) => strategy.id === options.lockedStrategyId)
-    : pool.find((strategy) => strategy.locked);
-  if (options.lockedStrategyId && !locked) throw new Error(`Locked expression strategy does not exist: ${options.lockedStrategyId}`);
-  const preferredBase = pool;
-  const defaultBase = preferredBase[candidateIndex % preferredBase.length] ?? pool[0]!;
+  const pool = selection.pool;
+  const locked = selection.mode === "explicit_lock" ? pool[0] : undefined;
+  const defaultBase = pool[candidateIndex % pool.length] ?? pool[0]!;
   const strategyRandomized = options.randomizationDimensions.includes("strategy") && options.variationStrength > 0;
   const base = locked ?? (strategyRandomized
-    ? weightedStrategy(preferredBase, input.seeds?.[candidateIndex as 0 | 1 | 2] ?? input.seed ?? 0, `base:${attempt}`, recent, options.reuseCooldown)
+    ? weightedStrategy(pool, input.seeds?.[candidateIndex] ?? input.seed ?? 0, `base:${attempt}`, recent, options.reuseCooldown)
     : defaultBase);
-  if (locked) {
-    return {
-      ...locked,
-      sequence: [...locked.sequence],
-      targetChannels: [...locked.targetChannels],
-      ...(locked.randomization ? { randomization: { ...locked.randomization } } : {}),
-    };
+  if (locked || selection.mode === "neutral_fallback") {
+    return { ...base, sequence: [...base.sequence], targetChannels: [...base.targetChannels],
+      ...(base.randomization ? { randomization: { ...base.randomization } } : {}) };
   }
-  const seed = input.seeds?.[candidateIndex as 0 | 1 | 2] ?? seedFor(input.seed ?? 0, candidateIndex);
+  const seed = input.seeds?.[candidateIndex] ?? seedFor(input.seed ?? 0, candidateIndex);
+  // Components may vary only inside the already-compatible pool. A single
+  // compatible strategy therefore remains atomic and cannot inherit a price,
+  // recovery or testimonial component from another project strategy.
   const sourceFor = (dimension: PlanningRandomizationDimension, salt: string): ExpressionStrategy => {
-    if (!options.randomizationDimensions.includes(dimension) || options.variationStrength === 0) return base;
+    if (!options.randomizationDimensions.includes(dimension) || options.variationStrength === 0 || pool.length === 1) return base;
     if (hashUnit(seed, `gate:${dimension}:${attempt}`) > options.variationStrength) return base;
     const randomizable = pool.filter((strategy) => strategy.randomization?.enabled !== false);
     return weightedStrategy(randomizable.length ? randomizable : pool, seed, `${salt}:${attempt}`, recent, options.reuseCooldown);
@@ -653,7 +817,7 @@ function sampleExpressionStrategy(
   return {
     ...base,
     id: mixed ? `${base.id}__mix_${stableHash(components).slice(0, 8)}` : base.id,
-    label: mixed ? `${base.label}（受控交叉编排）` : base.label,
+    label: mixed ? `${base.label}（兼容策略族内编排）` : base.label,
     openingMode: opening.openingMode,
     narrativeMode: narrative.narrativeMode,
     sequence: [...narrative.sequence],
@@ -1129,30 +1293,95 @@ function orderGaps(gaps: InformationGap[]): InformationGap[] {
   );
 }
 
+/** Project-controlled facts that a consumer carrier may ask about but never state for the organization. */
+function organizationOnlyGap(gap: InformationGap): boolean {
+  const probe = `${gap.category} ${gap.label} ${gap.question}`;
+  return containsPublicationRestriction(`${gap.question}
+${gap.answer ?? ""}
+${gap.boundary ?? ""}`)
+    || /(?:机构|组织|公司|门店|场所|地址|位置|路线|交通|预约|档期|营业|价格|费用|资质|证照|活动)/u.test(probe);
+}
+
+/** Remove governance-only clauses before a planning object can become copy instructions. */
+function publicGap(gap: InformationGap): InformationGap & { disclosureScope: "organization_only" | "shared" } {
+  const disclosureScope = organizationOnlyGap(gap) ? "organization_only" : "shared";
+  // A historical answer without factual evidence is an unresolved proposal, not
+  // public copy. Enforce this at the planning boundary as well as in the engine
+  // binder so direct planner callers and replay tools cannot revive stale answers.
+  const answer = gap.answer && gap.evidenceIds.length
+    ? redactPublicationRestrictedText(gap.answer).trim()
+    : "";
+  const framework = gap.framework && gap.evidenceIds.length
+    ? redactPublicationRestrictedText(gap.framework).trim()
+    : "";
+  const boundary = gap.boundary && !containsPublicationRestriction(gap.boundary)
+    ? redactPublicationRestrictedText(gap.boundary).trim()
+    : "";
+  const publicationRestrictions = [...new Set([
+    ...publicationRestrictionsFromText(gap.question),
+    ...publicationRestrictionsFromText(gap.answer ?? ""),
+    ...publicationRestrictionsFromText(gap.framework ?? ""),
+    ...publicationRestrictionsFromText(gap.boundary ?? ""),
+  ])];
+  const redactedQuestion = redactPublicationRestrictedText(gap.question).trim();
+  const question = redactedQuestion || (disclosureScope === "organization_only"
+    ? `${gap.label}有哪些可公开、可核验的信息？`
+    : gap.question);
+  return {
+    ...gap,
+    question,
+    ...(answer ? { answer } : { answer: undefined }),
+    ...(framework ? { framework } : { framework: undefined }),
+    ...(boundary ? { boundary } : { boundary: undefined }),
+    disclosureScope,
+    publicationRestrictions,
+  };
+}
+
 /** Build the single canonical gap/placement object used by every planning stage. */
 function makeGapPlanningCards(
   opportunity: TopicOpportunity,
   gaps: InformationGap[],
   strategy: ExpressionStrategy,
   commentsEnabled: boolean,
+  publishingTopology: ResolvedGenerationConfig["task"]["publishingTopology"],
+  focusContract?: EditorialFocusContract,
 ): InformationGapPlanningCard[] {
-  const relevant = orderGaps(gaps.filter((gap) => opportunity.gapIds.includes(gap.id)));
+  const relevant = orderGaps(gaps.filter((gap) => opportunity.gapIds.includes(gap.id)).map(publicGap));
   const critical = relevant.filter((gap) => gap.required);
   const residual = relevant.filter((gap) => !critical.some((item) => item.id === gap.id));
-  const bodyIds = new Set(critical.map((gap) => gap.id));
-  const bodyResidual = commentsEnabled ? residual.slice(0, 1) : residual;
+  const bodyEligible = (gap: InformationGap & { disclosureScope?: "organization_only" | "shared" }) =>
+    publishingTopology === "institution_owned" || gap.disclosureScope !== "organization_only";
+  const bodyIds = new Set(critical.filter(bodyEligible).map((gap) => gap.id));
+  const bodyResidual = (commentsEnabled ? residual.slice(0, 1) : residual).filter(bodyEligible);
   const commentResidual = commentsEnabled ? residual.slice(1) : [];
   bodyResidual.forEach((gap) => bodyIds.add(gap.id));
-  if (relevant[0]) bodyIds.add(relevant[0].id);
-  if (!commentsEnabled) relevant.forEach((gap) => bodyIds.add(gap.id));
+  const firstBodyEligible = relevant.find(bodyEligible);
+  if (firstBodyEligible) bodyIds.add(firstBodyEligible.id);
+  if (!commentsEnabled) relevant.filter(bodyEligible).forEach((gap) => bodyIds.add(gap.id));
   const commentIds = new Set(commentsEnabled ? commentResidual.map((gap) => gap.id) : []);
   if (commentsEnabled) {
     // A required unresolved gap may be stated once in the body as the post's
     // open loop. Do not duplicate every unknown into comments; comments own
     // only their residual gaps or an explicitly preferred channel.
     for (const gap of relevant) {
-      if (gap.preferredChannels?.includes("N.body")) bodyIds.add(gap.id);
+      if (gap.preferredChannels?.includes("N.body") && bodyEligible(gap)) bodyIds.add(gap.id);
       if (gap.preferredChannels?.includes("Cref")) commentIds.add(gap.id);
+      if (gap.disclosureScope === "organization_only") commentIds.add(gap.id);
+    }
+    // A focused unresolved responsibility has one visible completion owner.
+    // Putting it in both body and comments made the writer repeat the same
+    // unknown and made validation require two independent “closures”. Keep the
+    // question/verification route in its accountable comment thread; the body
+    // is reserved for supported information. Standard candidates retain their
+    // configured cross-channel allocation.
+    if (focusContract?.mode === "focused") {
+      for (const gap of relevant) {
+        if (!(gap.answer ?? gap.framework)) {
+          bodyIds.delete(gap.id);
+          commentIds.add(gap.id);
+        }
+      }
     }
     // If comments are enabled and requested, keep at least one thread anchored
     // to a real gap instead of generating a topology-only comment.
@@ -1169,15 +1398,70 @@ function makeGapPlanningCards(
     proofability: gap.proofability,
     required: gap.required,
     priority: gapPriority(gap),
+    obligation: bodyIds.has(gap.id) && gap.required
+      ? "body_required"
+      : (gap.required || commentIds.has(gap.id))
+        ? "network_required"
+        : "optional_context",
     ...(gap.answer ? { answer: gap.answer } : {}),
     ...(gap.framework ? { framework: gap.framework } : {}),
     ...(gap.boundary ? { boundary: gap.boundary } : {}),
     evidenceIds: [...gap.evidenceIds],
+    evidenceBindingStatus: gap.evidenceBindingStatus,
+    disclosureScope: gap.disclosureScope,
+    ...(gap.publicationRestrictions?.length ? { publicationRestrictions: [...gap.publicationRestrictions] } : {}),
     plannedPlacements: CHANNELS.filter((channel) =>
       (channel === "N.body" && bodyIds.has(gap.id))
       || (channel === "Cref" && commentIds.has(gap.id)),
     ),
   }));
+}
+
+/** Compile one narrow, domain-neutral editorial purpose from approved planning inputs. */
+export function compileContentIntentCard(
+  opportunity: TopicOpportunity,
+  cards: InformationGapPlanningCard[],
+  strategy: ExpressionStrategy,
+  imagePlan: ImagePlan,
+): ContentIntentCard {
+  const bodyCards = cards.filter((card) => card.plannedPlacements.includes("N.body"));
+  const commentCards = cards.filter((card) => card.plannedPlacements.includes("Cref"));
+  const primary = [...bodyCards, ...cards].sort((left, right) =>
+    Number(right.obligation === "body_required") - Number(left.obligation === "body_required")
+    || Number(right.required) - Number(left.required)
+    || right.decisionLeverage - left.decisionLeverage
+    || left.gapId.localeCompare(right.gapId))[0];
+  const completionMode: ContentIntentCard["completionMode"] = !primary
+    ? "clarify"
+    : !(primary.answer ?? primary.framework)
+      ? (primary.required ? "preserve_unknown" : "route_next_step")
+      : strategy.prototype === "option_comparison" || /(?:比较|对比|差异)/u.test(strategy.bodyRole)
+        ? "compare"
+        : "answer";
+  const imageRole: ContentIntentCard["imageRole"] = imagePlan.role === "diagram"
+    ? "explain_concept"
+    : imagePlan.role === "evidence" || imagePlan.role === "before_after"
+      ? "show_evidence"
+      : imagePlan.role === "scene"
+        ? "set_scene"
+        : /(?:流程|步骤|路径)/u.test(strategy.bodyRole)
+          ? "show_process"
+          : "summarize_decision";
+  return {
+    readerDecision: opportunity.angle || opportunity.topic,
+    singleTakeaway: primary?.question || opportunity.angle || opportunity.topic,
+    openingQuestion: opportunity.angle || opportunity.topic,
+    bodyOwnedGapIds: bodyCards.map((card) => card.gapId),
+    commentOwnedGapIds: commentCards.map((card) => card.gapId),
+    bodyMustEstablish: bodyCards
+      .filter((card) => card.obligation === "body_required" || card.required)
+      .map((card) => card.gapId),
+    bodyMustNotExpand: cards
+      .filter((card) => card.obligation === "network_required" && !card.plannedPlacements.includes("N.body"))
+      .map((card) => card.gapId),
+    imageRole,
+    completionMode,
+  };
 }
 
 /** Render legacy channel tokens from the canonical cards. Never assign gaps here. */
@@ -1556,6 +1840,7 @@ function dialoguePlans(
   seed: number,
   personaScenePlan: PersonaScenePlan,
   replyRouting: { claimRules: ProjectClaimRule[]; projectBlueprint?: ProjectCreativeBlueprint } = { claimRules: [] },
+  focusContract?: EditorialFocusContract,
 ): DialogueThreadPlan[] {
   const relevant = gapCards.filter((gap) => opportunity.gapIds.includes(gap.gapId));
   const ordered = [...relevant].sort((left, right) =>
@@ -1574,7 +1859,9 @@ function dialoguePlans(
   const method = config.parameters;
   const roleDiversity = method?.commentRoleDiversity ?? 65;
   const constraintDensity = method?.commentConstraintDensity ?? 60;
-  const gapMultiplexing = method?.commentGapMultiplexing ?? 55;
+  const gapMultiplexing = focusContract?.allowCrossGapBranching === false
+    ? 0
+    : method?.commentGapMultiplexing ?? 55;
   const replyIncrement = method?.commentReplyIncrement ?? 70;
   const discoveryStrength = method?.commentDiscoveryStrength ?? 65;
   const inferenceEffort = method?.commentInferenceEffort ?? 35;
@@ -1582,8 +1869,12 @@ function dialoguePlans(
   const falseClosureGuard = method?.commentFalseClosureGuard ?? 95;
   const questionCompression = method?.questionCompression ?? 60;
   const platformRegister = method?.commentPlatformRegister ?? 68;
-  const conversationRate = method?.commentConversationRate ?? 48;
-  const branchingStrength = method?.commentBranchingStrength ?? 62;
+  const conversationRate = focusContract?.allowMultiTurnGrowth === false
+    ? 0
+    : method?.commentConversationRate ?? 48;
+  const branchingStrength = focusContract?.allowCrossGapBranching === false
+    ? 0
+    : method?.commentBranchingStrength ?? 62;
   const organicVariation = method?.commentOrganicVariation ?? 58;
   const stages: TopicOpportunity["audienceStage"][] = ["discovering", "collecting", "comparing", "hesitating", "ready"];
   const stageIndex = stages.indexOf(opportunity.audienceStage);
@@ -1626,7 +1917,8 @@ function dialoguePlans(
   // P2-11: only plan multi-turn threads when the growth pass (stage 2B) is
   // enabled; otherwise every thread stays a single exchange, matching what the
   // engine will actually produce (2A followUps are emptied, 2B is skipped).
-  const multiTurnCount = config.content.commentMultiTurnGrowthEnabled === true && config.content.followUpDepth > 0
+  const multiTurnCount = focusContract?.allowMultiTurnGrowth !== false
+    && config.content.commentMultiTurnGrowthEnabled === true && config.content.followUpDepth > 0
     ? Math.min(targetCount, visibleLineCapacity, Math.round(targetCount * conversationRate / 100))
     : 0;
   // P3-15: at most one counterexample thread per plan, and only when the
@@ -1711,9 +2003,11 @@ function dialoguePlans(
       ? evidenceStances
       : evidenceStances.slice(0, roleDiversity >= 75 ? 3 : roleDiversity >= 40 ? 2 : 1);
     const evidenceStance = stancePool[Math.floor(hashUnit(seed, `stance:${index}`) * stancePool.length)]!;
-    const constraints = Array.from({ length: Math.min(constraintCount, constraintPool.length) }, (_, offset) =>
-      constraintPool[(constraintStart + index + offset * Math.max(1, targetCount)) % constraintPool.length]!,
-    ).filter((item, itemIndex, all) => all.indexOf(item) === itemIndex);
+    const constraints = focusContract?.mode === "focused"
+      ? []
+      : Array.from({ length: Math.min(constraintCount, constraintPool.length) }, (_, offset) =>
+          constraintPool[(constraintStart + index + offset * Math.max(1, targetCount)) % constraintPool.length]!,
+        ).filter((item, itemIndex, all) => all.indexOf(item) === itemIndex);
     const auxiliaryGapIds = ordered
       .filter((candidate) => candidate.gapId !== gap.gapId)
       .sort((left, right) => hashUnit(seed, `aux:${index}:${left.gapId}`) - hashUnit(seed, `aux:${index}:${right.gapId}`))
@@ -1781,7 +2075,9 @@ function dialoguePlans(
           : unusedResponsibilityMatched;
     // 项目缺口席位存在职责映射时，命中角色一旦用尽就生成当前缺口专属的
     // 中性读者卡；社会席位则已在上面从真实读者角色池轮换。
-    const openerCard = eligiblePool[0] ?? neutralRole;
+    const openerCard = focusContract?.mode === "focused" && ownsPrimaryGap
+      ? neutralRole
+      : eligiblePool[0] ?? neutralRole;
     const personaRepeated = usedOpenerDisplayRoles.has(openerCard.displayRole);
     usedOpenerDisplayRoles.add(openerCard.displayRole);
     // T3 漂浮短反应也必须保留主 gap 语义，只压缩长度，不改换话题。
@@ -1864,38 +2160,53 @@ function dialoguePlans(
       ],
     };
     const baseDirectAnswer = gap.answer ?? gap.framework
-      ?? pickVariant(
-        directAnswerFallbackPools[threadFunction] ?? ["当前不能直接下结论，先给出可执行核验路径", "这里不能直接给结论，先给一条能落地的核实路径"],
-        "directAnswer",
-      );
+      ?? (focusContract?.mode === "focused"
+        ? `“${gap.label}”当前无法确认；只说明尚未披露的部分，并按本问题继续核实`
+        : pickVariant(
+          directAnswerFallbackPools[threadFunction] ?? ["当前不能直接下结论，先给出可执行核验路径", "这里不能直接给结论，先给一条能落地的核实路径"],
+          "directAnswer",
+        ));
     // M7 per-mechanism ruling — 需求 7.6 / design 组件 E · E1: replyPlan = (b) → RETAINED but
     // already NON-blocking. Evidence support is weak (a), but the answer-requirement template
     // (directAnswer / condition / boundary / unknown / nextQuestion) carries recorded creative
     // and safety value (b) — boundary + unknown declarations. A missing replyPlan is only a
     // `warning` in content.ts (comment_reply_plan_missing), never a hard gate; kept as-is.
-    const replyPlan: DialogueThreadPlan["replyPlan"] = {
-      directAnswer: replyIncrement >= 70 && gap.evidenceIds.length
-        ? `${baseDirectAnswer}${pickVariant([
-          "；核验时只采用本线程列出的证据来源",
-          "；适用性核对以本条所列证据来源为准",
-          "；下结论前回到本线程挂出的来源逐项核对",
-        ], "evidenceSuffix")}`
-        : baseDirectAnswer,
-      condition: replyIncrement >= 70 && constraints.length > 1
-        ? constraints.join("；")
-        : constraints[0] ?? pickVariant([
-          "仅在已披露条件内回答",
-          "只在对方已说清的条件范围内回应",
-          "未披露的个人条件不作为回答依据",
-        ], "condition"),
-      boundary,
-      unknown,
-      nextQuestion: replyIncrement >= 70 ? nextQuestion : pickVariant([
-        "核实一个会改变结论的条件",
-        "补问一项足以改变判断的输入",
-        "确认一个还没说清、且会改变结论的条件",
-      ], "nextQuestion"),
-    };
+    const focusedReply = focusContract?.mode === "focused";
+    const replyPlan: DialogueThreadPlan["replyPlan"] = focusedReply
+      ? {
+          directAnswer: gap.evidenceIds.length
+            ? `${baseDirectAnswer}；只按本线程列出的公开依据说明`
+            : baseDirectAnswer,
+          condition: "只按当前公开、可核验的信息回答",
+          boundary: gap.boundary ?? "不把未披露信息写成确定事实",
+          unknown: gap.answer || gap.framework
+            ? `“${gap.label}”中证据未覆盖的部分仍保持未知`
+            : `“${gap.label}”目前没有可核验答案，未披露部分保持未知`,
+          nextQuestion: `继续核实“${gap.question}”中尚未披露的部分`,
+        }
+      : {
+          directAnswer: replyIncrement >= 70 && gap.evidenceIds.length
+            ? `${baseDirectAnswer}${pickVariant([
+              "；核验时只采用本线程列出的证据来源",
+              "；适用性核对以本条所列证据来源为准",
+              "；下结论前回到本线程挂出的来源逐项核对",
+            ], "evidenceSuffix")}`
+            : baseDirectAnswer,
+          condition: replyIncrement >= 70 && constraints.length > 1
+            ? constraints.join("；")
+            : constraints[0] ?? pickVariant([
+              "仅在已披露条件内回答",
+              "只在对方已说清的条件范围内回应",
+              "未披露的个人条件不作为回答依据",
+            ], "condition"),
+          boundary,
+          unknown,
+          nextQuestion: replyIncrement >= 70 ? nextQuestion : pickVariant([
+            "核实一个会改变结论的条件",
+            "补问一项足以改变判断的输入",
+            "确认一个还没说清、且会改变结论的条件",
+          ], "nextQuestion"),
+        };
     const cueSource = gap.answer ?? gap.framework
       ?? (gap.evidenceIds.length ? "已有可核验来源，但答案仍需核实" : "当前资料未给出确定答案");
     const cueCore = [...cueSource.replace(/[。；;！？!?]+$/u, "")].slice(0, discoveryStrength >= 70 ? 20 : 14).join("");
@@ -1991,7 +2302,8 @@ function dialoguePlans(
       : threadKind === "reader_exchange"
         ? Math.min(1, plannedFollowUps) as 0 | 1
         : plannedFollowUps;
-    const extensionGapId = threadKind === "org_answer" && branchingStrength >= 45 ? auxiliaryGapIds[0] : undefined;
+    const extensionGapId = focusContract?.allowCrossGapBranching !== false
+      && threadKind === "org_answer" && branchingStrength >= 45 ? auxiliaryGapIds[0] : undefined;
     const topology: NonNullable<DialogueThreadPlan["conversationPlan"]>["topology"] = threadKind === "organic_reaction"
       ? "organic_reaction"
       : threadKind === "host_reply"
@@ -2215,10 +2527,121 @@ function structureSimilarityToRecent(plan: OrchestrationPlan, recent: CoverageSi
   return Math.max(...recent.map((item) => 1 - coverageSignatureDistance(signature, item)));
 }
 
-/** F42: return exactly three structurally distinct plans for one selected topic. */
+function effectiveEditorialAngle(
+  opportunity: TopicOpportunity,
+  gaps: InformationGap[],
+  topology: ResolvedGenerationConfig["task"]["publishingTopology"],
+): string {
+  const labels = gaps.map((gap) => gap.label).filter(Boolean).slice(0, 2).join("、") || opportunity.topic;
+  const allOrganizationOnly = gaps.length > 0 && gaps.every(organizationOnlyGap);
+  if (topology === "institution_owned") {
+    return `以明确机构身份围绕“${labels}”说明当前可确认信息、必要边界与仍未知项，不模拟消费者体验`;
+  }
+  if (topology === "confirmed_individual_author") {
+    return `只依据已确认作者事实围绕“${labels}”提出或回应一个窄问题，不补写未确认经历`;
+  }
+  if (allOrganizationOnly) {
+    return `以准备行动者的创作情景提出“${labels}”中的一个具体问题；不虚构已经到店、咨询或获得机构答案，事实答案留给明确机构身份`;
+  }
+  return opportunity.angle || opportunity.topic;
+}
+
+function editorialFocusContract(
+  input: PlanTopicOrchestrationsInput,
+  gaps: InformationGap[],
+  selection: StrategySelectionContext,
+): EditorialFocusContract {
+  const narrow = gaps.length <= 2;
+  const allOrganizationOnly = gaps.length > 0 && gaps.every(organizationOnlyGap);
+  const explicitlyConstrained = input.opportunity.boundaries.some((boundary) =>
+    /(?:不能|不得|禁止).{0,16}(?:体验|亲历|案例|顾客|客户|口碑|效果|承诺)/u.test(boundary));
+  // A small number of gaps is not enough to justify suppressing the configured
+  // method. Generic comparison/education posts with two gaps still need their
+  // normal parameter semantics. Focus mode is reserved for narrow controlled-
+  // fact tasks (location, identity, credential, schedule, price, etc.) or an
+  // opportunity carrying an explicit anti-fabrication/publication boundary.
+  // When every approved strategy introduces another business premise, the
+  // neutral fallback is itself a strong focus signal. Keeping the old project
+  // persona/event in that case would re-import the very price/recovery/outcome
+  // topic that strategy compatibility just rejected.
+  const neutralFallback = selection.mode === "neutral_fallback";
+  const focused = narrow && (allOrganizationOnly || explicitlyConstrained || neutralFallback);
+  return {
+    mode: focused ? "focused" : "standard",
+    reason: focused
+      ? neutralFallback
+        ? `当前选题没有兼容的已审批表达策略；改用当前缺口专属的中立人物、事件与评论职责，不继承相邻营销主题。`
+        : `本候选只有 ${gaps.length} 个受控信息职责；取消额外社交席位、跨缺口分支和多轮扩写，避免为热闹引入无关主题。`
+      : `本候选不属于受控窄题，保留最终参数编译出的标准评论能力。`,
+    allowedGapIds: gaps.map((gap) => gap.id),
+    effectiveAngle: effectiveEditorialAngle(input.opportunity, gaps, input.config.task.publishingTopology),
+    originalAngle: input.opportunity.angle,
+    allowSocialThreads: !focused,
+    allowCrossGapBranching: !focused,
+    allowMultiTurnGrowth: !focused,
+    strategySelection: {
+      mode: selection.mode,
+      compatibleStrategyIds: [...selection.compatibleIds],
+      rejectedStrategyIds: [...selection.rejectedIds],
+    },
+  };
+}
+
+/**
+ * A neutral strategy fallback must also neutralize the creative scene. Strategy
+ * filtering alone is insufficient: project blueprints may still contain an
+ * unrelated persona/event (price, recovery, outcome, etc.) that would leak back
+ * into titles, body copy and image plans. Keep accountable/confirmed identities
+ * intact, but project creative-scenario fields onto the selected gap only.
+ */
+function applyFocusedPersonaProjection(
+  plan: PersonaScenePlan,
+  cards: InformationGapPlanningCard[],
+  focus: EditorialFocusContract,
+): void {
+  if (focus.mode !== "focused" || focus.strategySelection.mode !== "neutral_fallback") return;
+  const selected = cards.filter((card) => focus.allowedGapIds.includes(card.gapId));
+  const labels = selected.map((card) => card.label).filter(Boolean).slice(0, 2).join("、") || "当前问题";
+  const unresolved = selected.some((card) => !(card.answer ?? card.framework));
+  const status = plan.host.status;
+  if (status === "creative_scenario") {
+    plan.scenarioFamilyId = `focused_${stableHash([labels, ...focus.allowedGapIds]).slice(0, 10)}`;
+    plan.prototype = "narrow_request";
+    plan.host = {
+      ...plan.host,
+      identityCue: "只想把当前问题问清楚的人",
+      lifeContext: `正在核实“${labels}”`,
+      currentStage: `只围绕“${labels}”收集公开信息`,
+      immediateConstraint: unresolved ? `${labels}还没有可核验答案` : `${labels}仍有未披露部分`,
+      relationshipAnchor: "围绕同一问题交流的读者",
+      affect: "谨慎，不急着下结论",
+      motive: `只把“${labels}”问清楚`,
+      voiceTraits: ["普通口语", "只说当前问题", "未知就明确保留未知"],
+      speechMarkers: [labels, "当前无法确认", "继续核实"],
+      knowledgeBoundary: `只知道“${labels}”的公开信息；不引入当前缺口之外的相邻主题`,
+    };
+  }
+  if (status !== "confirmed_author_facts") {
+    plan.event = {
+      timeAnchor: "最近",
+      setting: `核对“${labels}”公开信息时`,
+      trigger: unresolved ? `发现“${labels}”还没有可核验答案` : `发现“${labels}”仍有未披露部分`,
+      observableAction: `把“${labels}”整理成一个具体问题`,
+      friction: `${labels}还没确认`,
+      emotionalAftertaste: "先不下结论",
+      openLoop: `继续核实“${labels}”中尚未披露的部分`,
+      imageMoment: `与“${labels}”核实直接相关的中性求助素材`,
+    };
+  }
+  plan.surfaceTargets = surfaceTargets("narrow_request", false);
+  plan.sampleBasis = `当前缺口“${labels}”的中立聚焦投影；未使用被兼容性门禁拒绝的项目场景。`;
+}
+
+/** F42: return three structurally varied candidates for the user-selected publishing topology. */
 export function planTopicOrchestrations(input: PlanTopicOrchestrationsInput): [OrchestrationPlan, OrchestrationPlan, OrchestrationPlan] {
   const options = resolvedOptions(input.options);
   const recent = (input.recentCoverage ?? []).slice(0, options.reuseCooldown);
+  const strategySelection = strategySelectionContext(input, options);
   const sourceIds = [...new Set([
     ...input.opportunity.evidenceIds,
     ...(input.projectIntelligence?.evidenceIds ?? []),
@@ -2227,11 +2650,8 @@ export function planTopicOrchestrations(input: PlanTopicOrchestrationsInput): [O
   const unknownLockedGap = options.lockedGapIds.find((id) => !gapById.has(id));
   if (unknownLockedGap) throw new Error(`Locked information gap does not exist: ${unknownLockedGap}`);
   const enabledProjectStrategies = (input.expressionStrategies ?? []).filter((strategy) => strategy.enabled !== false);
-  const explicitPolicyLock = Boolean(
-    options.lockedStrategyId
-    || enabledProjectStrategies.find((strategy) => strategy.locked),
-  );
-  const expressionPolicyFixed = explicitPolicyLock || enabledProjectStrategies.length === 1;
+  const explicitPolicyLock = strategySelection.mode === "explicit_lock";
+  const expressionPolicyFixed = explicitPolicyLock || strategySelection.pool.length === 1;
   // When the expression policy is intentionally fixed, distance is measured
   // only over the still-independent state/gap axes, whose attainable range is smaller.
   // An explicit lock prioritizes exact policy fidelity over a distance target and
@@ -2242,7 +2662,7 @@ export function planTopicOrchestrations(input: PlanTopicOrchestrationsInput): [O
 
   const buildPlan = (candidateIndex: 0 | 1 | 2, attempt: number): OrchestrationPlan => {
     const seed = input.seeds?.[candidateIndex] ?? seedFor(input.seed ?? 0, candidateIndex);
-    const strategy = sampleExpressionStrategy(input, options, candidateIndex, attempt, recent);
+    const strategy = sampleExpressionStrategy(input, options, candidateIndex, attempt, recent, strategySelection);
     const unlockedGapIds = input.opportunity.gapIds.filter((id) => !options.lockedGapIds.includes(id));
     const gapOrderRandomized = options.randomizationDimensions.includes("gap_order") && options.variationStrength > 0;
     const orderedUnlocked = gapOrderRandomized
@@ -2275,11 +2695,27 @@ export function planTopicOrchestrations(input: PlanTopicOrchestrationsInput): [O
       .map((id) => gapById.get(id))
       .filter((gap): gap is InformationGap => Boolean(gap))
       .map((gap) => options.lockedGapIds.includes(gap.id) ? { ...gap, required: true } : gap);
+    const focusContract = editorialFocusContract(input, gaps, strategySelection);
+    const effectiveOpportunity = { ...opportunity, angle: focusContract.effectiveAngle };
     const commentsEnabled = input.config.expressionWindow.channels.includes("comments") && input.config.content.commentThreadMax > 0;
-    const gapPlanningCards = makeGapPlanningCards(opportunity, gaps, strategy, commentsEnabled);
-    const channelAllocation = renderChannelAllocation(opportunity, gapPlanningCards, strategy, commentsEnabled);
-    const personaScenePlan = buildPersonaScenePlan(strategy, opportunity, input.config, seed + attempt, input.projectBlueprint);
-    const imagePlan = buildImagePlan(strategy, opportunity, input.imageAnalyses ?? [], personaScenePlan);
+    const gapPlanningCards = makeGapPlanningCards(
+      effectiveOpportunity,
+      gaps,
+      strategy,
+      commentsEnabled,
+      input.config.task.publishingTopology,
+      focusContract,
+    );
+    const channelAllocation = renderChannelAllocation(effectiveOpportunity, gapPlanningCards, strategy, commentsEnabled);
+    const personaScenePlan = buildPersonaScenePlan(strategy, effectiveOpportunity, input.config, seed + attempt, input.projectBlueprint);
+    applyFocusedPersonaProjection(personaScenePlan, gapPlanningCards, focusContract);
+    if (!focusContract.allowMultiTurnGrowth) personaScenePlan.commentNetwork.multiTurnTarget = [0, 0];
+    if (!focusContract.allowCrossGapBranching) {
+      personaScenePlan.commentNetwork.branchMoves = ["只围绕当前线程主问题澄清，不延伸相邻主题"];
+      personaScenePlan.commentNetwork.organicMoves = ["不为制造热闹增加无信息职责的节点"];
+    }
+    const imagePlan = buildImagePlan(strategy, effectiveOpportunity, input.imageAnalyses ?? [], personaScenePlan);
+    const contentIntent = compileContentIntentCard(effectiveOpportunity, gapPlanningCards, strategy, imagePlan);
     const primaryGapIds = gapPlanningCards
       .filter((card) => card.plannedPlacements.includes("Cref"))
       .map((card) => card.gapId);
@@ -2288,16 +2724,19 @@ export function planTopicOrchestrations(input: PlanTopicOrchestrationsInput): [O
     if (individualAuthor && (input.config.task.authorContext.status !== "confirmed" || input.config.task.authorContext.facts.length === 0)) {
       throw new Error("confirmed_individual_author requires at least one human-confirmed author fact.");
     }
-    const requiredSocialSlots = commentsEnabled ? (individualAuthor ? 2 : 1) : 0;
-    const minimumThreadTarget = primaryGapIds.length + requiredSocialSlots;
-    // Comment capacity follows distinct conversational responsibilities, not a
-    // configured minimum or expansion percentage in isolation. One project-gap
-    // seat answers one distinguishable question; one social seat makes the
-    // section feel inhabited. Only a topic with at least three distinct gaps and
-    // very high expansion earns one extra social angle. This prevents two facts
-    // from being padded into five variants of the same question.
+    const requiredSocialSlots = commentsEnabled && focusContract.allowSocialThreads ? (individualAuthor ? 2 : 1) : 0;
+    const responsibilityThreadTarget = primaryGapIds.length + requiredSocialSlots;
+    // `commentThreadMin` is a user-visible output contract, not merely a hint.
+    // When distinct project-gap duties do not fill it, add same-topic social
+    // anchor seats. These seats never own/resolve a gap, carry no project-fact
+    // evidence, and focused mode still disables auxiliary gaps and multi-turn
+    // growth. This preserves the requested count without cloning one factual
+    // answer or importing adjacent marketing topics.
+    const configuredMinimumTarget = commentsEnabled ? input.config.content.commentThreadMin : 0;
     const optionalDiversitySlots = commentsEnabled && primaryGapIds.length >= 3 && commentExpansion >= 85 ? 1 : 0;
-    const effectiveThreadTarget = commentsEnabled ? minimumThreadTarget + optionalDiversitySlots : 0;
+    const effectiveThreadTarget = commentsEnabled
+      ? Math.max(configuredMinimumTarget, responsibilityThreadTarget + optionalDiversitySlots)
+      : 0;
     const COMMENT_THREAD_HARD_MAX = 8;
     if (effectiveThreadTarget > COMMENT_THREAD_HARD_MAX) {
       throw new Error(`comment_capacity_hard_limit_exceeded: ${primaryGapIds.length} project-gap seats + ${requiredSocialSlots} social seats exceed ${COMMENT_THREAD_HARD_MAX}; split the topic.`);
@@ -2306,7 +2745,7 @@ export function planTopicOrchestrations(input: PlanTopicOrchestrationsInput): [O
       ? `为同时保留 ${primaryGapIds.length} 个项目缺口与 ${requiredSocialSlots} 个必要互动席位，实际线程数 ${effectiveThreadTarget} 超出可读性目标 ${input.config.content.commentThreadMax}，但未超过硬上限 ${COMMENT_THREAD_HARD_MAX}。`
       : undefined;
     const dialogueThreads = dialoguePlans(
-      opportunity,
+      effectiveOpportunity,
       gapPlanningCards,
       strategy,
       effectiveThreadTarget,
@@ -2318,6 +2757,7 @@ export function planTopicOrchestrations(input: PlanTopicOrchestrationsInput): [O
         claimRules: input.projectBlueprint?.claimPolicy.rules ?? [],
         projectBlueprint: input.projectBlueprint,
       },
+      focusContract,
     );
     const gapCoverageLedger = buildGapCoverageLedger(
       gapPlanningCards,
@@ -2339,10 +2779,12 @@ export function planTopicOrchestrations(input: PlanTopicOrchestrationsInput): [O
       candidateIndex,
       seed,
       strategy,
-      stateSeed: stateSeed({ ...input, opportunity }, seed, candidateIndex + attempt * 3, options),
+      stateSeed: stateSeed({ ...input, opportunity: effectiveOpportunity }, seed, candidateIndex + attempt * 3, options),
       personaScenePlan,
       selectedGapIds,
       gapPlanningCards,
+      contentIntent,
+      focusContract,
       channelAllocation,
       imagePlan,
       dialogueThreads,
@@ -2373,7 +2815,9 @@ export function planTopicOrchestrations(input: PlanTopicOrchestrationsInput): [O
         `同一选题采用 ${strategy.label}，并沿独立表达轴做受控交叉编排。`,
         `可见成品采用 ${personaScenePlan.prototype} 原型；人物、事件和评论关系网跨通道保持一致。`,
         `随机化维度：${options.randomizationDimensions.join("、") || "无"}；强度 ${options.variationStrength.toFixed(2)}。`,
-        "每篇只推进一个窄任务；正文建立人物事件，评论用短互动逐步补足相邻信息。",
+        focusContract.reason,
+        `写作有效角度：${focusContract.effectiveAngle}`,
+        `策略选择模式：${focusContract.strategySelection.mode}；兼容 ${focusContract.strategySelection.compatibleStrategyIds.length} 项，拒绝 ${focusContract.strategySelection.rejectedStrategyIds.length} 项。`,
         `信息台账完整度 ${gapCoverageLedger.ledgerCompleteness.toFixed(2)}；最终正文与评论尚未生成，真实解决率待生成后核验。`,
       ],
       evidenceIds: sourceIds,

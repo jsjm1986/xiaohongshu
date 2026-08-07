@@ -159,7 +159,22 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   color: var(--ink) !important; font: inherit; font-weight: 600;
 }
 .toast__action:hover { border-color: var(--coral) !important; color: var(--coral) !important; }
-.toast--success > svg { color: var(--green); }
+/* 成功反馈必须一眼可见：原先只有图标变绿，白色卡片会融进页面背景。 */
+.toast--success {
+  border-color: #176b4b;
+  background: #176b4b;
+  color: #fff;
+  box-shadow: 0 12px 30px rgb(23 107 75 / 28%), 0 3px 10px rgb(23 107 75 / 20%);
+  font-size: 14px;
+  font-weight: 650;
+}
+.toast--success > svg { flex: none; color: #fff; }
+.toast--success > button:not(.toast__action) { color: rgb(255 255 255 / 82%); }
+.toast--success .toast__action {
+  border-color: rgb(255 255 255 / 55%) !important;
+  color: #fff !important;
+}
+.toast--success .toast__action:hover { border-color: #fff !important; color: #fff !important; }
 .toast--error > svg { color: var(--red); }
 .toast--info > svg { color: var(--blue); }
 .skeleton-block { padding: 10px 22px 25px; display: flex; flex-direction: column; gap: 12px; }
@@ -584,7 +599,7 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .candidate-card footer span { display: flex; align-items: center; gap: 4px; }
 .candidate-card__score strong { color: var(--blue); font-size: 13px; }
 .candidate-matrix { margin-top: 12px; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
-.candidate-matrix__row { min-height: 31px; display: grid; grid-template-columns: 120px repeat(3, 1fr); align-items: center; border-top: 1px solid var(--line); }
+.candidate-matrix__row { min-height: 31px; display: grid; grid-template-columns: 120px repeat(var(--candidate-count, 3), 1fr); align-items: center; border-top: 1px solid var(--line); }
 .candidate-matrix__row:first-child { border-top: 0; }
 .candidate-matrix__row > span { padding-left: 11px; color: var(--muted); font-size: 8px; }
 .candidate-matrix__row > b, .candidate-matrix__row > strong { height: 100%; padding: 8px; display: flex; align-items: center; justify-content: center; border-left: 1px solid var(--line); font-size: 8px; font-weight: 600; }
@@ -1648,12 +1663,15 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   color: #8c641f;
   font-size: 13px;
 }
-.generation-release-proof { display: flex; align-items: flex-start; gap: 10px; padding: 13px 16px; border: 1px solid #b9d9cb; border-radius: 12px; background: #f3faf7; color: #31664f; }
-.generation-release-proof > svg { flex: 0 0 auto; margin-top: 1px; }
-.generation-release-proof > div { flex: 1; min-width: 0; }
-.generation-release-proof strong { color: var(--text); font-size: 12px; }
-.generation-release-proof p { margin: 3px 0 0; color: #567465; font-size: 10px; line-height: 1.55; }
-.generation-release-proof > a { flex: 0 0 auto; color: var(--brand); font-size: 10px; text-decoration: none; }
+.generation-release-proof { margin-bottom: 10px; border: 1px solid #b9d9cb; border-radius: 11px; background: #f3faf7; color: #31664f; overflow: hidden; }
+.generation-release-proof > summary { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 7px 12px; cursor: pointer; list-style: none; }
+.generation-release-proof > summary::-webkit-details-marker { display: none; }
+.generation-release-proof > summary strong { color: var(--text); font-size: 11px; }
+.generation-release-proof > summary > svg:last-child { margin-left: auto; transition: transform .15s ease; }
+.generation-release-proof[open] > summary > svg:last-child { transform: rotate(180deg); }
+.generation-release-proof > div { display: flex; align-items: center; gap: 12px; padding: 7px 12px 9px 37px; border-top: 1px solid #d9ebe3; }
+.generation-release-proof p { flex: 1; margin: 0; color: #567465; font-size: 9px; line-height: 1.5; }
+.generation-release-proof a { flex: none; color: var(--brand); font-size: 10px; text-decoration: none; }
 
 /* Research and evidence governance */
 .research-page { display: grid; gap: 16px; }
@@ -2905,6 +2923,9 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   font-size: var(--v2-fs-sm); line-height: 1.5;
 }
 .qc-panel { max-width: 720px; }
+.qc-replay-contract { padding: 10px 12px; display: flex; flex-direction: column; gap: 3px; border: 1px solid #d8c99c; border-radius: 9px; background: #fffaf0; color: var(--ink-2); }
+.qc-replay-contract strong { font-size: 10px; }
+.qc-replay-contract small { color: var(--muted); font-size: 8px; line-height: 1.5; }
 .qc-step { display: flex; flex-direction: column; gap: 16px; }
 .qc-hint { color: var(--v2-muted); font-size: var(--v2-fs-sm); }
 /* 阻塞性提示(额度用尽等):要和普通灰色说明区分开,它解释的是"为什么不能继续" */
@@ -3501,12 +3522,17 @@ div.qc-topic { cursor: default; }
 .qc-issue-more > ul { margin: 4px 0 0; padding-left: 18px; color: var(--v2-warn); font-size: var(--v2-fs-micro); }
 
 /* ===== 生成结果页 · 易用性优化(信息零丢失:诊断默认折叠,内容前置) ===== */
-.validation-summary { margin-bottom: 17px; padding: 14px 16px; border: 1px solid #f0caca; border-radius: 13px; background: #fff; box-shadow: var(--shadow-sm); }
-.validation-summary > header { display: flex; gap: 10px; align-items: flex-start; }
-.validation-summary > header > svg { flex: none; margin-top: 2px; color: var(--red); }
-.validation-summary > header strong { display: block; font-size: 13px; }
-.validation-summary > header p { margin: 3px 0 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
-.validation-summary__groups { margin: 10px 0 0; padding: 8px 0 0; border-top: 1px dashed var(--line); display: grid; gap: 4px; }
+.validation-summary { margin-bottom: 10px; border: 1px solid #f0caca; border-radius: 11px; background: #fff; box-shadow: var(--shadow-sm); overflow: hidden; }
+.validation-summary > summary { display: flex; align-items: center; gap: 8px; min-height: 42px; padding: 8px 12px; cursor: pointer; list-style: none; }
+.validation-summary > summary::-webkit-details-marker { display: none; }
+.validation-summary > summary > svg:first-child { flex: none; color: var(--red); }
+.validation-summary > summary > strong { font-size: 12px; }
+.validation-summary > summary > span { color: var(--muted); font-size: 10px; }
+.validation-summary > summary > em { margin-left: auto; color: var(--muted); font-size: 9px; font-style: normal; }
+.validation-summary > summary > svg:last-child { flex: none; color: var(--muted); transition: transform .15s ease; }
+.validation-summary[open] > summary > svg:last-child { transform: rotate(180deg); }
+.validation-summary[open] > summary { border-bottom: 1px dashed var(--line); }
+.validation-summary__groups { padding: 7px 10px 9px; display: grid; gap: 3px; }
 .validation-summary__group > summary { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 7px; cursor: pointer; font-size: 10px; list-style: none; }
 .validation-summary__group > summary::-webkit-details-marker { display: none; }
 .validation-summary__group > summary:hover { background: var(--surface-soft, #f7f8f6); }
@@ -5070,16 +5096,45 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
   .v2 .generate-page .author-fact-summary li { grid-template-columns:1fr; gap:3px; }
 }
 
-/* 未通过候选的人工交付确认：不改写自动校验，只解锁当前用户/候选。 */
-.manual-delivery-confirmation { margin: -4px 0 17px; padding: 14px 16px; display: grid; gap: 12px; border: 1px solid #e3c17d; border-radius: 13px; background: #fffaf0; }
-.manual-delivery-confirmation > div:first-child { display: grid; gap: 3px; }
-.manual-delivery-confirmation strong { color: #754c0d; font-size: 13px; }
-.manual-delivery-confirmation p { margin: 0; color: #89682e; font-size: 10px; line-height: 1.6; }
-.manual-delivery-confirmation small { color: #5d7769; font-size: 9px; }
-.manual-delivery-confirmation__action { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding-top: 10px; border-top: 1px dashed #e3c17d; }
-.manual-delivery-confirmation__action label { display: flex; min-width: 0; align-items: flex-start; gap: 9px; color: #614a22; font-size: 10px; line-height: 1.55; cursor: pointer; }
-.manual-delivery-confirmation__action input { width: 16px; height: 16px; flex: 0 0 auto; margin-top: 0; accent-color: var(--green); }
-.manual-delivery-confirmation.is-confirmed { border-color: #a8c8b6; background: #f2faf6; }
-.manual-delivery-confirmation.is-confirmed strong { color: #315f49; }
-.manual-delivery-confirmation.is-confirmed p { color: #567465; }
-@media (max-width: 640px) { .manual-delivery-confirmation__action { align-items: stretch; flex-direction: column; } }
+/* 未通过候选的人工交付确认：首屏单行操作；确认后由状态条表达，不再占一张卡。 */
+.manual-delivery-confirmation { margin: 0 0 10px; min-height: 46px; padding: 7px 10px 7px 12px; display: flex; align-items: center; gap: 14px; border: 1px solid #e3c17d; border-radius: 11px; background: #fffaf0; }
+.manual-delivery-confirmation__summary { min-width: 190px; display: grid; gap: 1px; }
+.manual-delivery-confirmation strong { display: flex; align-items: center; gap: 6px; color: #754c0d; font-size: 11px; }
+.manual-delivery-confirmation small { color: #89682e; font-size: 8px; }
+.manual-delivery-confirmation.is-confirmed { border-color: #8fc4aa; background: #edf8f2; box-shadow: inset 3px 0 0 #23845f; }
+.manual-delivery-confirmation.is-confirmed strong { color: #176b4b; font-size: 12px; }
+.manual-delivery-confirmation.is-confirmed small { color: #477361; }
+.manual-delivery-confirmation__action--ready { gap: 7px; }
+.manual-delivery-confirmation__action { flex: 1; display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.manual-delivery-confirmation__action label { display: flex; min-width: 0; align-items: center; gap: 7px; color: #614a22; font-size: 9px; line-height: 1.35; cursor: pointer; }
+.manual-delivery-confirmation__action input { width: 15px; height: 15px; flex: 0 0 auto; margin: 0; accent-color: var(--green); }
+.manual-delivery-confirmation__action .button { flex: none; padding: 7px 11px; }
+@media (max-width: 760px) { .manual-delivery-confirmation { align-items: stretch; flex-direction: column; gap: 6px; } .manual-delivery-confirmation__action { justify-content: space-between; } }
+@media (max-width: 520px) { .manual-delivery-confirmation__action { align-items: stretch; flex-direction: column; } }
+
+/* Simple mode exposes the planner contracts that can otherwise look like silent overrides. */
+.simple-generation-contract { display: grid; gap: 7px; }
+.simple-generation-contract__item { display: flex; align-items: flex-start; gap: 8px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-soft); }
+.simple-generation-contract__item > svg { flex: none; margin-top: 1px; color: var(--brand); }
+.simple-generation-contract__item > span { min-width: 0; }
+.simple-generation-contract__item strong, .simple-generation-contract__item small { display: block; }
+.simple-generation-contract__item strong { font-size: 10px; }
+.simple-generation-contract__item small { margin-top: 2px; color: var(--muted); font-size: 9px; line-height: 1.5; }
+.simple-generation-contract__item.is-warning { border-color: #e4d4aa; background: #fffaf0; }
+.simple-generation-contract__item.is-warning > svg { color: var(--amber); }
+
+.formal-delivery-review { margin: 0 0 10px; padding: 11px 13px; border: 1px solid #e3c17d; border-radius: 11px; background: #fffaf0; }
+.formal-delivery-review > header { display: flex; align-items: flex-start; gap: 8px; }
+.formal-delivery-review > header > svg { flex: none; margin-top: 1px; color: var(--amber); }
+.formal-delivery-review > header strong, .formal-delivery-review > header small { display: block; }
+.formal-delivery-review > header strong { color: #754c0d; font-size: 12px; }
+.formal-delivery-review > header small { margin-top: 2px; color: #89682e; font-size: 9px; }
+.formal-delivery-review > ul { margin: 8px 0 0 24px; padding: 0; display: grid; gap: 5px; }
+.formal-delivery-review li { color: #614a22; font-size: 9px; line-height: 1.5; }
+.formal-delivery-review li b { margin-right: 6px; }
+.simple-generation-notices { padding: 11px 13px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-soft); }
+.simple-generation-notices > strong { display: flex; align-items: center; gap: 7px; font-size: 11px; }
+.simple-generation-notices > strong svg { color: var(--brand); }
+.simple-generation-notices ul { margin: 7px 0 0; padding-left: 18px; display: grid; gap: 4px; }
+.simple-generation-notices li { color: var(--muted); font-size: 9px; line-height: 1.5; }
+.simple-generation-notices li.is-warning { color: #8c641f; }

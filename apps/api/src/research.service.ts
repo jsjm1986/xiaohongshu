@@ -772,6 +772,8 @@ export class ResearchService implements OnModuleInit {
     // 仅 parameter 或 catalog 漂移的下一次自愈会撞上同名而插入失败。
     const contractTag = createHash('sha256')
       .update([
+        String(formula.id),
+        String(definition.digest ?? ''),
         FORMULA_EXECUTION_POLICY_DIGEST,
         PROMPT_CONTRACT_DIGEST,
         PARAMETER_POLICY_DIGEST,
@@ -785,6 +787,44 @@ export class ResearchService implements OnModuleInit {
     const notes = parentId
       ? '代码合同 digest 漂移后按当前运行时重建的只读基线；未绑定任何研究产物，不代表研究结论或参数校准。'
       : '迁移前已运行行为的只读基线；不代表研究结论或参数校准。';
+
+    // A project can return to a contract it used before (for example after an
+    // active formula is rolled back). UNIQUE(project_id, version) means that
+    // blindly inserting the deterministic version would make startup fail.
+    // Re-activate only an exact, unbound baseline; any mismatch remains a hard
+    // failure rather than mutating or trusting an unrelated release record.
+    const existing = this.database.prepare(
+      'SELECT * FROM release_manifests WHERE project_id=? AND version=?',
+    ).get(projectId, version) as JsonObject | undefined;
+    if (existing) {
+      const existingBindings = parseJson<JsonObject>(existing.bindings_json, {});
+      const existingPinned = [
+        ...stringArray(existingBindings.datasetSnapshotIds),
+        ...stringArray(existingBindings.experimentResultIds),
+        ...stringArray(existingBindings.calibrationProposalIds),
+      ];
+      const exactContract = String(existing.formula_version_id) === String(formula.id)
+        && String(existing.formula_digest) === String(definition.digest ?? '')
+        && String(existing.execution_policy_version) === FORMULA_EXECUTION_POLICY_VERSION
+        && String(existing.execution_policy_digest) === FORMULA_EXECUTION_POLICY_DIGEST
+        && String(existing.prompt_version) === PROMPT_CONTRACT_VERSION
+        && String(existing.prompt_digest) === PROMPT_CONTRACT_DIGEST
+        && String(existing.parameter_policy_version) === PARAMETER_POLICY_VERSION
+        && String(existing.parameter_policy_digest) === PARAMETER_POLICY_DIGEST
+        && String(existing.evidence_catalog_version) === String(this.catalog.data.catalogVersion ?? 'unknown')
+        && String(existing.evidence_catalog_digest) === this.catalog.digest;
+      if (!exactContract || existingPinned.length > 0) {
+        throw new Error(`发布清单版本 ${version} 已存在但合同或绑定不匹配，不能自动复用`);
+      }
+      this.database.prepare(
+        "UPDATE release_manifests SET status='active', activated_at=? WHERE id=?",
+      ).run(now, String(existing.id));
+      this.record(projectId, userId, 'research.release.baseline-reactivate', 'release_manifest', String(existing.id), {
+        formulaVersionId: formula.id,
+        parentId: parentId ?? null,
+      });
+      return;
+    }
     this.database.prepare(
       `INSERT INTO release_manifests
        (id,project_id,version,parent_id,status,app_version,build_id,formula_version_id,formula_digest,

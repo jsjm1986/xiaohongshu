@@ -5,6 +5,7 @@ import { autoApproveAndGenerate, quickCandidateFields, reviseCandidate, type Qui
 import { revisionStageText } from '../../lib/revision-progress';
 import { InlineProgress } from './InlineProgress';
 import type { SimpleSettingOverrides } from '../../lib/simple-generation';
+import type { RetryPublishingContract } from '../../lib/quick-recipe';
 import type { Project } from '../../types';
 
 interface Props {
@@ -13,6 +14,7 @@ interface Props {
   presetId: string | undefined;
   overrides: SimpleSettingOverrides;
   imageAssetIds: string[];
+  publishing: RetryPublishingContract;
   jobId: string | undefined;
   results: QuickCandidateView[];
   busy: boolean;
@@ -24,7 +26,7 @@ interface Props {
   onGenerated: (results: QuickCandidateView[], jobId: string) => void;
 }
 
-export function ResultTab({ project, opportunityId, presetId, overrides, imageAssetIds, jobId, results, busy, setBusy, generating, setGenerating, fail, onGenerated }: Props) {
+export function ResultTab({ project, opportunityId, presetId, overrides, imageAssetIds, publishing, jobId, results, busy, setBusy, generating, setGenerating, fail, onGenerated }: Props) {
   const toast = useToast();
   const [progress, setProgress] = useState<number | undefined>(undefined);
   const [revisingId, setRevisingId] = useState<string | null>(null);
@@ -42,6 +44,7 @@ export function ResultTab({ project, opportunityId, presetId, overrides, imageAs
         presetId,
         overrides,
         imageAssetIds,
+        publishing,
         onProgress: (j) => setProgress(j.progress),
       });
       onGenerated((job.candidates ?? []).map(quickCandidateFields), job.id);

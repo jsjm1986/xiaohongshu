@@ -1,11 +1,17 @@
-import type { ContentPreset, GenerationJob, TopicOpportunity } from "../types";
+import type { ContentPreset, GenerateInput, GenerationJob, TopicOpportunity } from "../types";
+import { isOpportunityAvailableForCreation } from "./quick-channel-state";
 import type { CommentRichnessLevel, SimpleSettingOverrides } from "./simple-generation";
+
+export type RetryPublishingContract = Pick<GenerateInput,
+  "publishingTopology" | "authorFacts" | "authorFactsConfirmed">;
 
 export interface QuickRecipe {
   opportunityId?: string;
   presetId?: string;
   overrides: SimpleSettingOverrides;
   imageAssetIds: string[];
+  /** Frozen publishing truth that must survive "retry same recipe". */
+  publishing?: RetryPublishingContract;
 }
 
 const str = (value: unknown): string | undefined =>
@@ -57,7 +63,24 @@ export function extractRecipe(job: GenerationJob): QuickRecipe {
     .map((entry) => str(record(entry).assetId) ?? str(record(entry).id))
     .filter((id): id is string => Boolean(id));
 
-  return { opportunityId, presetId: job.presetId, overrides, imageAssetIds };
+  const topology = str(task.publishingTopology) as GenerateInput["publishingTopology"] | undefined;
+  const authorContext = record(task.authorContext);
+  const storedFacts = Array.isArray(authorContext.facts) ? authorContext.facts : [];
+  const authorFacts = topology === "confirmed_individual_author"
+    ? storedFacts.map((value) => {
+      const fact = record(value);
+      return {
+        id: str(fact.id) ?? "",
+        statement: str(fact.statement) ?? "",
+        category: str(fact.category) as NonNullable<GenerateInput["authorFacts"]>[number]["category"],
+      };
+    }).filter((fact) => fact.id && fact.statement && fact.category)
+    : undefined;
+  const publishing: RetryPublishingContract = topology === "confirmed_individual_author"
+    ? { publishingTopology: topology, authorFacts, authorFactsConfirmed: true }
+    : topology ? { publishingTopology: topology } : {};
+
+  return { opportunityId, presetId: job.presetId, overrides, imageAssetIds, publishing };
 }
 
 export interface ResolvedRecipeTargets {
@@ -65,6 +88,7 @@ export interface ResolvedRecipeTargets {
   presetId: string | undefined;
   overrides: SimpleSettingOverrides;
   imageAssetIds: string[];
+  publishing: RetryPublishingContract;
   warnings: string[];
 }
 
@@ -76,10 +100,11 @@ export function resolveRecipeTargets(
 ): ResolvedRecipeTargets {
   const warnings: string[] = [];
 
-  const oppExists = Boolean(recipe.opportunityId) && opportunities.some((item) => item.id === recipe.opportunityId);
+  const oppExists = Boolean(recipe.opportunityId) && opportunities.some((item) =>
+    item.id === recipe.opportunityId && isOpportunityAvailableForCreation(item));
   const opportunityId = oppExists ? recipe.opportunityId! : "";
   if (recipe.opportunityId && !oppExists) {
-    warnings.push("原选题已不在选题池，请挑一个新选题套用这套配置。");
+    warnings.push("原选题已不在当前选题池或已失效，请挑一个新选题套用这套配置。");
   }
 
   let presetId = recipe.presetId;
@@ -89,5 +114,12 @@ export function resolveRecipeTargets(
     warnings.push("原预设已删除，已回落到默认预设。");
   }
 
-  return { opportunityId, presetId, overrides: recipe.overrides, imageAssetIds: recipe.imageAssetIds, warnings };
+  return {
+    opportunityId,
+    presetId,
+    overrides: recipe.overrides,
+    imageAssetIds: recipe.imageAssetIds,
+    publishing: recipe.publishing ?? {},
+    warnings,
+  };
 }

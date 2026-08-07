@@ -1,5 +1,6 @@
 import { buildSimpleGenerateInput, resolveSimpleGenerationSettings, type SimpleSettingOverrides } from "./simple-generation";
 import type { ContentPreset, GenerateInput, GenerationBatchStatus, GenerationJob, Project, TopicOpportunity } from "../types";
+import type { RetryPublishingContract } from "./quick-recipe";
 
 interface BuildBatchArgs {
   project: Project;
@@ -7,15 +8,17 @@ interface BuildBatchArgs {
   presets: ContentPreset[];
   overrides: SimpleSettingOverrides;
   imageAssetIds: string[];
+  /** Omitted for new batches; supplied only when replaying a frozen job recipe. */
+  publishing?: RetryPublishingContract;
 }
 
 /** 二维批量展开:每个选题 × 每个预设 → 一个 GenerateInput(复用单篇构造逻辑,零重写)。 */
-export function buildBatchJobs({ project, opportunities, presets, overrides, imageAssetIds }: BuildBatchArgs): GenerateInput[] {
+export function buildBatchJobs({ project, opportunities, presets, overrides, imageAssetIds, publishing }: BuildBatchArgs): GenerateInput[] {
   const jobs: GenerateInput[] = [];
   for (const opportunity of opportunities) {
     for (const preset of presets) {
       const settings = resolveSimpleGenerationSettings({ project, preset, opportunity, overrides });
-      jobs.push(buildSimpleGenerateInput({
+      const input = buildSimpleGenerateInput({
         projectId: project.id,
         opportunity,
         settings,
@@ -25,7 +28,8 @@ export function buildBatchJobs({ project, opportunities, presets, overrides, ima
         localFieldsEnabled: false,
         overrides: overrides as Record<string, unknown>,
         randomizationDimensions: [],
-      }));
+      });
+      jobs.push({ ...input, ...publishing });
     }
   }
   return jobs;

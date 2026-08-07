@@ -22,12 +22,16 @@ test("默认使用选题驱动的自动用户情景且不提交作者事实", ()
   assert.equal(result.authorContext, undefined);
 });
 
-test("简单模式二选一会生成对应请求合同", () => {
-  const creative = applyPublishingTopology(input, createSimplePublishingTopologyDraft("creative_scenario"));
-  const institution = applyPublishingTopology(input, createSimplePublishingTopologyDraft("institution_owned"));
-  assert.equal(creative.publishingTopology, "creative_scenario");
-  assert.equal(institution.publishingTopology, "institution_owned");
-  assert.deepEqual(institution.authorFacts, []);
+test("简单模式选择自动用户视角时，请求只冻结该视角", () => {
+  const result = applyPublishingTopology(input, createSimplePublishingTopologyDraft("creative_scenario"));
+  assert.equal(result.publishingTopology, "creative_scenario");
+  assert.deepEqual(result.authorFacts, []);
+});
+
+test("简单模式选择机构账号时，请求冻结机构视角", () => {
+  const result = applyPublishingTopology(input, createSimplePublishingTopologyDraft("institution_owned"));
+  assert.equal(result.publishingTopology, "institution_owned");
+  assert.deepEqual(result.authorFacts, []);
 });
 
 test("机构账号覆盖会清空隐藏的作者事实", () => {

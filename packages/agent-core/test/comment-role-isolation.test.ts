@@ -650,21 +650,82 @@ describe("buildOrgThreadScope (逐 gap 口径)", () => {
     expect(scope.硬约束).toBeUndefined();
   });
 
+  it("把历史 section_ 别名唯一归一到当前 evidence_section_ 证据", () => {
+    const canonical = { ...evidenceReferences[0]!, id: "evidence_section_d1" };
+    const scope = buildOrgThreadScope(
+      thread,
+      { ...gapCard, evidenceIds: ["section_d1"] },
+      [canonical],
+    );
+    expect(scope.证据原文).toEqual([expect.objectContaining({ id: "evidence_section_d1" })]);
+    expect(scope.硬约束).toBeUndefined();
+  });
+
+  it("机构主写作上下文不暴露消费者 host/event 亲历合同", () => {
+    const plan = isolationPlan();
+    const input = promptInput(plan);
+    input.config.task.publishingTopology = "institution_owned";
+    const text = promptFullText(buildStagedCorePrompt(input));
+    const candidateTask = text.match(/<task_data scope="candidate">\n([\s\S]*?)\n<\/task_data>/u)?.[1] ?? "";
+    const projected = JSON.parse(candidateTask) as { orchestrationPlan: { personaScenePlan: Record<string, unknown> } };
+    expect(projected.orchestrationPlan.personaScenePlan).not.toHaveProperty("host");
+    expect(projected.orchestrationPlan.personaScenePlan).not.toHaveProperty("event");
+    expect(projected.orchestrationPlan.personaScenePlan).not.toHaveProperty("crossChannelRules");
+    expect(projected.orchestrationPlan.personaScenePlan).toHaveProperty("commentCast");
+  });
+
   it("无证据的 gap 输出显式硬约束", () => {
     const scope = buildOrgThreadScope({ ...thread, primaryGapId: "fit_gap" }, { gapId: "fit_gap", label: "适用条件", evidenceIds: [] }, evidenceReferences);
     expect(scope.证据原文).toHaveLength(0);
-    expect(scope.硬约束).toBe("你手里没有适用条件的信息口径，只能走转人工（“我帮你跟专人确认”）或保留未知；禁止承诺提供、禁止编具体说法、禁止“发定位/发详细地址/加微信发你”类具体交付");
+    expect(scope.硬约束).toContain("你手里没有适用条件的已核验证据，只能明确说当前无法确认");
+    expect(scope.硬约束).toContain("不得承诺替对方确认、稍后回复、私信、预约、对接、安排或发送资料");
   });
 
   it("缺口卡缺失时标签回落 primaryGapId,无证据即硬约束", () => {
     const scope = buildOrgThreadScope(thread, undefined, evidenceReferences);
     expect(scope.gap标签).toBe("price_gap");
-    expect(scope.硬约束).toContain("只能走转人工（“我帮你跟专人确认”）或保留未知；禁止承诺提供");
+    expect(scope.硬约束).toContain("只能明确说当前无法确认");
+    expect(scope.硬约束).toContain("不得承诺替对方确认");
   });
 
   it("只钉 gap 卡列出的证据,不夹带其他证据", () => {
     const scope = buildOrgThreadScope(thread, gapCard, [...evidenceReferences, { ...evidenceReferences[0]!, id: "evidence_other" }]);
     expect(scope.证据原文.map((quote) => quote.id)).toEqual(["evidence_d1"]);
+  });
+});
+
+describe("受限机构名称的跨阶段写作投影", () => {
+  it("完整生成、核心正文、读者评论和机构答复都不接收项目名或共享别名", () => {
+    const plan = isolationPlan();
+    plan.gapPlanningCards = (plan.gapPlanningCards ?? []).map((card) => ({
+      ...card,
+      publicationRestrictions: ["机构全称不得对外公开"],
+    }));
+    const input = promptInput(plan);
+    input.config.project.name = "星零感眼袋（7.28）";
+    input.config.project.productPoints = ["星零感微孔去眼袋"];
+    input.config.task.goal = "说明公开信息；机构全称不得对外公开";
+    input.evidenceReferences = [{
+      id: "evidence_alias", documentId: "d-alias", path: "org.md", section: "公开信息",
+      quote: "星零感微孔去眼袋位于锦华万达附近；机构全称不得对外公开。",
+      kind: "fact", evidenceStatus: "user_supplied", scope: [], caveats: [],
+      publicationRestrictions: ["机构全称不得对外公开"],
+    }];
+    const planned = plan.dialogueThreads[0]!;
+    const bundles = [
+      buildGenerationPrompt(input),
+      buildStagedCorePrompt(input),
+      buildStagedCommentReadersPrompt(input, core),
+      buildStagedOrgAnswersPrompt(input, core, "publisher", [{ planned, question: "机构信息怎么核实？" }]),
+    ];
+    for (const bundle of bundles) {
+      const text = promptFullText(bundle);
+      expect(text).not.toContain("星零感眼袋（7.28）");
+      expect(text).not.toContain("星零感微孔去眼袋");
+      expect(text).not.toContain("星零感");
+      expect(text).not.toContain("机构全称不得对外公开");
+      expect(text).toContain("本机构");
+    }
   });
 });
 
@@ -699,7 +760,8 @@ describe("按侧+按角色隔离的评论提示词", () => {
     const text = promptFullText(prompt);
     expect(text).toContain("知肤研究所助理");
     expect(text).toContain("你只知道下方列出的口径");
-    expect(text).toContain("我帮你跟专人确认");
+    expect(text).toContain("没有证据的细节只能明确“当前无法确认”");
+    expect(text).not.toContain("需要转人工时只说“我帮你跟专人确认”");
     expect(text).toContain("以当期确认为准");
     // 逐 gap 口径:有证据的 gap 钉 quote。护栏只认 price/location/schedule 三类
     // claimType,本蓝图仅有 price 规则,所以只有价格 gap 路由到 staff——地址/适用
@@ -709,7 +771,7 @@ describe("按侧+按角色隔离的评论提示词", () => {
     for (const planned of staffThreads) {
       const card = plan.gapPlanningCards.find((item) => item.gapId === planned.primaryGapId);
       if ((card?.evidenceIds.length ?? 0) === 0) {
-        expect(text).toContain(`你手里没有${card?.label ?? planned.primaryGapId}的信息口径，只能走转人工（“我帮你跟专人确认”）或保留未知；禁止承诺提供`);
+        expect(text).toContain(`你手里没有${card?.label ?? planned.primaryGapId}的已核验证据，只能明确说当前无法确认`);
       }
     }
     // 另一个角色(IP/楼主)的任何定义不出现。
@@ -744,7 +806,8 @@ describe("按侧+按角色隔离的评论提示词", () => {
     expect(text).not.toContain("voiceTraits");
     expect(text).toContain("你只知道下方列出的口径");
     // 无证据的适用条件 gap 走硬约束。
-    expect(text).toContain("你手里没有适用条件的信息口径，只能走转人工（“我帮你跟专人确认”）或保留未知；禁止承诺提供");
+    expect(text).toContain("你手里没有适用条件的已核验证据，只能明确说当前无法确认");
+    expect(text).toContain("不得承诺替对方确认、稍后回复、私信、预约、对接、安排或发送资料");
     for (const banned of ["助理", "staff"]) {
       expect(text, `publisher 调用不应出现: ${banned}`).not.toContain(banned);
     }
@@ -850,7 +913,45 @@ describe("按侧+按角色隔离的引擎合并", () => {
     }));
   }
 
-  it("评论编辑 Agent 的职责内改写进入最终文案并持久化 pass 结论", async () => {
+  function completeNetworkEditorResponse(request: ModelGenerationRequest, drift = false) {
+    const current = [...request.messages].reverse().flatMap((message) =>
+      typeof message.content === "string" ? [message.content] : [])
+      .map((text) => {
+        try { return JSON.parse(text) as { disclaimer?: string; threads?: Array<{ id: string; question: string; answer: string; followUps?: unknown[] }> }; }
+        catch { return undefined; }
+      })
+      .find((value) => value?.disclaimer === STAGED_COMMENT_DISCLAIMER && Array.isArray(value.threads));
+    if (!current?.threads) throw new Error("终编测试夹具没有读到完整评论网络。");
+    const unknownVariants = [
+      "这一项当前无法确认，先不下结论。",
+      "这一项目前无法核实，先保留未知。",
+      "目前还不能确定，先不下结论。",
+    ];
+    const seenQuestions = new Set<string>();
+    return {
+      disclaimer: current.disclaimer,
+      threads: current.threads.map((thread, index) => {
+        const duplicateQuestion = seenQuestions.has(thread.question);
+        seenQuestions.add(thread.question);
+        return {
+          ...thread,
+          question: drift
+            ? "今天天气怎么样？"
+            : duplicateQuestion
+              ? `我也在看这项，${thread.question}`
+              : thread.question,
+          answer: thread.answer === "这一项当前无法确认，先不下结论。"
+            ? unknownVariants[index % unknownVariants.length]
+            : (thread.answer ?? ""),
+          followUps: thread.followUps ?? [],
+        };
+      }),
+      assessment: { status: "pass", reasons: [], summary: "已消除重复答复并保持冻结职责。" },
+    };
+  }
+
+  it("完整评论终编仅在重复网络命中时调用，并持久化通过结论", async () => {
+    let editorCalls = 0;
     const provider: ModelProvider = {
       async generate(request) {
         const purpose = String(request.metadata?.purpose);
@@ -858,42 +959,31 @@ describe("按侧+按角色隔离的引擎合并", () => {
           return { text: JSON.stringify({ threads: frozenReaderThreads(request) }), raw: {} };
         }
         if (purpose === "edit_comment_readers") {
-          return {
-            text: JSON.stringify({
-              threads: frozenReaderThreads(request, true),
-              assessment: { status: "pass", reasons: [], summary: "已按人物处境改成具体问法。" },
-            }),
-            raw: {},
-          };
+          editorCalls += 1;
+          return { text: JSON.stringify(completeNetworkEditorResponse(request)), raw: {} };
         }
         if (purpose === "generate_org_answers") {
           return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "需要结合对应条件确认。" })) }), raw: {} };
         }
         if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
-        if (purpose === "repair") return {
-          text: JSON.stringify({ N: { body: "先核实适用边界，再决定下一步。修复后标记。细节仍在整理，确认后再补充。" } }),
-          raw: {},
-        };
         return { text: coreResponse(), raw: {} };
       },
     };
-    const value = engineConfig();
-    value.generation.maxRepairAttempts = 1;
-    value.task.mustMention = ["修复后标记"];
     const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-07-12T12:00:00Z") })
-      .generate({ jobId: "comment-editor-pass", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge, planningContext });
+      .generate({ jobId: "comment-editor-pass", config: engineConfig(), formulaVersion: DEFAULT_FORMULA_VERSION, knowledge, planningContext });
 
     expect(result.packages).toHaveLength(3);
+    expect(editorCalls).toBe(3);
     for (const pkg of result.packages) {
-      expect(pkg.validation.repairAttempts).toBe(1);
-      expect(pkg.commentEditorialAssessment).toEqual({ status: "pass", reasons: [], summary: "已按人物处境改成具体问法。" });
-      expect(pkg.content.Cref.threads.every((thread) => thread.question.includes("我时间有限"))).toBe(true);
+      expect(pkg.commentEditorialAssessment).toEqual({ status: "pass", reasons: [], summary: "已消除重复答复并保持冻结职责。" });
+      const answers = pkg.content.Cref.threads.map((thread) => thread.answer).filter(Boolean);
+      expect(new Set(answers).size).toBe(answers.length);
       expect(pkg.validation.issues.some((issue) => issue.code === "comment_editor_unavailable" || issue.code === "comment_editor_contract_rejected")).toBe(false);
     }
   });
 
-  it("评论编辑 Agent 越过冻结 gap 时原子拒收，机构答复只看到原始问题", async () => {
-    const orgPromptTexts: string[] = [];
+  it("完整评论终编越过冻结 gap 时原子拒收并保留原始网络", async () => {
+    let editorCalls = 0;
     const provider: ModelProvider = {
       async generate(request) {
         const purpose = String(request.metadata?.purpose);
@@ -901,18 +991,8 @@ describe("按侧+按角色隔离的引擎合并", () => {
           return { text: JSON.stringify({ threads: frozenReaderThreads(request) }), raw: {} };
         }
         if (purpose === "edit_comment_readers") {
-          const original = frozenReaderThreads(request);
-          return {
-            text: JSON.stringify({
-              threads: original.map((thread) => ({ ...thread, question: "今天天气怎么样？" })),
-              assessment: { status: "pass", reasons: [], summary: "已编辑。" },
-            }),
-            raw: {},
-          };
-        }
-        if (purpose === "generate_org_answers") {
-          orgPromptTexts.push(requestText(request));
-          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "需要结合对应条件确认。" })) }), raw: {} };
+          editorCalls += 1;
+          return { text: JSON.stringify(completeNetworkEditorResponse(request, true)), raw: {} };
         }
         if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
         return { text: coreResponse(), raw: {} };
@@ -922,14 +1002,13 @@ describe("按侧+按角色隔离的引擎合并", () => {
       .generate({ jobId: "comment-editor-contract", config: engineConfig(), formulaVersion: DEFAULT_FORMULA_VERSION, knowledge, planningContext });
 
     expect(result.packages).toHaveLength(3);
+    expect(editorCalls).toBe(3);
     expect(result.packages.every((pkg) => pkg.commentEditorialAssessment === undefined)).toBe(true);
     expect(result.packages.every((pkg) => pkg.validation.issues.some((issue) =>
       issue.code === "comment_editor_contract_rejected"
-      && issue.disposition === "advisory"
+      && issue.disposition === "review"
       && issue.origin === "deterministic"))).toBe(true);
     expect(result.packages.flatMap((pkg) => pkg.content.Cref.threads).every((thread) => thread.question !== "今天天气怎么样？")).toBe(true);
-    expect(orgPromptTexts.length).toBeGreaterThan(0);
-    expect(orgPromptTexts.every((text) => !text.includes("今天天气怎么样"))).toBe(true);
   });
 
   it("模型输出携带漂移字段时,surfaceRoleCard/postingIdentity/线程形态仍以规划层为准", async () => {
@@ -981,8 +1060,7 @@ describe("按侧+按角色隔离的引擎合并", () => {
         // 答复来源:T3 恒空;T2 来自读者侧;T1 来自对应角色的机构调用。
         if (kind === "organic_reaction") expect(thread.answer).toBe("");
         else if (kind === "reader_exchange") expect(thread.answer).toBe("姐妹我也蹲一个");
-        else if (plan.postingIdentity === "staff") expect(thread.answer).toBe("这个我让专人跟你确认。");
-        else expect(thread.answer).toBe("这个得看个人条件，我先不乱说。");
+        else expect(thread.answer).toBe("这一项当前无法确认，先不下结论。");
       }
     }
   });
@@ -1037,6 +1115,8 @@ describe("按侧+按角色隔离的引擎合并", () => {
       .generate({ jobId: "host-isolation", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge, planningContext });
 
     expect(calls.some((call) => call.metadata?.purpose === "generate_host_answers")).toBe(true);
+    expect(result.packages).toHaveLength(3);
+    expect(result.packages.every((pkg) => pkg.configSnapshot.task.publishingTopology === "confirmed_individual_author")).toBe(true);
     for (const pkg of result.packages) {
       const host = pkg.content.Cref.threads.find((thread) => thread.threadKind === "host_reply");
       expect(host).toBeDefined();
@@ -1056,9 +1136,11 @@ describe("按侧+按角色隔离的引擎合并", () => {
     }
   });
 
-  it("机构答复调用失败或缺 id 时,该角色线程回落规划口径并记 model_org_answer_failed", async () => {
+  it("无事实证据的机构线程零调用并确定性保留未知", async () => {
+    const calls: ModelGenerationRequest[] = [];
     const provider: ModelProvider = {
       async generate(request) {
+        calls.push(request);
         const purpose = String(request.metadata?.purpose);
         if (purpose === "generate_comment_readers") {
           return {
@@ -1068,51 +1150,21 @@ describe("按侧+按角色隔离的引擎合并", () => {
             raw: {},
           };
         }
-        if (purpose === "generate_org_answers") {
-          // publisher 调用整体失败;staff 调用缺一个线程 id(该线程必须回落)。
-          if (request.metadata?.identity === "publisher") throw new Error("upstream 500");
-          return {
-            text: JSON.stringify({ answers: stagedThreadIds(request).slice(1).map((id) => ({ id, answer: "MOCK机构答复文本XYZ。" })) }),
-            raw: {},
-          };
-        }
+        if (purpose === "generate_org_answers") throw new Error("无证据线程不应调用机构模型");
         if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
         return { text: coreResponse(), raw: {} };
       },
     };
     const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-07-12T12:00:00Z") })
-      .generate({ jobId: "role-isolation-fallback", config: engineConfig(), formulaVersion: DEFAULT_FORMULA_VERSION, knowledge, planningContext });
+      .generate({ jobId: "role-isolation-no-evidence", config: engineConfig(), formulaVersion: DEFAULT_FORMULA_VERSION, knowledge, planningContext });
     expect(result.packages).toHaveLength(3);
-    // publisher 调用整体失败、staff 调用缺一个 id:任何含机构线程的候选都必须
-    // 有 warning 且受影响答复回落规划口径(不是模型文本)。
+    expect(calls.filter((call) => call.metadata?.purpose === "generate_org_answers")).toHaveLength(0);
     for (const pkg of result.packages) {
-      const planned = pkg.dialogueThreads ?? [];
-      const orgThreads = planned.filter((thread) => (thread.threadKind ?? "org_answer") === "org_answer");
-      const warnings = pkg.validation.issues.filter((issue) => issue.code === "model_org_answer_failed" && issue.severity === "warning");
-      if (orgThreads.length) expect(warnings.length).toBeGreaterThan(0);
-      for (const [index, thread] of pkg.content.Cref.threads.entries()) {
-        const plan = planned[index]!;
-        if ((plan.threadKind ?? "org_answer") !== "org_answer") continue;
-        // publisher 线程整体回落(调用失败),staff 首线程缺 id 回落:都不是模型文本。
-        if (plan.postingIdentity === "publisher") expect(thread.answer).not.toBe("这个得看个人条件，我先不乱说。");
-        expect(thread.answer).not.toBe("");
-        // 兜底话术必须是可追责答复方的声音:org_answer 位上说话的是真实发布身份
-        // (publisher/staff/expert)。此前兜底是路人腔("我也是想先把这个问明白"
-        // "我还在看,确定了来回你"),等于让发布账号冒充普通消费者,而该回落只记
-        // warning 不阻断,会直接进可发布文案。
-        for (const readerVoice of [
-          "我也是想先把这个问明白",
-          "那我还是多留点时间保险",
-          "我还在看，确定了来回你",
-          "姐妹我也是",
-          "哈哈我也是今天才注意到",
-        ]) {
-          expect(thread.answer, `org_answer 兜底不应是路人腔: ${thread.answer}`).not.toContain(readerVoice);
-        }
+      for (const thread of pkg.content.Cref.threads.filter((item) => item.threadKind === "org_answer")) {
+        expect(thread.answer).toBe("这一项当前无法确认，先不下结论。");
+        expect(thread.answer).not.toMatch(/(?:帮.*确认|稍后|私信|预约|对接|安排|发给)/u);
       }
     }
-    // 三个 required gap 且营销话头偏 T1:全 run 至少一个候选命中失败/缺 id 回落。
-    expect(result.packages.some((pkg) => pkg.validation.issues.some((issue) => issue.code === "model_org_answer_failed"))).toBe(true);
   });
 
   it("2B 后空答复的机构追问由 2B-O 补答;未覆盖的追问确定性丢弃并记 warning", async () => {
@@ -1169,28 +1221,23 @@ describe("按侧+按角色隔离的引擎合并", () => {
       .generate({ jobId: "role-isolation-2bo", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge, planningContext });
     expect(result.packages).toHaveLength(3);
     const followUpAnswerCalls = calls.filter((call) => call.metadata?.purpose === "generate_org_followup_answers");
-    expect(followUpAnswerCalls.length).toBeGreaterThan(0);
+    // 该夹具没有可支撑机构事实的来源：追问同样零调用，不能让补答模型
+    // 借追问编造“专人确认”等未来服务动作。
+    expect(followUpAnswerCalls).toHaveLength(0);
     for (const pkg of result.packages) {
       const planned = pkg.dialogueThreads ?? [];
       for (const [index, thread] of pkg.content.Cref.threads.entries()) {
-        const plan = planned[index]!;
-        const kind = plan.threadKind ?? "org_answer";
+        const kind = planned[index]?.threadKind ?? "org_answer";
         if (kind === "organic_reaction") {
-          // T3 不生长:模型多写了也确定性截空。
           expect(thread.followUps).toHaveLength(0);
           continue;
         }
-        if (kind === "reader_exchange") continue; // 读者侧追问不在本用例断言范围
-        if (plan.postingIdentity === "staff") {
-          expect(thread.followUps[0]?.answer).toBe("专人跟你确认。");
-        } else {
-          // publisher 补答未覆盖:追问确定性丢弃,不保留空答复,并记 warning。
-          expect(thread.followUps.every((followUp) => followUp.answer.trim())).toBe(true);
-        }
+        if (kind === "reader_exchange") continue;
+        expect(thread.followUps.every((followUp) =>
+          followUp.answer === "这一项当前无法确认，先不下结论。" &&
+          !/(?:帮.*确认|稍后|私信|预约|对接|安排|发给)/u.test(followUp.answer))).toBe(true);
       }
     }
-    // publisher 补答未覆盖的 warning 至少出现一次。
-    expect(result.packages.some((pkg) => pkg.validation.issues.some((issue) => issue.code === "model_org_answer_failed"))).toBe(true);
   });
 
   /**
@@ -1230,6 +1277,64 @@ describe("按侧+按角色隔离的引擎合并", () => {
       });
     return result.packages.map((pkg) => pkg.validation.issues.filter((issue) => issue.code === "accountable_identity_incomplete"));
   }
+
+  it("有人工确认事实时才调用机构模型，证据外官网/执照/预约动作仍确定性回退", async () => {
+    const calls: ModelGenerationRequest[] = [];
+    const confirmation = { confirmedBy: "owner-1", confirmedAt: "2026-08-05T00:00:00.000Z" };
+    const groundedGaps: InformationGap[] = isolationGaps.map((gap) => ({
+      ...gap,
+      answer: gap.id === "price_gap"
+        ? "单次体验 680 起，以当期确认为准"
+        : gap.id === "address_gap"
+          ? "当前只确认位于目标商圈附近，具体位置以当期确认为准"
+          : "适用条件需要结合个人情况评估",
+      sourceStatus: "user_supplied",
+      humanConfirmation: confirmation,
+    }));
+    const groundedContext = { informationGaps: groundedGaps, projectBlueprint: isolationBlueprint() };
+    const provider: ModelProvider = {
+      async generate(request) {
+        calls.push(request);
+        const purpose = String(request.metadata?.purpose);
+        if (purpose === "generate_comment_readers") {
+          return { text: JSON.stringify({ threads: frozenReaderThreads(request) }), raw: {} };
+        }
+        if (purpose === "edit_comment_readers") {
+          return {
+            text: JSON.stringify({
+              threads: frozenReaderThreads(request),
+              assessment: { status: "pass", reasons: [], summary: "保持原问题。" },
+            }), raw: {},
+          };
+        }
+        if (purpose === "generate_org_answers") {
+          return {
+            text: JSON.stringify({
+              answers: stagedThreadIds(request).map((id) => ({
+                id,
+                answer: "官网暂时没有，营业执照在大厅公示，我稍后帮你预约。",
+              })),
+              ownedFirstComment: "资质都能在线查，我可以帮大家预约。",
+            }),
+            raw: {},
+          };
+        }
+        if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
+        return { text: coreResponse(), raw: {} };
+      },
+    };
+    const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-08-05T00:00:00Z") })
+      .generate({ jobId: "org-answer-evidence-boundary", config: engineConfig(), formulaVersion: DEFAULT_FORMULA_VERSION, knowledge, planningContext: groundedContext });
+
+    expect(calls.filter((call) => call.metadata?.purpose === "generate_org_answers").length).toBeGreaterThan(0);
+    const visible = result.packages.flatMap((pkg) => [
+      pkg.content.Cref.ownedFirstComment ?? "",
+      ...pkg.content.Cref.threads.map((thread) => thread.answer),
+    ]).join("\n");
+    expect(visible).not.toMatch(/官网暂时没有|营业执照在大厅公示|稍后帮你预约|帮大家预约/u);
+    expect(result.packages.some((pkg) => pkg.validation.issues.some((issue) =>
+      issue.code === "model_org_answer_failed" && issue.origin === "deterministic"))).toBe(true);
+  });
 
   it("合规蓝图不产生 accountable_identity_incomplete", async () => {
     const perCandidate = await issuesFor(isolationBlueprint(), "accountable-ok");

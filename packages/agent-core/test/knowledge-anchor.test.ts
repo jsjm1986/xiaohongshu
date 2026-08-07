@@ -9,14 +9,10 @@ import {
   DEFAULT_FORMULA_VERSION,
   normalizeProjectCreativeBlueprint,
   parseGenerationDraft,
-  parseKnowledgeAnchorSelections,
-  reviewKnowledgeAnchorsWithModel,
   validateGenerationDraft,
   type EvidenceReference,
   type GenerationDraft,
   type KnowledgeAnchorContext,
-  type ModelGenerationRequest,
-  type ModelProvider,
   type ProjectBlueprintModuleKey,
 } from "../src/index.js";
 
@@ -26,6 +22,8 @@ const EV_RECOVERY = "evidence_recovery";
 const EV_GIFT = "evidence_gift";
 const EV_FOLLOWUP = "evidence_followup";
 const EV_INFERRED = "evidence_inferred";
+const EV_REVIEW = "evidence_review";
+const EV_ORGANIZATION = "evidence_organization";
 
 const evidenceSources: Record<string, string> = {
   // 单句内含"可能",整句过不了保守支持门;其中"消肿一般7天左右"是可用于 AI 复核的子片段。
@@ -33,6 +31,14 @@ const evidenceSources: Record<string, string> = {
   [EV_GIFT]: "本月到店有赠送护理包,数量有限。",
   [EV_FOLLOWUP]: "恢复期以复诊记录为准,大多数人一到两周。",
   [EV_INFERRED]: "消肿一般7天左右。",
+  // No sentence/comma boundary around the useful exact substring: deterministic
+  // candidate extraction stays conservative, while the judge may point to the
+  // exact contiguous quote and the server still verifies it mechanically.
+  [EV_REVIEW]: "根据店内记录（消肿一般7天左右）但每个人体质不同也有人可能需要两三周",
+  [EV_ORGANIZATION]: [
+    "| 机构定位 | 专注眼周年轻化，尤其擅长眼袋；机构类型为门诊 |",
+    "| 地址 | 成都锦江区，锦华万达附近 |",
+  ].join("\n"),
 };
 
 function evidenceReference(id: string, evidenceStatus: EvidenceReference["evidenceStatus"]): EvidenceReference {
@@ -53,6 +59,8 @@ const evidenceReferences = [
   evidenceReference(EV_GIFT, "user_supplied"),
   evidenceReference(EV_FOLLOWUP, "observed"),
   evidenceReference(EV_INFERRED, "inferred"),
+  evidenceReference(EV_REVIEW, "observed"),
+  evidenceReference(EV_ORGANIZATION, "observed"),
 ];
 
 // 受控声明规则:词面命中"恢复期"即要求证据。完整蓝图走 normalize,与校验层同构。
@@ -257,17 +265,6 @@ function gateIssues(draft: GenerationDraft) {
   }).filter((issue) => ANCHOR_GATE_CODES.includes(issue.code));
 }
 
-function spyProvider(text: string): ModelProvider & { requests: ModelGenerationRequest[] } {
-  const requests: ModelGenerationRequest[] = [];
-  return {
-    requests,
-    async generate(request: ModelGenerationRequest) {
-      requests.push(request);
-      return { text, raw: {} };
-    },
-  };
-}
-
 describe("attachKnowledgeAnchors 机械锚定", () => {
   it("敏感面命中句子自动挂 fact 台账并过全校验链", () => {
     const draft = makeDraft("今天把流程问清楚了。消肿一般7天左右。", [
@@ -355,47 +352,169 @@ describe("attachKnowledgeAnchors 机械锚定", () => {
   });
 });
 
-describe("collectUnanchoredSensitiveClaims + AI 复核兜底", () => {
-  // "消肿一般 7 天左右。"带空格:逐字包含失败;唯一源句候选含"可能"过不了
-  // 保守支持门 → 机械未命中;AI 可选中子片段"消肿一般7天左右"通过校验。
+
+describe("生产机构信息证据回归", () => {
+  const organizationBlueprint = structuredClone(projectBlueprint);
+  organizationBlueprint.claimPolicy.rules = [{
+    ...organizationBlueprint.claimPolicy.rules[0]!,
+    id: "rule_organization",
+    label: "机构公开信息",
+    claimType: "identity",
+    terms: ["机构类型", "门诊", "专注眼周年轻化", "地址", "锦华万达", "门牌", "地铁站"],
+  }];
+  const context: KnowledgeAnchorContext = {
+    allowedEvidenceIds: [EV_ORGANIZATION],
+    evidenceSources: { [EV_ORGANIZATION]: evidenceSources[EV_ORGANIZATION]! },
+    evidenceReferences: [evidenceReference(EV_ORGANIZATION, "observed")],
+    projectBlueprint: organizationBlueprint,
+  };
+  const validate = (draft: GenerationDraft) => validateGenerationDraft({
+    draft,
+    config: validationConfig(),
+    ledger: buildKnowledgeLedger([]),
+    allowedEvidenceIds: context.allowedEvidenceIds,
+    evidenceSources: context.evidenceSources,
+    evidenceReferences: context.evidenceReferences,
+    projectBlueprint: context.projectBlueprint,
+  });
+
+  it("anchors the production organization paraphrase from exact table rows", () => {
+    const draft = attachKnowledgeAnchors(makeDraft(
+      "机构类型是门诊，专注眼周年轻化，地址在成都锦江区锦华万达附近。",
+      [],
+    ), context);
+    const facts = draft.reasoning.filter((item) => item.status === "fact");
+    expect(facts.map((item) => item.statement)).toEqual([
+      "机构类型是门诊",
+      "专注眼周年轻化",
+      "地址在成都锦江区锦华万达附近。",
+    ]);
+    expect(facts.every((item) => item.sourceSpans?.every((span) =>
+      evidenceSources[EV_ORGANIZATION]!.includes(span.quote)))).toBe(true);
+    expect(validate(draft).filter((issue) => issue.code === "sensitive_claim_without_evidence")).toEqual([]);
+  });
+
+  it("anchors production body relation forms without weakening their source requirements", () => {
+    const draft = attachKnowledgeAnchors(makeDraft(
+      "门诊在成都锦江区锦华万达附近，专注眼周年轻化。我们在成都锦江区锦华万达附近。",
+      [],
+    ), context);
+    expect(draft.reasoning.map((item) => item.statement)).toEqual([
+      "门诊在成都锦江区锦华万达附近",
+      "专注眼周年轻化。",
+      "我们在成都锦江区锦华万达附近。",
+    ]);
+    expect(validate(draft).filter((issue) => issue.code === "sensitive_claim_without_evidence")).toEqual([]);
+
+    const addressOnlyContext: KnowledgeAnchorContext = {
+      ...context,
+      evidenceSources: { [EV_ORGANIZATION]: "| 地址 | 成都锦江区，锦华万达附近 |" },
+      evidenceReferences: [{
+        ...evidenceReference(EV_ORGANIZATION, "observed"),
+        quote: "| 地址 | 成都锦江区，锦华万达附近 |",
+      }],
+    };
+    const addressOnly = attachKnowledgeAnchors(makeDraft("门诊在成都锦江区锦华万达附近。", []), addressOnlyContext);
+    expect(addressOnly.reasoning).toEqual([]);
+  });
+
+  it("anchors natural organization wording and still returns exact source quotes", () => {
+    const draft = attachKnowledgeAnchors(makeDraft(
+      "位置在成都锦江区锦华万达附近，我们是一家专注眼周年轻化的门诊。",
+      [],
+    ), context);
+    expect(draft.reasoning.map((item) => item.statement)).toEqual([
+      "位置在成都锦江区锦华万达附近",
+      "我们是一家专注眼周年轻化的门诊。",
+    ]);
+    expect(draft.reasoning.every((item) => item.sourceSpans?.length)).toBe(true);
+    expect(draft.reasoning.flatMap((item) => item.sourceSpans ?? []).every((span) =>
+      evidenceSources[EV_ORGANIZATION]!.includes(span.quote))).toBe(true);
+    expect(validate(draft).filter((issue) => issue.code === "sensitive_claim_without_evidence")).toEqual([]);
+  });
+
+  it("does not invent unknown navigation details while retaining the grounded public area", () => {
+    const draft = attachKnowledgeAnchors(makeDraft(
+      "具体门牌和地铁站还没有公开，地址在锦华万达附近；",
+      [],
+    ), context);
+    expect(draft.reasoning.some((item) => item.statement.includes("具体门牌"))).toBe(false);
+    expect(draft.reasoning.some((item) => item.statement.includes("地址在锦华万达附近"))).toBe(true);
+    expect(validate(draft)).toContainEqual(expect.objectContaining({
+      code: "sensitive_claim_without_evidence",
+      severity: "error",
+      message: expect.stringContaining("具体门牌和地铁站还没有公开"),
+    }));
+  });
+
+  it("rejects an unsupported precise address", () => {
+    const draft = attachKnowledgeAnchors(makeDraft("地址在锦华万达A座12楼。", []), context);
+    expect(draft.reasoning.filter((item) => item.status === "fact")).toHaveLength(0);
+    expect(validate(draft)).toContainEqual(expect.objectContaining({
+      code: "sensitive_claim_without_evidence",
+      severity: "error",
+    }));
+  });
+});
+
+describe("collectUnanchoredSensitiveClaims + 联合判官机械挂账", () => {
+  // The useful quote is exact but embedded in a source line that also carries
+  // uncertainty. Mechanical candidate extraction does not guess a substring;
+  // the judge may select it, and the server verifies exact containment/support.
   const spacedBody = "先记录下恢复过程。消肿一般 7 天左右。";
+  const reviewContext = anchorContext({
+    allowedEvidenceIds: [EV_REVIEW],
+    evidenceSources: { [EV_REVIEW]: evidenceSources[EV_REVIEW]! },
+    evidenceReferences: [evidenceReference(EV_REVIEW, "observed")],
+  });
+
+
+  const reviewGateIssues = (draft: GenerationDraft) => validateGenerationDraft({
+    draft,
+    config: validationConfig(),
+    ledger: buildKnowledgeLedger([]),
+    allowedEvidenceIds: reviewContext.allowedEvidenceIds,
+    evidenceSources: reviewContext.evidenceSources,
+    evidenceReferences: reviewContext.evidenceReferences,
+    projectBlueprint: reviewContext.projectBlueprint,
+  }).filter((issue) => ANCHOR_GATE_CODES.includes(issue.code));
 
   it("机械未命中的句子进入复核清单", () => {
-    const draft = attachKnowledgeAnchors(makeDraft(spacedBody, []), anchorContext());
-    const claims = collectUnanchoredSensitiveClaims(draft, anchorContext());
+    const draft = attachKnowledgeAnchors(makeDraft(spacedBody, []), reviewContext);
+    const claims = collectUnanchoredSensitiveClaims(draft, reviewContext);
     expect(claims).toEqual([{ statement: "消肿一般 7 天左右。", location: "N.body", occurrence: { field: "body" } }]);
   });
 
   it("AI 选中且机械校验通过 → 挂账并过全校验链", () => {
-    const draft = attachKnowledgeAnchors(makeDraft(spacedBody, []), anchorContext());
-    const context = anchorContext();
+    const draft = attachKnowledgeAnchors(makeDraft(spacedBody, []), reviewContext);
+    const context = reviewContext;
     const claims = collectUnanchoredSensitiveClaims(draft, context);
     const anchored = attachKnowledgeAnchorSelections(draft, context, claims, [
-      { statementIndex: 0, evidenceId: EV_RECOVERY, quote: "消肿一般7天左右" },
+      { statementIndex: 0, evidenceId: EV_REVIEW, quote: "消肿一般7天左右" },
     ]);
     expect(anchored.reasoning.filter((item) => item.status === "fact")).toHaveLength(1);
-    expect(anchored.evidenceIds).toEqual([EV_RECOVERY]);
-    expect(gateIssues(anchored)).toEqual([]);
+    expect(anchored.evidenceIds).toEqual([EV_REVIEW]);
+    expect(reviewGateIssues(anchored)).toEqual([]);
     // 幂等:同一选择再挂一次不重复。
     expect(attachKnowledgeAnchorSelections(anchored, context, claims, [
-      { statementIndex: 0, evidenceId: EV_RECOVERY, quote: "消肿一般7天左右" },
+      { statementIndex: 0, evidenceId: EV_REVIEW, quote: "消肿一般7天左右" },
     ])).toBe(anchored);
   });
 
   it("AI 编造 quote(不是源内连续片段)→ 机械校验拦下,error 照旧", () => {
-    const draft = attachKnowledgeAnchors(makeDraft(spacedBody, []), anchorContext());
-    const context = anchorContext();
+    const draft = attachKnowledgeAnchors(makeDraft(spacedBody, []), reviewContext);
+    const context = reviewContext;
     const claims = collectUnanchoredSensitiveClaims(draft, context);
     const anchored = attachKnowledgeAnchorSelections(draft, context, claims, [
       { statementIndex: 0, evidenceId: EV_RECOVERY, quote: "消肿肯定7天能好" },
     ]);
     expect(anchored).toBe(draft);
-    expect(gateIssues(anchored).some((issue) => issue.code === "sensitive_claim_without_evidence")).toBe(true);
+    expect(reviewGateIssues(anchored).some((issue) => issue.code === "sensitive_claim_without_evidence")).toBe(true);
   });
 
   it("AI 选了角色不合规的源 → 拦下不挂", () => {
-    const draft = attachKnowledgeAnchors(makeDraft(spacedBody, []), anchorContext());
-    const context = anchorContext();
+    const draft = attachKnowledgeAnchors(makeDraft(spacedBody, []), reviewContext);
+    const context = reviewContext;
     const claims = collectUnanchoredSensitiveClaims(draft, context);
     const anchored = attachKnowledgeAnchorSelections(draft, context, claims, [
       { statementIndex: 0, evidenceId: EV_INFERRED, quote: "消肿一般7天左右" },
@@ -404,65 +523,13 @@ describe("collectUnanchoredSensitiveClaims + AI 复核兜底", () => {
   });
 
   it("AI 选 none → 不挂且 error 照旧", () => {
-    const draft = attachKnowledgeAnchors(makeDraft(spacedBody, []), anchorContext());
-    const context = anchorContext();
+    const draft = attachKnowledgeAnchors(makeDraft(spacedBody, []), reviewContext);
+    const context = reviewContext;
     const claims = collectUnanchoredSensitiveClaims(draft, context);
     const anchored = attachKnowledgeAnchorSelections(draft, context, claims, []);
     expect(anchored).toBe(draft);
-    expect(gateIssues(anchored).some((issue) => issue.code === "sensitive_claim_without_evidence")).toBe(true);
+    expect(reviewGateIssues(anchored).some((issue) => issue.code === "sensitive_claim_without_evidence")).toBe(true);
   });
 
-  it("parseKnowledgeAnchorSelections:异常形状与越界编号一律丢弃", () => {
-    expect(parseKnowledgeAnchorSelections("garbage", 1)).toEqual([]);
-    expect(parseKnowledgeAnchorSelections({ selections: "nope" }, 1)).toEqual([]);
-    expect(parseKnowledgeAnchorSelections({
-      selections: [
-        { statementIndex: 7, support: "evidence", evidenceId: EV_RECOVERY, quote: "消肿一般7天左右" },
-        { statementIndex: 0, support: "none", evidenceId: null, quote: null },
-        { statementIndex: 0, support: "evidence", evidenceId: EV_RECOVERY, quote: "消肿一般7天左右" },
-      ],
-    }, 1)).toEqual([]);
-    expect(parseKnowledgeAnchorSelections({
-      selections: [{ statementIndex: 0, support: "evidence", evidenceId: EV_RECOVERY, quote: "消肿一般7天左右" }],
-    }, 1)).toEqual([{ statementIndex: 0, evidenceId: EV_RECOVERY, quote: "消肿一般7天左右" }]);
-  });
-});
 
-describe("reviewKnowledgeAnchorsWithModel", () => {
-  const spacedBody = "先记录下恢复过程。消肿一般 7 天左右。";
-
-  it("机械未命中时批量一次调用,选中校验过后挂账", async () => {
-    const draft = attachKnowledgeAnchors(makeDraft(spacedBody, []), anchorContext());
-    const provider = spyProvider(JSON.stringify({
-      selections: [{ statementIndex: 0, support: "evidence", evidenceId: EV_RECOVERY, quote: "消肿一般7天左右" }],
-    }));
-    const reviewed = await reviewKnowledgeAnchorsWithModel(provider, draft, anchorContext(), { model: "test-model" });
-    expect(provider.requests).toHaveLength(1);
-    expect(provider.requests[0]).toMatchObject({ schemaName: "knowledge_anchor_review", model: "test-model" });
-    expect(reviewed.reasoning.filter((item) => item.status === "fact")).toHaveLength(1);
-    expect(gateIssues(reviewed)).toEqual([]);
-  });
-
-  it("机械全部命中时不发起模型调用(零成本)", async () => {
-    const draft = attachKnowledgeAnchors(makeDraft("消肿一般7天左右。", []), anchorContext());
-    const provider = spyProvider("{}");
-    const reviewed = await reviewKnowledgeAnchorsWithModel(provider, draft, anchorContext(), {});
-    expect(provider.requests).toHaveLength(0);
-    expect(reviewed).toBe(draft);
-  });
-
-  it("模型输出不可解析 → 视为全部 none,不挂不炸", async () => {
-    const draft = attachKnowledgeAnchors(makeDraft(spacedBody, []), anchorContext());
-    const provider = spyProvider("这不是 JSON");
-    const reviewed = await reviewKnowledgeAnchorsWithModel(provider, draft, anchorContext(), {});
-    expect(reviewed).toBe(draft);
-    expect(gateIssues(reviewed).some((issue) => issue.code === "sensitive_claim_without_evidence")).toBe(true);
-  });
-
-  it("模型调用抛错 → 不挂不炸", async () => {
-    const draft = attachKnowledgeAnchors(makeDraft(spacedBody, []), anchorContext());
-    const provider: ModelProvider = { async generate() { throw new Error("network down"); } };
-    const reviewed = await reviewKnowledgeAnchorsWithModel(provider, draft, anchorContext(), {});
-    expect(reviewed).toBe(draft);
-  });
 });

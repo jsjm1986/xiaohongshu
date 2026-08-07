@@ -49,6 +49,7 @@ export function QuickHistoryPage() {
       w.setPresetId(targets.presetId);
       w.setOverrides(targets.overrides);
       w.setImageAssetIds(targets.imageAssetIds);
+      w.setPublishing(targets.publishing);
       w.setResults([]);
       w.setJobId(undefined);
       w.setBatchMode(false);

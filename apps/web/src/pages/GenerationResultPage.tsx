@@ -149,6 +149,11 @@ export function GenerationResultPage() {
   const publishable = selected?.validation?.valid === true;
   const manuallyConfirmed = selected?.manualDeliveryConfirmation?.confirmed === true;
   const deliverable = publishable || manuallyConfirmed;
+  const candidateCount = job?.candidates?.length ?? 0;
+  const partiallyGenerated = candidateCount > 0 && candidateCount < 3;
+  const formalReviewIssues = (selected?.validation?.issues ?? []).filter((issue) =>
+    issue.disposition === "review"
+    && ["model_not_invoked", "gap_evidence_binding_degraded", "required_information_not_realized"].includes(issue.code ?? ""));
   const impactDetails = useMemo(
     () => {
       const normalized = normalizeImpactReport(
@@ -230,7 +235,7 @@ export function GenerationResultPage() {
       await api.generations.confirmManualDelivery(job.id, selected.id);
       setJob(await api.generations.get(job.id));
       setManualConfirmChecked(false);
-      toast.push("已记录人工交付确认，当前候选可以复制与导出");
+      // 成功状态在原交付栏内持续呈现，不再让用户追右上角的一闪而过提示。
     } catch (error) {
       toast.push(errorMessage(error, "人工交付确认失败"), "error");
     } finally {
@@ -324,50 +329,43 @@ export function GenerationResultPage() {
         title={selected.title}
         actions={
           <>
-            {job.qualityStatus === "needs_review" && (
-              <Badge tone="warning">
-                <TriangleAlert size={13} /> 本次没有候选通过质量门禁
-              </Badge>
-            )}
             {!publishable && (
               <Badge tone={manuallyConfirmed ? "warning" : "danger"}>
                 <TriangleAlert size={13} /> {manuallyConfirmed ? "自动校验未通过 · 已人工确认交付" : "自动校验未通过 · 确认后可复制与导出"}
               </Badge>
             )}
-            <Button
-              variant="secondary"
-              icon={<Clipboard size={16} />}
-              onClick={copyContent}
-              disabled={!deliverable}
-            >
-              复制全部
-            </Button>
-            <div className="export-menu">
-              <Button icon={<Download size={16} />} disabled={!deliverable}>
-                导出 <ChevronDown size={14} />
-              </Button>
-              <div className="export-menu__dropdown">
-                <button type="button" disabled={!deliverable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "markdown"))}>
-                  <FileText size={16} />
-                  Markdown
-                </button>
-                <button type="button" disabled={!deliverable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "json"))}>
-                  <FileJson size={16} />
-                  JSON
-                </button>
-                <button type="button" disabled={!deliverable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "docx"))}>
-                  <FileText size={16} />
-                  DOCX
-                </button>
-                <button type="button" disabled={!deliverable} onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "pdf"))}>
-                  <FileText size={16} />
-                  PDF
-                </button>
-            </div>
-          </div>
+            {publishable && (
+              <>
+                <Button
+                  variant="secondary"
+                  icon={<Clipboard size={16} />}
+                  onClick={copyContent}
+                >
+                  复制全部
+                </Button>
+                <div className="export-menu">
+                  <Button icon={<Download size={16} />}>
+                    导出 <ChevronDown size={14} />
+                  </Button>
+                  <div className="export-menu__dropdown">
+                    <button type="button" onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "markdown"))}><FileText size={16} />Markdown</button>
+                    <button type="button" onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "json"))}><FileJson size={16} />JSON</button>
+                    <button type="button" onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "docx"))}><FileText size={16} />DOCX</button>
+                    <button type="button" onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "pdf"))}><FileText size={16} />PDF</button>
+                  </div>
+                </div>
+              </>
+            )}
           </>
         }
       />
+
+      {!publishable && formalReviewIssues.length > 0 && (
+        <section className="formal-delivery-review" role="status" aria-label="正式交付复核原因">
+          <header><TriangleAlert size={16} /><div><strong>当前是可查看草稿，不是可直接交付成品</strong><small>以下原因由服务端正式交付门槛判定；修复后重新生成，或逐项核对并完成人工确认。</small></div></header>
+          <ul>{formalReviewIssues.map((issue, index) => <li key={`${issue.code}-${index}`}><b>{validationIssueLabel(issue.code) || issue.code}</b><span>{issue.message}</span></li>)}</ul>
+        </section>
+      )}
 
       {!publishable && selected.validation && (
         <ValidationSummaryCard candidate={selected} />
@@ -375,14 +373,27 @@ export function GenerationResultPage() {
 
       {!publishable && (
         <section className={`manual-delivery-confirmation${manuallyConfirmed ? " is-confirmed" : ""}`} aria-label="人工交付确认">
-          <div>
-            <strong>{manuallyConfirmed ? "当前候选已由你人工确认交付" : "人工核对后允许复制与导出"}</strong>
-            <p>自动校验结果不会改变。确认仅绑定当前用户与当前候选；改稿生成新候选后需要重新确认。</p>
-            {manuallyConfirmed && selected.manualDeliveryConfirmation && (
-              <small>确认时间：{formatDate(selected.manualDeliveryConfirmation.confirmedAt, true)}</small>
-            )}
+          <div className="manual-delivery-confirmation__summary">
+            <strong>
+              {manuallyConfirmed && <CheckCircle2 size={15} />}
+              {manuallyConfirmed ? "已人工确认，可复制与导出" : "人工核对后解锁复制与导出"}
+            </strong>
+            <small>{manuallyConfirmed ? "当前候选已解锁，自动校验结论仍保留" : "仅限当前用户与候选，自动校验结论保留"}</small>
           </div>
-          {!manuallyConfirmed && (
+          {manuallyConfirmed ? (
+            <div className="manual-delivery-confirmation__action manual-delivery-confirmation__action--ready">
+              <Button variant="secondary" icon={<Clipboard size={15} />} onClick={copyContent}>复制全部</Button>
+              <div className="export-menu">
+                <Button icon={<Download size={15} />}>导出 <ChevronDown size={13} /></Button>
+                <div className="export-menu__dropdown">
+                  <button type="button" onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "markdown"))}><FileText size={15} />Markdown</button>
+                  <button type="button" onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "json"))}><FileJson size={15} />JSON</button>
+                  <button type="button" onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "docx"))}><FileText size={15} />DOCX</button>
+                  <button type="button" onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "pdf"))}><FileText size={15} />PDF</button>
+                </div>
+              </div>
+            </div>
+          ) : (
             <div className="manual-delivery-confirmation__action">
               <label>
                 <input
@@ -390,7 +401,7 @@ export function GenerationResultPage() {
                   checked={manualConfirmChecked}
                   onChange={(event) => setManualConfirmChecked(event.target.checked)}
                 />
-                <span>我已逐条核对事实、证据、身份与风险，并承担本次人工交付决定。</span>
+                <span>我已核对事实、证据、身份与风险，并承担本次交付决定。</span>
               </label>
               <Button
                 variant="secondary"
@@ -406,40 +417,33 @@ export function GenerationResultPage() {
         </section>
       )}
 
-      {job.qualityStatus === "needs_review" && (
-        <div className="generation-fallback-notice" role="status">
-          <TriangleAlert size={18} />
-          <div>
-            <strong>没有候选通过自动校验，可以怎么用</strong>
-            <p>请逐条查看下方「校验与一般诊断」中的问题项：若是事实或身份类错误，建议调整知识口径或设置后重新生成；若只是形态提醒，可人工复核候选后酌情使用。逐条核对并完成人工交付确认后，可复制与导出；自动校验结论仍保留。</p>
-          </div>
-        </div>
-      )}
-
-      {job.releaseManifestId && <section className="generation-release-proof">
-        <PackageCheck size={19} />
+      {job.releaseManifestId && <details className="generation-release-proof">
+        <summary>
+          <PackageCheck size={17} />
+          <strong>运行版本：{job.researchSnapshot?.version || job.releaseManifestId}</strong>
+          <ChevronDown size={14} />
+        </summary>
         <div>
-          <strong>本次生成已冻结运行版本：{job.researchSnapshot?.version || job.releaseManifestId}</strong>
           <p>
             提示合同 v{job.researchSnapshot?.promptVersion || "—"} · 参数策略 v{job.researchSnapshot?.parameterPolicyVersion || "—"} ·
             研究文字{job.researchSnapshot?.researchInjectedIntoPrompt === false ? "未自动注入提示词" : "注入状态未记录"}。
           </p>
+          <Link to="/research">查看证据与发布清单</Link>
         </div>
-        <Link to="/research">查看证据与发布清单</Link>
-      </section>}
+      </details>}
 
       <section className="candidate-compare">
         <header>
           <div>
-            <h2>3 个候选版本</h2>
-            <p>随机种子 {job.seed || "—"} · 内容可复现</p>
+            <h2>{candidateCount} 个候选版本</h2>
+            <p>{partiallyGenerated ? `目标生成 3 个，实际完成 ${candidateCount} 个` : `随机种子 ${job.seed || "—"} · 同一任务可复现`}</p>
           </div>
-          <Badge tone="neutral">
-            <Check size={13} />
-            候选与系统校验快照已记录
+          <Badge tone={partiallyGenerated ? "warning" : "neutral"}>
+            {partiallyGenerated ? <TriangleAlert size={13} /> : <Check size={13} />}
+            {partiallyGenerated ? "部分生成完成" : "候选与系统校验快照已记录"}
           </Badge>
         </header>
-        <div className="candidate-grid">
+        <div className="candidate-grid" style={{ gridTemplateColumns: `repeat(${Math.max(1, candidateCount)}, minmax(0, 1fr))` }}>
           {job.candidates?.map((candidate, index) => {
             const readiness = resolveValidationReadinessHeuristic(candidate.validationHeuristic, candidate.score);
             return <button
@@ -449,7 +453,7 @@ export function GenerationResultPage() {
               onClick={() => setSelectedId(candidate.id)}
             >
               <div className="candidate-card__top">
-                <span>0{index + 1}</span>
+                <span>{String(candidate.candidateIndex + 1).padStart(2, "0")}</span>
                 <Badge tone={index === 0 ? "purple" : "neutral"}>
                   {candidate.label || "随机候选"}
                 </Badge>
@@ -474,9 +478,9 @@ export function GenerationResultPage() {
           })}
         </div>
         <details className="candidate-matrix-fold">
-          <summary>对比 3 个候选 <ChevronDown size={14} /></summary>
-        <div className="candidate-matrix">
-          <div className="candidate-matrix__row candidate-matrix__head"><span>对照维度</span>{job.candidates?.map((candidate, index) => <strong key={candidate.id}>候选 0{index + 1}</strong>)}</div>
+          <summary>对比 {candidateCount} 个候选 <ChevronDown size={14} /></summary>
+        <div className="candidate-matrix" style={{ "--candidate-count": Math.max(1, candidateCount) } as React.CSSProperties}>
+          <div className="candidate-matrix__row candidate-matrix__head"><span>对照维度</span>{job.candidates?.map((candidate) => <strong key={candidate.id}>候选 {String(candidate.candidateIndex + 1).padStart(2, "0")}</strong>)}</div>
           <div className="candidate-matrix__row"><span>完整表达结构</span>{job.candidates?.map((candidate) => <b key={candidate.id}>{candidate.orchestrationSnapshot?.strategy?.label || candidate.orchestrationSnapshot?.strategyName || candidate.label || "基础结构"}</b>)}</div>
           <div className="candidate-matrix__row"><span>图片计划职责</span>{job.candidates?.map((candidate) => <b key={candidate.id}>{candidate.imagePlan?.role ? `${imageRoleLabel(candidate.imagePlan.role)}(${candidate.imagePlan.role})` : candidate.orchestrationSnapshot?.strategy?.imageRole || "未生成图片计划"}</b>)}</div>
           <div className="candidate-matrix__row"><span>标题长度</span>{job.candidates?.map((candidate) => <b key={candidate.id}>{candidate.title.length} 字</b>)}</div>
@@ -1145,19 +1149,18 @@ function ValidationSummaryCard({ candidate }: { candidate: Candidate }) {
   const errorCount = issues.filter((issue) => issue.severity === "error").length;
   const warnCount = issues.length - errorCount;
   return (
-    <section className="validation-summary" role="alert">
-      <header>
-        <TriangleAlert size={18} />
-        <div>
-          <strong>本候选未通过自动校验</strong>
-          <p>
-            {errorCount > 0 ? `${errorCount} 个必须处理的问题` : ""}
-            {errorCount > 0 && warnCount > 0 ? " · " : ""}
-            {warnCount > 0 ? `${warnCount} 个复核提醒` : ""}
-            。事实类问题建议调整知识口径或设置后重新生成;形态提醒可人工复核后酌情使用。
-          </p>
-        </div>
-      </header>
+    <details className="validation-summary">
+      <summary>
+        <TriangleAlert size={16} />
+        <strong>自动校验未通过</strong>
+        <span>
+          {errorCount > 0 ? `${errorCount} 项须处理` : ""}
+          {errorCount > 0 && warnCount > 0 ? " · " : ""}
+          {warnCount > 0 ? `${warnCount} 项提醒` : ""}
+        </span>
+        <em>查看详情</em>
+        <ChevronDown size={14} />
+      </summary>
       <div className="validation-summary__groups">
         {sorted.map((group, index) => {
           const label = validationIssueLabel(group.code);
@@ -1188,7 +1191,7 @@ function ValidationSummaryCard({ candidate }: { candidate: Candidate }) {
           );
         })}
       </div>
-    </section>
+    </details>
   );
 }
 
