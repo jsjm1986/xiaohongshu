@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { COMMENT_DISCLAIMER_FALLBACK, commentTotal, replyIdentity } from '../src/components/quick/NoteComments';
+import { COMMENT_DISCLAIMER_FALLBACK, commentTotal, replyIdentity, unavailableAnswerText } from '../src/components/quick/NoteComments';
 import { answererLabelFor } from '../src/lib/comment-view';
 
 // 这一组守的是合规红线,不是排版:答复的署名决定「这句话是谁在担责」。
@@ -90,4 +90,14 @@ test('host_reply 只署楼主本人和已确认作者标', () => {
     badge: '已确认作者',
   });
   assert.equal(answererLabelFor({ threadKind: 'host_reply', postingIdentity: 'author', answer: '我还没决定' }), '楼主本人（已确认）');
+});
+
+
+test('空答复按节点 realization 显示真实原因，不生成替代话术', () => {
+  assert.equal(unavailableAnswerText({ availability: 'withheld_no_evidence', stage: 'org_answer' }), '缺少可核验依据，未生成答复');
+  assert.equal(unavailableAnswerText({ availability: 'withheld_unsupported', stage: 'org_answer' }), '答复超出证据支持范围，已隔离');
+  assert.equal(unavailableAnswerText({ availability: 'failed_provider', stage: 'org_answer' }), '答复阶段暂时失败，未生成替代话术');
+  assert.equal(unavailableAnswerText({ availability: 'rejected_contract', stage: 'comment_network' }), '答复未通过冻结职责校验，已拒收');
+  assert.equal(unavailableAnswerText({ availability: 'not_applicable' }), undefined);
+  assert.equal(unavailableAnswerText({ availability: 'generated' }), undefined);
 });

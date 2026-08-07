@@ -220,7 +220,7 @@ test('生产默认退避窗口达到分钟级，足以跨过实测错误簇', as
 });
 
 /** 任务级质量取最佳可交付候选，不合并三份候选的告警。 */
-test('deriveQualityStatus：存在 passed 候选即通过，全部不可直发才需复核', () => {
+test('deriveQualityStatus：存在 passed 候选即通过，全 blocked 保持 blocked', () => {
   const clean = { validation: { valid: true, qualityStatus: 'passed' as const, issues: [] } };
   const advisory = { validation: { valid: true, qualityStatus: 'passed' as const, issues: [{ severity: 'warning' as const, disposition: 'advisory' as const }] } };
   const review = { validation: { valid: true, qualityStatus: 'needs_review' as const, issues: [{ severity: 'warning' as const, disposition: 'review' as const }] } };
@@ -229,7 +229,7 @@ test('deriveQualityStatus：存在 passed 候选即通过，全部不可直发�
   assert.equal(deriveQualityStatus([clean]), 'passed');
   assert.equal(deriveQualityStatus([advisory]), 'passed');
   assert.equal(deriveQualityStatus([review]), 'needs_review');
-  assert.equal(deriveQualityStatus([blocked]), 'needs_review');
+  assert.equal(deriveQualityStatus([blocked]), 'blocked');
   assert.equal(deriveQualityStatus([review, clean]), 'passed');
   assert.equal(deriveQualityStatus([blocked, clean]), 'passed');
   assert.equal(deriveQualityStatus([review, blocked]), 'needs_review');

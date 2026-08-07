@@ -646,6 +646,7 @@ export type CommentNodeKind = "question" | "answer" | "follow_up" | "clarificati
 export interface CommentThread extends CommentScenarioMetadata {
   question: string;
   answer: string;
+  answerRealization?: CommentAnswerRealization;
   purpose?: string;
   id?: string;
   gapId?: string;
@@ -1004,10 +1005,25 @@ export interface ReaderReasoningEntry {
   evidenceIds: string[];
 }
 
+export type CommentAnswerAvailability =
+  | "generated"
+  | "withheld_no_evidence"
+  | "withheld_unsupported"
+  | "failed_provider"
+  | "rejected_contract"
+  | "not_applicable";
+
+export interface CommentAnswerRealization {
+  availability: CommentAnswerAvailability;
+  reasonCode?: string;
+  stage?: "reader_exchange" | "org_answer" | "host_answer" | "comment_network" | "preview";
+}
+
 export interface ReaderComment {
   id?: string;
   question: string;
   answer: string;
+  answerRealization?: CommentAnswerRealization;
   function?: string;
   /** 线程互动形态:只有 org_answer 的 answer 出自可追责身份,其余是模拟读者接话。 */
   threadKind?: "org_answer" | "reader_exchange" | "organic_reaction" | string;
@@ -1050,6 +1066,7 @@ export interface ReaderGapLedgerEntry {
 
 export type ContentIssueDisposition = "block" | "review" | "advisory";
 export type ContentIssueOrigin = "deterministic" | "agent" | "infrastructure";
+export type ContentIssueOverridePolicy = "not_required" | "human_reviewable" | "non_overridable";
 export type CandidateQualityStatus = "passed" | "needs_review" | "blocked";
 
 export interface CommentEditorialAssessment {
@@ -1066,6 +1083,31 @@ export interface CandidateValidationIssue {
   repairable?: boolean;
   disposition?: ContentIssueDisposition;
   origin?: ContentIssueOrigin;
+  overridePolicy?: ContentIssueOverridePolicy;
+}
+
+export type EditorialStage = "core" | "comment_openers" | "org_answers" | "comment_network" | "ledger" | "revision";
+export type EditorialAssessmentStatus = "pass" | "review" | "rejected" | "unavailable" | "skipped";
+
+export interface EditorialAssessmentRecord {
+  stage: EditorialStage;
+  status: EditorialAssessmentStatus;
+  reasons: string[];
+  summary: string;
+  accepted: boolean;
+  attempt: number;
+}
+
+export type ChannelRealizationStatus = "complete" | "partial" | "failed" | "not_applicable";
+export interface ArtifactRealization {
+  status: "complete" | "partial" | "failed";
+  mode: "model_generated" | "deterministic_preview";
+  deliverability: "eligible" | "non_deliverable";
+  channels: {
+    core: { status: ChannelRealizationStatus; reasonCodes: string[] };
+    comments: { status: ChannelRealizationStatus; reasonCodes: string[] };
+    ledger: { status: ChannelRealizationStatus; reasonCodes: string[] };
+  };
 }
 
 export interface CandidateValidation {
@@ -1082,6 +1124,9 @@ export interface ReaderCandidate {
     confirmed: true;
     confirmedAt: string;
     confirmedBy: string;
+    contentDigest: string;
+    issueDigest: string;
+    issueCodes: string[];
   };
   packageId: string;
   candidateIndex: number;
@@ -1096,6 +1141,9 @@ export interface ReaderCandidate {
   comments: ReaderComment[];
   validation?: CandidateValidation;
   commentEditorialAssessment?: CommentEditorialAssessment;
+  editorialAssessments?: EditorialAssessmentRecord[];
+  artifactRealization?: ArtifactRealization;
+  generationMode?: "model_generated" | "deterministic_preview";
   reasoning: ReaderReasoningEntry[];
   gapLedger?: { entries: ReaderGapLedgerEntry[]; realizationStatus?: string };
   gapCards: Array<{
@@ -1154,6 +1202,9 @@ export interface Candidate {
    * Absent on historical packages means "not computed", not "nothing uncovered".
    */
   commentUncoveredGaps?: string[];
+  editorialAssessments?: EditorialAssessmentRecord[];
+  artifactRealization?: ArtifactRealization;
+  generationMode?: "model_generated" | "deterministic_preview";
   imageBrief?: string;
   /** Legacy compatibility value; display only when bound to validationHeuristic. */
   score?: number;
@@ -1541,7 +1592,7 @@ export type PlanningRandomizationDimension =
   | "gap_order";
 
 export type GenerationStatus = "queued" | "running" | "completed" | "failed";
-export type GenerationQualityStatus = "unknown" | "passed" | "needs_review";
+export type GenerationQualityStatus = "unknown" | "passed" | "needs_review" | "blocked";
 
 export type ResearchReviewStatus = "draft" | "under_review" | "approved" | "deprecated" | "rejected";
 

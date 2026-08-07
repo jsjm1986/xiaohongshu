@@ -492,7 +492,8 @@ describe("threadKind validation (读者互动层)", () => {
     });
     expect(issues).toContainEqual(expect.objectContaining({
       code: "consumer_body_organization_fact",
-      disposition: "block",
+      severity: "warning",
+      disposition: "review",
       channel: "N.body",
     }));
 
@@ -508,7 +509,8 @@ describe("threadKind validation (读者互动层)", () => {
     });
     expect(issues).toContainEqual(expect.objectContaining({
       code: "ungrounded_organization_service_commitment",
-      disposition: "block",
+      severity: "warning",
+      disposition: "review",
       channel: "Cref",
     }));
 

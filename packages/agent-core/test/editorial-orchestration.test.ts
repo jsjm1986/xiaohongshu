@@ -154,12 +154,16 @@ describe("repair responsibility routing", () => {
 
   it("routes ledger mapping, visible copy and planning conflicts to different owners", () => {
     expect(repairResponsibilityForIssues([issue("visible_claim_not_in_ledger", "N.body")])).toEqual({
-      responsibility: "ledger_only",
+      responsibility: "none",
       channels: [],
     });
     expect(repairResponsibilityForIssues([issue("forbidden_phrase", "N.body")])).toEqual({
-      responsibility: "visible_copy",
+      responsibility: "core_copy",
       channels: ["N.body"],
+    });
+    expect(repairResponsibilityForIssues([issue("comment_reply_voice_repetition", "Cref")])).toEqual({
+      responsibility: "comment_editor",
+      channels: ["Cref"],
     });
     expect(repairResponsibilityForIssues([issue("reply_identity_plan_drift", "Cref")])).toEqual({
       responsibility: "replan_required",

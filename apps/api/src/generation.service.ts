@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import {
   ContentGenerationAgent,
@@ -7,6 +7,7 @@ import {
   ModelProviderError,
   OpenAICompatibleClient,
   indexKnowledgeSource,
+  issueOverridePolicy,
   type ContentPackage,
   type FormulaVersion,
   type GenerationParameterSelection,
@@ -94,6 +95,7 @@ interface JobRow {
   release_manifest_id: string | null;
   research_snapshot_json: string;
   quality_status: 'unknown' | 'passed' | 'needs_review';
+  delivery_quality_status: 'unknown' | 'passed' | 'needs_review' | 'blocked';
   /** 批次归属;单篇生成恒为 null(迁移 v12 加入) */
   batch_id: string | null;
 }
@@ -758,7 +760,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       goal: row.goal,
       mode: row.mode,
       status: row.status,
-      qualityStatus: row.quality_status,
+      qualityStatus: jobQualityStatus(row),
       progress: row.progress,
       seed: row.seed,
       // formula 可能缺失(历史任务或异常数据)。原来 mapJob 写的是
@@ -838,7 +840,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       topic: row.topic,
       goal: row.goal,
       status: row.status,
-      qualityStatus: row.quality_status,
+      qualityStatus: jobQualityStatus(row),
       createdAt: row.created_at,
       completedAt: row.completed_at ?? undefined,
       error: row.error ?? undefined,
@@ -887,21 +889,67 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     throw new NotFoundException('候选内容不存在');
   }
 
+  private deliverySnapshot(content: ContentPackage): { contentDigest: string; issueDigest: string; issueCodes: string[] } {
+    const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    const issueView = content.validation.issues
+      .map((issue) => ({
+        code: issue.code, severity: issue.severity, disposition: issue.disposition,
+        overridePolicy: issueOverridePolicy(issue), channel: issue.channel, message: issue.message,
+      }))
+      .sort((a, b) => `${a.code}:${a.channel}:${a.message}`.localeCompare(`${b.code}:${b.channel}:${b.message}`));
+    return {
+      contentDigest: hash({
+        content: content.content,
+        evidence: content.evidence,
+        reasoning: content.reasoning,
+        unknowns: content.unknowns,
+        generationMode: content.generationMode,
+        artifactRealization: content.artifactRealization,
+      }),
+      issueDigest: hash(issueView),
+      issueCodes: [...new Set(issueView.map((issue) => issue.code))].sort(),
+    };
+  }
+
+  private assertManualDeliveryEligible(content: ContentPackage): void {
+    if (content.generationMode === 'deterministic_preview' || content.artifactRealization?.deliverability === 'non_deliverable') {
+      throw new BadRequestException('确定性预览不是正式成品，不能通过人工确认升级为可交付内容；请重新生成');
+    }
+    if (content.validation.valid) throw new BadRequestException('候选已通过自动校验，无需人工交付确认');
+    const issues = content.validation.issues;
+    const nonOverridable = issues.filter((issue) => issueOverridePolicy(issue) === 'non_overridable');
+    if (nonOverridable.length) {
+      throw new BadRequestException(`候选包含不可人工覆盖的阻断项：${[...new Set(nonOverridable.map((issue) => issue.code))].join('、')}；请修复或重新生成`);
+    }
+    const reviewable = issues.filter((issue) => issueOverridePolicy(issue) === 'human_reviewable');
+    if (!reviewable.length) throw new BadRequestException('候选没有可人工确认的复核项；请修复或重新生成');
+  }
+
   manualDeliveryConfirmation(packageId: string, userId: string): {
-    confirmed: true; confirmedAt: string; confirmedBy: string;
+    confirmed: true; confirmedAt: string; confirmedBy: string; contentDigest: string; issueDigest: string; issueCodes: string[];
   } | null {
     const row = this.database.prepare(
-      `SELECT created_at FROM audit_logs
-       WHERE action='generation.manual-delivery-confirm'
-         AND entity_type='content_package' AND entity_id=? AND user_id=?
-       ORDER BY id DESC LIMIT 1`,
-    ).get(packageId, userId) as { created_at: string } | undefined;
-    return row ? { confirmed: true, confirmedAt: row.created_at, confirmedBy: userId } : null;
+      `SELECT a.created_at, a.details_json, p.content_json FROM audit_logs a
+       JOIN content_packages p ON p.id=a.entity_id
+       WHERE a.action='generation.manual-delivery-confirm'
+         AND a.entity_type='content_package' AND a.entity_id=? AND a.user_id=?
+       ORDER BY a.id DESC LIMIT 1`,
+    ).get(packageId, userId) as { created_at: string; details_json: string; content_json: string } | undefined;
+    if (!row) return null;
+    const content = normalizeContentPackageForApi(parseJson<ContentPackage>(row.content_json, {} as ContentPackage));
+    if (content.generationMode === 'deterministic_preview' || content.artifactRealization?.deliverability === 'non_deliverable') return null;
+    const details = parseJson<Record<string, unknown>>(row.details_json, {});
+    const current = this.deliverySnapshot(content);
+    if (details.contentDigest !== current.contentDigest || details.issueDigest !== current.issueDigest) return null;
+    if (content.validation.issues.some((issue) => issueOverridePolicy(issue) === 'non_overridable')) return null;
+    return { confirmed: true, confirmedAt: row.created_at, confirmedBy: userId, ...current };
   }
 
   confirmManualDelivery(jobId: string, candidateId: string, principal: SessionPrincipal): Record<string, unknown> {
     const job = this.jobRow(jobId);
     const content = this.contentPackage(jobId, candidateId);
+    this.assertManualDeliveryEligible(content);
+    const snapshot = this.deliverySnapshot(content);
     const existing = this.manualDeliveryConfirmation(content.id, principal.userId);
     if (!existing) {
       const project = this.resources.projectRow(job.project_id);
@@ -911,14 +959,13 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
         details: {
           jobId, candidateId: content.candidateId, packageId: content.id,
           automaticValidationValid: content.validation.valid,
-          acknowledgement: 'reviewed_facts_evidence_identity_and_risk',
+          acknowledgement: 'reviewed_human_reviewable_issues',
+          ...snapshot,
         },
       });
     }
     const confirmation = this.manualDeliveryConfirmation(content.id, principal.userId);
     if (!confirmation) throw new InternalServerErrorException('人工交付确认未能保存');
-    // 只回最小确认结果。SaaS 极简页也能调用本端点，不能借 POST 响应取得完整
-    // GenerationJob 中的专家字段；调用方按自己的产品界面刷新 get 或 reader。
     return { jobId, candidateId: content.candidateId, confirmation };
   }
 
@@ -1290,12 +1337,13 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
         const completed = this.database
           .prepare(
             `UPDATE generation_jobs
-                SET status='completed', quality_status=?, progress=100, error=NULL, completed_at=?,
+                SET status='completed', quality_status=?, delivery_quality_status=?, progress=100, error=NULL, completed_at=?,
                     knowledge_context_json=?, opportunity_snapshot_json=?, resolution_snapshot_json=?,
                     config_impact_json=?, updated_at=?, claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL
               WHERE id=? AND status='running' AND claimed_by=? AND deleted_at IS NULL`,
           )
           .run(
+            qualityStatus === 'blocked' ? 'needs_review' : qualityStatus,
             qualityStatus,
             result.completedAt,
             JSON.stringify(result.knowledgeContext),
@@ -1851,7 +1899,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       goal: row.goal,
       mode: row.mode,
       status: row.status,
-      qualityStatus: row.quality_status,
+      qualityStatus: jobQualityStatus(row),
       progress: row.progress,
       ...this.queueView(row.id),
       candidates: includeCandidates && row.status === 'completed' ? this.packageRows(row.id).map((item) => this.mapCandidate(parseJson<ContentPackage>(item.content_json, {} as ContentPackage), deliveryConfirmationUserId)) : undefined,
@@ -1952,6 +2000,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
           threadKind,
           replyDisplayName: thread.replyDisplayName ?? planned?.replyDisplayName,
           postingIdentity: thread.postingIdentity,
+          answerRealization: thread.answerRealization,
           answerIdentity: thread.answerIdentity ?? (threadKind === "reader_exchange"
             ? "simulated_reader"
             : threadKind === "organic_reaction" ? "none" : thread.postingIdentity),
@@ -2024,6 +2073,10 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
         ? this.manualDeliveryConfirmation(content.id, deliveryConfirmationUserId) ?? undefined
         : undefined,
       commentEditorialAssessment: content.commentEditorialAssessment,
+      coreEditorialAssessment: content.coreEditorialAssessment,
+      editorialAssessments: content.editorialAssessments,
+      artifactRealization: content.artifactRealization,
+      generationMode: content.generationMode,
       revisions: content.revisions,
       resolutionSnapshot: content.resolutionSnapshot,
       impactReport: normalizedImpactReport ? publicImpacts(normalizedImpactReport) : undefined,
@@ -2393,6 +2446,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * status/disposition. Historical packages remain readable via the old
  * error=block, warning=advisory convention.
  */
+function jobQualityStatus(row: Pick<JobRow, 'quality_status' | 'delivery_quality_status'>): 'unknown' | 'passed' | 'needs_review' | 'blocked' {
+  return row.delivery_quality_status && row.delivery_quality_status !== 'unknown'
+    ? row.delivery_quality_status
+    : row.quality_status;
+}
+
 export function deriveQualityStatus(
   packages: Array<{
     validation: {
@@ -2401,7 +2460,7 @@ export function deriveQualityStatus(
       issues: Array<{ severity?: 'error' | 'warning'; disposition?: 'block' | 'review' | 'advisory' }>;
     };
   }>,
-): 'passed' | 'needs_review' {
+): 'passed' | 'needs_review' | 'blocked' {
   const candidateStatus = (content: typeof packages[number]): 'passed' | 'needs_review' | 'blocked' => {
     if (content.validation.qualityStatus) return content.validation.qualityStatus;
     if (!content.validation.valid) return 'blocked';
@@ -2409,7 +2468,10 @@ export function deriveQualityStatus(
     if (content.validation.issues.some((issue) => issue.disposition === 'review')) return 'needs_review';
     return 'passed';
   };
-  return packages.some((content) => candidateStatus(content) === 'passed') ? 'passed' : 'needs_review';
+  const statuses = packages.map(candidateStatus);
+  if (statuses.includes('passed')) return 'passed';
+  if (statuses.includes('needs_review')) return 'needs_review';
+  return 'blocked';
 }
 
 export function computeBatchStatus(jobStatuses: string[]): 'queued' | 'running' | 'completed' | 'failed' | 'partial' {

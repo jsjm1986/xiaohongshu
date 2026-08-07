@@ -526,6 +526,20 @@ export function parseStagedOrgAnswers(text: string): StagedOrgAnswersCopy {
   return { answers, ownedFirstComment: optionalTrimmedText(container.ownedFirstComment) };
 }
 
+function answerRealization(value: unknown): ContentPackageContent["Cref"]["threads"][number]["answerRealization"] {
+  if (!isRecord(value)) return undefined;
+  const availability = String(value.availability);
+  if (!["generated", "withheld_no_evidence", "withheld_unsupported", "failed_provider", "rejected_contract", "not_applicable"].includes(availability)) return undefined;
+  const stage = typeof value.stage === "string" && ["reader_exchange", "org_answer", "host_answer", "comment_network", "preview"].includes(value.stage)
+    ? value.stage as NonNullable<ContentPackageContent["Cref"]["threads"][number]["answerRealization"]>["stage"]
+    : undefined;
+  return {
+    availability: availability as NonNullable<ContentPackageContent["Cref"]["threads"][number]["answerRealization"]>["availability"],
+    ...(typeof value.reasonCode === "string" && value.reasonCode.trim() ? { reasonCode: value.reasonCode.trim() } : {}),
+    ...(stage ? { stage } : {}),
+  };
+}
+
 function parseContent(value: unknown): ContentPackageContent {
   if (!isRecord(value) || !isRecord(value.H) || !isRecord(value.N) || !isRecord(value.Cref)) {
     throw new Error("Generation output must include content.H, content.N and content.Cref objects.");
@@ -608,6 +622,7 @@ function parseContent(value: unknown): ContentPackageContent {
         || ["author", "brand", "staff", "expert", "publisher"].includes(String(thread.answerIdentity))
         ? thread.answerIdentity as ContentPackageContent["Cref"]["threads"][number]["answerIdentity"]
         : undefined,
+      answerRealization: answerRealization(thread.answerRealization),
       threadKind: thread.threadKind === "host_reply"
         ? "host_reply" as const
         : thread.threadKind === "reader_exchange"
@@ -748,6 +763,7 @@ export function parseGenerationDraft(text: string): GenerationDraft {
       ...(location ? { location } : {}),
       ...(occurrence ? { occurrence } : {}),
       sourceSpans,
+      ...(item.semanticSupport === "ai_judged" ? { semanticSupport: "ai_judged" as const } : {}),
     };
   });
   const unknowns = Array.isArray(value.unknowns) ? parseUnknowns(value.unknowns) : [];
@@ -1477,7 +1493,8 @@ function mechanicallyGroundedFactEntry(
     && occurrenceMatches(item.occurrence, occurrence)
     && spans.length > 0
     && (!allowedEvidenceIds || spans.some((span) => allowedEvidenceIds.has(span.evidenceId)))
-    && combinedEvidenceSupport(item.statement, spans.map((span) => span.quote));
+    && (item.semanticSupport === "ai_judged"
+      || combinedEvidenceSupport(item.statement, spans.map((span) => span.quote)));
 }
 
 function typedRelationCoveredByStatement(claim: string, statement: string): boolean {
@@ -1741,15 +1758,95 @@ export function isHashtagOnlyLine(statement: string): boolean {
   return /^(?:#[^#\s]+[\s、,，]*)+$/u.test(trimmed);
 }
 
-export function issueDisposition(issue: Pick<ContentValidationIssue, "severity" | "disposition">): NonNullable<ContentValidationIssue["disposition"]> {
+/**
+ * Cross-industry semantic judgments belong to the project-aware agents, not to
+ * fixed vocabulary, token-overlap or Chinese phrasing heuristics. These codes
+ * remain visible for audit and human review, but cannot hard-block delivery on
+ * their own. Structural integrity, identity ownership, confidentiality and
+ * source authenticity are deliberately absent from this set and stay hard.
+ */
+const AI_GOVERNED_REVIEW_CODES = new Set([
+  "allocated_unknown_path_not_visible",
+  "author_fact_scope_exceeded",
+  "body_gap_false_resolution",
+  "comment_auxiliary_false_resolution",
+  "comment_discovery_as_evidence",
+  "comment_discovery_false_closure",
+  "comment_discovery_withholding",
+  "comment_gap_input_unspecified",
+  "comment_gap_silently_dropped",
+  "comment_gap_verification_unspecified",
+  "comment_host_state_inconsistency",
+  "comment_reply_topic_drift",
+  "comment_required_gap_deferred",
+  "comment_role_constraint_ungrounded",
+  "conflict_as_fact",
+  "consumer_body_organization_fact",
+  "creative_scenario_timeline_drift",
+  "duplicate_comment_answer",
+  "duplicate_comment_question",
+  "evidence_quote_not_supportive",
+  "fabricated_operational_experience",
+  "fabricated_testimonial",
+  "gap_resolution_not_realized",
+  "image_product_shape_drift",
+  "marketing_claim_grounding",
+  "plan_to_copy_alignment",
+  "planned_body_gap_not_realized",
+  "planned_comment_gap_not_realized",
+  "prohibited_claim",
+  "publishing_topology_voice_mismatch",
+  "reader_exchange_controlled_claim",
+  "reply_question_plan_drift",
+  "ungrounded_organization_service_commitment",
+  "unknown_as_fact",
+  "unsupported_narrative_history",
+  "visible_claim_not_in_ledger",
+]);
+
+export function issueDisposition(
+  issue: Pick<ContentValidationIssue, "code" | "severity" | "disposition">,
+): NonNullable<ContentValidationIssue["disposition"]> {
+  if (AI_GOVERNED_REVIEW_CODES.has(issue.code)) return "review";
   return issue.disposition ?? (issue.severity === "error" ? "block" : "advisory");
+}
+
+export function issueOverridePolicy(
+  issue: Pick<ContentValidationIssue, "code" | "severity" | "disposition" | "overridePolicy">,
+): NonNullable<ContentValidationIssue["overridePolicy"]> {
+  // Central AI-governance policy wins over stale/legacy per-issue metadata.
+  // Otherwise a semantic code serialized earlier as non_overridable would stay
+  // hard-blocking even after the cross-industry policy moved it to review.
+  if (AI_GOVERNED_REVIEW_CODES.has(issue.code)) return "human_reviewable";
+  if (issue.overridePolicy) return issue.overridePolicy;
+  if (issue.code === "model_not_invoked") return "non_overridable";
+  const disposition = issueDisposition(issue);
+  return disposition === "block" ? "non_overridable"
+    : disposition === "review" ? "human_reviewable" : "not_required";
 }
 
 export function candidateQualityStatus(
   validation: { valid?: boolean; issues: readonly ContentValidationIssue[] },
 ): "passed" | "needs_review" | "blocked" {
-  if (validation.valid === false || validation.issues.some((issue) => issueDisposition(issue) === "block")) return "blocked";
-  return validation.issues.some((issue) => issueDisposition(issue) === "review") ? "needs_review" : "passed";
+  if (validation.issues.some((issue) => issueDisposition(issue) === "block")) return "blocked";
+  if (validation.issues.some((issue) => issueDisposition(issue) === "review")) return "needs_review";
+  // Historical payloads may carry only valid=false without issue metadata.
+  return validation.valid === false ? "blocked" : "passed";
+}
+
+/** Normalize semantic heuristics at the validator boundary, not only when an
+ * engine later packages them. Direct API/test consumers must see the same AI-
+ * governed review contract as generated packages. An explicit agent verdict
+ * uses its own code/metadata and is therefore not weakened here. */
+function applyAiGovernanceToIssue(issue: ContentValidationIssue): ContentValidationIssue {
+  if (!AI_GOVERNED_REVIEW_CODES.has(issue.code)) return issue;
+  return {
+    ...issue,
+    severity: "warning",
+    disposition: "review",
+    overridePolicy: "human_reviewable",
+    repairable: false,
+  };
 }
 
 export function validateGenerationDraft(input: DraftValidationInput): ContentValidationIssue[] {
@@ -1973,6 +2070,7 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
         }
       }
       if (item.status === "fact" && sourceSpans.length > 0
+        && item.semanticSupport !== "ai_judged"
         && !combinedEvidenceSupport(item.statement, sourceSpans.map((span) => span.quote))) {
         add("evidence_quote_not_supportive", "error", "package", `Evidence quotes do not jointly support the factual statement: ${item.statement}`);
       }
@@ -2037,12 +2135,25 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
       // The judge may classify an offer/hedge/question, but a factual verdict
       // never bypasses the mechanical ledger. "supported" matters only after its
       // exact quote has actually been attached as a fact row.
-      const grounded = judgment?.classification !== undefined && judgment.classification !== "factual_assertion"
-        ? true
+      const grounded = judgment
+        ? judgment.classification !== "factual_assertion" || judgment.supported === true
         : ledgerFactSupportsClaim(draft, statement, surface.location, surface.occurrence);
       if (!grounded) {
         const labels = matchedRules.map((rule) => rule.label || rule.claimType).join(", ") || "measured claim";
-        add("sensitive_claim_without_evidence", "error", surface.location === "Cref.thread" || surface.location === "Cref.followUp" ? "Cref" : surface.location, `A controlled project claim (${labels}) is visible without factual evidence: ${statement}`);
+        const channel = surface.location === "Cref.thread" || surface.location === "Cref.followUp" ? "Cref" : surface.location;
+        if (judgment?.classification === "factual_assertion" && judgment.supported === false) {
+          issues.push({
+            code: "sensitive_claim_without_evidence", severity: "error", channel,
+            message: `AI evidence judge found no support for a controlled project claim (${labels}): ${statement}`,
+            repairable: true, disposition: "block", origin: "agent", overridePolicy: "non_overridable",
+          });
+        } else {
+          issues.push({
+            code: "sensitive_claim_without_evidence", severity: "warning", channel,
+            message: `No AI evidence verdict is available for a controlled project claim (${labels}); review it instead of applying a vocabulary hard gate: ${statement}`,
+            repairable: false, disposition: "review", origin: "deterministic", overridePolicy: "human_reviewable",
+          });
+        }
       }
     }
   }
@@ -2826,12 +2937,12 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
       );
     }
   }
-  return issues;
+  return issues.map(applyAiGovernanceToIssue);
 }
 
 export function diagnosticsFromValidation(issues: ContentValidationIssue[]): ContentDiagnostic[] {
-  const errors = issues.filter((item) => item.severity === "error");
-  const warnings = issues.filter((item) => item.severity === "warning");
+  const errors = issues.filter((item) => issueDisposition(item) === "block");
+  const warnings = issues.filter((item) => issueDisposition(item) !== "block");
   return [
     {
       name: "hard_constraints",
@@ -3054,7 +3165,7 @@ export function applyGenerationPatch(current: GenerationDraft, patch: Generation
 
 export function channelsForIssues(issues: ContentValidationIssue[]): ContentChannel[] {
   const channels = new Set<ContentChannel>();
-  for (const issue of issues.filter((item) => item.repairable && item.severity === "error")) {
+  for (const issue of issues.filter((item) => item.repairable && issueDisposition(item) === "block")) {
     if (issue.channel === "package") {
       channels.add("H");
       channels.add("N.body");

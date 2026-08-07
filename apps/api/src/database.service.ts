@@ -13,7 +13,7 @@ export type SqlValue = string | number | bigint | Uint8Array | null;
  * 无关的测试变红——那不是回归信号,是维护噪声。测试断言这个常量,真正想验的
  * 「迁移到最新且表结构对得上」不变。
  */
-export const SCHEMA_VERSION = 25;
+export const SCHEMA_VERSION = 26;
 
 @Injectable()
 export class DatabaseService implements OnModuleDestroy {
@@ -1438,6 +1438,30 @@ export class DatabaseService implements OnModuleDestroy {
       this.db.exec('PRAGMA user_version = 25');
     });
     if (version < 25) version = 25;
+
+    if (version < 26) this.transaction(() => {
+      const hasGenerationJobs = Boolean(
+        this.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='generation_jobs'").get(),
+      );
+      if (hasGenerationJobs) {
+        const columns = new Set(
+          (this.prepare("SELECT name FROM pragma_table_info('generation_jobs')").all() as { name: string }[])
+            .map((row) => row.name),
+        );
+        if (!columns.has('delivery_quality_status')) {
+          this.db.exec(`
+            ALTER TABLE generation_jobs
+              ADD COLUMN delivery_quality_status TEXT NOT NULL DEFAULT 'unknown'
+              CHECK(delivery_quality_status IN ('unknown','passed','needs_review','blocked'));
+          `);
+        }
+        if (columns.has('quality_status')) {
+          this.db.exec("UPDATE generation_jobs SET delivery_quality_status=quality_status WHERE delivery_quality_status='unknown'");
+        }
+      }
+      this.db.exec('PRAGMA user_version = 26');
+    });
+    if (version < 26) version = 26;
   }
 
   onModuleDestroy(): void {

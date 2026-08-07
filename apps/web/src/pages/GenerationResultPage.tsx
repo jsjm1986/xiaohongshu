@@ -50,6 +50,7 @@ import {
   type DiagnosticProxyView,
 } from "../lib/diagnostic-proxy";
 import { errorMessage } from "../lib/errors";
+import { candidateDeliverable, deliveryReadiness } from "../lib/delivery-readiness";
 import {
   isRevisionInFlight,
   revisionBoxState,
@@ -146,9 +147,11 @@ export function GenerationResultPage() {
     // decision or a local checkbox across candidate switches.
     setManualConfirmChecked(false);
   }, [selected?.id]);
-  const publishable = selected?.validation?.valid === true;
-  const manuallyConfirmed = selected?.manualDeliveryConfirmation?.confirmed === true;
-  const deliverable = publishable || manuallyConfirmed;
+  const readiness = deliveryReadiness(selected?.validation, { generationMode: selected?.generationMode, deliverability: selected?.artifactRealization?.deliverability });
+  const publishable = readiness === "publishable";
+  const reviewable = readiness === "human_reviewable";
+  const manuallyConfirmed = reviewable && selected?.manualDeliveryConfirmation?.confirmed === true;
+  const deliverable = candidateDeliverable(selected?.validation, manuallyConfirmed, { generationMode: selected?.generationMode, deliverability: selected?.artifactRealization?.deliverability });
   const candidateCount = job?.candidates?.length ?? 0;
   const partiallyGenerated = candidateCount > 0 && candidateCount < 3;
   const formalReviewIssues = (selected?.validation?.issues ?? []).filter((issue) =>
@@ -229,7 +232,7 @@ export function GenerationResultPage() {
   };
 
   const confirmManualDelivery = async () => {
-    if (!job || !selected || publishable || manuallyConfirmed || !manualConfirmChecked || manualConfirming) return;
+    if (!job || !selected || !reviewable || manuallyConfirmed || !manualConfirmChecked || manualConfirming) return;
     setManualConfirming(true);
     try {
       await api.generations.confirmManualDelivery(job.id, selected.id);
@@ -331,7 +334,7 @@ export function GenerationResultPage() {
           <>
             {!publishable && (
               <Badge tone={manuallyConfirmed ? "warning" : "danger"}>
-                <TriangleAlert size={13} /> {manuallyConfirmed ? "自动校验未通过 · 已人工确认交付" : "自动校验未通过 · 确认后可复制与导出"}
+                <TriangleAlert size={13} /> {manuallyConfirmed ? "自动校验需复核 · 已人工确认交付" : reviewable ? "自动校验需复核 · 确认后可复制与导出" : "存在硬阻断 · 必须修复"}
               </Badge>
             )}
             {publishable && (
@@ -371,7 +374,7 @@ export function GenerationResultPage() {
         <ValidationSummaryCard candidate={selected} />
       )}
 
-      {!publishable && (
+      {reviewable && (
         <section className={`manual-delivery-confirmation${manuallyConfirmed ? " is-confirmed" : ""}`} aria-label="人工交付确认">
           <div className="manual-delivery-confirmation__summary">
             <strong>

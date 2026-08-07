@@ -41,6 +41,8 @@ export interface ReaderComment {
    */
   threadKind?: string;
   postingIdentity?: string;
+  /** Explicit answer-node availability; absent on historical packages. */
+  answerRealization?: ContentPackage['content']['Cref']['threads'][number]['answerRealization'];
   /** Minimal answer-side display role needed to render staff/expert/host correctly. */
   surfaceRoleCard?: { replyDisplayRole?: string };
   /** Human-confirmed author facts referenced by host_reply; IDs only, never project evidence. */
@@ -70,7 +72,7 @@ export interface ReaderStrategy {
 
 export interface ReaderCandidate {
   id: string;
-  manualDeliveryConfirmation?: { confirmed: true; confirmedAt: string; confirmedBy: string };
+  manualDeliveryConfirmation?: { confirmed: true; confirmedAt: string; confirmedBy: string; contentDigest: string; issueDigest: string; issueCodes: string[] };
   packageId: string;
   candidateIndex: number;
   seed: number;
@@ -84,6 +86,9 @@ export interface ReaderCandidate {
   comments: ReaderComment[];
   validation: ContentPackage['validation'];
   commentEditorialAssessment?: ContentPackage['commentEditorialAssessment'];
+  editorialAssessments?: ContentPackage['editorialAssessments'];
+  artifactRealization?: ContentPackage['artifactRealization'];
+  generationMode?: ContentPackage['generationMode'];
   reasoning: ReaderReasoningEntry[];
   gapLedger?: {
     entries: Array<{
@@ -146,6 +151,7 @@ function readerComments(pkg: ContentPackage): ReaderComment[] {
       // 成稿线程可能缺 threadKind(旧包),规划线程里有;与其他元数据同一套回落。
       threadKind: thread.threadKind ?? plan?.threadKind,
       postingIdentity: thread.postingIdentity,
+      answerRealization: thread.answerRealization,
       surfaceRoleCard: thread.surfaceRoleCard ?? plan?.surfaceRoleCard,
       authorFactIds: thread.authorFactIds ?? plan?.authorFactIds,
       topicAnchorGapId: thread.topicAnchorGapId ?? plan?.topicAnchorGapId,
@@ -228,6 +234,9 @@ export function readerView(
     comments: readerComments(pkg),
     validation: pkg.validation,
     commentEditorialAssessment: pkg.commentEditorialAssessment,
+    editorialAssessments: pkg.editorialAssessments,
+    artifactRealization: pkg.artifactRealization,
+    generationMode: pkg.generationMode,
     reasoning: readerReasoning(pkg),
     gapLedger: readerGapLedger(pkg),
     gapCards: (pkg.orchestrationSnapshot?.gapPlanningCards ?? []).map((card) =>

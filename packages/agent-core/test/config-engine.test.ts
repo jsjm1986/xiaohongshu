@@ -102,8 +102,8 @@ describe("observed generation cost controls", () => {
       { code: "gap_resolution_not_realized", severity: "error", channel: "N.body", message: "terminal", repairable: false },
     ])).toBe(false);
     expect(shouldAttemptGenerationRepair([
-      { code: "visible_claim_not_in_ledger", severity: "error", channel: "N.body", message: "repairable", repairable: true },
-    ])).toBe(true);
+      { code: "visible_claim_not_in_ledger", severity: "error", channel: "N.body", message: "AI-governed review", repairable: true },
+    ])).toBe(false);
     expect(shouldAttemptGenerationRepair([
       { code: "shape", severity: "warning", channel: "N.body", message: "warning", repairable: true },
     ])).toBe(false);
@@ -634,7 +634,6 @@ describe("three-candidate content generation engine", () => {
         calls.push(request);
         const purpose = String(request.metadata?.purpose);
         if (purpose === "revision") {
-          const ids = stagedThreadIds(request);
           return {
             text: JSON.stringify({
               N: {
@@ -642,18 +641,25 @@ describe("three-candidate content generation engine", () => {
                 title: "先把适用条件问具体",
                 body: "先把适用边界写清，再说明自己的情况和现实限制。哪些条件会改变判断，就逐项向可追责渠道问明白；当前没有统一答案，不替个人下结论。",
               },
-              Cref: {
-                disclaimer: "以下为完整评论区创作参考，不代表真实用户发言。",
-                threads: ids.map((id, index) => ({
-                  id,
-                  question: `适用条件第${index + 1}项该怎么确认？`,
-                  answer: "这一项当前无法确认，先不下结论。",
-                  followUps: [],
-                })),
-              },
               evidenceIds: [],
               reasoning: [],
               unknowns: [],
+            }),
+            raw: {},
+          };
+        }
+        if (purpose === "revision_comment_network") {
+          const ids = stagedThreadIds(request);
+          return {
+            text: JSON.stringify({
+              disclaimer: "以下为多角色评论情景演练与发布者答疑参考模板，不代表真实用户发言、亲历口碑或已经发生的互动。",
+              threads: ids.map((id, index) => ({
+                id,
+                question: `关于适用条件，第${index + 1}项现实情况该怎么确认？`,
+                answer: "",
+                followUps: [],
+              })),
+              assessment: { status: "pass", reasons: [], summary: "评论已按冻结职责复核。" },
             }),
             raw: {},
           };
@@ -873,8 +879,10 @@ describe("three-candidate content generation engine", () => {
       rankStatus: "not_applied",
       approvalBasis: "approved_dependency",
     });
-    const revisionCall = calls.at(-1)!;
-    expect(revisionCall.metadata?.purpose).toBe("revision");
+    const revisionCall = calls.find((call) => call.metadata?.purpose === "revision")!;
+    const commentRevisionCall = calls.find((call) => call.metadata?.purpose === "revision_comment_network")!;
+    expect(revisionCall).toBeTruthy();
+    expect(commentRevisionCall).toBeTruthy();
     const revisionContent = revisionCall.messages[1]!.content;
     const revisionText = Array.isArray(revisionContent)
       ? revisionContent.find((part) => part.type === "text")?.text ?? ""
@@ -882,6 +890,9 @@ describe("three-candidate content generation engine", () => {
     expect(revisionText).toContain("图片中有核验清单");
     expect(revisionText).toContain("image-analysis:img1");
     expect(Array.isArray(revisionContent) && revisionContent.some((part) => part.type === "image_url")).toBe(true);
+    expect(revised.package.editorialAssessments?.at(-1)).toMatchObject({ stage: "revision", status: "pass", accepted: true });
+    expect(revised.package.generationMode).toBe("model_generated");
+    expect(revised.package.artifactRealization?.mode).toBe("model_generated");
   });
 
   /**

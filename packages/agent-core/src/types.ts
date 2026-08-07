@@ -1046,12 +1046,28 @@ export interface CommentFollowUp extends CommentScenarioMetadata {
   displayName?: string;
 }
 
+export type CommentAnswerAvailability =
+  | "generated"
+  | "withheld_no_evidence"
+  | "withheld_unsupported"
+  | "failed_provider"
+  | "rejected_contract"
+  | "not_applicable";
+
+export interface CommentAnswerRealization {
+  availability: CommentAnswerAvailability;
+  reasonCode?: string;
+  stage?: "reader_exchange" | "org_answer" | "host_answer" | "comment_network" | "preview";
+}
+
 export interface CommentReferenceThread extends CommentScenarioMetadata {
   id: string;
   question: string;
   answer: string;
   followUps: CommentFollowUp[];
   postingIdentity: "author" | "brand" | "staff" | "expert" | "reader_question_template" | "publisher";
+  /** Explicit truth state for an answer node; optional on historical packages. */
+  answerRealization?: CommentAnswerRealization;
   /** Actual visible answer speaker. Reader exchanges do not inherit the future publisher route. */
   answerIdentity?: "simulated_reader" | "none" | "author" | "brand" | "staff" | "expert" | "publisher";
   sourceClusterIds: string[];
@@ -2011,6 +2027,7 @@ export interface PlanningContext {
 
 export type ContentIssueDisposition = "block" | "review" | "advisory";
 export type ContentIssueOrigin = "deterministic" | "agent" | "infrastructure";
+export type ContentIssueOverridePolicy = "not_required" | "human_reviewable" | "non_overridable";
 export type CandidateQualityStatus = "passed" | "needs_review" | "blocked";
 
 export interface ContentValidationIssue {
@@ -2024,6 +2041,8 @@ export interface ContentValidationIssue {
   disposition?: ContentIssueDisposition;
   /** Identifies who made the judgment without pretending heuristic signals are hard constraints. */
   origin?: ContentIssueOrigin;
+  /** Server-owned delivery override policy. Historical issues derive it from disposition. */
+  overridePolicy?: ContentIssueOverridePolicy;
 }
 
 export interface ContentDiagnostic {
@@ -2070,6 +2089,30 @@ export interface ClaimSourceSpan {
   quote: string;
 }
 
+export type EditorialStage = "core" | "comment_openers" | "org_answers" | "comment_network" | "ledger" | "revision";
+export type EditorialAssessmentStatus = "pass" | "review" | "rejected" | "unavailable" | "skipped";
+
+export interface EditorialAssessmentRecord {
+  stage: EditorialStage;
+  status: EditorialAssessmentStatus;
+  reasons: string[];
+  summary: string;
+  accepted: boolean;
+  attempt: number;
+}
+
+export type ChannelRealizationStatus = "complete" | "partial" | "failed" | "not_applicable";
+export interface ArtifactRealization {
+  status: "complete" | "partial" | "failed";
+  mode: "model_generated" | "deterministic_preview";
+  deliverability: "eligible" | "non_deliverable";
+  channels: {
+    core: { status: ChannelRealizationStatus; reasonCodes: string[] };
+    comments: { status: ChannelRealizationStatus; reasonCodes: string[] };
+    ledger: { status: ChannelRealizationStatus; reasonCodes: string[] };
+  };
+}
+
 export interface CommentEditorialAssessment {
   status: "pass" | "review";
   reasons: string[];
@@ -2095,6 +2138,8 @@ export interface ContentReasoningEntry {
   occurrence?: ReasoningOccurrence;
   /** Optional only so historical packages remain readable; new factual drafts require exact spans. */
   sourceSpans?: ClaimSourceSpan[];
+  /** AI claim judge accepted a natural paraphrase against the cited exact source span. */
+  semanticSupport?: "ai_judged";
 }
 
 export interface ContentPackage {
@@ -2154,6 +2199,12 @@ export interface ContentPackage {
   commentEditorialAssessment?: CommentEditorialAssessment;
   /** Agent editorial result for title/body/image-brief alignment; absent on historical packages. */
   coreEditorialAssessment?: CoreEditorialAssessment;
+  /** Append-only stage audit; legacy singular assessments remain readable. */
+  editorialAssessments?: EditorialAssessmentRecord[];
+  /** Explicit package/channel completion truth. */
+  artifactRealization?: ArtifactRealization;
+  /** Distinguishes formal model output from non-deliverable deterministic previews. */
+  generationMode?: "model_generated" | "deterministic_preview";
   unknowns: UnknownItem[];
   conflicts: KnowledgeConflict[];
   diagnostics: ContentDiagnostic[];
@@ -2221,6 +2272,7 @@ export interface GenerationDraft {
   commentEditorialAssessment?: CommentEditorialAssessment;
   /** Core title/body/image editor result. */
   coreEditorialAssessment?: CoreEditorialAssessment;
+  editorialAssessments?: EditorialAssessmentRecord[];
 }
 
 export interface GenerationValidationTelemetrySummary {

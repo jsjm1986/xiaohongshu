@@ -22,6 +22,9 @@ export interface ExportOptions {
     confirmedBy: string;
     jobId: string;
     candidateId: string;
+    contentDigest: string;
+    issueDigest: string;
+    issueCodes: string[];
   };
 }
 
@@ -172,9 +175,20 @@ export class ExportService {
     if (!Object.keys(content).length || !Object.keys(asObject(content.N)).length) {
       throw new BadRequestException('ContentPackage 缺少 content.N');
     }
+    const generationMode = typeof pkg.generationMode === 'string' ? pkg.generationMode : undefined;
+    const artifactRealization = asObject(pkg.artifactRealization);
+    if (generationMode === 'deterministic_preview' || artifactRealization.deliverability === 'non_deliverable') {
+      throw new BadRequestException('确定性预览不是正式成品，禁止导出；请重新生成');
+    }
     const validation = asObject(pkg.validation);
+    const issues = Array.isArray(validation.issues) ? validation.issues.filter((issue): issue is JsonObject => Boolean(issue) && typeof issue === 'object' && !Array.isArray(issue)) : [];
+    const nonOverridable = issues.filter((issue) => issue.overridePolicy === 'non_overridable'
+      || (issue.overridePolicy === undefined && (issue.disposition === 'block' || issue.severity === 'error')));
+    if (nonOverridable.length) {
+      throw new BadRequestException('候选包含不可人工覆盖的阻断项，禁止导出；请修复或重新生成');
+    }
     if (validation.valid !== true && options.manualDeliveryConfirmation?.confirmed !== true) {
-      throw new BadRequestException('候选未通过事实、证据与信息闭合校验，禁止导出；请先修复错误、重新生成或完成候选级人工交付确认');
+      throw new BadRequestException('候选未通过自动校验，禁止导出；仅可人工确认可复核项，硬阻断必须修复或重新生成');
     }
     const deliverable = options.manualDeliveryConfirmation?.confirmed === true
       ? { ...pkg, manualDeliveryConfirmation: options.manualDeliveryConfirmation }

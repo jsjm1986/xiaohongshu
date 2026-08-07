@@ -92,6 +92,17 @@ export function commentTotal(candidate: Pick<Source, 'comments' | 'commentOwnedF
  * 「情景演练参考,非真实用户发言」。这个 ⓘ 不能删——界面不声明就等于在断言这些是
  * 真实留言,而方法论明确禁止假冒消费者。编排信息移交工作区 CommentPlanCard。
  */
+export function unavailableAnswerText(availability?: ReaderComment['answerRealization']): string | undefined {
+  if (!availability || availability.availability === 'generated' || availability.availability === 'not_applicable') return undefined;
+  const labels: Record<string, string> = {
+    withheld_no_evidence: '缺少可核验依据，未生成答复',
+    withheld_unsupported: '答复超出证据支持范围，已隔离',
+    failed_provider: '答复阶段暂时失败，未生成替代话术',
+    rejected_contract: '答复未通过冻结职责校验，已拒收',
+  };
+  return labels[availability.availability] ?? '答复当前不可用';
+}
+
 export function NoteComments({ candidate, accountLabel, copyEnabled = true }: NoteCommentsProps) {
   const toast = useToast();
   const [noteOpen, setNoteOpen] = useState(false);
@@ -158,6 +169,7 @@ export function NoteComments({ candidate, accountLabel, copyEnabled = true }: No
             name={row.displayName || '读者'}
             text={row.question}
             onCopy={() => void copyOne(row.question)}
+            unavailableReply={unavailableAnswerText(source?.answerRealization)}
             reply={
               row.answer?.trim() && identity
                 ? {
@@ -187,6 +199,7 @@ interface RowProps {
   text: string;
   onCopy: () => void;
   reply?: { name: string; badge?: string; text: string; onCopy: () => void };
+  unavailableReply?: string;
   followUps?: Array<{ question: string; answer: string }>;
   onCopyFollow?: (text: string) => void;
   /** 追问答复的署名:与主答复同一套判定结果(replyIdentity),只有 reader_exchange 不带「作者」标 */
@@ -194,7 +207,7 @@ interface RowProps {
   copyEnabled?: boolean;
 }
 
-function Row({ name, badge, text, onCopy, reply, followUps = [], onCopyFollow, followReply, copyEnabled = true }: RowProps) {
+function Row({ name, badge, text, onCopy, reply, unavailableReply, followUps = [], onCopyFollow, followReply, copyEnabled = true }: RowProps) {
   const tone = avatarTone(name);
   return (
     <div className="xhs-comment">
@@ -215,6 +228,12 @@ function Row({ name, badge, text, onCopy, reply, followUps = [], onCopyFollow, f
               <Button variant="ghost" icon={<Copy size={11} />} disabled={!copyEnabled} onClick={reply.onCopy} aria-label="复制答复" />
             </div>
             <p className="xhs-comment__text">{reply.text}</p>
+          </div>
+        )}
+
+        {!reply && unavailableReply && (
+          <div className="xhs-comment__reply xhs-comment__reply--unavailable" role="status">
+            <p className="xhs-comment__availability">{unavailableReply}</p>
           </div>
         )}
 

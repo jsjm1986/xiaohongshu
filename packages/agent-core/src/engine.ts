@@ -7,6 +7,7 @@ import {
   channelsForIssues,
   commentThreadFunction,
   issueDisposition,
+  issueOverridePolicy,
   diagnosticsFromValidation,
   evaluateGapCoverageRealization,
   mergeCrefPatchById,
@@ -100,10 +101,13 @@ import {
 } from "./prompt.js";
 import { analyzeRevisionDependencies, mergeContentByChannels } from "./revision.js";
 import type {
+  ArtifactRealization,
+  CommentAnswerRealization,
   ContentChannel,
   ContentPackage,
   CommentGapCoverageLedger,
   ContentValidationIssue,
+  EditorialAssessmentRecord,
   EvidenceReference,
   FormulaVersion,
   GenerationDraft,
@@ -1567,21 +1571,6 @@ function factualEvidenceForThread(
     && Boolean(reference.quote?.trim()));
 }
 
-function organizationAnswerSupported(answer: string, references: EvidenceReference[]): boolean {
-  if (!answer.trim()) return false;
-  const sources = references.flatMap((reference) => reference.quote?.trim() ? [reference.quote] : []);
-  return splitSensitiveStatements(answer).every((statement) => {
-    if (!statement.trim()) return true;
-    // Unknown preservation and a short conversational acknowledgement do not
-    // assert an organization fact and need no source.
-    if (/(?:当前|目前|暂时|尚)?(?:无法|没法|不能|不确定|不清楚|不知道|没有准确信息|还不能).{0,16}(?:确认|核实|提供|说明|判断|确定)|先不下结论/u.test(statement)) return true;
-    if (/^(?:理解|明白|确实|这个担心|您这个担心|先别急|可以理解)/u.test(statement)
-      && [...statement].length <= 18) return true;
-    return sources.some((source) => conservativeEvidenceSupport(statement, source));
-  });
-}
-
-
 function bindDialogueProvenance(
   draft: GenerationDraft,
   plan: OrchestrationPlan,
@@ -2142,11 +2131,130 @@ function uniqueUnknowns(ledger: KnowledgeLedger, draft: GenerationDraft): Genera
   return [...new Map([...ledger.unknowns, ...draft.unknowns].map((item) => [item.id, item])).values()];
 }
 
+function stagedCommentsFromDraft(draft: GenerationDraft): StagedCommentCopy {
+  return {
+    disclaimer: draft.content.Cref.disclaimer,
+    ownedFirstComment: draft.content.Cref.ownedFirstComment,
+    threads: draft.content.Cref.threads.map((thread) => ({
+      id: thread.id,
+      question: thread.question,
+      answer: thread.answer,
+      followUps: thread.followUps.map((followUp) => ({
+        question: followUp.question, answer: followUp.answer, kind: followUp.kind, boundary: followUp.boundary,
+      })),
+      kind: thread.kind,
+      answerKind: thread.answerKind,
+      boundary: thread.boundary,
+      function: thread.function,
+    })),
+  };
+}
+
+function applyAcceptedCommentNetwork(draft: GenerationDraft, accepted: StagedCommentCopy): GenerationDraft {
+  const visibleById = new Map(accepted.threads.map((thread) => [thread.id, thread]));
+  return {
+    ...draft,
+    content: {
+      ...draft.content,
+      Cref: {
+        ...draft.content.Cref,
+        disclaimer: accepted.disclaimer,
+        ownedFirstComment: accepted.ownedFirstComment,
+        threads: draft.content.Cref.threads.map((thread) => {
+          const visible = visibleById.get(thread.id);
+          if (!visible) return thread;
+          return {
+            ...thread,
+            question: visible.question,
+            answer: visible.answer,
+            followUps: visible.followUps.map((followUp, index) => ({
+              ...thread.followUps[index]!, question: followUp.question, answer: followUp.answer,
+              kind: followUp.kind ?? thread.followUps[index]?.kind,
+              boundary: followUp.boundary ?? thread.followUps[index]?.boundary,
+            })),
+          };
+        }),
+      },
+    },
+  };
+}
+
+function answerRealizationFor(
+  thread: GenerationDraft["content"]["Cref"]["threads"][number],
+  plan: OrchestrationPlan,
+  issues: readonly ContentValidationIssue[],
+  mode: ArtifactRealization["mode"],
+): CommentAnswerRealization {
+  const kind = thread.threadKind ?? "org_answer";
+  if (kind === "organic_reaction") return { availability: "not_applicable" };
+  if (thread.answer.trim()) return { availability: "generated", stage: mode === "deterministic_preview" ? "preview" : kind === "reader_exchange" ? "reader_exchange" : kind === "host_reply" ? "host_answer" : "org_answer" };
+  const related = issues.filter((issue) => issue.channel === "Cref" && issue.message.includes(thread.id));
+  if (related.some((issue) => issue.code === "model_org_answer_skipped_no_evidence")) {
+    return { availability: "withheld_no_evidence", reasonCode: "model_org_answer_skipped_no_evidence", stage: "org_answer" };
+  }
+  const failed = related.find((issue) => issue.code === "model_org_answer_failed" || issue.code === "model_host_answer_failed");
+  if (failed) return {
+    availability: failed.origin === "infrastructure" ? "failed_provider" : "withheld_unsupported",
+    reasonCode: failed.code,
+    stage: kind === "host_reply" ? "host_answer" : "org_answer",
+  };
+  const planned = plan.dialogueThreads.find((item) => item.id === thread.id);
+  if (kind === "org_answer" && !(planned?.evidenceIds.length)) return { availability: "withheld_no_evidence", reasonCode: "no_planned_evidence", stage: "org_answer" };
+  return { availability: "rejected_contract", reasonCode: "comment_answer_unavailable", stage: kind === "host_reply" ? "host_answer" : kind === "reader_exchange" ? "reader_exchange" : "org_answer" };
+}
+
+function annotateAnswerRealizations(
+  draft: GenerationDraft,
+  plan: OrchestrationPlan,
+  issues: readonly ContentValidationIssue[],
+  mode: ArtifactRealization["mode"],
+): GenerationDraft {
+  return {
+    ...draft,
+    content: { ...draft.content, Cref: { ...draft.content.Cref, threads: draft.content.Cref.threads.map((thread) => ({
+      ...thread, answerRealization: answerRealizationFor(thread, plan, issues, mode),
+    })) } },
+  };
+}
+
+function artifactRealizationFor(
+  draft: GenerationDraft,
+  plan: OrchestrationPlan | undefined,
+  issues: readonly ContentValidationIssue[],
+  mode: ArtifactRealization["mode"],
+): ArtifactRealization {
+  const issueCodes = (predicate: (issue: ContentValidationIssue) => boolean) => [...new Set(issues.filter(predicate).map((issue) => issue.code))].sort();
+  const coreCodes = issueCodes((issue) => issue.channel === "H" || issue.channel.startsWith("N."));
+  const commentCodes = issueCodes((issue) => issue.channel === "Cref");
+  const ledgerCodes = issueCodes((issue) => issue.code.includes("ledger") || issue.code.includes("evidence") || issue.code.includes("fact_source"));
+  const channelStatus = (codes: string[], failed: boolean): "complete" | "partial" | "failed" => failed ? "failed" : codes.length ? "partial" : "complete";
+  const coreFailed = !draft.content.N.title.trim() || !draft.content.N.body.trim();
+  const commentsApplicable = (plan?.dialogueThreads.length ?? draft.content.Cref.threads.length) > 0;
+  const commentsFailed = commentsApplicable && draft.content.Cref.threads.some((thread) => {
+    const kind = thread.threadKind ?? "org_answer";
+    return (kind === "org_answer" || kind === "host_reply") && !thread.answer.trim();
+  });
+  const ledgerFailed = issues.some((issue) => issue.code === "model_ledger_failed") && draft.reasoning.length === 0;
+  const channels: ArtifactRealization["channels"] = {
+    core: { status: channelStatus(coreCodes, coreFailed), reasonCodes: coreCodes },
+    comments: { status: commentsApplicable ? channelStatus(commentCodes, commentsFailed) : "not_applicable", reasonCodes: commentCodes },
+    ledger: { status: channelStatus(ledgerCodes, ledgerFailed), reasonCodes: ledgerCodes },
+  };
+  const statuses = Object.values(channels).map((channel) => channel.status);
+  return {
+    status: mode === "deterministic_preview" ? "partial" : statuses.includes("failed") ? "failed" : statuses.includes("partial") ? "partial" : "complete",
+    mode,
+    deliverability: mode === "model_generated" ? "eligible" : "non_deliverable",
+    channels,
+  };
+}
+
 function completeIssueMetadata(issues: readonly ContentValidationIssue[]): ContentValidationIssue[] {
   return issues.map((issue) => ({
     ...issue,
-    disposition: issue.disposition ?? (issue.severity === "error" ? "block" : "advisory"),
+    disposition: issueDisposition(issue),
     origin: issue.origin ?? (issue.code.startsWith("model_") ? "infrastructure" : "deterministic"),
+    overridePolicy: issueOverridePolicy({ ...issue, disposition: issueDisposition(issue) }),
   }));
 }
 
@@ -2162,6 +2270,10 @@ function formalDeliveryReviewIssues(
     issues.push({
       code: "model_not_invoked", severity: "warning", channel: "package",
       disposition: "review", origin: "infrastructure", message: modelMessage, repairable: false,
+    }, {
+      code: "deterministic_preview_non_deliverable", severity: "error", channel: "package",
+      disposition: "block", origin: "deterministic",
+      message: "确定性预览不属于模型正式成品，不能通过人工确认升级为可交付内容。", repairable: false,
     });
   }
   const degradedCards = (plan?.gapPlanningCards ?? []).filter((card) =>
@@ -2326,15 +2438,9 @@ function acceptReaderStageEdit(
     const kind = planned.threadKind ?? "org_answer";
     if (kind !== "reader_exchange" && thread.answer.trim()) throw new CommentEditorContractError(`Reader editor wrote an answer for ${thread.id}.`);
     if (kind === "reader_exchange" && !thread.answer.trim()) throw new CommentEditorContractError(`Reader editor removed reader-B speech from ${thread.id}.`);
-    if (kind === "org_answer") {
-      const card = cards.get(planned.primaryGapId);
-      if (!card || !questionMatchesPlannedGap(thread.question, card)) throw new CommentEditorContractError(`Reader editor changed the primary responsibility of ${thread.id}.`);
-      const guarded = guardedReplyIdentitiesForQuestion(thread.question, claimRules);
-      if ([...guarded].some((identity) => identity !== planned.postingIdentity)) throw new CommentEditorContractError(`Reader editor changed the responder of ${thread.id}.`);
-    }
-    if (kind === "host_reply" && guardedReplyIdentitiesForQuestion(thread.question, claimRules).size) {
-      throw new CommentEditorContractError(`Reader editor crossed the host boundary in ${thread.id}.`);
-    }
+    // Question meaning and responder suitability are judged by the reader
+    // editor itself. The server owns only thread identity and answer topology;
+    // it must not reinterpret another industry's language with fixed terms.
     return { ...before, question: thread.question, answer: thread.answer };
   });
   return { threads };
@@ -2411,21 +2517,16 @@ function acceptCommentNetworkEdit(
     if (thread.followUps.length > before.followUps.length) throw new CommentEditorContractError(`Comment editor added follow-ups to ${thread.id}.`);
     const kind = planned.threadKind ?? "org_answer";
     if (kind === "org_answer") {
-      const card = cards.get(planned.primaryGapId);
-      if (!card || !questionMatchesPlannedGap(thread.question, card)) throw new CommentEditorContractError(`Comment editor changed the primary responsibility of ${thread.id}.`);
-      const guarded = guardedReplyIdentitiesForQuestion(thread.question, []);
-      if ([...guarded].some((identity) => identity !== planned.postingIdentity)) throw new CommentEditorContractError(`Comment editor changed the responder of ${thread.id}.`);
-      const evidence = factualEvidenceForThread(planned, plan, references);
-      if (!before.answer.trim()) {
-        if (thread.answer.trim()) throw new CommentEditorContractError(`Comment editor filled unavailable organization copy in ${thread.id}.`);
-      } else if (!organizationAnswerSupported(thread.answer, evidence)) {
-        throw new CommentEditorContractError(`Comment editor expanded unsupported organization copy in ${thread.id}.`);
+      if (!before.answer.trim() && thread.answer.trim()) {
+        throw new CommentEditorContractError(`Comment editor filled unavailable organization copy in ${thread.id}.`);
       }
-      for (const followUp of thread.followUps) {
-        if (followUp.answer.trim() && !organizationAnswerSupported(followUp.answer, evidence)) {
-          throw new CommentEditorContractError(`Comment editor expanded unsupported organization follow-up in ${thread.id}.`);
-        }
+      if (before.answer.trim() && !thread.answer.trim()) {
+        throw new CommentEditorContractError(`Comment editor removed an available organization answer from ${thread.id}.`);
       }
+      // Evidence semantics are owned by the downstream AI claim judge. The
+      // network editor may naturalize an existing accountable answer, but may
+      // neither manufacture one for an unavailable node nor erase one that the
+      // accountable answer agent already produced.
     }
     if (kind === "organic_reaction" && (thread.answer.trim() || thread.followUps.length)) throw new CommentEditorContractError(`Comment editor expanded organic reaction ${thread.id}.`);
     if (kind === "host_reply" && thread.followUps.length) throw new CommentEditorContractError(`Comment editor expanded host thread ${thread.id}.`);
@@ -2466,12 +2567,9 @@ export function shouldCorrectCommentReadersFailure(error: unknown, originalRespo
   return originalResponse.trim().length > 0 && !(error instanceof ModelProviderError);
 }
 
-export type RepairResponsibility = "none" | "ledger_only" | "visible_copy" | "replan_required";
+export type RepairResponsibility = "none" | "ledger_only" | "core_copy" | "comment_editor" | "replan_required";
 
 const LEDGER_REPAIR_CODES = new Set([
-  // These codes can be repaired without changing public copy: they describe
-  // source-span identity, occurrence mapping or ledger completeness. Scope,
-  // caveat and unsupported-claim errors deliberately stay visible-copy work.
   "evidence_quote_empty", "evidence_quote_not_exact", "evidence_quote_not_supportive",
   "fact_source_id_mismatch", "fact_source_span_missing",
   "followup_evidence_ledger_mismatch", "package_evidence_ledger_mismatch",
@@ -2486,27 +2584,27 @@ const REPLAN_REQUIRED_CODES = new Set([
   "reply_identity_plan_drift", "reply_question_plan_drift",
 ]);
 
-/** Route blockers to their owner instead of asking one generic copy patch to hide every problem. */
+/** Route every repairable blocker to one stage owner. Generic patches never own Cref. */
 export function repairResponsibilityForIssues(
   issues: readonly ContentValidationIssue[],
 ): { responsibility: RepairResponsibility; channels: ContentChannel[] } {
   const blockers = issues.filter((issue) => issueDisposition(issue) === "block");
-  if (!blockers.length || blockers.some((issue) => !issue.repairable)) {
-    return { responsibility: "none", channels: [] };
-  }
-  if (blockers.some((issue) => REPLAN_REQUIRED_CODES.has(issue.code))) {
-    return { responsibility: "replan_required", channels: [] };
-  }
-  if (blockers.every((issue) => LEDGER_REPAIR_CODES.has(issue.code))) {
-    return { responsibility: "ledger_only", channels: [] };
-  }
-  return { responsibility: "visible_copy", channels: channelsForIssues([...issues]) };
+  if (!blockers.length || blockers.some((issue) => !issue.repairable)) return { responsibility: "none", channels: [] };
+  if (blockers.some((issue) => REPLAN_REQUIRED_CODES.has(issue.code))) return { responsibility: "replan_required", channels: [] };
+  if (blockers.every((issue) => LEDGER_REPAIR_CODES.has(issue.code))) return { responsibility: "ledger_only", channels: [] };
+  const channels = channelsForIssues([...issues]);
+  const hasComments = channels.includes("Cref");
+  const hasCore = channels.some((channel) => channel !== "Cref");
+  // A mixed failure cannot be atomically delegated to two agents in one bounded
+  // attempt. Repair the core first; the next validation routes residual comment
+  // defects to the network editor.
+  if (hasCore) return { responsibility: "core_copy", channels: channels.filter((channel) => channel !== "Cref") };
+  if (hasComments) return { responsibility: "comment_editor", channels: ["Cref"] };
+  return { responsibility: "none", channels: [] };
 }
 
-/** A patch cannot make a candidate publishable while any terminal or planning blocker remains. */
 export function shouldAttemptGenerationRepair(issues: readonly ContentValidationIssue[]): boolean {
-  const responsibility = repairResponsibilityForIssues(issues).responsibility;
-  return responsibility === "ledger_only" || responsibility === "visible_copy";
+  return ["ledger_only", "core_copy", "comment_editor"].includes(repairResponsibilityForIssues(issues).responsibility);
 }
 
 function validationTelemetrySummary(
@@ -2643,6 +2741,7 @@ export class ContentGenerationAgent implements GenerationEngine {
     const availableEvidence = generationEvidenceReferences(input.config, input.knowledge, context, input.planningContext);
     const evidenceSources = generationEvidenceSources(input.config, input.knowledge, context, input.planningContext);
     const stageIssues: ContentValidationIssue[] = [];
+    const editorialAssessments: EditorialAssessmentRecord[] = [];
     let draft: GenerationDraft;
     if (this.provider && useProvider) {
       let promptInput = {
@@ -2706,6 +2805,7 @@ export class ContentGenerationAgent implements GenerationEngine {
         onCoreSettled?.();
       }
       let core = parseStagedCoreCopy(coreResponse.text);
+      editorialAssessments.push({ stage: "core", status: "pass", reasons: [], summary: "核心图文已生成并进入合同校验。", accepted: true, attempt: 1 });
       const coreIdentityIssues = validatePublishingTopologyCopy(core, input.config, input.planningContext?.projectBlueprint);
       if (coreIdentityIssues.length) {
         const identityRepairPrompt = buildStagedCoreIdentityRepairPrompt(promptInput, core, coreIdentityIssues);
@@ -2746,24 +2846,21 @@ export class ContentGenerationAgent implements GenerationEngine {
           const identityIssues = validatePublishingTopologyCopy(edited.core, input.config, input.planningContext?.projectBlueprint);
           const remaining = coreEditorialReasons(edited.core, orchestrationPlan);
           const bodyLength = [...edited.core.N.body].length;
-          if (identityIssues.length || remaining.length
-            || bodyLength < input.config.content.bodyMinChars
-            || bodyLength > input.config.content.bodyMaxChars) {
-            throw new CommentEditorContractError(`Core editor did not satisfy the frozen contract: ${[
-              ...identityIssues.map((issue) => issue.code), ...remaining,
-              ...(bodyLength < input.config.content.bodyMinChars || bodyLength > input.config.content.bodyMaxChars ? ["body_length"] : []),
-            ].join(", ")}`);
+          if (bodyLength < input.config.content.bodyMinChars || bodyLength > input.config.content.bodyMaxChars) {
+            throw new CommentEditorContractError("Core editor changed the configured body-length contract.");
           }
           core = edited.core;
-          if (edited.assessment.status === "review") {
+          editorialAssessments.push({ stage: "core", status: edited.assessment.status, reasons: [...edited.assessment.reasons], summary: edited.assessment.summary, accepted: true, attempt: 2 });
+          if (edited.assessment.status === "review" || identityIssues.length || remaining.length) {
             stageIssues.push({
               code: "core_editor_review", severity: "warning", channel: "N.body",
-              message: edited.assessment.summary || edited.assessment.reasons.join("；") || "核心图文编辑仍建议人工复核。",
+              message: edited.assessment.summary || edited.assessment.reasons.join("；") || [...identityIssues.map((issue) => issue.message), ...remaining].join("；") || "核心图文编辑仍建议人工复核。",
               repairable: false, disposition: "review", origin: "agent",
             });
           }
         } catch (error) {
           const rejected = error instanceof CommentEditorContractError;
+          editorialAssessments.push({ stage: "core", status: rejected ? "rejected" : "unavailable", reasons: [error instanceof Error ? error.message : String(error)], summary: "核心编辑结果未被采用。", accepted: false, attempt: 2 });
           stageIssues.push({
             code: rejected ? "core_editor_contract_rejected" : "core_editor_unavailable",
             severity: "warning", channel: "N.body",
@@ -2890,6 +2987,7 @@ export class ContentGenerationAgent implements GenerationEngine {
       let commentEditorialAssessment: import("./types.js").CommentEditorialAssessment | undefined;
       let readerSide = parsedReaderSide;
       const initialReaderReasons = readerStageEditorialReasons(readerSide, orchestrationPlan, claimRules);
+      if (!initialReaderReasons.length) editorialAssessments.push({ stage: "comment_openers", status: "skipped", reasons: [], summary: "读者开口未触发编辑。", accepted: true, attempt: 0 });
       if (initialReaderReasons.length) {
         try {
           const editorPrompt = buildStagedCommentEditorPrompt(promptInput, core, readerSide);
@@ -2906,11 +3004,9 @@ export class ContentGenerationAgent implements GenerationEngine {
           const edited = parseStagedCommentEditor(editorResponse.text);
           const accepted = acceptReaderStageEdit(readerSide, edited, orchestrationPlan, claimRules);
           const remaining = readerStageEditorialReasons(accepted, orchestrationPlan, claimRules);
-          if (edited.assessment.status === "pass" && remaining.length) {
-            throw new CommentEditorContractError(`Reader editor reported pass with unresolved problems: ${remaining.join("; ")}`);
-          }
           readerSide = accepted;
           commentEditorialAssessment = edited.assessment;
+          editorialAssessments.push({ stage: "comment_openers", status: edited.assessment.status, reasons: [...edited.assessment.reasons], summary: edited.assessment.summary, accepted: true, attempt: 1 });
           if (edited.assessment.status === "review" || remaining.length) {
             stageIssues.push({
               code: "reader_editor_review", severity: "warning", channel: "Cref",
@@ -2920,6 +3016,7 @@ export class ContentGenerationAgent implements GenerationEngine {
           }
         } catch (error) {
           const rejected = error instanceof CommentEditorContractError;
+          editorialAssessments.push({ stage: "comment_openers", status: rejected ? "rejected" : "unavailable", reasons: [error instanceof Error ? error.message : String(error)], summary: "读者开口编辑结果未被采用。", accepted: false, attempt: 1 });
           stageIssues.push({
             code: rejected ? "reader_editor_contract_rejected" : "reader_editor_unavailable",
             severity: "warning", channel: "Cref",
@@ -2939,6 +3036,7 @@ export class ContentGenerationAgent implements GenerationEngine {
       // 各≤1 次,该身份无线程则跳过):每次调用只见本角色身份卡与逐 gap 口径
       // scope,其他身份的任何信息不出现。每个调用独立 try/catch；失败、缺 id
       // 或证据不足时答复保持空缺，由最终完整性校验阻断，不生成替代话术。
+      const accountableAnswerIssueStart = stageIssues.length;
       const hostAnswersById = new Map<string, StagedOrgAnswersCopy["answers"][number]>();
       const hostAnswerThreads = orchestrationPlan.dialogueThreads
         .map((planned, index) => ({ planned, reader: readerSide.threads[index]! }))
@@ -3023,40 +3121,25 @@ export class ContentGenerationAgent implements GenerationEngine {
             metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_org_answers", stage: 2.1, identity },
           });
           const orgSide = parseStagedOrgAnswers(orgResponse.text);
-          if (identity === "publisher" && orgSide.ownedFirstComment) {
-            const publisherReferences = [...new Map(modelEligibleThreads
-              .flatMap(({ planned }) => evidenceByThread.get(planned.id) ?? [])
-              .map((reference) => [reference.id, reference])).values()];
-            if (organizationAnswerSupported(orgSide.ownedFirstComment, publisherReferences)) {
-              ownedFirstComment = orgSide.ownedFirstComment;
-            } else {
-              stageIssues.push({
-                code: "model_org_answer_failed",
-                severity: "warning",
-                channel: "Cref",
-                message: "机构首评新增了证据未支持的事实或服务动作，已确定性丢弃。",
-                repairable: false,
-                disposition: "advisory",
-                origin: "deterministic",
-              });
-            }
+          if (identity === "publisher" && orgSide.ownedFirstComment?.trim()) {
+            ownedFirstComment = orgSide.ownedFirstComment;
           }
           for (const { planned } of modelEligibleThreads) {
             const found = orgSide.answers.find((answer) => answer.id === planned.id);
-            const references = evidenceByThread.get(planned.id) ?? [];
-            if (found && organizationAnswerSupported(found.answer, references)) {
+            if (found?.answer.trim()) {
+              // The answer model received only this thread's approved evidence
+              // scope. Preserve its natural wording; the unified AI claim judge
+              // later decides semantic support and records exact source quotes.
               orgAnswersById.set(planned.id, found);
             } else {
               stageIssues.push({
                 code: "model_org_answer_failed",
                 severity: "error",
                 channel: "Cref",
-                message: found
-                  ? `机构答复（${identity}）在线程 ${planned.id} 新增了证据未支持的内容；原答复已隔离，节点保持空缺。`
-                  : `机构答复（${identity}）未覆盖线程 ${planned.id}；节点保持空缺。`,
+                message: `机构答复（${identity}）未覆盖线程 ${planned.id}；节点保持空缺。`,
                 repairable: false,
                 disposition: "block",
-                origin: "deterministic",
+                origin: "agent",
               });
             }
           }
@@ -3069,6 +3152,40 @@ export class ContentGenerationAgent implements GenerationEngine {
             repairable: false, disposition: "review", origin: "infrastructure",
           });
         }
+      }
+      const accountableThreadCount = hostAnswerThreads.length + orgAnswerThreads.length;
+      const accountableAnswerIssues = stageIssues.slice(accountableAnswerIssueStart).filter((issue) =>
+        issue.code === "model_host_answer_failed"
+        || issue.code === "model_org_answer_failed"
+        || issue.code === "model_org_answer_skipped_no_evidence");
+      if (!accountableThreadCount) {
+        editorialAssessments.push({
+          stage: "org_answers", status: "skipped", reasons: [],
+          summary: "当前评论网络没有可追责答复节点。", accepted: true, attempt: 0,
+        });
+      } else if (accountableAnswerIssues.some((issue) => issue.disposition === "block" || issue.severity === "error")) {
+        editorialAssessments.push({
+          stage: "org_answers", status: "rejected",
+          reasons: accountableAnswerIssues.map((issue) => issue.message),
+          summary: "部分可追责答复未通过证据或冻结职责校验，相关节点保持空缺。", accepted: false, attempt: 1,
+        });
+      } else if (accountableAnswerIssues.some((issue) => issue.origin === "infrastructure")) {
+        editorialAssessments.push({
+          stage: "org_answers", status: "unavailable",
+          reasons: accountableAnswerIssues.map((issue) => issue.message),
+          summary: "可追责答复阶段未完整执行，未生成替代话术。", accepted: false, attempt: 1,
+        });
+      } else if (accountableAnswerIssues.length) {
+        editorialAssessments.push({
+          stage: "org_answers", status: "review",
+          reasons: accountableAnswerIssues.map((issue) => issue.message),
+          summary: "可追责答复阶段完成，但无依据或不受支持的节点保持空缺。", accepted: true, attempt: 1,
+        });
+      } else {
+        editorialAssessments.push({
+          stage: "org_answers", status: "pass", reasons: [],
+          summary: "可追责答复已生成并通过证据边界校验。", accepted: true, attempt: 1,
+        });
       }
       // 合并层确定性:surfaceRoleCard/postingIdentity/threadKind 一律以规划层
       // 为准;模型输出只取可见文案。disclaimer 用确定性常量,不再由模型输出。
@@ -3215,20 +3332,17 @@ export class ContentGenerationAgent implements GenerationEngine {
             for (const { planned, thread, followUpIndex } of modelEligibleItems) {
               const requestId = `${thread.id}:fu:${followUpIndex}`;
               const found = followUpSide.answers.find((answer) => answer.id === requestId);
-              const references = evidenceByRequestId.get(requestId) ?? [];
-              if (found?.answer.trim() && organizationAnswerSupported(found.answer, references)) {
+              if (found?.answer.trim()) {
                 filledAnswers.set(requestId, found.answer);
               } else {
                 stageIssues.push({
                   code: "model_org_answer_failed",
                   severity: "warning",
                   channel: "Cref",
-                  message: found
-                    ? `机构补答（${identity}）在线程 ${thread.id} 的第 ${followUpIndex + 1} 条追问新增了证据未支持的内容；原答复已隔离，该可选追问将不进入成稿。`
-                    : `机构补答（${identity}）未覆盖线程 ${thread.id} 的第 ${followUpIndex + 1} 条追问；该可选追问将不进入成稿。`,
+                  message: `机构补答（${identity}）未覆盖线程 ${thread.id} 的第 ${followUpIndex + 1} 条追问；该可选追问将不进入成稿。`,
                   repairable: false,
                   disposition: "review",
-                  origin: "deterministic",
+                  origin: "agent",
                 });
               }
             }
@@ -3269,6 +3383,7 @@ export class ContentGenerationAgent implements GenerationEngine {
       // exposes a concrete problem. All answers and follow-ups are now visible;
       // server acceptance keeps IDs, responsibilities, evidence and unknowns frozen.
       const networkReasons = commentNetworkEditorialReasons(comments, orchestrationPlan);
+      if (!networkReasons.length) editorialAssessments.push({ stage: "comment_network", status: "skipped", reasons: [], summary: "完整评论网络未触发终编。", accepted: true, attempt: 0 });
       if (networkReasons.length) {
         try {
           const editorPrompt = buildStagedCommentNetworkEditorPrompt(promptInput, core, comments, networkReasons);
@@ -3285,20 +3400,19 @@ export class ContentGenerationAgent implements GenerationEngine {
           const edited = parseStagedCommentNetworkEditor(editorResponse.text);
           const accepted = acceptCommentNetworkEdit(comments, edited, orchestrationPlan, availableEvidence);
           const remainingNetworkReasons = commentNetworkEditorialReasons(accepted, orchestrationPlan);
-          if (edited.assessment.status === "pass" && remainingNetworkReasons.length) {
-            throw new CommentEditorContractError(`Comment editor reported pass with unresolved network problems: ${remainingNetworkReasons.join("; ")}`);
-          }
           comments = accepted;
           commentEditorialAssessment = edited.assessment;
-          if (edited.assessment.status === "review") {
+          editorialAssessments.push({ stage: "comment_network", status: edited.assessment.status, reasons: [...edited.assessment.reasons], summary: edited.assessment.summary, accepted: true, attempt: 1 });
+          if (edited.assessment.status === "review" || remainingNetworkReasons.length) {
             stageIssues.push({
               code: "comment_editor_review", severity: "warning", channel: "Cref",
-              message: edited.assessment.summary || edited.assessment.reasons.join("；") || "完整评论网络仍建议人工复核。",
+              message: edited.assessment.summary || edited.assessment.reasons.join("；") || remainingNetworkReasons.join("；") || "完整评论网络仍建议人工复核。",
               repairable: false, disposition: "review", origin: "agent",
             });
           }
         } catch (error) {
           const rejected = error instanceof CommentEditorContractError;
+          editorialAssessments.push({ stage: "comment_network", status: rejected ? "rejected" : "unavailable", reasons: [error instanceof Error ? error.message : String(error)], summary: "完整评论网络编辑结果未被采用。", accepted: false, attempt: 1 });
           stageIssues.push({
             code: rejected ? "comment_editor_contract_rejected" : "comment_editor_unavailable",
             severity: "warning", channel: "Cref",
@@ -3399,6 +3513,7 @@ export class ContentGenerationAgent implements GenerationEngine {
         ...deterministicBase,
         content: stagedContent,
         ...(commentEditorialAssessment ? { commentEditorialAssessment } : {}),
+        editorialAssessments,
       };
       const ledgerPrompt = buildStagedLedgerPrompt(promptInput, stagedContent);
       try {
@@ -3420,6 +3535,7 @@ export class ContentGenerationAgent implements GenerationEngine {
           reasoning: parsed.reasoning,
           unknowns: parsed.unknowns,
         };
+        editorialAssessments.push({ stage: "ledger", status: "pass", reasons: [], summary: "事实台账已生成并解析。", accepted: true, attempt: 1 });
       } catch (error) {
         // 与同类阶段失败对齐为 warning。判官/机构答复/评论生长失败都是 warning,
         // 只有台账判 error,于是中继一抖动 quality_status 就归零——实测 18 篇产出
@@ -3429,6 +3545,7 @@ export class ContentGenerationAgent implements GenerationEngine {
         // reasoning 均非空(catch 保留了前序阶段的产出,只是没被本阶段精炼);它降低
         // 的是事实锚定率(人均 fact 0.8 → 0.2)。这是质量削弱,不是内容失效,可发布
         // 但需人工复核锚定——故 warning + repairable:false,并在文案里点明后果。
+        editorialAssessments.push({ stage: "ledger", status: "unavailable", reasons: [error instanceof Error ? error.message : String(error)], summary: "事实台账阶段不可用，保留前序台账。", accepted: false, attempt: 1 });
         stageIssues.push({
           code: "model_ledger_failed",
           severity: "warning",
@@ -3441,6 +3558,13 @@ export class ContentGenerationAgent implements GenerationEngine {
       }
     } else {
       draft = deterministicDraft(input.config, context, ledger, candidateIndex, variation, impactReport, orchestrationPlan, planning.opportunity, evidenceSources);
+      editorialAssessments.push(
+        { stage: "core", status: "skipped", reasons: ["model_not_invoked"], summary: "确定性预览未运行核心写作 Agent。", accepted: true, attempt: 0 },
+        { stage: "comment_openers", status: "skipped", reasons: ["model_not_invoked"], summary: "确定性预览未运行读者开口 Agent。", accepted: true, attempt: 0 },
+        { stage: "comment_network", status: "skipped", reasons: ["model_not_invoked"], summary: "确定性预览未运行评论终编 Agent。", accepted: true, attempt: 0 },
+        { stage: "ledger", status: "skipped", reasons: ["model_not_invoked"], summary: "确定性预览未运行台账 Agent。", accepted: true, attempt: 0 },
+      );
+      draft = { ...draft, editorialAssessments };
     }
 
     const allowedEvidenceIds = availableEvidence.map((reference) => reference.id);
@@ -3509,63 +3633,58 @@ export class ContentGenerationAgent implements GenerationEngine {
         channels,
         before: validationTelemetrySummary(issues),
       });
-      if (!this.provider || !useProvider) {
+      if (repairRoute.responsibility === "comment_editor") {
+        if (!this.provider || !useProvider) break;
+        const commentsBefore = stagedCommentsFromDraft(draft);
+        try {
+          const commentPromptInput = {
+            config: input.config, formulaVersion: input.formulaVersion, knowledge: context, ledger,
+            candidateIndex, seed, variation, impactReport, topicOpportunity: planning.opportunity,
+            projectIntelligence: planning.intelligence, projectBlueprint: input.planningContext?.projectBlueprint,
+            imageAnalyses: planning.imageAnalyses, orchestrationPlan, evidenceReferences: availableEvidence,
+          };
+          const reasons = issues.filter((issue) => issueDisposition(issue) === "block" && issue.channel === "Cref").map((issue) => `${issue.code}: ${issue.message}`);
+          const prompt = buildStagedCommentNetworkEditorPrompt(commentPromptInput, { H: draft.content.H, N: draft.content.N }, commentsBefore, reasons);
+          const response = await this.provider.generate({
+            messages: prompt.messages, responseSchema: prompt.responseSchema, schemaName: "content_candidate_comment_network_editor",
+            model: input.config.model.model, seed: seed + 300 + repairAttempts, temperature: Math.min(input.config.model.temperature, 0.35),
+            maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_SHORT_OUTPUT_TOKENS),
+            metadata: { jobId: input.jobId, candidateIndex, purpose: "repair_comment_network", attempt: repairAttempts, stage: 4.1 },
+          });
+          const edited = parseStagedCommentNetworkEditor(response.text);
+          const accepted = acceptCommentNetworkEdit(commentsBefore, edited, orchestrationPlan, availableEvidence);
+          draft = applyAcceptedCommentNetwork(draft, accepted);
+          editorialAssessments.push({ stage: "comment_network", status: edited.assessment.status, reasons: [...edited.assessment.reasons], summary: edited.assessment.summary, accepted: true, attempt: repairAttempts + 1 });
+        } catch (error) {
+          editorialAssessments.push({ stage: "comment_network", status: error instanceof CommentEditorContractError ? "rejected" : "unavailable", reasons: [error instanceof Error ? error.message : String(error)], summary: "评论修复未被采用。", accepted: false, attempt: repairAttempts + 1 });
+          issues = [...issues, { code: "comment_editor_contract_rejected", severity: "error", channel: "Cref", message: error instanceof Error ? error.message : String(error), repairable: false, disposition: "block", origin: "deterministic" }];
+          continue;
+        }
+      } else if (!this.provider || !useProvider) {
         const replacement = deterministicDraft(input.config, context, ledger, candidateIndex, variation, impactReport, orchestrationPlan, planning.opportunity, evidenceSources);
-        draft = { ...replacement, content: mergeContentByChannels(draft.content, replacement.content, channels) };
+        draft = { ...replacement, content: mergeContentByChannels(draft.content, replacement.content, channels), editorialAssessments };
       } else {
         const prompt = buildRepairPrompt({
-          current: draft,
-          issues,
-          channels,
-          config: input.config,
-          knowledge: context,
-          seed: seed + repairAttempts,
-          attempt: repairAttempts,
-          impactReport,
-          imageAnalyses: planning.imageAnalyses,
-          orchestrationPlan,
-          evidenceReferences: availableEvidence,
+          current: draft, issues, channels, config: input.config, knowledge: context,
+          seed: seed + repairAttempts, attempt: repairAttempts, impactReport,
+          imageAnalyses: planning.imageAnalyses, orchestrationPlan, evidenceReferences: availableEvidence,
         });
         try {
           const response = await this.provider.generate({
-            messages: prompt.messages,
-            responseSchema: prompt.responseSchema,
-            schemaName: "content_repair_patch",
-            model: input.config.model.model,
-            seed: seed + repairAttempts,
-            temperature: Math.min(input.config.model.temperature, 0.4),
+            messages: prompt.messages, responseSchema: prompt.responseSchema, schemaName: "content_repair_patch",
+            model: input.config.model.model, seed: seed + repairAttempts, temperature: Math.min(input.config.model.temperature, 0.4),
             maxOutputTokens: input.config.model.maxOutputTokens,
             metadata: { jobId: input.jobId, candidateIndex, purpose: "repair", attempt: repairAttempts },
           });
           const patch = parseGenerationPatch(response.text);
-          if (patch.Cref) {
-            // P4-22: merge the visible-copy patch by thread id — out-of-order
-            // and partial patches are fine (unreturned threads keep their
-            // prose); only unplanned ids or a missing disclaimer fail.
-            patch.Cref = mergeCrefPatchById(draft.content.Cref, patch.Cref);
-          }
+          if (patch.Cref) throw new CommentEditorContractError("Generic repair attempted to write Cref; comments belong to the network editor.");
           draft = applyGenerationPatch(draft, patch);
         } catch (error) {
-          emitGenerationTelemetry(input, {
-            type: "candidate_repair_failed",
-            candidateIndex,
-            repairAttempt: repairAttempts,
-            errorName: error instanceof Error ? error.name.slice(0, 80) : "UnknownError",
-          });
-          // P4-22: a failed repair never fails the whole candidate. Record one
-          // issue (terminal attempts are repairable:false), keep the channel's
-          // original issues and the pre-repair draft; the candidate survives
-          // for human review (surfaced as needs_review downstream).
-          issues = [
-            ...issues.filter((item) => item.code !== "repair_parse_failed"),
-            {
-              code: "repair_parse_failed",
-              severity: "error",
-              channel: "package",
-              message: error instanceof Error ? error.message : String(error),
-              repairable: repairAttempts < maxAutomaticRepairAttempts,
-            },
-          ];
+          emitGenerationTelemetry(input, { type: "candidate_repair_failed", candidateIndex, repairAttempt: repairAttempts, errorName: error instanceof Error ? error.name.slice(0, 80) : "UnknownError" });
+          issues = [...issues.filter((item) => item.code !== "repair_parse_failed"), {
+            code: "repair_parse_failed", severity: "error", channel: "package",
+            message: error instanceof Error ? error.message : String(error), repairable: repairAttempts < maxAutomaticRepairAttempts,
+          }];
           continue;
         }
       }
@@ -3623,6 +3742,9 @@ export class ContentGenerationAgent implements GenerationEngine {
       ));
     }
     issues = completeIssueMetadata(issues);
+    const generationMode = this.provider && useProvider ? "model_generated" as const : "deterministic_preview" as const;
+    draft = annotateAnswerRealizations({ ...draft, editorialAssessments }, orchestrationPlan, issues, generationMode);
+    const artifactRealization = artifactRealizationFor(draft, orchestrationPlan, issues, generationMode);
     const finalQualityStatus = candidateQualityStatus({ issues });
     emitGenerationTelemetry(input, {
       type: "candidate_completed",
@@ -3688,13 +3810,16 @@ export class ContentGenerationAgent implements GenerationEngine {
       // 里判官覆盖了多少、判了多少 unsupported」。不改变任何判定行为。
       ...(draft.claimJudgments?.length ? { claimJudgments: draft.claimJudgments } : {}),
       ...(draft.commentEditorialAssessment ? { commentEditorialAssessment: draft.commentEditorialAssessment } : {}),
+      editorialAssessments: structuredClone(editorialAssessments),
+      artifactRealization,
+      generationMode,
       unknowns: uniqueUnknowns(ledger, draft),
       conflicts: ledger.conflicts,
       diagnostics: [...diagnosticsFromValidation(issues), ...buildParameterDiagnostics(impactReport)],
       resolutionSnapshot,
       impactReport,
       validation: (() => {
-        return { valid: finalQualityStatus === "passed", qualityStatus: finalQualityStatus, repairAttempts, issues };
+        return { valid: finalQualityStatus !== "blocked", qualityStatus: finalQualityStatus, repairAttempts, issues };
       })(),
       revisions: [],
     };
@@ -3707,6 +3832,12 @@ export class ContentGenerationAgent implements GenerationEngine {
       throw new Error("Package config formula.versionId does not match the supplied immutable formula version.");
     }
     const dependency = analyzeRevisionDependencies({ instruction: input.instruction, explicitChannels: input.explicitChannels });
+    const changesCommentContract = dependency.directChannels.includes("Cref")
+      && /(?:答复|发布|发言|回复).{0,6}(?:身份|角色)|(?:身份|角色).{0,6}(?:改|换|调整)|主缺口|primary\s*gap|posting\s*identity|reply\s*identity/iu.test(input.instruction);
+    if (changesCommentContract) {
+      throw new Error("修改涉及评论答复身份、角色或主缺口，必须重新规划并生成，不能在改稿补丁中变更。");
+    }
+
     const inheritedSelection = input.parameterSelection ?? {
       presetId: input.package.resolutionSnapshot?.presetId,
       styleProfileId: input.package.resolutionSnapshot?.styleProfileId,
@@ -3734,82 +3865,122 @@ export class ContentGenerationAgent implements GenerationEngine {
       topic: input.package.coverageSignature?.topicKey ?? config.task.theme,
       id: input.package.orchestrationSnapshot?.topicOpportunityId ?? `revision_${input.package.id}`,
     };
+    const editorialAssessments: EditorialAssessmentRecord[] = [...(input.package.editorialAssessments ?? [])];
     const current: GenerationDraft = {
       content: input.package.content,
       evidenceIds: input.package.evidence.map((item) => item.id),
       reasoning: input.package.reasoning,
       unknowns: input.package.unknowns,
       commentEditorialAssessment: input.package.commentEditorialAssessment,
+      coreEditorialAssessment: input.package.coreEditorialAssessment,
+      editorialAssessments,
     };
     let revised = current;
+    const coreChannels = dependency.rerunChannels.filter((channel) => channel !== "Cref");
+    const revisesComments = dependency.rerunChannels.includes("Cref");
+
     if (this.provider) {
-      const syntheticIssues: ContentValidationIssue[] = dependency.rerunChannels.map((channel) => ({
-        code: dependency.semanticChange ? "user_revision_fact_consistency" : "user_revision_presentation",
-        severity: "error",
-        channel,
-        message: input.instruction,
-        repairable: true,
-      }));
-      const prompt = buildRepairPrompt({
-        current,
-        issues: syntheticIssues,
-        channels: dependency.rerunChannels,
-        config,
-        knowledge: context,
-        seed: input.package.seed + input.package.revisions.length + 1,
-        attempt: 1,
-        impactReport,
-        imageAnalyses: input.imageAnalyses,
-        orchestrationPlan: input.package.orchestrationSnapshot,
-        evidenceReferences: availableEvidence,
+      if (coreChannels.length) {
+        const syntheticIssues: ContentValidationIssue[] = coreChannels.map((channel) => ({
+          code: dependency.semanticChange ? "user_revision_fact_consistency" : "user_revision_presentation",
+          severity: "error", channel, message: input.instruction, repairable: true,
+        }));
+        const prompt = buildRepairPrompt({
+          current: revised, issues: syntheticIssues, channels: coreChannels,
+          config, knowledge: context, seed: input.package.seed + input.package.revisions.length + 1,
+          attempt: 1, impactReport, imageAnalyses: input.imageAnalyses,
+          orchestrationPlan: input.package.orchestrationSnapshot, evidenceReferences: availableEvidence,
+        });
+        const response = await this.provider.generate({
+          messages: prompt.messages, responseSchema: prompt.responseSchema, schemaName: "chat_revision_core_patch",
+          model: config.model.model, seed: input.package.seed + input.package.revisions.length + 1,
+          temperature: config.model.temperature, maxOutputTokens: config.model.maxOutputTokens,
+          metadata: { jobId: input.package.jobId, candidateIndex: input.package.candidateIndex, purpose: "revision", stage: "core" },
+        });
+        const parsedPatch = parseGenerationPatch(response.text);
+        if (parsedPatch.Cref) throw new CommentEditorContractError("Core revision attempted to write Cref.");
+        const patched = applyGenerationPatch(revised, parsedPatch);
+        const contentRevision = coreChannels.some((channel) => channel !== "H");
+        revised = {
+          ...patched,
+          content: mergeContentByChannels(revised.content, patched.content, coreChannels),
+          evidenceIds: contentRevision ? patched.evidenceIds : revised.evidenceIds,
+          reasoning: contentRevision ? patched.reasoning : revised.reasoning,
+          unknowns: contentRevision ? patched.unknowns : revised.unknowns,
+          editorialAssessments,
+        };
+      }
+      if (revisesComments) {
+        const plan = input.package.orchestrationSnapshot;
+        if (!plan) throw new Error("历史内容缺少冻结评论编排，不能自动修改评论；请重新生成。");
+        const promptInput: import("./prompt.js").GenerationPromptInput = {
+          config, formulaVersion: input.formulaVersion, knowledge: context, ledger,
+          candidateIndex: input.package.candidateIndex,
+          seed: input.package.seed + input.package.revisions.length + 1,
+          variation: variationFor(input.package.seed + input.package.revisions.length + 1, input.package.candidateIndex),
+          impactReport, topicOpportunity: revisionOpportunity,
+          projectIntelligence: input.planningContext?.projectIntelligence,
+          projectBlueprint: input.planningContext?.projectBlueprint,
+          imageAnalyses: input.imageAnalyses, orchestrationPlan: plan, evidenceReferences: availableEvidence,
+        };
+        const before = stagedCommentsFromDraft(revised);
+        const prompt = buildStagedCommentNetworkEditorPrompt(promptInput, { H: revised.content.H, N: revised.content.N }, before, [
+          `用户修改要求：${input.instruction}`,
+        ]);
+        const response = await this.provider.generate({
+          messages: prompt.messages, responseSchema: prompt.responseSchema,
+          schemaName: "chat_revision_comment_network",
+          model: config.model.model, seed: input.package.seed + input.package.revisions.length + 101,
+          temperature: Math.min(config.model.temperature, 0.4),
+          maxOutputTokens: Math.min(config.model.maxOutputTokens, GENERATION_SHORT_OUTPUT_TOKENS),
+          metadata: { jobId: input.package.jobId, candidateIndex: input.package.candidateIndex, purpose: "revision_comment_network", stage: "comment_network" },
+        });
+        const edited = parseStagedCommentNetworkEditor(response.text);
+        const accepted = acceptCommentNetworkEdit(before, edited, plan, availableEvidence);
+        revised = applyAcceptedCommentNetwork(revised, accepted);
+        revised.commentEditorialAssessment = edited.assessment;
+        editorialAssessments.push({
+          stage: "comment_network", status: edited.assessment.status,
+          reasons: [...edited.assessment.reasons], summary: edited.assessment.summary,
+          accepted: true, attempt: input.package.revisions.length + 1,
+        });
+      }
+      editorialAssessments.push({
+        stage: "revision", status: "pass", reasons: [], summary: "修改已按阶段职责原子应用。",
+        accepted: true, attempt: input.package.revisions.length + 1,
       });
-      const response = await this.provider.generate({
-        messages: prompt.messages,
-        responseSchema: prompt.responseSchema,
-        schemaName: "chat_revision_patch",
-        model: config.model.model,
-        seed: input.package.seed + input.package.revisions.length + 1,
-        temperature: config.model.temperature,
-        maxOutputTokens: config.model.maxOutputTokens,
-        metadata: { jobId: input.package.jobId, candidateIndex: input.package.candidateIndex, purpose: "revision" },
-      });
-      const parsedPatch = parseGenerationPatch(response.text);
-      const patched = applyGenerationPatch(current, parsedPatch);
-      const contentRevision = dependency.rerunChannels.some((channel) => channel !== "H");
-      revised = {
-        ...patched,
-        content: mergeContentByChannels(current.content, patched.content, dependency.rerunChannels),
-        evidenceIds: contentRevision ? patched.evidenceIds : current.evidenceIds,
-        reasoning: contentRevision ? patched.reasoning : current.reasoning,
-        unknowns: contentRevision ? patched.unknowns : current.unknowns,
-      };
     } else {
       const variation = variationFor(input.package.seed + input.package.revisions.length + 1, input.package.candidateIndex);
       const replacement = deterministicDraft(
-        config,
-        context,
-        ledger,
-        input.package.candidateIndex,
-        variation,
-        impactReport,
-        input.package.orchestrationSnapshot,
-        revisionOpportunity,
-        evidenceSources,
+        config, context, ledger, input.package.candidateIndex, variation, impactReport,
+        input.package.orchestrationSnapshot, revisionOpportunity, evidenceSources,
       );
-      revised = { ...replacement, content: mergeContentByChannels(current.content, replacement.content, dependency.rerunChannels) };
+      // Deterministic compatibility mode may preview H/N changes, but never
+      // rewrites comments that are owned by staged agents.
+      revised = {
+        ...replacement,
+        content: mergeContentByChannels(current.content, replacement.content, coreChannels),
+        editorialAssessments,
+      };
+      editorialAssessments.push({
+        stage: "revision", status: "skipped", reasons: ["model_not_invoked"],
+        summary: revisesComments ? "确定性预览未修改评论；评论需由阶段化 Agent 处理。" : "确定性预览未运行修改 Agent。",
+        accepted: true, attempt: input.package.revisions.length + 1,
+      });
     }
 
     const allowedEvidenceIds = availableEvidence.map((reference) => reference.id);
     if (input.package.orchestrationSnapshot) {
       if (!this.provider) revised = keepCriticalBoundariesInBody(revised, input.package.orchestrationSnapshot, config);
       revised = bindDialogueProvenance(revised, input.package.orchestrationSnapshot, allowedEvidenceIds, evidenceSources, availableEvidence);
-      // 修订路径同样在校验前做证据自动锚定。
-      revised = attachKnowledgeAnchors(revised, { allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, projectBlueprint: input.planningContext?.projectBlueprint });
+      const anchorContext: KnowledgeAnchorContext = {
+        allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence,
+        projectBlueprint: input.planningContext?.projectBlueprint,
+      };
+      revised = attachKnowledgeAnchors(revised, anchorContext);
       if (this.provider) {
-        // 修订路径的 AI 判官兜底:同上,仍未锚定的句子批量一次裁决。
-        revised = await judgeSensitiveClaimsWithModel(this.provider, revised, { allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, projectBlueprint: input.planningContext?.projectBlueprint }, {
-          model: config.model.model,
-          seed: input.package.seed + input.package.revisions.length + 202,
+        revised = await judgeSensitiveClaimsWithModel(this.provider, revised, anchorContext, {
+          model: config.model.model, seed: input.package.seed + input.package.revisions.length + 202,
           temperature: Math.min(config.model.temperature, 0.2),
           maxOutputTokens: Math.min(config.model.maxOutputTokens, GENERATION_REVIEW_OUTPUT_TOKENS),
           metadata: { jobId: input.package.jobId, candidateIndex: input.package.candidateIndex, purpose: "claim_judge" },
@@ -3817,79 +3988,66 @@ export class ContentGenerationAgent implements GenerationEngine {
       }
       revised = refreshCreativeScenarioIdentities(revised);
     }
-    const revisionIssues = validateGenerationDraft({ draft: revised, config, ledger, allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, orchestrationPlan: input.package.orchestrationSnapshot, projectBlueprint: input.planningContext?.projectBlueprint });
+    const revisionIssues = validateGenerationDraft({
+      draft: revised, config, ledger, allowedEvidenceIds, evidenceSources,
+      evidenceReferences: availableEvidence, orchestrationPlan: input.package.orchestrationSnapshot,
+      projectBlueprint: input.planningContext?.projectBlueprint,
+    });
     const revisionCoverage = input.package.orchestrationSnapshot
-      ? evaluateGapCoverageRealization(revised, input.package.orchestrationSnapshot)
-      : undefined;
+      ? evaluateGapCoverageRealization(revised, input.package.orchestrationSnapshot) : undefined;
     if (this.deliveryReadinessPolicy === "formal") {
       revisionIssues.push(...formalDeliveryReviewIssues(
-        input.package.orchestrationSnapshot,
-        revisionCoverage,
-        Boolean(this.provider),
-        "本次修改未执行配置的模型，结果需人工确认后交付。",
+        input.package.orchestrationSnapshot, revisionCoverage, Boolean(this.provider),
+        "本次修改未执行配置的模型，结果仅为不可交付预览。",
       ));
     }
     const issues = completeIssueMetadata(revisionIssues);
+    const generationMode = this.provider ? "model_generated" as const : "deterministic_preview" as const;
+    if (input.package.orchestrationSnapshot) {
+      revised = annotateAnswerRealizations(revised, input.package.orchestrationSnapshot, issues, generationMode);
+    }
+    const artifactRealization = artifactRealizationFor(revised, input.package.orchestrationSnapshot, issues, generationMode);
     const now = this.now().toISOString();
     const revision: RevisionRecord = {
       id: `rev_${createHash("sha256").update(`${input.package.id}:${input.instruction}:${input.package.revisions.length}`).digest("hex").slice(0, 16)}`,
-      createdAt: now,
-      instruction: input.instruction,
-      directChannels: dependency.directChannels,
-      rerunChannels: dependency.rerunChannels,
+      createdAt: now, instruction: input.instruction,
+      directChannels: dependency.directChannels, rerunChannels: dependency.rerunChannels,
       parentPackageId: input.package.id,
     };
     const revisedEvidence = citedEvidenceSnapshot(availableEvidence, revised.reasoning);
     const revisionPlanWithoutArtifacts: OrchestrationPlan | undefined = input.package.orchestrationSnapshot
-      ? {
-        ...input.package.orchestrationSnapshot,
-        gapCoverageLedger: revisionCoverage!,
-      }
-      : undefined;
+      ? { ...input.package.orchestrationSnapshot, gapCoverageLedger: revisionCoverage! } : undefined;
     const productionArtifacts = buildProductionArtifacts({
-      plan: revisionPlanWithoutArtifacts,
-      content: revised.content,
-      imageAnalyses: input.imageAnalyses,
-      imageBriefEnabled: config.content.imageBriefEnabled,
-      previous: input.package.productionArtifacts,
+      plan: revisionPlanWithoutArtifacts, content: revised.content, imageAnalyses: input.imageAnalyses,
+      imageBriefEnabled: config.content.imageBriefEnabled, previous: input.package.productionArtifacts,
     });
     const realizedRevisionPlan = revisionPlanWithoutArtifacts
-      ? { ...revisionPlanWithoutArtifacts, productionArtifacts: structuredClone(productionArtifacts) }
-      : undefined;
+      ? { ...revisionPlanWithoutArtifacts, productionArtifacts: structuredClone(productionArtifacts) } : undefined;
+    const qualityStatus = candidateQualityStatus({ issues });
     const revisedPackage: ContentPackage = {
       ...input.package,
       id: `${input.package.id}_r${input.package.revisions.length + 1}`,
-      createdAt: now,
-      content: revised.content,
-      productionArtifacts,
-      knowledgeSnapshot: knowledgeSnapshotFor(input.knowledge, context),
-      orchestrationSnapshot: realizedRevisionPlan,
+      createdAt: now, content: revised.content, productionArtifacts,
+      knowledgeSnapshot: knowledgeSnapshotFor(input.knowledge, context), orchestrationSnapshot: realizedRevisionPlan,
       formulaSnapshot: {
-        versionId: input.formulaVersion.id,
-        digest: input.formulaVersion.digest,
+        versionId: input.formulaVersion.id, digest: input.formulaVersion.digest,
         enabledFormulaIds: [...config.formula.enabledFormulaIds],
         executionPolicyVersion: FORMULA_EXECUTION_POLICY_VERSION,
         executionPolicyDigest: FORMULA_EXECUTION_POLICY_DIGEST,
         executionAudit: formulaExecutionAudit(input.formulaVersion, config.formula.enabledFormulaIds),
       },
-      evidence: revisedEvidence,
-      reasoning: revised.reasoning,
+      evidence: revisedEvidence, reasoning: revised.reasoning,
       commentEditorialAssessment: revised.commentEditorialAssessment,
-      unknowns: uniqueUnknowns(ledger, revised),
-      conflicts: ledger.conflicts,
+      coreEditorialAssessment: revised.coreEditorialAssessment,
+      editorialAssessments: structuredClone(editorialAssessments), artifactRealization, generationMode,
+      unknowns: uniqueUnknowns(ledger, revised), conflicts: ledger.conflicts,
       diagnostics: [...diagnosticsFromValidation(issues), ...buildParameterDiagnostics(impactReport)],
-      configSnapshot: cloneConfig(config),
-      resolutionSnapshot: compilation.resolutionSnapshot,
-      impactReport,
-      validation: (() => {
-        const qualityStatus = candidateQualityStatus({ issues });
-        return { valid: qualityStatus === "passed", qualityStatus, repairAttempts: 0, issues };
-      })(),
+      configSnapshot: cloneConfig(config), resolutionSnapshot: compilation.resolutionSnapshot, impactReport,
+      validation: { valid: qualityStatus !== "blocked", qualityStatus, repairAttempts: 0, issues },
       revisions: [...input.package.revisions, revision],
     };
     return { package: revisedPackage, dependency };
-  }
-}
+  }}
 
 export async function generateThreeCandidates(
   input: GenerationInput,

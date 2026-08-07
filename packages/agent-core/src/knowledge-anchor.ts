@@ -86,10 +86,13 @@ function groundedFact(
     && item.occurrence?.threadId === occurrence.threadId
     && item.occurrence?.followUpIndex === occurrence.followUpIndex
     && (item.sourceSpans?.length ?? 0) > 0
-    // Directional visible-claim coverage: a prior “门诊在 X” row must not make
-    // a later “我们在 X” occurrence disappear merely because they share X.
-    && combinedEvidenceSupport(statement, [item.statement])
-    && combinedEvidenceSupport(item.statement, (item.sourceSpans ?? []).map((span) => span.quote)));
+    // AI-judged rows cover only the exact atom the judge reviewed. Sharing a
+    // visible occurrence (for example two clauses in one body sentence) must
+    // not let the first judged atom suppress evidence review for its siblings.
+    && (item.semanticSupport === "ai_judged"
+      ? item.statement === statement
+      : (combinedEvidenceSupport(statement, [item.statement])
+        && combinedEvidenceSupport(item.statement, (item.sourceSpans ?? []).map((span) => span.quote)))));
 }
 
 // 幂等护栏:同一定位下 statement 已有等价 fact 记录(即便暂无 sourceSpans)
@@ -234,9 +237,9 @@ export function collectUnanchoredSensitiveClaims(
 
 /**
  * 挂载联合判官的证据选择。这里做系统机械校验——证据必须在
- * 锚定池内(角色合规)、quote 必须是源文本逐字连续片段(source.includes)、
- * 且通过 conservativeEvidenceSupport 保守支持门;任一不过即作废不挂,
- * error 照旧由校验层报出。幂等:已 grounded/已记录的句子不重复挂。
+ * 锚定池内(角色合规)、quote 必须是源文本逐字连续片段(source.includes)。
+ * 语义支持由 AI 判官负责，系统不再以词法相似度重复推翻；落账时显式标记
+ * semanticSupport=ai_judged，供最终校验审计。幂等:已 grounded/已记录的句子不重复挂。
  */
 export function attachKnowledgeAnchorSelections(
   draft: GenerationDraft,
@@ -255,7 +258,6 @@ export function attachKnowledgeAnchorSelections(
     const source = selection.evidenceId ? poolById.get(selection.evidenceId) : undefined;
     const quote = selection.quote?.trim();
     if (!source || !quote || !source.includes(quote)) continue;
-    if (!conservativeEvidenceSupport(claim.statement, quote)) continue;
     if (groundedFact(reasoning, claim.statement, claim.location, claim.occurrence)
       || recordedFact(reasoning, claim.statement, claim.location, claim.occurrence)) continue;
     reasoning.push({
@@ -265,6 +267,7 @@ export function attachKnowledgeAnchorSelections(
       location: claim.location,
       occurrence: claim.occurrence,
       sourceSpans: [{ evidenceId: selection.evidenceId!, quote }],
+      semanticSupport: "ai_judged",
     });
     additions.push({ location: claim.location, occurrence: claim.occurrence, evidenceId: selection.evidenceId! });
   }
@@ -346,9 +349,7 @@ export function resolveClaimJudgments(
       ? evidencePool.find((candidate) => candidate.evidenceId === verdict.evidenceId)
       : undefined;
     const supported = verdict.supported === true
-      && Boolean(source && verdict.quote
-        && source.quote.includes(verdict.quote)
-        && conservativeEvidenceSupport(claim.statement, verdict.quote));
+      && Boolean(source && verdict.quote && source.quote.includes(verdict.quote));
     judgments.push({ statement: claim.statement, classification: "factual_assertion", supported });
   }
   return judgments;

@@ -11,6 +11,7 @@ import { api } from '../lib/api';
 import { clampCandidateIndex } from '../lib/note-view';
 import { readerPath } from '../lib/quick-nav';
 import { publishOrderText } from '../lib/publish-copy';
+import { candidateDeliverable, deliveryReadiness } from '../lib/delivery-readiness';
 import { areaPath, QUICK_HOME_PATH } from '../lib/quick-routes';
 import { failureReason } from '../lib/retry-plan';
 import { retryJobOnce } from '../lib/single-retry';
@@ -138,9 +139,11 @@ export function QuickReaderPage() {
    */
   const failureNotice = revisionFailureNotice(job?.activeRevision);
   const activeCandidate = job?.candidates?.[clampCandidateIndex(activeIndex, job.candidates.length)];
-  const publishable = activeCandidate?.validation?.valid === true;
-  const manuallyConfirmed = activeCandidate?.manualDeliveryConfirmation?.confirmed === true;
-  const deliverable = publishable || manuallyConfirmed;
+  const readiness = deliveryReadiness(activeCandidate?.validation, { generationMode: activeCandidate?.generationMode, deliverability: activeCandidate?.artifactRealization?.deliverability });
+  const publishable = readiness === 'publishable';
+  const reviewable = readiness === 'human_reviewable';
+  const manuallyConfirmed = reviewable && activeCandidate?.manualDeliveryConfirmation?.confirmed === true;
+  const deliverable = candidateDeliverable(activeCandidate?.validation, manuallyConfirmed, { generationMode: activeCandidate?.generationMode, deliverability: activeCandidate?.artifactRealization?.deliverability });
 
   useEffect(() => {
     // 人工确认与本地勾选都只属于当前候选，切换版本时不得继承。
@@ -148,7 +151,7 @@ export function QuickReaderPage() {
   }, [activeCandidate?.id]);
 
   const confirmManualDelivery = async () => {
-    if (!activeCandidate || publishable || manuallyConfirmed || !manualConfirmChecked || manualConfirming) return;
+    if (!activeCandidate || !reviewable || manuallyConfirmed || !manualConfirmChecked || manualConfirming) return;
     setManualConfirming(true);
     try {
       await api.generations.confirmManualDelivery(jobId, activeCandidate.id);
@@ -188,7 +191,7 @@ export function QuickReaderPage() {
   };
 
   const exportAs = (candidate: ReaderCandidate, format: ExportFormat) => {
-    if (!(candidate.validation?.valid === true || candidate.manualDeliveryConfirmation?.confirmed === true)) {
+    if (!candidateDeliverable(candidate.validation, candidate.manualDeliveryConfirmation?.confirmed === true, { generationMode: candidate.generationMode, deliverability: candidate.artifactRealization?.deliverability })) {
       toast.push('请先完成人工交付确认', 'error');
       return;
     }
@@ -331,7 +334,7 @@ export function QuickReaderPage() {
               onSeeDetail={() => workbenchRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
             />
 
-            {current.validation?.valid !== true && (
+            {deliveryReadiness(current.validation, { generationMode: current.generationMode, deliverability: current.artifactRealization?.deliverability }) === 'human_reviewable' && (
               <section className={`manual-delivery-confirmation qc-manual-delivery${current.manualDeliveryConfirmation?.confirmed ? ' is-confirmed' : ''}`} aria-label="人工交付确认">
                 <div className="manual-delivery-confirmation__summary">
                   <strong>

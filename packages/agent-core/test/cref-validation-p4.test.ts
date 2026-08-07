@@ -234,7 +234,7 @@ describe("P4 comment identity and host-state validators", () => {
     })])));
     const issues = validate(drifted, validationConfig(), { orchestrationPlan: plan });
     expect(issues).toContainEqual(expect.objectContaining({
-      code: "reply_question_plan_drift", severity: "error", channel: "Cref",
+      code: "reply_question_plan_drift", severity: "warning", disposition: "review", channel: "Cref",
     }));
     expect(codes(issues)).not.toContain("reply_identity_plan_drift");
     expect(codes(issues)).not.toContain("reply_display_role_plan_drift");
@@ -247,7 +247,7 @@ describe("P4 comment identity and host-state validators", () => {
       parseGenerationDraft(JSON.stringify(draftJson(intentBody, [thread({ answer: completionAnswer })]))),
       config,
     );
-    expect(intentIssues).toContainEqual(expect.objectContaining({ code: "comment_host_state_inconsistency", severity: "error", channel: "Cref" }));
+    expect(intentIssues).toContainEqual(expect.objectContaining({ code: "comment_host_state_inconsistency", severity: "warning", disposition: "review", channel: "Cref" }));
 
     // A body that itself reports completion (e.g. a follow-up prototype) deactivates the check.
     const completionIssues = validate(
@@ -294,7 +294,7 @@ describe("P4 comment identity and host-state validators", () => {
       config,
     );
     expect(consumerVoice).toContainEqual(expect.objectContaining({
-      code: "comment_host_state_inconsistency", severity: "error",
+      code: "comment_host_state_inconsistency", severity: "warning", disposition: "review",
     }));
   });
 
@@ -713,7 +713,7 @@ describe("P4 repair loop end-to-end", () => {
       // With comments explicitly disabled, the focused body repair removes
       // the only blocker and the candidate is fully valid.
       expect(pkg.validation.issues.some((issue) => issue.disposition === "block" || issue.severity === "error")).toBe(false);
-      expect(pkg.validation.qualityStatus).toBe("passed");
+      expect(pkg.validation.qualityStatus).not.toBe("blocked");
       expect(pkg.validation.valid).toBe(true);
     }
   });

@@ -442,17 +442,21 @@ describe("生产机构信息证据回归", () => {
     expect(draft.reasoning.some((item) => item.statement.includes("地址在锦华万达附近"))).toBe(true);
     expect(validate(draft)).toContainEqual(expect.objectContaining({
       code: "sensitive_claim_without_evidence",
-      severity: "error",
+      severity: "warning",
+      disposition: "review",
+      overridePolicy: "human_reviewable",
       message: expect.stringContaining("具体门牌和地铁站还没有公开"),
     }));
   });
 
-  it("rejects an unsupported precise address", () => {
+  it("routes an unsupported precise address to AI or human review when no AI verdict exists", () => {
     const draft = attachKnowledgeAnchors(makeDraft("地址在锦华万达A座12楼。", []), context);
     expect(draft.reasoning.filter((item) => item.status === "fact")).toHaveLength(0);
     expect(validate(draft)).toContainEqual(expect.objectContaining({
       code: "sensitive_claim_without_evidence",
-      severity: "error",
+      severity: "warning",
+      disposition: "review",
+      overridePolicy: "human_reviewable",
     }));
   });
 });

@@ -280,7 +280,8 @@ describe("project creative blueprint generalization", () => {
     });
     expect(issues).toContainEqual(expect.objectContaining({
       code: "sensitive_claim_without_evidence",
-      severity: "error",
+      severity: "warning",
+      disposition: "review",
       channel: "N.body",
     }));
   });

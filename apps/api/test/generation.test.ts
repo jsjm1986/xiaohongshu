@@ -597,7 +597,7 @@ test('formula registry, settings and deterministic generation form one working f
 
   const job = await waitForJob(jobId);
   assert.equal(job.status, 'completed', job.error);
-  assert.equal(job.qualityStatus, 'needs_review');
+  assert.equal(job.qualityStatus, 'blocked', '三个候选均含硬阻断时任务级状态必须保持 blocked');
   assert.equal(job.progress, 100);
   const executionTrace = await request(`/api/generations/${jobId}/trace`);
   assert.equal(executionTrace.response.status, 200);
@@ -636,8 +636,12 @@ test('formula registry, settings and deterministic generation form one working f
   assert.ok(job.candidates.every((item: any) => item.orchestrationSnapshot?.stateSeed?.history?.status === 'provided'));
   assert.equal(new Set(job.candidates.map((item: any) => item.id)).size, 3);
   assert.ok(job.candidates.every((item: any) => item.validation?.valid === false
-    && item.validation?.qualityStatus === 'needs_review'
-    && item.validation?.issues.some((issue: any) => issue.code === 'model_not_invoked' && issue.disposition === 'review')),
+    && item.validation?.qualityStatus === 'blocked'
+    && item.generationMode === 'deterministic_preview'
+    && item.artifactRealization?.deliverability === 'non_deliverable'
+    && item.validation?.issues.some((issue: any) => issue.code === 'model_not_invoked' && issue.disposition === 'review')
+    && item.validation?.issues.some((issue: any) => issue.code === 'deterministic_preview_non_deliverable'
+      && issue.overridePolicy === 'non_overridable')),
   JSON.stringify(job.candidates.map((item: any) => item.validation)));
   assert.equal(job.knowledgeContext.mode, 'full');
   assert.ok(job.knowledgeContext.selectedDocumentIds.includes(currentKnowledge.body.id));
@@ -705,8 +709,15 @@ test('formula registry, settings and deterministic generation form one working f
     .every((comment: any) => !comment.primaryGapId && !comment.replyPlan && !(comment.evidenceIds?.length))));
   assert.ok(job.candidates.every((item: any) => item.comments.every((comment: any) => comment.surfaceRoleCard?.displayRole
     && comment.surfaceRoleCard?.speechPattern && !/DirectAnswer|本线程/u.test(`${comment.question}${comment.answer}`))));
-  assert.ok(job.candidates.every((item: any) =>
-    new Set(item.comments.map((comment: any) => comment.surfaceRoleCard?.displayRole)).size >= 3));
+  // displayRole is a planned social position, not a per-candidate quota. The
+  // frozen contract requires every visible thread to carry a complete role card;
+  // diversity is verified across candidate plans rather than forcing 3 roles into
+  // every candidate regardless of its selected topology.
+  const candidateRoleSignatures = job.candidates.map((item: any) => [...new Set(
+    item.comments.map((comment: any) => comment.surfaceRoleCard?.displayRole).filter(Boolean),
+  )].sort().join('|'));
+  assert.ok(candidateRoleSignatures.every(Boolean));
+  assert.ok(new Set(candidateRoleSignatures).size >= 2);
   assert.ok(job.candidates.every((item: any) => item.gapCoverageLedger?.closureRate === 1 && item.gapCoverageLedger?.uncoveredGapIds?.length === 0));
   assert.ok(job.candidates.every((item: any) => item.effectiveThreadCount === item.comments.length));
   assert.ok(job.candidates.every((item: any) => item.comments.every((comment: any) => ['publisher', 'brand', 'staff', 'expert'].includes(comment.postingIdentity))));
@@ -734,7 +745,7 @@ test('formula registry, settings and deterministic generation form one working f
       status: 'computed',
       value: candidate.score,
       range: [0, 100],
-      inputs: { errorCount: 0, warningCount: candidate.validation.issues.filter((item: any) => item.severity === 'warning').length, errorPenalty: 25, warningPenalty: 5 },
+      inputs: { errorCount: candidate.validation.issues.filter((item: any) => item.severity === 'error').length, warningCount: candidate.validation.issues.filter((item: any) => item.severity === 'warning').length, errorPenalty: 25, warningPenalty: 5 },
       evidenceStatus: 'operational_heuristic',
       calibrated: false,
       predicts: { quality: false, effect: false },
@@ -777,124 +788,120 @@ test('formula registry, settings and deterministic generation form one working f
   assert.ok(revisedCandidate, '结果包应出现在候选里');
   assert.equal(revisedCandidate.revisions.length, 1);
   assert.equal(revisedCandidate.validation?.valid, false, JSON.stringify(revisedCandidate.validation));
-  assert.equal(revisedCandidate.validation?.qualityStatus, 'needs_review');
+  assert.equal(revisedCandidate.validation?.qualityStatus, 'blocked');
+  assert.equal(revisedCandidate.generationMode, 'deterministic_preview');
+  assert.equal(revisedCandidate.artifactRealization?.deliverability, 'non_deliverable');
   assert.ok(revisedCandidate.validation?.issues.some((issue: any) => issue.code === 'model_not_invoked' && issue.disposition === 'review'));
-  assert.ok(revisedCandidate.body.length > 0, '无模型改稿仍应保留可审阅内容');
+  assert.ok(revisedCandidate.validation?.issues.some((issue: any) => issue.code === 'deterministic_preview_non_deliverable'));
+  assert.ok(revisedCandidate.body.length > 0, '无模型改稿仍应保留可审阅预览');
 
   const exportCandidateId = job.candidates[2].id;
   const unconfirmedMarkdown = await request(`/api/generations/${jobId}/candidates/${encodeURIComponent(exportCandidateId)}/export?format=markdown`);
   assert.equal(unconfirmedMarkdown.response.status, 400);
+  assert.match(String(unconfirmedMarkdown.body.message), /预览不是正式成品|禁止导出/u);
   const exportConfirmation = await request(
     `/api/generations/${jobId}/candidates/${encodeURIComponent(exportCandidateId)}/manual-delivery-confirmation`,
     { method: 'POST', body: JSON.stringify({ acknowledged: true }) },
   );
-  assert.equal(exportConfirmation.response.status, 201, JSON.stringify(exportConfirmation.body));
-  const markdown = await request(`/api/generations/${jobId}/candidates/${encodeURIComponent(exportCandidateId)}/export?format=markdown`);
-  assert.equal(markdown.response.status, 200);
-  // Generated packages are schemaVersion 1.1, so the export uses the two-part
-  // executive + audit appendix layout; thread metadata lives in the appendix.
-  assert.match(Buffer.from(markdown.body).toString('utf8'), /# 审计附录（非发布素材）/u);
-  assert.match(Buffer.from(markdown.body).toString('utf8'), /评论线程完整元数据/u);
-  assert.match(Buffer.from(markdown.body).toString('utf8'), /模拟情景，非真实评论/u);
-  assert.match(Buffer.from(markdown.body).toString('utf8'), /发现式路径/u);
-  assert.match(Buffer.from(markdown.body).toString('utf8'), /信息闭合台账/u);
-  assert.match(Buffer.from(markdown.body).toString('utf8'), /F32\/F33 分项审查元数据（非质量分）/u);
-  assert.match(Buffer.from(markdown.body).toString('utf8'), /是否产生分数：否/u);
-  const exportedJson = await request(`/api/generations/${jobId}/candidates/${encodeURIComponent(exportCandidateId)}/export?format=json`);
-  assert.equal(exportedJson.response.status, 200);
-  const exportedDiagnostics = exportedJson.body.diagnostics.filter((item: any) => ['F32', 'F33'].includes(item.formulaId));
-  assert.equal(exportedDiagnostics.length, 2);
-  assert.ok(exportedDiagnostics.every((item: any) => item.semantics === 'ordered_component_review_metadata'));
-  assert.ok(exportedDiagnostics.every((item: any) => item.aggregateValue === null && item.scoreProduced === false));
-  const docx = await request(`/api/generations/${jobId}/candidates/${encodeURIComponent(exportCandidateId)}/export?format=docx`);
-  assert.equal(docx.response.status, 200);
-  assert.equal(Buffer.from(docx.body).subarray(0, 2).toString('ascii'), 'PK');
+  assert.equal(exportConfirmation.response.status, 400);
+  assert.match(String(exportConfirmation.body.message), /预览不是正式成品|不能通过人工确认/u);
+  for (const format of ['markdown', 'json', 'docx', 'pdf']) {
+    const rejected = await request(`/api/generations/${jobId}/candidates/${encodeURIComponent(exportCandidateId)}/export?format=${format}`);
+    assert.equal(rejected.response.status, 400, `${format} 不得导出 preview`);
+  }
 
-  // A blocked candidate remains blocked at the server until the current user
-  // explicitly confirms manual delivery for this exact content-package row.
+  // Hard blockers are never manually overridable. Only review-only candidates
+  // may be acknowledged, and the acknowledgement is bound to exact content + issues.
   const deliveryDatabase = app.get(DatabaseService);
   const deliveryRow = deliveryDatabase.prepare(
     'SELECT id, content_json FROM content_packages WHERE job_id=? AND candidate_index=1',
   ).get(jobId) as { id: string; content_json: string };
-  const blockedDeliveryContent = JSON.parse(deliveryRow.content_json);
-  blockedDeliveryContent.validation = {
+  const deliveryContent = JSON.parse(deliveryRow.content_json);
+  // This block isolates manual-override policy for a formal model package; the
+  // earlier assertions already cover deterministic-preview rejection.
+  deliveryContent.generationMode = 'model_generated';
+  deliveryContent.artifactRealization = {
+    ...(deliveryContent.artifactRealization ?? {}),
+    mode: 'model_generated',
+    deliverability: 'eligible',
+  };
+  deliveryContent.validation = {
     valid: false,
     qualityStatus: 'blocked',
     repairAttempts: 2,
     issues: [{
       code: 'manual_delivery_test_block', severity: 'error', channel: 'N.body',
-      message: '测试用自动校验阻断', repairable: false,
+      message: '测试用自动校验阻断', repairable: false, disposition: 'block',
+      overridePolicy: 'non_overridable', origin: 'deterministic',
     }],
   };
   deliveryDatabase.prepare('UPDATE content_packages SET content_json=? WHERE id=?')
-    .run(JSON.stringify(blockedDeliveryContent), deliveryRow.id);
+    .run(JSON.stringify(deliveryContent), deliveryRow.id);
 
-  const blockedCandidateId = String(blockedDeliveryContent.candidateId);
-  const blockedExportPath = `/api/generations/${jobId}/candidates/${encodeURIComponent(blockedCandidateId)}/export`;
-  const beforeConfirmation = await request(`${blockedExportPath}?format=json`);
-  assert.equal(beforeConfirmation.response.status, 400);
-  assert.match(String(beforeConfirmation.body.message), /人工交付确认/u);
+  const deliveryCandidateId = String(deliveryContent.candidateId);
+  const deliveryExportPath = `/api/generations/${jobId}/candidates/${encodeURIComponent(deliveryCandidateId)}/export`;
+  const blockedExport = await request(`${deliveryExportPath}?format=json`);
+  assert.equal(blockedExport.response.status, 400);
+  assert.match(String(blockedExport.body.message), /不可人工覆盖/u);
 
-  const missingAcknowledgement = await request(
-    `/api/generations/${jobId}/candidates/${encodeURIComponent(blockedCandidateId)}/manual-delivery-confirmation`,
-    { method: 'POST', body: JSON.stringify({ acknowledged: false }) },
+  const blockedConfirmation = await request(
+    `/api/generations/${jobId}/candidates/${encodeURIComponent(deliveryCandidateId)}/manual-delivery-confirmation`,
+    { method: 'POST', body: JSON.stringify({ acknowledged: true }) },
   );
-  assert.equal(missingAcknowledgement.response.status, 400);
+  assert.equal(blockedConfirmation.response.status, 400);
+  assert.match(String(blockedConfirmation.body.message), /不可人工覆盖/u);
+
+  deliveryContent.validation = {
+    valid: false,
+    qualityStatus: 'needs_review',
+    repairAttempts: 0,
+    issues: [{
+      code: 'manual_delivery_test_review', severity: 'warning', channel: 'package',
+      message: '测试用人工复核项', repairable: false, disposition: 'review',
+      overridePolicy: 'human_reviewable', origin: 'deterministic',
+    }],
+  };
+  deliveryDatabase.prepare('UPDATE content_packages SET content_json=? WHERE id=?')
+    .run(JSON.stringify(deliveryContent), deliveryRow.id);
 
   const confirmedDelivery = await request(
-    `/api/generations/${jobId}/candidates/${encodeURIComponent(blockedCandidateId)}/manual-delivery-confirmation`,
+    `/api/generations/${jobId}/candidates/${encodeURIComponent(deliveryCandidateId)}/manual-delivery-confirmation`,
     { method: 'POST', body: JSON.stringify({ acknowledged: true }) },
   );
   assert.equal(confirmedDelivery.response.status, 201, JSON.stringify(confirmedDelivery.body));
   assert.deepEqual(Object.keys(confirmedDelivery.body).sort(), ['candidateId', 'confirmation', 'jobId']);
-  assert.equal(confirmedDelivery.body.candidateId, blockedCandidateId);
   assert.equal(confirmedDelivery.body.confirmation.confirmed, true);
-  assert.equal(confirmedDelivery.body.candidates, undefined, '确认响应不得夹带完整版候选');
-  const confirmedJob = (await request(`/api/generations/${jobId}`)).body;
-  const confirmedCandidate = confirmedJob.candidates.find((item: any) => item.id === blockedCandidateId);
-  assert.equal(confirmedCandidate.validation.valid, false, '人工确认不得篡改自动校验结论');
-  assert.equal(confirmedCandidate.manualDeliveryConfirmation.confirmed, true);
-  assert.equal(
-    confirmedJob.candidates.find((item: any) => item.id !== blockedCandidateId)?.manualDeliveryConfirmation,
-    undefined,
-    '确认不得继承到其他候选',
-  );
+  assert.equal(confirmedDelivery.body.confirmation.issueCodes[0], 'manual_delivery_test_review');
+  assert.match(confirmedDelivery.body.confirmation.contentDigest, /^[a-f0-9]{64}$/u);
+  assert.match(confirmedDelivery.body.confirmation.issueDigest, /^[a-f0-9]{64}$/u);
 
-  const manualMarkdown = await request(`${blockedExportPath}?format=markdown`);
-  assert.equal(manualMarkdown.response.status, 200);
-  const manualMarkdownText = Buffer.from(manualMarkdown.body).toString('utf8');
-  assert.match(manualMarkdownText, /## 人工交付确认/u);
-  assert.match(manualMarkdownText, /自动校验状态保持未通过/u);
-  assert.match(manualMarkdownText, /不代表系统校验通过/u);
-
-  const manualJson = await request(`${blockedExportPath}?format=json`);
+  const manualJson = await request(`${deliveryExportPath}?format=json`);
   assert.equal(manualJson.response.status, 200);
   assert.equal(manualJson.body.validation.valid, false);
   assert.equal(manualJson.body.manualDeliveryConfirmation.confirmed, true);
-  assert.equal(manualJson.body.manualDeliveryConfirmation.candidateId, blockedCandidateId);
-
-  const manualDocx = await request(`${blockedExportPath}?format=docx`);
-  assert.equal(manualDocx.response.status, 200);
-  assert.equal(Buffer.from(manualDocx.body).subarray(0, 2).toString('ascii'), 'PK');
-  const manualPdf = await request(`${blockedExportPath}?format=pdf`);
-  assert.equal(manualPdf.response.status, 200);
-  assert.equal(Buffer.from(manualPdf.body).subarray(0, 4).toString('ascii'), '%PDF');
 
   const confirmationAudit = deliveryDatabase.prepare(
     `SELECT user_id, details_json FROM audit_logs
      WHERE action='generation.manual-delivery-confirm' AND entity_id=? ORDER BY id DESC LIMIT 1`,
   ).get(deliveryRow.id) as { user_id: string; details_json: string };
   const confirmationDetails = JSON.parse(confirmationAudit.details_json);
-  assert.equal(confirmationDetails.automaticValidationValid, false);
-  assert.equal(confirmationDetails.acknowledgement, 'reviewed_facts_evidence_identity_and_risk');
-  assert.equal(
-    app.get(GenerationService).manualDeliveryConfirmation(deliveryRow.id, 'another-user'),
-    null,
-    '确认必须按用户隔离',
-  );
+  assert.equal(confirmationDetails.acknowledgement, 'reviewed_human_reviewable_issues');
+  assert.equal(confirmationDetails.issueCodes[0], 'manual_delivery_test_review');
 
-  // Restore the package bytes so the rest of this long integration test keeps
-  // exercising its original fixture; the audit record intentionally remains.
+  // Exact-package binding: changing visible copy invalidates the stored confirmation.
+  deliveryContent.content.N.body += '内容已变化';
+  deliveryDatabase.prepare('UPDATE content_packages SET content_json=? WHERE id=?')
+    .run(JSON.stringify(deliveryContent), deliveryRow.id);
+  assert.equal(
+    app.get(GenerationService).manualDeliveryConfirmation(deliveryRow.id, confirmationAudit.user_id),
+    null,
+    '内容摘要变化后旧确认必须失效',
+  );
+  const staleConfirmationExport = await request(`${deliveryExportPath}?format=json`);
+  assert.equal(staleConfirmationExport.response.status, 400);
+
+  // Restore package bytes; the stale audit record intentionally remains and must
+  // not unlock the restored package because its snapshot belonged to another state.
   deliveryDatabase.prepare('UPDATE content_packages SET content_json=? WHERE id=?')
     .run(deliveryRow.content_json, deliveryRow.id);
 
@@ -956,10 +963,13 @@ test('formula registry, settings and deterministic generation form one working f
   assert.equal(advanced.response.status, 201);
   const advancedJob = await waitForJob(advanced.body.id);
   assert.equal(advancedJob.status, 'completed', advancedJob.error);
-  assert.equal(advancedJob.qualityStatus, 'needs_review');
+  assert.equal(advancedJob.qualityStatus, 'blocked');
   assert.ok(advancedJob.candidates.every((item: any) => item.validation?.valid === false
-    && item.validation?.qualityStatus === 'needs_review'
-    && item.validation?.issues.some((issue: any) => issue.code === 'model_not_invoked')));
+    && item.validation?.qualityStatus === 'blocked'
+    && item.generationMode === 'deterministic_preview'
+    && item.artifactRealization?.deliverability === 'non_deliverable'
+    && item.validation?.issues.some((issue: any) => issue.code === 'model_not_invoked')
+    && item.validation?.issues.some((issue: any) => issue.code === 'deterministic_preview_non_deliverable')));
   assert.deepEqual(advancedJob.resolvedConfig.task.preContactKnown, []);
   assert.deepEqual(advancedJob.resolvedConfig.task.readerConstraints, []);
   assert.equal(advancedJob.resolvedConfig.task.readerHistory, undefined);

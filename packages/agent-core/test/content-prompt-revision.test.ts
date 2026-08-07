@@ -315,7 +315,7 @@ describe("structured output parsing and validation", () => {
       allowedEvidenceIds: ["evidence_d1"],
       evidenceSources: { evidence_d1: "原始记录：恢复期为7天；样本范围有限。" },
     });
-    expect(unrelatedIssues).toContainEqual(expect.objectContaining({ code: "evidence_quote_not_supportive", severity: "error" }));
+    expect(unrelatedIssues).toContainEqual(expect.objectContaining({ code: "evidence_quote_not_supportive", severity: "warning", disposition: "review" }));
   });
 
   it("rejects numeric contradictions, short-token coverage and unledgered ordinary facts", () => {
@@ -342,7 +342,7 @@ describe("structured output parsing and validation", () => {
       allowedEvidenceIds: ["evidence_d1"],
       evidenceSources: { evidence_d1: "恢复期为70天" },
     });
-    expect(numericIssues).toContainEqual(expect.objectContaining({ code: "evidence_quote_not_supportive", severity: "error" }));
+    expect(numericIssues).toContainEqual(expect.objectContaining({ code: "evidence_quote_not_supportive", severity: "warning", disposition: "review" }));
 
     value.content.N.body = "产品采用火星材料制造。";
     value.reasoning = [{
@@ -361,7 +361,7 @@ describe("structured output parsing and validation", () => {
       allowedEvidenceIds: ["evidence_d1"],
       evidenceSources: { evidence_d1: "产品" },
     });
-    expect(shortTokenIssues).toContainEqual(expect.objectContaining({ code: "visible_claim_not_in_ledger", severity: "error" }));
+    expect(shortTokenIssues).toContainEqual(expect.objectContaining({ code: "visible_claim_not_in_ledger", severity: "warning", disposition: "review" }));
 
     value.content.N.body = "眼袋是脂肪膨出形成的。";
     value.evidenceIds = [];
@@ -374,7 +374,7 @@ describe("structured output parsing and validation", () => {
       allowedEvidenceIds: [],
       evidenceSources: {},
     });
-    expect(ordinaryFactIssues).toContainEqual(expect.objectContaining({ code: "visible_claim_not_in_ledger", severity: "error" }));
+    expect(ordinaryFactIssues).toContainEqual(expect.objectContaining({ code: "visible_claim_not_in_ledger", severity: "warning", disposition: "review" }));
   });
 
   it("does not allow inferred or unknown evidence to be promoted into a fact", () => {
@@ -470,8 +470,12 @@ describe("structured output parsing and validation", () => {
       }),
     });
     expect(issues).toContainEqual(expect.objectContaining({ code: "comment_plan_language_surface_leak", severity: "error" }));
-    expect(issues).toContainEqual(expect.objectContaining({ code: "fabricated_operational_experience", severity: "error" }));
-    expect(issues).toContainEqual(expect.objectContaining({ code: "sensitive_claim_without_evidence", severity: "error" }));
+    expect(issues).toContainEqual(expect.objectContaining({
+      code: "fabricated_operational_experience", severity: "warning", disposition: "review",
+    }));
+    expect(issues).toContainEqual(expect.objectContaining({
+      code: "sensitive_claim_without_evidence", severity: "warning", disposition: "review",
+    }));
 
     thread.question = "你说的见人是第二天就得上班吗？";
     thread.answer = "是，我现在就是卡在这个安排。";
@@ -645,7 +649,7 @@ describe("structured output parsing and validation", () => {
     });
     const falseClosure = parseGenerationDraft(JSON.stringify(falseClosureValue));
     const issues = validateGenerationDraft({ draft: falseClosure, config, ledger: buildKnowledgeLedger([]), allowedEvidenceIds: ["evidence_d1"] });
-    expect(issues).toContainEqual(expect.objectContaining({ code: "comment_discovery_false_closure", severity: "error", channel: "Cref" }));
+    expect(issues).toContainEqual(expect.objectContaining({ code: "comment_discovery_false_closure", severity: "warning", disposition: "review", channel: "Cref" }));
   });
 
   it("accepts a streamlined discoveryPlan (boundary only) as present while keeping the safety checks at error", () => {
@@ -692,7 +696,7 @@ describe("structured output parsing and validation", () => {
     });
     const parsedClosure = parseGenerationDraft(JSON.stringify(closure));
     const closureIssues = validateGenerationDraft({ draft: parsedClosure, config, ledger: buildKnowledgeLedger([]), allowedEvidenceIds: ["evidence_d1"] });
-    expect(closureIssues).toContainEqual(expect.objectContaining({ code: "comment_discovery_false_closure", severity: "error", channel: "Cref" }));
+    expect(closureIssues).toContainEqual(expect.objectContaining({ code: "comment_discovery_false_closure", severity: "warning", disposition: "review", channel: "Cref" }));
   });
 
   it("computes resolvedRate from the final body instead of the planning ledger", () => {
@@ -772,7 +776,7 @@ describe("structured output parsing and validation", () => {
     expect(missing).toMatchObject({ ledgerCompleteness: 1, realizedResolvedRate: 0, resolvedRate: 0 });
     expect(missing.entries[0]).toMatchObject({ status: "realization_failed" });
     const issues = validateGenerationDraft({ draft: answerRemoved, config, ledger: buildKnowledgeLedger([]), allowedEvidenceIds: ["evidence_d1"], evidenceSources: { evidence_d1: gap.answer! }, orchestrationPlan: plan });
-    expect(issues).toContainEqual(expect.objectContaining({ code: "gap_resolution_not_realized", severity: "error", channel: "N.body" }));
+    expect(issues).toContainEqual(expect.objectContaining({ code: "gap_resolution_not_realized", severity: "warning", disposition: "review", channel: "N.body" }));
   });
 
   it("accepts an evidence-bound natural paraphrase but rejects partial or polarity-reversed gap copy", () => {

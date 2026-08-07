@@ -18,7 +18,7 @@ const CANDIDATE_KEYS = [
   'id', 'packageId', 'candidateIndex', 'seed',
   'title', 'body', 'tags', 'imageBrief',
   'commentDisclaimer', 'commentOwnedFirstComment', 'commentUncoveredGaps', 'comments',
-  'validation', 'commentEditorialAssessment', 'reasoning', 'gapLedger', 'gapCards',
+  'validation', 'commentEditorialAssessment', 'editorialAssessments', 'artifactRealization', 'generationMode', 'reasoning', 'gapLedger', 'gapCards',
   'sources', 'unknowns', 'strategy', 'deploymentPlan',
 ];
 
@@ -57,6 +57,7 @@ function pkg(overrides: Record<string, unknown> = {}): ContentPackage {
             function: 'clarify',
             question: '能换班组吗',
             answer: '按合同可以',
+            answerRealization: { availability: 'generated', stage: 'org_answer' },
             postingIdentity: 'staff',
             stage: 'comparing',
             boundary: '工期顺延',
@@ -89,6 +90,9 @@ function pkg(overrides: Record<string, unknown> = {}): ContentPackage {
     diagnostics: [{ name: 'hard_constraints', status: 'pass', explanation: 'ok', score: 1 }] as unknown as ContentPackage['diagnostics'],
     validation: { valid: false, qualityStatus: 'blocked', repairAttempts: 1, issues: [{ code: 'ungrounded_fact', severity: 'error', disposition: 'block', origin: 'deterministic', message: 'no evidence', repairable: false }] },
     commentEditorialAssessment: { status: 'review', reasons: ['职责冲突'], summary: '仍需复核。' },
+    editorialAssessments: [{ stage: 'comment_network', status: 'review', reasons: ['职责冲突'], summary: '仍需复核。', accepted: true, attempt: 1 }],
+    artifactRealization: { status: 'partial', mode: 'model_generated', deliverability: 'eligible', channels: { core: { status: 'complete', reasonCodes: [] }, comments: { status: 'partial', reasonCodes: ['ungrounded_fact'] }, ledger: { status: 'complete', reasonCodes: [] } } },
+    generationMode: 'model_generated',
     revisions: [],
     deploymentPlan: { postingIdentity: 'author', ownedFirstComment: true } as unknown as ContentPackage['deploymentPlan'],
     dialogueThreads: [{ id: 't-1', personaRole: 'skeptical_returning_reader', simulated: true } as unknown as NonNullable<ContentPackage['dialogueThreads']>[number]],
@@ -136,7 +140,7 @@ test('字段集与白名单完全相等,不多不少', () => {
 });
 
 test('当前用户的人工交付确认可进入轻量投影且不改写校验结论', () => {
-  const confirmation = { confirmed: true as const, confirmedAt: '2026-08-05T00:00:00.000Z', confirmedBy: 'user-1' };
+  const confirmation = { confirmed: true as const, confirmedAt: '2026-08-05T00:00:00.000Z', confirmedBy: 'user-1', contentDigest: 'content', issueDigest: 'issues', issueCodes: ['ungrounded_fact'] };
   const view = readerView(pkg(), confirmation);
   assert.deepEqual(view.manualDeliveryConfirmation, confirmation);
   assert.equal(view.validation.valid, false);
@@ -265,4 +269,13 @@ test('host_reply 阅读投影保留作者事实与话题锚点，不冒充机构
   assert.deepEqual(comment.authorFactIds, ['af1']);
   assert.equal(comment.topicAnchorGapId, 'gap-1');
   assert.equal(comment.surfaceRoleCard?.replyDisplayRole, '楼主');
+});
+
+
+test('节点与包级 realization 及阶段审计进入轻量投影', () => {
+  const view = readerView(pkg());
+  assert.equal(view.comments[0]?.answerRealization?.availability, 'generated');
+  assert.equal(view.artifactRealization?.channels.comments.status, 'partial');
+  assert.equal(view.editorialAssessments?.[0]?.stage, 'comment_network');
+  assert.equal(view.generationMode, 'model_generated');
 });

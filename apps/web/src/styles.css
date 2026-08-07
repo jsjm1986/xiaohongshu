@@ -5138,3 +5138,12 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
 .simple-generation-notices ul { margin: 7px 0 0; padding-left: 18px; display: grid; gap: 4px; }
 .simple-generation-notices li { color: var(--muted); font-size: 9px; line-height: 1.5; }
 .simple-generation-notices li.is-warning { color: #8c641f; }
+.quick-shell .xhs-comment__reply--unavailable { border-left-style: dashed; opacity: .82; }
+.quick-shell .xhs-comment__availability { margin: 0; color: var(--v2-muted); font-size: var(--v2-fs-micro); line-height: 1.45; }
+.qc-realization { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid var(--v2-line); border-radius: 10px; background: var(--v2-surface-soft); }
+.qc-realization__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.qc-realization__head strong { font-size: var(--v2-fs-sm); }
+.qc-realization__head small, .qc-realization li { color: var(--v2-muted); font-size: var(--v2-fs-xs); }
+.qc-realization__channels { display: flex; flex-wrap: wrap; gap: 6px; }
+.qc-realization__channels span { padding: 3px 7px; border-radius: 999px; background: var(--v2-surface); font-size: var(--v2-fs-micro); }
+.qc-realization details ul { margin: 6px 0 0; padding-left: 18px; }

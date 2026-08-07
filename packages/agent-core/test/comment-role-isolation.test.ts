@@ -982,7 +982,7 @@ describe("按侧+按角色隔离的引擎合并", () => {
     }
   });
 
-  it("完整评论终编越过冻结 gap 时原子拒收并保留原始网络", async () => {
+  it("完整评论终编语义由 Agent assessment 治理，不再被固定 gap 词表二次否决", async () => {
     let editorCalls = 0;
     const provider: ModelProvider = {
       async generate(request) {
@@ -1003,12 +1003,10 @@ describe("按侧+按角色隔离的引擎合并", () => {
 
     expect(result.packages).toHaveLength(3);
     expect(editorCalls).toBe(3);
-    expect(result.packages.every((pkg) => pkg.commentEditorialAssessment === undefined)).toBe(true);
-    expect(result.packages.every((pkg) => pkg.validation.issues.some((issue) =>
-      issue.code === "comment_editor_contract_rejected"
-      && issue.disposition === "review"
-      && issue.origin === "deterministic"))).toBe(true);
-    expect(result.packages.flatMap((pkg) => pkg.content.Cref.threads).every((thread) => thread.question !== "今天天气怎么样？")).toBe(true);
+    expect(result.packages.every((pkg) => pkg.commentEditorialAssessment?.status === "pass")).toBe(true);
+    expect(result.packages.every((pkg) => !pkg.validation.issues.some((issue) =>
+      issue.code === "comment_editor_contract_rejected"))).toBe(true);
+    expect(result.packages.flatMap((pkg) => pkg.content.Cref.threads).some((thread) => thread.question === "今天天气怎么样？")).toBe(true);
   });
 
   it("采访腔由读者编辑Agent纠正，原子验收后才进入答复阶段", async () => {
@@ -1313,7 +1311,7 @@ describe("按侧+按角色隔离的引擎合并", () => {
     return result.packages.map((pkg) => pkg.validation.issues.filter((issue) => issue.code === "accountable_identity_incomplete"));
   }
 
-  it("有人工确认事实时才调用机构模型，证据外官网/执照/预约动作仍确定性回退", async () => {
+  it("有事实 scope 时保留机构模型自然答复，证据语义交给 Claim Judge", async () => {
     const calls: ModelGenerationRequest[] = [];
     const confirmation = { confirmedBy: "owner-1", confirmedAt: "2026-08-05T00:00:00.000Z" };
     const groundedGaps: InformationGap[] = isolationGaps.map((gap) => ({
@@ -1347,14 +1345,23 @@ describe("按侧+按角色隔离的引擎合并", () => {
             text: JSON.stringify({
               answers: stagedThreadIds(request).map((id) => ({
                 id,
-                answer: "官网暂时没有，营业执照在大厅公示，我稍后帮你预约。",
+                answer: "具体要结合个人情况评估，先不下统一结论。",
               })),
-              ownedFirstComment: "资质都能在线查，我可以帮大家预约。",
+              ownedFirstComment: "具体情况不同，先结合个人条件判断。",
             }),
             raw: {},
           };
         }
         if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
+        if (purpose === "claim_judge") {
+          const statements = [...requestText(request).matchAll(/^\d+\.\s+(.+)$/gmu)];
+          return {
+            text: JSON.stringify({ judgments: statements.map((_, statementIndex) => ({
+              statementIndex, classification: "hedge", supported: null, evidenceId: null, quote: null,
+            })) }),
+            raw: {},
+          };
+        }
         return { text: coreResponse(), raw: {} };
       },
     };
@@ -1366,9 +1373,10 @@ describe("按侧+按角色隔离的引擎合并", () => {
       pkg.content.Cref.ownedFirstComment ?? "",
       ...pkg.content.Cref.threads.map((thread) => thread.answer),
     ]).join("\n");
-    expect(visible).not.toMatch(/官网暂时没有|营业执照在大厅公示|稍后帮你预约|帮大家预约/u);
-    expect(result.packages.some((pkg) => pkg.validation.issues.some((issue) =>
+    expect(visible).toMatch(/结合个人条件判断/u);
+    expect(result.packages.every((pkg) => !pkg.validation.issues.some((issue) =>
       issue.code === "model_org_answer_failed" && issue.origin === "deterministic"))).toBe(true);
+    expect(result.packages.every((pkg) => pkg.validation.qualityStatus !== "blocked"), JSON.stringify(result.packages.map((pkg) => ({ status: pkg.validation.qualityStatus, issues: pkg.validation.issues.filter((issue) => issue.disposition === "block") })), null, 2)).toBe(true);
   });
 
   it("合规蓝图不产生 accountable_identity_incomplete", async () => {

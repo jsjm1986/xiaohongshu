@@ -221,14 +221,15 @@ test('SaaS 会话能读 reader:白名单是 /api/generations 前缀,子路径同
   assert.equal(body.candidates.length, 1);
 });
 
-test('SaaS 可确认当前候选，最小响应不泄露完整版字段，reader 刷新后持久化可见', async () => {
+test('SaaS 仅可确认 human_reviewable 候选，最小响应不泄露完整版字段，reader 刷新后持久化可见', async () => {
   const db = app.get(DatabaseService);
   const row = db.prepare('SELECT content_json FROM content_packages WHERE id=?').get(`${jobId}-pkg`) as { content_json: string };
   const blocked = JSON.parse(row.content_json);
   blocked.validation = {
     valid: false,
+    qualityStatus: 'needs_review',
     repairAttempts: 1,
-    issues: [{ code: 'manual_delivery_reader_test', severity: 'error', message: '测试阻断' }],
+    issues: [{ code: 'manual_delivery_reader_test', severity: 'warning', disposition: 'review', overridePolicy: 'human_reviewable', message: '测试复核项', repairable: false, channel: 'package' }],
   };
   db.prepare('UPDATE content_packages SET content_json=? WHERE id=?').run(JSON.stringify(blocked), `${jobId}-pkg`);
 
@@ -247,6 +248,27 @@ test('SaaS 可确认当前候选，最小响应不泄露完整版字段，reader
   assert.equal(refreshed.response.status, 200);
   assert.equal(refreshed.body.candidates[0].validation.valid, false, '人工确认不得改写自动校验结论');
   assert.equal(refreshed.body.candidates[0].manualDeliveryConfirmation.confirmed, true);
+
+  const preview = JSON.parse((db.prepare('SELECT content_json FROM content_packages WHERE id=?').get(`${jobId}-pkg`) as { content_json: string }).content_json);
+  preview.generationMode = 'deterministic_preview';
+  preview.artifactRealization = {
+    status: 'partial', mode: 'deterministic_preview', deliverability: 'non_deliverable',
+    channels: {
+      core: { status: 'complete', reasonCodes: [] },
+      comments: { status: 'complete', reasonCodes: [] },
+      ledger: { status: 'complete', reasonCodes: [] },
+    },
+  };
+  preview.validation = { valid: true, qualityStatus: 'passed', repairAttempts: 0, issues: [] };
+  db.prepare('UPDATE content_packages SET content_json=? WHERE id=?').run(JSON.stringify(preview), `${jobId}-pkg`);
+
+  const rejectedPreview = await request(path, {
+    method: 'POST', body: JSON.stringify({ acknowledged: true }),
+  }, saasCookie, saasCsrf);
+  assert.equal(rejectedPreview.response.status, 400);
+  assert.match(String(rejectedPreview.body.message), /确定性预览不是正式成品/u);
+  const previewReader = await request(`/api/generations/${jobId}/reader`, {}, saasCookie, '');
+  assert.equal(previewReader.body.candidates[0].manualDeliveryConfirmation, undefined, '切换为 preview 后旧确认必须失效');
 });
 
 test('未完成任务返回空候选数组,而不是 undefined 或 404', async () => {

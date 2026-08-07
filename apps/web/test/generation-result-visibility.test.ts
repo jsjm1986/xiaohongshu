@@ -12,18 +12,19 @@ test("服务器执行轨迹不出现在用户界面", () => {
   assert.doesNotMatch(css, /generation-execution-trace/u);
 });
 
-test("全部候选未通过时仍展示草稿，人工确认后按候选解锁交付", () => {
+test("全部候选未通过时仍展示草稿，只有可复核候选能人工解锁，硬阻断必须修复", () => {
   assert.doesNotMatch(page, /if \(deliveryState\.allRejected\)/u);
   assert.match(page, /<h2>\{selected\.title\}<\/h2>/u);
   assert.match(page, /selected\.body[\s\S]*?split\("\\n"\)/u);
   assert.match(page, /selected\.comments\.map/u);
-  assert.match(page, /const deliverable = publishable \|\| manuallyConfirmed/u);
-  assert.match(page, /!publishable && \(/u);
+  assert.match(page, /const deliverable = candidateDeliverable\(/u);
+  assert.match(page, /const reviewable = readiness === "human_reviewable"/u);
+  assert.match(page, /reviewable && \(/u);
   assert.match(page, /manuallyConfirmed \? "已人工确认，可复制与导出"/u);
   assert.match(page, /我已核对事实、证据、身份与风险/u);
   assert.match(page, /仅限当前用户与候选，自动校验结论保留/u);
   assert.match(page, /setManualConfirmChecked\(false\)/u);
-  assert.match(page, /自动校验未通过 · 确认后可复制与导出/u);
+  assert.match(page, /存在硬阻断 · 必须修复/u);
 });
 
 test("结果页把校验、人工确认和运行版本压缩为按需展开信息", () => {

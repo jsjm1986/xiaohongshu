@@ -295,6 +295,58 @@ describe("judgeSensitiveClaimsWithModel 四类句子裁决", () => {
     expect(sensitiveClaimIssues(judged)).toEqual([]);
   });
 
+  it("疼痛口径自然改写由 AI 语义裁决放行，越界比较仍由 AI 阻断", async () => {
+    const evidenceId = "evidence_pain";
+    const source = "打麻药的时候有短暂的进针刺痛感，之后操作无痛感，些许人会有酸胀、牵拉或压迫感；过程中可沟通并根据情况调整节奏。";
+    const painContext = anchorContext({
+      allowedEvidenceIds: [evidenceId],
+      evidenceSources: { [evidenceId]: source },
+      evidenceReferences: [{
+        id: evidenceId, documentId: "doc_pain", path: "pain.md", quote: source,
+        kind: "fact", evidenceStatus: "observed", scope: [], caveats: [],
+      }],
+      projectBlueprint: {
+        ...projectBlueprint,
+        claimPolicy: {
+          ...projectBlueprint.claimPolicy,
+          rules: projectBlueprint.claimPolicy.rules.map((rule) => ({
+            ...rule, terms: ["疼", "刺痛", "酸胀", "牵拉", "抽血"],
+          })),
+        },
+      },
+    });
+
+    const natural = attachKnowledgeAnchors(makeDraft("打麻药时会短暂刺痛，之后部分人会觉得酸胀或牵拉。"), painContext);
+    expect(collectUnanchoredSensitiveClaims(natural, painContext)).toHaveLength(2);
+    const supported = await judgeSensitiveClaimsWithModel(spyProvider(JSON.stringify({
+      judgments: [
+        {
+          statementIndex: 0, classification: "factual_assertion", supported: true,
+          evidenceId, quote: "打麻药的时候有短暂的进针刺痛感",
+        },
+        {
+          statementIndex: 1, classification: "factual_assertion", supported: true,
+          evidenceId, quote: "些许人会有酸胀、牵拉或压迫感",
+        },
+      ],
+    })), natural, painContext, {});
+    expect(supported.reasoning.filter((item) => item.semanticSupport === "ai_judged"), JSON.stringify(supported.reasoning, null, 2)).toHaveLength(2);
+    expect(supported.reasoning).toEqual(expect.arrayContaining([
+      expect.objectContaining({ statement: "打麻药时会短暂刺痛", evidenceIds: [evidenceId] }),
+      expect.objectContaining({ statement: "之后部分人会觉得酸胀或牵拉。", evidenceIds: [evidenceId] }),
+    ]));
+    expect(sensitiveClaimIssues(supported, painContext)).toEqual([]);
+
+    const comparison = attachKnowledgeAnchors(makeDraft("比抽血轻一点。"), painContext);
+    const unsupported = await judgeSensitiveClaimsWithModel(spyProvider(JSON.stringify({
+      judgments: [{ statementIndex: 0, classification: "factual_assertion", supported: false, evidenceId: null, quote: null }],
+    })), comparison, painContext, {});
+    const issues = sensitiveClaimIssues(unsupported, painContext);
+    expect(issues).toContainEqual(expect.objectContaining({
+      code: "sensitive_claim_without_evidence", disposition: "block", origin: "agent",
+    }));
+  });
+
   it("事实断言 supported 但缺来源身份或引文 → 强制改判无据", async () => {
     const draft = unanchoredDraft("先记录一下。大部分人7天左右能消肿。");
     const provider = spyProvider(JSON.stringify({

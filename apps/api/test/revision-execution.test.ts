@@ -154,6 +154,28 @@ after(async () => {
 
 test('修改任务被认领、推进进度、最终完成，旧人工确认不跨内容版本继承', async () => {
   const { jobId, candidateId } = await createRealJob('改稿执行-完成');
+  // 本文件关闭 provider，生成结果默认是不可交付 preview。这个用例测试的是
+  // “正式可复核包的确认与内容版本绑定”，因此先显式构造该前置状态；preview
+  // 自身不可确认由 generation-reader-route / export 回归独立覆盖。
+  const database = app.get(DatabaseService);
+  const packageRow = database.prepare(
+    'SELECT id, content_json FROM content_packages WHERE job_id=? AND candidate_index=0',
+  ).get(jobId) as { id: string; content_json: string };
+  const reviewablePackage = JSON.parse(packageRow.content_json);
+  reviewablePackage.generationMode = 'model_generated';
+  reviewablePackage.artifactRealization = {
+    ...(reviewablePackage.artifactRealization ?? {}), mode: 'model_generated', deliverability: 'eligible',
+  };
+  reviewablePackage.validation = {
+    valid: false, qualityStatus: 'needs_review', repairAttempts: 0,
+    issues: [{
+      code: 'revision_version_binding_review', severity: 'warning', channel: 'package',
+      message: '测试用正式人工复核项', repairable: false, disposition: 'review',
+      overridePolicy: 'human_reviewable', origin: 'deterministic',
+    }],
+  };
+  database.prepare('UPDATE content_packages SET content_json=? WHERE id=?')
+    .run(JSON.stringify(reviewablePackage), packageRow.id);
   const confirmed = await request(
     `/api/generations/${jobId}/candidates/${encodeURIComponent(candidateId)}/manual-delivery-confirmation`,
     { method: 'POST', body: JSON.stringify({ acknowledged: true }) },

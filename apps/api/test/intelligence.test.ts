@@ -1310,10 +1310,12 @@ test('planning CRUD, explicit approvals, image safety and generation snapshots w
   assert.equal(automaticGeneration.body.opportunitySelectionAudit, undefined);
   const automaticCompleted = await waitForJob(request, automaticGeneration.body.id);
   assert.equal(automaticCompleted.status, 'completed', automaticCompleted.error);
-  assert.equal(automaticCompleted.qualityStatus, 'needs_review');
+  assert.equal(automaticCompleted.qualityStatus, 'blocked');
   assert.ok(automaticCompleted.candidates.every((item: any) => item.validation?.valid === false
-    && item.validation?.qualityStatus === 'needs_review'
-    && item.validation?.issues.some((issue: any) => issue.code === 'model_not_invoked' && issue.disposition === 'review')),
+    && item.validation?.qualityStatus === 'blocked'
+    && item.generationMode === 'deterministic_preview'
+    && item.artifactRealization?.deliverability === 'non_deliverable'
+    && item.validation?.issues.some((issue: any) => issue.code === 'deterministic_preview_non_deliverable' && issue.disposition === 'block')),
   JSON.stringify(automaticCompleted.candidates.map((item: any) => item.validation)));
   const automaticAudit = automaticCompleted.opportunitySelectionAudit;
   assert.equal(automaticCompleted.opportunitySnapshot.score, undefined);
@@ -1359,19 +1361,15 @@ test('planning CRUD, explicit approvals, image safety and generation snapshots w
   const automaticExportPath = `/api/generations/${automaticCompleted.id}/candidates/${reviewCandidate.id}/export?format=json`;
   const blockedAutomaticExport = await request(automaticExportPath);
   assert.equal(blockedAutomaticExport.response.status, 400);
-  assert.match(String(blockedAutomaticExport.body.message), /人工交付确认/u);
-  const confirmedAutomatic = await request(
+  assert.match(String(blockedAutomaticExport.body.message), /确定性预览.*禁止导出/u);
+  const rejectedAutomaticConfirmation = await request(
     `/api/generations/${automaticCompleted.id}/candidates/${reviewCandidate.id}/manual-delivery-confirmation`,
     { method: 'POST', body: JSON.stringify({ acknowledged: true }) },
   );
-  assert.equal(confirmedAutomatic.response.status, 201, JSON.stringify(confirmedAutomatic.body));
-  const exportedAutomatic = await request(automaticExportPath);
-  assert.equal(exportedAutomatic.response.status, 200);
-  assert.equal(exportedAutomatic.body.opportunitySnapshot.opportunitySelectionAudit.selectionMode, 'heuristic_ranked');
-  assert.equal(
-    exportedAutomatic.body.opportunitySnapshot.opportunitySelectionAudit.selectedOpportunityRank.heuristic.id,
-    'OpportunityRankHeuristicV1',
-  );
+  assert.equal(rejectedAutomaticConfirmation.response.status, 400);
+  assert.match(String(rejectedAutomaticConfirmation.body.message), /确定性预览.*不能通过人工确认/u);
+  const stillBlockedAutomaticExport = await request(automaticExportPath);
+  assert.equal(stillBlockedAutomaticExport.response.status, 400);
 
   const source = await sharp({
     create: { width: 3_000, height: 40, channels: 3, background: '#cc3355' },

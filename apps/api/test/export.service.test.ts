@@ -572,35 +572,58 @@ test('rejects malformed packages and unsupported formats', async () => {
   );
 });
 
-test('manual delivery confirmation exports a blocked package without changing validation truth', async () => {
+test('manual delivery confirmation exports only human-reviewable packages and never overrides a blocker', async () => {
   const service = new ExportService();
-  const blocked = structuredClone(contentPackage) as any;
-  blocked.validation = {
+  const reviewable = structuredClone(contentPackage) as any;
+  reviewable.validation = {
     valid: false,
-    qualityStatus: 'blocked',
-    repairAttempts: 2,
-    issues: [{ severity: 'error', code: 'blocked', message: 'blocked' }],
+    qualityStatus: 'needs_review',
+    repairAttempts: 0,
+    issues: [{ severity: 'warning', code: 'review', message: 'review', disposition: 'review', overridePolicy: 'human_reviewable' }],
   };
   const confirmation = {
     confirmed: true as const,
     confirmedAt: '2026-08-05T12:00:00.000Z',
     confirmedBy: 'user-1',
     jobId: 'job-1',
-    candidateId: String(blocked.candidateId),
+    candidateId: String(reviewable.candidateId),
+    contentDigest: 'content-digest',
+    issueDigest: 'issue-digest',
+    issueCodes: ['review'],
   };
-  const markdown = (await service.exportPackage(blocked, 'markdown', {
+  const markdown = (await service.exportPackage(reviewable, 'markdown', {
     manualDeliveryConfirmation: confirmation,
   })).toString('utf8');
   assert.match(markdown, /## 人工交付确认/u);
   assert.match(markdown, /自动校验状态保持未通过/u);
-  assert.match(markdown, /不代表系统校验通过/u);
 
-  const json = JSON.parse((await service.exportPackage(blocked, 'json', {
-    manualDeliveryConfirmation: confirmation,
-  })).toString('utf8'));
-  assert.equal(json.validation.valid, false);
-  assert.equal(json.manualDeliveryConfirmation.confirmed, true);
-  assert.equal(json.manualDeliveryConfirmation.confirmedBy, 'user-1');
+  const blocked = structuredClone(reviewable) as any;
+  blocked.validation = {
+    valid: false,
+    qualityStatus: 'blocked',
+    repairAttempts: 0,
+    issues: [{ severity: 'error', code: 'blocked', message: 'blocked', disposition: 'block', overridePolicy: 'non_overridable' }],
+  };
+  await assert.rejects(
+    () => service.exportPackage(blocked, 'json', { manualDeliveryConfirmation: confirmation }),
+    /不可人工覆盖/u,
+  );
+
+  const preview = structuredClone(contentPackage) as any;
+  preview.generationMode = 'deterministic_preview';
+  preview.artifactRealization = {
+    status: 'partial', mode: 'deterministic_preview', deliverability: 'non_deliverable',
+    channels: {
+      core: { status: 'complete', reasonCodes: [] },
+      comments: { status: 'complete', reasonCodes: [] },
+      ledger: { status: 'complete', reasonCodes: [] },
+    },
+  };
+  preview.validation = { valid: true, qualityStatus: 'passed', repairAttempts: 0, issues: [] };
+  await assert.rejects(
+    () => service.exportPackage(preview, 'json', { manualDeliveryConfirmation: confirmation }),
+    /确定性预览不是正式成品/u,
+  );
 });
 
 test('renders v1.1 packages in the two-part executive + audit appendix layout', async () => {

@@ -656,7 +656,7 @@ describe("consumer experience labelling (消费者亲历允许，机构冒充消
         ]))),
       );
       expect(issues, `${postingIdentity} 答复侧证词形态应拦`).toContainEqual(
-        expect.objectContaining({ code: "fabricated_operational_experience", severity: "error" }));
+        expect.objectContaining({ code: "fabricated_operational_experience", severity: "warning", disposition: "review" }));
     }
   });
 });

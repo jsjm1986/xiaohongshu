@@ -41,6 +41,47 @@ interface Props {
   deliverable: boolean;
 }
 
+const REALIZATION_LABEL: Record<string, string> = {
+  complete: '完整', partial: '部分完成', failed: '失败', not_applicable: '不适用',
+};
+const STAGE_LABEL: Record<string, string> = {
+  core: '核心图文', comment_openers: '读者开口', org_answers: '可追责答复',
+  comment_network: '评论终编', ledger: '事实台账', revision: '修改',
+};
+
+function RealizationCard({ candidate }: { candidate: ReaderCandidate }) {
+  const realization = candidate.artifactRealization;
+  const audits = candidate.editorialAssessments ?? [];
+  if (!realization && audits.length === 0) return null;
+  const preview = candidate.generationMode === 'deterministic_preview' || realization?.deliverability === 'non_deliverable';
+  return (
+    <section className="qc-realization" aria-label="产物实现状态">
+      <div className="qc-realization__head">
+        <strong>{preview ? '确定性预览 · 不可交付' : `产物${REALIZATION_LABEL[realization?.status ?? ''] ?? realization?.status ?? '状态未知'}`}</strong>
+        <small>{preview ? '需运行正式模型生成' : '按最终可见内容与阶段结果计算'}</small>
+      </div>
+      {realization && (
+        <div className="qc-realization__channels">
+          <span>核心图文：{REALIZATION_LABEL[realization.channels.core.status]}</span>
+          <span>评论：{REALIZATION_LABEL[realization.channels.comments.status]}</span>
+          <span>事实台账：{REALIZATION_LABEL[realization.channels.ledger.status]}</span>
+        </div>
+      )}
+      {audits.length > 0 && (
+        <details>
+          <summary>查看阶段审计（{audits.length}）</summary>
+          <ul>{audits.map((audit, index) => (
+            <li key={`${audit.stage}-${audit.attempt}-${index}`}>
+              {STAGE_LABEL[audit.stage] ?? audit.stage}：{audit.summary || audit.status}
+              {!audit.accepted && '（未采用）'}
+            </li>
+          ))}</ul>
+        </details>
+      )}
+    </section>
+  );
+}
+
 export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, retrying, activeIndex, deliverable }: Props) {
   const toast = useToast();
   const [instruction, setInstruction] = useState('');
@@ -69,6 +110,7 @@ export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, ret
       <CandidateDiffBar candidates={candidates} activeIndex={activeIndex} />
 
       <ValidationVerdict validation={current.validation} manuallyConfirmed={!verdict.publishable && deliverable} />
+      <RealizationCard candidate={current} />
 
       {/* 第二段:判断依据。(原第一段「成品」已移交预览区 NoteCard,不是漏了;
           编号沿用旧序号,方便与计划文档对照) */}

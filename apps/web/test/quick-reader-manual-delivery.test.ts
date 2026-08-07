@@ -9,7 +9,7 @@ const comments = readFileSync(new URL('../src/components/quick/NoteComments.tsx'
 const alert = readFileSync(new URL('../src/components/quick/NoteAlertBar.tsx', import.meta.url), 'utf8');
 
 test('极简阅读页紧凑展示候选级人工交付确认', () => {
-  assert.match(page, /current\.validation\?\.valid !== true && \(/u);
+  assert.match(page, /deliveryReadiness\(current\.validation, \{ generationMode: current\.generationMode, deliverability: current\.artifactRealization\?\.deliverability \}\) === 'human_reviewable'/u);
   assert.match(page, /人工核对后解锁复制与导出/u);
   assert.match(page, /我已核对事实、证据、身份与风险/u);
   assert.match(page, /api\.generations\.confirmManualDelivery\(jobId, activeCandidate\.id\)/u);
@@ -19,7 +19,7 @@ test('极简阅读页紧凑展示候选级人工交付确认', () => {
 });
 
 test('自动通过或人工确认后才开放极简页全部复制与导出入口', () => {
-  assert.match(page, /const deliverable = publishable \|\| manuallyConfirmed/u);
+  assert.match(page, /const deliverable = candidateDeliverable\(activeCandidate\?\.validation, manuallyConfirmed, \{ generationMode: activeCandidate\?\.generationMode, deliverability: activeCandidate\?\.artifactRealization\?\.deliverability \}\)/u);
   assert.match(page, /copyEnabled=\{deliverable\}/u);
   assert.match(page, /deliverable=\{deliverable\}/u);
   assert.match(note, /disabled=\{!copyEnabled\}/u);

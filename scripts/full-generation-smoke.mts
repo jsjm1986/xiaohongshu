@@ -481,7 +481,21 @@ async function main(): Promise<void> {
         },
       }))
       : defaultScenarios;
-    const scenarios = angleScenarios.filter((scenario) => !scenarioFilter || scenario.name === scenarioFilter);
+    const selectedScenarios = angleScenarios.filter((scenario) => !scenarioFilter || scenario.name === scenarioFilter);
+    const requestedPerspectives = (process.env.SMOKE_PERSPECTIVES ?? '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+    const supportedPerspectives = new Set(['creative_scenario', 'institution_owned']);
+    if (requestedPerspectives.some((value) => !supportedPerspectives.has(value))) {
+      throw new Error('SMOKE_PERSPECTIVES supports only creative_scenario,institution_owned.');
+    }
+    const scenarios = requestedPerspectives.length
+      ? selectedScenarios.flatMap((scenario) => requestedPerspectives.map((publishingTopology) => ({
+        name: `${scenario.name}-${publishingTopology}`,
+        input: { ...scenario.input, publishingTopology },
+      })))
+      : selectedScenarios;
 
     if (scenarios.length === 0) {
       throw new Error(`Unknown SMOKE_SCENARIO: ${scenarioFilter}`);

@@ -1,4 +1,4 @@
-import type { ReaderComment } from '../types';
+import type { CommentAnswerRealization, ReaderComment } from '../types';
 
 /**
  * 评论区可读性:补上「谁在说、这条在补哪个缺口」。
@@ -77,6 +77,7 @@ export interface CommentRow {
   id?: string;
   question: string;
   answer: string;
+  answerRealization?: CommentAnswerRealization;
   /** 线程互动形态:决定 answererLabel 与 identitySummary 的口径。 */
   threadKind?: string;
   /** 提问方标签:模拟读者(全部线程实测 simulated=true) */
@@ -133,6 +134,7 @@ export function commentSectionView(
       id: c.id,
       question: c.question,
       answer: isOrganicReaction ? '' : c.answer,
+      answerRealization: c.answerRealization,
       threadKind: c.threadKind,
       // simulated 缺失的历史包不能默认成"真实读者"——那是更强的断言。
       askerLabel: c.simulated === false ? '未标记为模拟' : '模拟读者',

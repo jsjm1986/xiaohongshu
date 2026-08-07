@@ -224,7 +224,7 @@ describe("M7 required-mechanism regression: gapCoverageLedger stays required (éœ
       orchestrationPlan: tamperedPlan,
     });
     expect(tamperedIssues).toContainEqual(
-      expect.objectContaining({ code: "comment_gap_silently_dropped", severity: "error" }),
+      expect.objectContaining({ code: "comment_gap_silently_dropped", severity: "warning", disposition: "review" }),
     );
 
     // Necessity per 7.7: if the ledger mechanism were made non-required (no orchestration
@@ -332,7 +332,7 @@ describe("M7 required-mechanism regression: persona-scene role grounding stays r
       allowedEvidenceIds: [],
     });
     expect(ungrounded).toContainEqual(
-      expect.objectContaining({ code: "comment_role_constraint_ungrounded", severity: "error" }),
+      expect.objectContaining({ code: "comment_role_constraint_ungrounded", severity: "warning", disposition: "review" }),
     );
 
     // Control: the SAME constraint is grounded once disclosed in the information window,
