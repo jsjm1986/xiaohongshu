@@ -221,33 +221,35 @@ test('SaaS 会话能读 reader:白名单是 /api/generations 前缀,子路径同
   assert.equal(body.candidates.length, 1);
 });
 
-test('SaaS 仅可确认 human_reviewable 候选，最小响应不泄露完整版字段，reader 刷新后持久化可见', async () => {
+test('SaaS 的正式复核候选无需人工解锁，reader 直接投影为可交付', async () => {
   const db = app.get(DatabaseService);
   const row = db.prepare('SELECT content_json FROM content_packages WHERE id=?').get(`${jobId}-pkg`) as { content_json: string };
-  const blocked = JSON.parse(row.content_json);
-  blocked.validation = {
+  const reviewable = JSON.parse(row.content_json);
+  reviewable.generationMode = 'model_generated';
+  reviewable.artifactRealization = {
+    ...(reviewable.artifactRealization ?? {}), mode: 'model_generated', deliverability: 'eligible',
+  };
+  reviewable.validation = {
     valid: false,
     qualityStatus: 'needs_review',
     repairAttempts: 1,
     issues: [{ code: 'manual_delivery_reader_test', severity: 'warning', disposition: 'review', overridePolicy: 'human_reviewable', message: '测试复核项', repairable: false, channel: 'package' }],
   };
-  db.prepare('UPDATE content_packages SET content_json=? WHERE id=?').run(JSON.stringify(blocked), `${jobId}-pkg`);
+  db.prepare('UPDATE content_packages SET content_json=? WHERE id=?').run(JSON.stringify(reviewable), `${jobId}-pkg`);
 
   const path = `/api/generations/${jobId}/candidates/${jobId}-cand/manual-delivery-confirmation`;
-  const confirmed = await request(path, {
+  const unnecessary = await request(path, {
     method: 'POST',
     body: JSON.stringify({ acknowledged: true }),
   }, saasCookie, saasCsrf);
-  assert.equal(confirmed.response.status, 201, JSON.stringify(confirmed.body));
-  assert.deepEqual(Object.keys(confirmed.body).sort(), ['candidateId', 'confirmation', 'jobId']);
-  assert.equal(confirmed.body.confirmation.confirmed, true);
-  assert.equal(confirmed.body.candidates, undefined);
-  assert.equal(confirmed.body.resolvedConfig, undefined);
+  assert.equal(unnecessary.response.status, 400);
+  assert.match(String(unnecessary.body.message), /无需人工交付确认/u);
 
   const refreshed = await request(`/api/generations/${jobId}/reader`, {}, saasCookie, '');
   assert.equal(refreshed.response.status, 200);
-  assert.equal(refreshed.body.candidates[0].validation.valid, false, '人工确认不得改写自动校验结论');
-  assert.equal(refreshed.body.candidates[0].manualDeliveryConfirmation.confirmed, true);
+  assert.equal(refreshed.body.candidates[0].validation.valid, true, '历史 valid=false 必须按当前白名单重算');
+  assert.equal(refreshed.body.candidates[0].validation.qualityStatus, 'needs_review');
+  assert.equal(refreshed.body.candidates[0].manualDeliveryConfirmation, undefined);
 
   const preview = JSON.parse((db.prepare('SELECT content_json FROM content_packages WHERE id=?').get(`${jobId}-pkg`) as { content_json: string }).content_json);
   preview.generationMode = 'deterministic_preview';

@@ -219,12 +219,18 @@ test('生产默认退避窗口达到分钟级，足以跨过实测错误簇', as
   assert.ok(total >= 60_000, `累计退避 ${total}ms 跨不过中位 20 秒、长尾百秒级的错误簇`);
 });
 
-/** 任务级质量取最佳可交付候选，不合并三份候选的告警。 */
-test('deriveQualityStatus：存在 passed 候选即通过，全 blocked 保持 blocked', () => {
+/** 任务级质量取最佳可交付候选，并按当前机械白名单重算历史元数据。 */
+test('deriveQualityStatus：语义旧阻断降为复核，机械硬门禁仍 blocked', () => {
   const clean = { validation: { valid: true, qualityStatus: 'passed' as const, issues: [] } };
-  const advisory = { validation: { valid: true, qualityStatus: 'passed' as const, issues: [{ severity: 'warning' as const, disposition: 'advisory' as const }] } };
-  const review = { validation: { valid: true, qualityStatus: 'needs_review' as const, issues: [{ severity: 'warning' as const, disposition: 'review' as const }] } };
-  const blocked = { validation: { valid: false, qualityStatus: 'blocked' as const, issues: [{ severity: 'error' as const, disposition: 'block' as const }] } };
+  const advisory = { validation: { valid: true, qualityStatus: 'passed' as const, issues: [
+    { code: 'body_too_short', severity: 'warning' as const, disposition: 'advisory' as const },
+  ] } };
+  const review = { validation: { valid: false, qualityStatus: 'blocked' as const, issues: [
+    { code: 'future_semantic_rule', severity: 'error' as const, disposition: 'block' as const },
+  ] } };
+  const blocked = { validation: { valid: false, qualityStatus: 'needs_review' as const, issues: [
+    { code: 'title_required', severity: 'warning' as const, disposition: 'review' as const },
+  ] } };
 
   assert.equal(deriveQualityStatus([clean]), 'passed');
   assert.equal(deriveQualityStatus([advisory]), 'passed');

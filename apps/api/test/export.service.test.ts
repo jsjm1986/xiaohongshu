@@ -317,7 +317,7 @@ test('exports a complete package as Markdown and deterministic JSON', async () =
   assert.match(markdownText, /来源=user/u);
 
   const json = await service.exportPackage(contentPackage, 'json');
-  assert.deepEqual(JSON.parse(json.toString('utf8')), contentPackage);
+  assert.deepEqual(JSON.parse(json.toString('utf8')), { ...contentPackage, validation: { ...contentPackage.validation, qualityStatus: 'passed' } });
 });
 
 test('exports valid DOCX and PDF buffers containing document signatures', async () => {
@@ -562,17 +562,18 @@ test('resolves an explicit CJK font path before platform fallbacks', async () =>
 test('rejects malformed packages and unsupported formats', async () => {
   const service = new ExportService();
   await assert.rejects(service.exportPackage({}, 'markdown'), BadRequestException);
-  await assert.rejects(
-    service.exportPackage({ ...contentPackage, validation: { valid: false, repairAttempts: 2, issues: [{ severity: 'error' }] } }, 'markdown'),
-    /禁止导出/u,
-  );
+  const relaxed = await service.exportPackage({
+    ...contentPackage,
+    validation: { valid: false, repairAttempts: 2, issues: [{ code: 'future_semantic_rule', severity: 'error', disposition: 'block' }] },
+  }, 'markdown');
+  assert.ok(relaxed.byteLength > 0, '新增语义规则默认只提醒，不得自动成为导出门禁');
   await assert.rejects(
     service.exportPackage(contentPackage, 'xml' as never),
     BadRequestException,
   );
 });
 
-test('manual delivery confirmation exports only human-reviewable packages and never overrides a blocker', async () => {
+test('formal review findings export immediately while mechanical hard gates remain blocked', async () => {
   const service = new ExportService();
   const reviewable = structuredClone(contentPackage) as any;
   reviewable.validation = {
@@ -602,11 +603,11 @@ test('manual delivery confirmation exports only human-reviewable packages and ne
     valid: false,
     qualityStatus: 'blocked',
     repairAttempts: 0,
-    issues: [{ severity: 'error', code: 'blocked', message: 'blocked', disposition: 'block', overridePolicy: 'non_overridable' }],
+    issues: [{ severity: 'error', code: 'title_required', message: 'blocked', disposition: 'block', overridePolicy: 'non_overridable' }],
   };
   await assert.rejects(
     () => service.exportPackage(blocked, 'json', { manualDeliveryConfirmation: confirmation }),
-    /不可人工覆盖/u,
+    /硬门禁|禁止导出/u,
   );
 
   const preview = structuredClone(contentPackage) as any;

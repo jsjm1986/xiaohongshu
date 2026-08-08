@@ -1,9 +1,14 @@
-import type { AgentHarnessJob } from '../types';
+import { harnessValidationValid, normalizeHarnessValidationIssue } from '@content-agent/agent-harness-core/validation';
+import type { AgentHarnessJob, AgentHarnessValidationIssue } from '../types';
 
 export type HarnessRunFilter = 'all' | 'active' | 'completed' | 'failed';
 export type HarnessCompletedResultState = 'not_completed' | 'missing_candidates' | 'all_blocked' | 'ready';
 
 export const HARNESS_POLL_WARNING_THRESHOLD = 3;
+
+export function harnessCandidateDeliverable(candidate: { validation: { valid: boolean; issues: AgentHarnessValidationIssue[] } }): boolean {
+  return harnessValidationValid(candidate.validation.issues.map(normalizeHarnessValidationIssue));
+}
 
 export function shouldWarnHarnessPolling(consecutiveFailures: number): boolean {
   return Number.isFinite(consecutiveFailures) && consecutiveFailures >= HARNESS_POLL_WARNING_THRESHOLD;
@@ -13,7 +18,7 @@ export function harnessCompletedResultState(job: AgentHarnessJob | null | undefi
   if (!job || job.status !== 'completed') return 'not_completed';
   const candidates = job.candidates ?? [];
   if (candidates.length === 0) return 'missing_candidates';
-  return candidates.some((candidate) => candidate.validation.valid) ? 'ready' : 'all_blocked';
+  return candidates.some(harnessCandidateDeliverable) ? 'ready' : 'all_blocked';
 }
 
 
@@ -28,7 +33,7 @@ export function canExportHarnessRun(job: AgentHarnessJob | null | undefined): bo
   const candidates = job?.candidates ?? [];
   return job?.status === 'completed'
     && candidates.length > 0
-    && candidates.every((candidate) => candidate.validation.valid);
+    && candidates.every(harnessCandidateDeliverable);
 }
 
 export interface HarnessTaskContractView {

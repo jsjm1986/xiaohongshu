@@ -296,8 +296,8 @@ describe('runAgentHarness bounded multi-turn protocol', () => {
     expect(result.candidates).toHaveLength(3);
     expect(result.reviewStatus).toBe('blocked');
     expect(result.reviewError).toContain('socket closed');
-    expect(result.candidates.every((item) => !item.validation.valid)).toBe(true);
-    expect(result.candidates.every((item) => item.validation.issues.some((issue) => issue.code === 'claim_audit_incomplete'))).toBe(true);
+    expect(result.candidates.every((item) => item.validation.valid)).toBe(true);
+    expect(result.candidates.every((item) => item.validation.issues.some((issue) => issue.code === 'claim_audit_incomplete' && issue.severity === 'warning'))).toBe(true);
   });
 
   it('produces three valid complete packages after a successful merged review', async () => {
@@ -391,7 +391,7 @@ describe('runAgentHarness bounded multi-turn protocol', () => {
     expect(result.candidates.every((item) => item.validation.valid)).toBe(true);
   });
 
-  it('deterministically blocks incomplete package-only fields and asset handling', async () => {
+  it('reports incomplete package-only fields and asset handling without semantic lockout', async () => {
     const values = [candidate(0, '字段不完整'), candidate(1, '标题二'), candidate(2, '标题三')];
     const replies = protocolReplies(values);
     const incomplete = (replies[2] as { candidate: ReturnType<typeof packagePayload> }).candidate;
@@ -408,7 +408,8 @@ describe('runAgentHarness bounded multi-turn protocol', () => {
     expect(codes.has('missing_response_sla')).toBe(true);
     expect(codes.has('missing_live_question_routes')).toBe(true);
     expect(codes.has('asset_decision_count')).toBe(true);
-    expect(result.candidates[0]?.validation.valid).toBe(false);
+    expect(result.candidates[0]?.validation.valid).toBe(true);
+    expect(result.candidates[0]?.publicationChecklist.some((check) => check.status === 'manual_review')).toBe(true);
   });
 
   it('scans publishable comment text but excludes comment audit metadata and operational routing', () => {
@@ -444,7 +445,7 @@ describe('runAgentHarness bounded multi-turn protocol', () => {
     expect(reviewPayload).not.toContain(productionOnly);
   });
 
-  it('reconciles a supported exact exception into citations but keeps unsupported exceptions blocked', async () => {
+  it('reconciles a supported exact exception and keeps unsupported exceptions visible for review', async () => {
     const supported = candidate(0, '补登记事实');
     const missingStatement = '具体结果仍需按实际确认';
     supported.citations = supported.citations.filter((citation) => citation.statement !== missingStatement);
@@ -468,10 +469,10 @@ describe('runAgentHarness bounded multi-turn protocol', () => {
       provider: scriptedProvider(protocolReplies([supported, candidate(1, '标题二'), candidate(2, '标题三')], unsupportedReview)),
     });
     expect(unsupportedResult.candidates[0]?.validation.issues.some((issue) => issue.code === 'undeclared_project_fact')).toBe(true);
-    expect(unsupportedResult.candidates[0]?.validation.valid).toBe(false);
+    expect(unsupportedResult.candidates[0]?.validation.valid).toBe(true);
   });
 
-  it('blocks invented experience fragments hidden in simulated reader voices', async () => {
+  it('flags invented experience fragments hidden in simulated reader voices for review', async () => {
     const leaked = candidate(0, '评论区不得伪造体验');
     const exchange = leaked.content.Cref.threads.find((thread) => thread.threadKind === 'reader_exchange')!;
     exchange.question = '我同事上个月做了，第三天就不肿了。';
@@ -482,19 +483,19 @@ describe('runAgentHarness bounded multi-turn protocol', () => {
     });
 
     expect(result.candidates[0]?.validation.issues.some((issue) => issue.code === 'fabricated_experience')).toBe(true);
-    expect(result.candidates[0]?.validation.valid).toBe(false);
+    expect(result.candidates[0]?.validation.valid).toBe(true);
   });
 
-  it('blocks a project bridge that appears before the reader tension and reframe', async () => {
-    const rushed = candidate(0, '项目承接不能抢跑');
+  it('flags a project bridge that appears before the reader tension and reframe', async () => {
+    const rushed = candidate(0, '先别急着下结论');
     rushed.content.N.body = `${BRIDGE}${TENSION}${REFRAME}${FACT}${OPEN_LOOP}`;
     const result = await runAgentHarness({
       ...baseInput,
       provider: scriptedProvider(protocolReplies([rushed, candidate(1, '标题二'), candidate(2, '标题三')])),
     });
     expect(result.candidates[0]?.validation.issues.some((issue) => issue.code === 'marketing_anchor_order')).toBe(true);
-    expect(result.candidates[0]?.publicationChecklist).toContainEqual(expect.objectContaining({ key: 'soft_marketing', status: 'blocked' }));
-    expect(result.candidates[0]?.validation.valid).toBe(false);
+    expect(result.candidates[0]?.publicationChecklist).toContainEqual(expect.objectContaining({ key: 'soft_marketing', status: 'manual_review' }));
+    expect(result.candidates[0]?.validation.valid).toBe(true);
   });
 
   it('rejects unknown short evidence references instead of persisting model-copied ids', async () => {

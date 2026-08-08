@@ -1713,8 +1713,11 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
         opportunitySelectionAudit,
       };
     }
-    const topic = typeof raw.topic === 'string' && raw.topic.trim()
+    const explicitTopic = typeof raw.topic === 'string' && raw.topic.trim()
       ? raw.topic.trim().slice(0, 500)
+      : undefined;
+    const topic = explicitTopic
+      ? explicitTopic
       : typeof opportunitySnapshot.topic === 'string'
         ? opportunitySnapshot.topic.slice(0, 500)
         : '';
@@ -1811,9 +1814,13 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       projectBlueprint,
       informationGaps: gaps,
       expressionStrategies: runtimeStrategies,
-      opportunities: usableOpportunities,
+      // A typed topic is an explicit creative lock, not a hint for the approved
+      // opportunity ranker. Passing the unrelated opportunity pool here caused
+      // Core to replace user topics with the highest ranked project card.
+      opportunities: explicitTopic && !opportunityId ? [] : usableOpportunities,
       imageAnalyses: imageContext,
       selectedOpportunityId: opportunityId,
+      taskThemeLocked: Boolean(explicitTopic && !opportunityId),
       recentCoverage,
       recentCoverageSource,
       orchestrationOptionsSource,

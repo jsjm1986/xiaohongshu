@@ -639,7 +639,8 @@ test('formula registry, settings and deterministic generation form one working f
     && item.validation?.qualityStatus === 'blocked'
     && item.generationMode === 'deterministic_preview'
     && item.artifactRealization?.deliverability === 'non_deliverable'
-    && item.validation?.issues.some((issue: any) => issue.code === 'model_not_invoked' && issue.disposition === 'review')
+    && item.validation?.issues.some((issue: any) => issue.code === 'model_not_invoked' && issue.disposition === 'block'
+      && issue.overridePolicy === 'non_overridable')
     && item.validation?.issues.some((issue: any) => issue.code === 'deterministic_preview_non_deliverable'
       && issue.overridePolicy === 'non_overridable')),
   JSON.stringify(job.candidates.map((item: any) => item.validation)));
@@ -791,7 +792,7 @@ test('formula registry, settings and deterministic generation form one working f
   assert.equal(revisedCandidate.validation?.qualityStatus, 'blocked');
   assert.equal(revisedCandidate.generationMode, 'deterministic_preview');
   assert.equal(revisedCandidate.artifactRealization?.deliverability, 'non_deliverable');
-  assert.ok(revisedCandidate.validation?.issues.some((issue: any) => issue.code === 'model_not_invoked' && issue.disposition === 'review'));
+  assert.ok(revisedCandidate.validation?.issues.some((issue: any) => issue.code === 'model_not_invoked' && issue.disposition === 'block'));
   assert.ok(revisedCandidate.validation?.issues.some((issue: any) => issue.code === 'deterministic_preview_non_deliverable'));
   assert.ok(revisedCandidate.body.length > 0, '无模型改稿仍应保留可审阅预览');
 
@@ -810,15 +811,13 @@ test('formula registry, settings and deterministic generation form one working f
     assert.equal(rejected.response.status, 400, `${format} 不得导出 preview`);
   }
 
-  // Hard blockers are never manually overridable. Only review-only candidates
-  // may be acknowledged, and the acknowledgement is bound to exact content + issues.
+  // Formal model artifacts use a reverse allowlist: stale or future semantic
+  // block metadata cannot disable export, while explicit mechanical gates do.
   const deliveryDatabase = app.get(DatabaseService);
   const deliveryRow = deliveryDatabase.prepare(
     'SELECT id, content_json FROM content_packages WHERE job_id=? AND candidate_index=1',
   ).get(jobId) as { id: string; content_json: string };
   const deliveryContent = JSON.parse(deliveryRow.content_json);
-  // This block isolates manual-override policy for a formal model package; the
-  // earlier assertions already cover deterministic-preview rejection.
   deliveryContent.generationMode = 'model_generated';
   deliveryContent.artifactRealization = {
     ...(deliveryContent.artifactRealization ?? {}),
@@ -830,8 +829,8 @@ test('formula registry, settings and deterministic generation form one working f
     qualityStatus: 'blocked',
     repairAttempts: 2,
     issues: [{
-      code: 'manual_delivery_test_block', severity: 'error', channel: 'N.body',
-      message: '测试用自动校验阻断', repairable: false, disposition: 'block',
+      code: 'future_semantic_rule', severity: 'error', channel: 'N.body',
+      message: '历史或未来语义规则', repairable: false, disposition: 'block',
       overridePolicy: 'non_overridable', origin: 'deterministic',
     }],
   };
@@ -840,10 +839,38 @@ test('formula registry, settings and deterministic generation form one working f
 
   const deliveryCandidateId = String(deliveryContent.candidateId);
   const deliveryExportPath = `/api/generations/${jobId}/candidates/${encodeURIComponent(deliveryCandidateId)}/export`;
+  const semanticExport = await request(`${deliveryExportPath}?format=json`);
+  assert.equal(semanticExport.response.status, 200, JSON.stringify(semanticExport.body));
+  assert.equal(semanticExport.body.validation.valid, true);
+  assert.equal(semanticExport.body.validation.qualityStatus, 'needs_review');
+  assert.ok(semanticExport.body.validation.issues.some((issue: any) =>
+    issue.code === 'future_semantic_rule'
+      && issue.severity === 'warning'
+      && issue.disposition === 'review'));
+
+  const unnecessaryConfirmation = await request(
+    `/api/generations/${jobId}/candidates/${encodeURIComponent(deliveryCandidateId)}/manual-delivery-confirmation`,
+    { method: 'POST', body: JSON.stringify({ acknowledged: true }) },
+  );
+  assert.equal(unnecessaryConfirmation.response.status, 400);
+  assert.match(String(unnecessaryConfirmation.body.message), /无需人工交付确认/u);
+
+  deliveryContent.validation = {
+    valid: true,
+    qualityStatus: 'passed',
+    repairAttempts: 0,
+    issues: [{
+      code: 'title_required', severity: 'warning', channel: 'N.title',
+      message: '标题缺失', repairable: true, disposition: 'review',
+      overridePolicy: 'human_reviewable', origin: 'deterministic',
+    }],
+  };
+  deliveryDatabase.prepare('UPDATE content_packages SET content_json=? WHERE id=?')
+    .run(JSON.stringify(deliveryContent), deliveryRow.id);
+
   const blockedExport = await request(`${deliveryExportPath}?format=json`);
   assert.equal(blockedExport.response.status, 400);
-  assert.match(String(blockedExport.body.message), /不可人工覆盖/u);
-
+  assert.match(String(blockedExport.body.message), /硬门禁|禁止导出/u);
   const blockedConfirmation = await request(
     `/api/generations/${jobId}/candidates/${encodeURIComponent(deliveryCandidateId)}/manual-delivery-confirmation`,
     { method: 'POST', body: JSON.stringify({ acknowledged: true }) },
@@ -851,57 +878,6 @@ test('formula registry, settings and deterministic generation form one working f
   assert.equal(blockedConfirmation.response.status, 400);
   assert.match(String(blockedConfirmation.body.message), /不可人工覆盖/u);
 
-  deliveryContent.validation = {
-    valid: false,
-    qualityStatus: 'needs_review',
-    repairAttempts: 0,
-    issues: [{
-      code: 'manual_delivery_test_review', severity: 'warning', channel: 'package',
-      message: '测试用人工复核项', repairable: false, disposition: 'review',
-      overridePolicy: 'human_reviewable', origin: 'deterministic',
-    }],
-  };
-  deliveryDatabase.prepare('UPDATE content_packages SET content_json=? WHERE id=?')
-    .run(JSON.stringify(deliveryContent), deliveryRow.id);
-
-  const confirmedDelivery = await request(
-    `/api/generations/${jobId}/candidates/${encodeURIComponent(deliveryCandidateId)}/manual-delivery-confirmation`,
-    { method: 'POST', body: JSON.stringify({ acknowledged: true }) },
-  );
-  assert.equal(confirmedDelivery.response.status, 201, JSON.stringify(confirmedDelivery.body));
-  assert.deepEqual(Object.keys(confirmedDelivery.body).sort(), ['candidateId', 'confirmation', 'jobId']);
-  assert.equal(confirmedDelivery.body.confirmation.confirmed, true);
-  assert.equal(confirmedDelivery.body.confirmation.issueCodes[0], 'manual_delivery_test_review');
-  assert.match(confirmedDelivery.body.confirmation.contentDigest, /^[a-f0-9]{64}$/u);
-  assert.match(confirmedDelivery.body.confirmation.issueDigest, /^[a-f0-9]{64}$/u);
-
-  const manualJson = await request(`${deliveryExportPath}?format=json`);
-  assert.equal(manualJson.response.status, 200);
-  assert.equal(manualJson.body.validation.valid, false);
-  assert.equal(manualJson.body.manualDeliveryConfirmation.confirmed, true);
-
-  const confirmationAudit = deliveryDatabase.prepare(
-    `SELECT user_id, details_json FROM audit_logs
-     WHERE action='generation.manual-delivery-confirm' AND entity_id=? ORDER BY id DESC LIMIT 1`,
-  ).get(deliveryRow.id) as { user_id: string; details_json: string };
-  const confirmationDetails = JSON.parse(confirmationAudit.details_json);
-  assert.equal(confirmationDetails.acknowledgement, 'reviewed_human_reviewable_issues');
-  assert.equal(confirmationDetails.issueCodes[0], 'manual_delivery_test_review');
-
-  // Exact-package binding: changing visible copy invalidates the stored confirmation.
-  deliveryContent.content.N.body += '内容已变化';
-  deliveryDatabase.prepare('UPDATE content_packages SET content_json=? WHERE id=?')
-    .run(JSON.stringify(deliveryContent), deliveryRow.id);
-  assert.equal(
-    app.get(GenerationService).manualDeliveryConfirmation(deliveryRow.id, confirmationAudit.user_id),
-    null,
-    '内容摘要变化后旧确认必须失效',
-  );
-  const staleConfirmationExport = await request(`${deliveryExportPath}?format=json`);
-  assert.equal(staleConfirmationExport.response.status, 400);
-
-  // Restore package bytes; the stale audit record intentionally remains and must
-  // not unlock the restored package because its snapshot belonged to another state.
   deliveryDatabase.prepare('UPDATE content_packages SET content_json=? WHERE id=?')
     .run(deliveryRow.content_json, deliveryRow.id);
 

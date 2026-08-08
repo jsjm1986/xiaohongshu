@@ -206,7 +206,7 @@ describe("M7 required-mechanism regression: gapCoverageLedger stays required (éœ
       orchestrationPlan: plan,
     });
     expect(omissionIssues).toContainEqual(
-      expect.objectContaining({ code: "comment_gap_missing_primary", severity: "error" }),
+      expect.objectContaining({ code: "comment_gap_missing_primary", severity: "warning", disposition: "review" }),
     );
 
     // (b) Ledger-level silent drop: the required gap is dropped from the coverage ledger

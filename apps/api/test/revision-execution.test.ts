@@ -152,7 +152,7 @@ after(async () => {
   if (dataDir) await rm(dataDir, { recursive: true, force: true });
 });
 
-test('修改任务被认领、推进进度、最终完成，旧人工确认不跨内容版本继承', async () => {
+test('修改任务被认领、推进进度并生成独立的新内容版本', async () => {
   const { jobId, candidateId } = await createRealJob('改稿执行-完成');
   // 本文件关闭 provider，生成结果默认是不可交付 preview。这个用例测试的是
   // “正式可复核包的确认与内容版本绑定”，因此先显式构造该前置状态；preview
@@ -176,13 +176,10 @@ test('修改任务被认领、推进进度、最终完成，旧人工确认不�
   };
   database.prepare('UPDATE content_packages SET content_json=? WHERE id=?')
     .run(JSON.stringify(reviewablePackage), packageRow.id);
-  const confirmed = await request(
-    `/api/generations/${jobId}/candidates/${encodeURIComponent(candidateId)}/manual-delivery-confirmation`,
-    { method: 'POST', body: JSON.stringify({ acknowledged: true }) },
-  );
-  assert.equal(confirmed.response.status, 201, JSON.stringify(confirmed.body));
   const beforeRevision = await request(`/api/generations/${jobId}`);
-  assert.equal(beforeRevision.body.candidates.find((item: any) => item.id === candidateId)?.manualDeliveryConfirmation?.confirmed, true);
+  const original = beforeRevision.body.candidates.find((item: any) => item.id === candidateId);
+  assert.equal(original?.validation.valid, true, '正式复核包无需人工确认即可交付');
+  assert.equal(original?.manualDeliveryConfirmation, undefined);
 
   await request(`/api/generations/${jobId}/revise`, {
     method: 'POST', body: JSON.stringify({ candidateId, instruction: '正文不要有价格' }),
@@ -199,13 +196,8 @@ test('修改任务被认领、推进进度、最终完成，旧人工确认不�
   const revised = detail.body.candidates.find((item: any) => item.packageId === revision.resultPackageId);
   assert.ok(revised, `结果包应出现在候选里，实际：${detail.body.candidates.map((c: any) => c.packageId).join(',')}`);
   assert.equal(revised.revisions.length, 1, '执行落地后要有一条改稿记录');
-  assert.equal(revised.manualDeliveryConfirmation, undefined, '旧内容包的人工确认不得解锁改稿后的新包');
-  const db = app.get(DatabaseService);
-  const oldConfirmation = db.prepare(
-    `SELECT COUNT(*) AS n FROM audit_logs
-       WHERE action='generation.manual-delivery-confirm' AND entity_id<>?`,
-  ).get(revision.resultPackageId) as { n: number };
-  assert.ok(Number(oldConfirmation.n) >= 1, '旧确认审计应保留，但不能绑定新包 ID');
+  assert.equal(revised.manualDeliveryConfirmation, undefined, '改稿后的新包不需要人工解锁记录');
+  assert.notEqual(revision.resultPackageId, packageRow.id, '改稿必须生成独立内容包 ID');
 });
 
 test('执行期间 job.status 始终是 completed,旧候选一直可读', async () => {

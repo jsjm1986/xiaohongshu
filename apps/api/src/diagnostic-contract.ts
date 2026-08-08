@@ -3,6 +3,8 @@ import {
   F32_DIAGNOSTIC_CONTRACT,
   F33_DIAGNOSTIC_CONTRACT,
   FORMULA_EXECUTION_HANDLER_REGISTRY,
+  candidateQualityStatus,
+  normalizeContentValidationIssue,
   type ContentDiagnostic,
   type DiagnosticProxyComponent,
   type DiagnosticProxyReport,
@@ -88,6 +90,22 @@ export function normalizeContentPackageForApi<T>(raw: T): T {
   }
   if (isRecord(pkg.impactReport)) {
     pkg.impactReport = normalizeImpactReportForApi(pkg.impactReport);
+  }
+  if (isRecord(pkg.validation) && Array.isArray(pkg.validation.issues)) {
+    const issues = pkg.validation.issues
+      .filter(isRecord)
+      .map((issue) => normalizeContentValidationIssue(issue as never));
+    const preview = pkg.generationMode === 'deterministic_preview'
+      || (isRecord(pkg.artifactRealization) && pkg.artifactRealization.deliverability === 'non_deliverable');
+    const qualityStatus = preview
+      ? 'blocked'
+      : candidateQualityStatus({ valid: pkg.validation.valid === true, issues });
+    pkg.validation = {
+      ...pkg.validation,
+      issues,
+      qualityStatus,
+      valid: !preview && qualityStatus !== 'blocked',
+    };
   }
   return pkg as T;
 }

@@ -1296,13 +1296,14 @@ test('planning CRUD, explicit approvals, image safety and generation snapshots w
   const coverage = await request(`/api/projects/${projectId}/coverage`);
   assert.equal(coverage.body.length, 3);
 
-  // 正式 API 在没有模型 provider 时保留确定性草稿，但不会把它标成可直接交付。
+  // 用户明确输入主题时，该主题是创作锁，不再被已批准机会卡的启发式排名覆盖。
+  // 没有模型 provider 时仍只生成不可交付的确定性预览。
   const automaticGeneration = await request('/api/generations', {
     method: 'POST',
     body: JSON.stringify({
       projectId,
       topic: 'automatic opportunity selection audit',
-      goal: 'verify that only Core supplies the applied ranking audit',
+      goal: 'verify that an explicit topic bypasses approved opportunity ranking',
       orchestrationOptions: { minStructureDistance: 0 },
     }),
   });
@@ -1318,43 +1319,31 @@ test('planning CRUD, explicit approvals, image safety and generation snapshots w
     && item.validation?.issues.some((issue: any) => issue.code === 'deterministic_preview_non_deliverable' && issue.disposition === 'block')),
   JSON.stringify(automaticCompleted.candidates.map((item: any) => item.validation)));
   const automaticAudit = automaticCompleted.opportunitySelectionAudit;
+  assert.equal(automaticCompleted.planningContext.taskThemeLocked, true);
+  assert.deepEqual(automaticCompleted.planningContext.opportunities, []);
   assert.equal(automaticCompleted.opportunitySnapshot.score, undefined);
-  assert.equal(automaticAudit.selectionMode, 'heuristic_ranked');
-  assert.equal(automaticAudit.rankStatus, 'applied');
-  assert.equal(automaticAudit.selectedOpportunityId, opportunity.body.id);
-  assert.equal(automaticAudit.selectedOpportunityRank.heuristic.id, 'OpportunityRankHeuristicV1');
-  assert.equal(automaticAudit.selectedOpportunityRank.heuristic.version, '1.0.0');
-  assert.equal(automaticAudit.selectedOpportunityRank.heuristic.weightsCalibrated, false);
-  assert.equal(automaticAudit.selectedOpportunityRank.heuristic.causal, false);
-  assert.equal(automaticAudit.selectedOpportunityRank.heuristic.notF28, true);
-  assert.equal(automaticAudit.selectedOpportunityRank.scoreSemantics, 'ordinal_noncausal_heuristic');
-  assert.deepEqual(automaticAudit.selectedOpportunityRank.legacyInputScore, {
-    value: 0.99,
-    used: false,
-    semantics: 'legacy_heuristic',
-  });
-  assert.equal(automaticAudit.selectedOpportunityRank.reviewRequired, false);
-  assert.equal(automaticAudit.selectedOpportunityRank.unknownMetrics.length, 0);
-  assert.equal(automaticAudit.selectedOpportunityRank.recentCoverage.source.source, 'observed');
-  assert.equal(automaticAudit.selectedOpportunityRank.components.length, 7);
-  assert.ok(automaticAudit.selectedOpportunityRank.components.every((item: any) => item.source.source === 'user'));
+  assert.equal(automaticAudit.selectionMode, 'default_policy');
+  assert.equal(automaticAudit.rankStatus, 'not_applied');
+  assert.match(automaticAudit.selectedOpportunityId, /^topic_/u);
+  assert.equal(automaticAudit.selectedOpportunityRank, undefined);
+  assert.match(automaticAudit.rankNotAppliedReason, /explicit topic/u);
   assert.ok(automaticCompleted.candidates.every((item: any) =>
-    item.opportunitySnapshot.opportunitySelectionAudit.selectionMode === 'heuristic_ranked'));
+    item.opportunitySnapshot.opportunitySelectionAudit.selectionMode === 'default_policy'
+    && item.orchestrationSnapshot.opportunitySelectionAudit.rankStatus === 'not_applied'
+    && item.orchestrationSnapshot.gapPlanningCards.some((card: any) =>
+      card.label === 'automatic opportunity selection audit')));
   const storedAutomaticJob = database.prepare(
     'SELECT opportunity_snapshot_json FROM generation_jobs WHERE id=?',
   ).get(automaticCompleted.id) as { opportunity_snapshot_json: string };
   const storedAutomaticSnapshot = JSON.parse(storedAutomaticJob.opportunity_snapshot_json);
-  assert.equal(storedAutomaticSnapshot.opportunitySelectionAudit.selectionMode, 'heuristic_ranked');
-  assert.equal(
-    storedAutomaticSnapshot.opportunitySelectionAudit.selectedOpportunityRank.heuristic.id,
-    'OpportunityRankHeuristicV1',
-  );
+  assert.equal(storedAutomaticSnapshot.opportunitySelectionAudit.selectionMode, 'default_policy');
+  assert.equal(storedAutomaticSnapshot.opportunitySelectionAudit.rankStatus, 'not_applied');
   const storedAutomaticPackage = database.prepare(
     'SELECT content_json FROM content_packages WHERE job_id=? ORDER BY candidate_index LIMIT 1',
   ).get(automaticCompleted.id) as { content_json: string };
   assert.equal(
     JSON.parse(storedAutomaticPackage.content_json).opportunitySnapshot.opportunitySelectionAudit.rankStatus,
-    'applied',
+    'not_applied',
   );
   const reviewCandidate = automaticCompleted.candidates[0];
   assert.ok(reviewCandidate);

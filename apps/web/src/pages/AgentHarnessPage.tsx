@@ -46,6 +46,7 @@ import { api } from '../lib/api';
 import { errorMessage } from '../lib/errors';
 import {
   canExportHarnessRun,
+  harnessCandidateDeliverable,
   filterHarnessRuns,
   harnessCompletedResultState,
   harnessFailureGuidance,
@@ -113,7 +114,7 @@ function harnessSeedingModeLabel(value: unknown): string {
 function statusLabel(job: AgentHarnessJob): string {
   if (job.status === 'queued') return job.candidateCheckpointAt ? '等待最终复核' : '等待独立 Agent';
   if (job.status === 'running') return job.candidateCheckpointAt ? '正在最终复核' : 'Agent 正在自主探索';
-  if (job.status === 'completed' && job.reviewStatus === 'blocked') return '候选已保留 · 复核阻断';
+  if (job.status === 'completed' && job.reviewStatus === 'blocked') return '候选已保留 · 复核待补';
   if (job.status === 'completed') return '独立运行完成';
   return '运行未完成';
 }
@@ -264,11 +265,12 @@ function CandidateCard({
   canExport: boolean;
 }) {
   const toast = useToast();
+  const deliverable = harnessCandidateDeliverable(candidate);
   const errors = candidate.validation.issues.filter((issue) => issue.severity === 'error');
   const warnings = candidate.validation.issues.filter((issue) => issue.severity === 'warning');
   const copy = async () => {
-    if (!candidate.validation.valid) {
-      toast.push('该候选仍有硬校验阻断，暂不能复制或导出', 'error');
+    if (!deliverable) {
+      toast.push('该候选缺少必要结构或存在伪造证据/素材引用，暂不能复制或导出', 'error');
       return;
     }
     try {
@@ -286,11 +288,11 @@ function CandidateCard({
     <header>
       <div><span className="v2-lab-id">PACKAGE-{candidate.candidateIndex + 1}</span><h3>{N.title}</h3><p>{candidate.concept}</p></div>
       <div className="harness-candidate__actions">
-        <Badge tone={candidate.validation.valid ? 'positive' : 'danger'}>{candidate.validation.valid ? '可导出' : `${errors.length} 项阻断`}</Badge>
-        <Button variant="ghost" icon={<Copy size={14} />} disabled={!candidate.validation.valid || !canExport} title={!canExport ? '缺少导出权限' : undefined} onClick={() => void copy()}>复制整包</Button>
+        <Badge tone={deliverable ? 'positive' : 'danger'}>{deliverable ? (warnings.length ? '可导出 · 有提醒' : '可导出') : `${errors.length} 项硬阻断`}</Badge>
+        <Button variant="ghost" icon={<Copy size={14} />} disabled={!deliverable || !canExport} title={!canExport ? '缺少导出权限' : undefined} onClick={() => void copy()}>复制整包</Button>
         <Button variant="ghost" icon={<Pencil size={14} />} disabled={!canRevise} title={!canRevise ? '缺少改稿权限' : undefined} onClick={() => onRevise(candidate)}>定向改稿</Button>
-        <Button variant="ghost" icon={<Download size={14} />} disabled={!candidate.validation.valid || !canExport} title={!canExport ? '缺少导出权限' : undefined} onClick={() => download('markdown')}>MD</Button>
-        <Button variant="ghost" icon={<FileJson size={14} />} disabled={!candidate.validation.valid || !canExport} title={!canExport ? '缺少导出权限' : undefined} onClick={() => download('json')}>JSON</Button>
+        <Button variant="ghost" icon={<Download size={14} />} disabled={!deliverable || !canExport} title={!canExport ? '缺少导出权限' : undefined} onClick={() => download('markdown')}>MD</Button>
+        <Button variant="ghost" icon={<FileJson size={14} />} disabled={!deliverable || !canExport} title={!canExport ? '缺少导出权限' : undefined} onClick={() => download('json')}>JSON</Button>
       </div>
     </header>
     <div className="harness-package-grid">
@@ -605,7 +607,7 @@ export function AgentHarnessPage() {
   const totals = useMemo(() => ({
     completed: jobs.filter((job) => job.status === 'completed').length,
     running: jobs.filter((job) => ['queued', 'running'].includes(job.status)).length,
-    valid: selected?.candidates?.filter((candidate) => candidate.validation.valid).length ?? 0,
+    valid: selected?.candidates?.filter(harnessCandidateDeliverable).length ?? 0,
   }), [jobs, selected]);
 
   const quickInput = useMemo(() => {
@@ -967,8 +969,8 @@ export function AgentHarnessPage() {
       {selected.status === 'failed' && failureGuidance && <div className="harness-failure" role="alert"><TriangleAlert size={19} /><div><strong>本次没有产生候选</strong><p>{failureGuidance.message}</p><Button variant="secondary" icon={failureGuidance.action === 'retry' ? <RotateCcw size={14} /> : <Sparkles size={14} />} loading={actionBusy} onClick={() => failureGuidance.action === 'retry' ? void retry() : navigate('/settings')}>{failureGuidance.actionLabel}</Button></div></div>}
       {selected.status === 'completed' && <>
         {completedResultState === 'missing_candidates' && <div className="harness-result-notice error" role="alert"><CircleAlert size={18} /><div><strong>运行已结束，但候选结果缺失</strong><p>这不是可发布的空结果，可能来自历史迁移或异常写入。原运行保留用于审计，请创建独立重试运行。</p><Button variant="secondary" icon={<RotateCcw size={14} />} loading={actionBusy} onClick={() => void retry()}>创建独立重试运行</Button></div></div>}
-        {reviewBlocked && <div className="harness-result-notice warning" role="alert"><TriangleAlert size={18} /><div><strong>候选已保留，最终复核未完成</strong><p>{selected.reviewError || '事实盘点或结构化复核未完成，因此三套候选仍被硬性阻断。可只重试最终复核，不会重新检索、读证据或生成正文。'}</p><Button variant="secondary" icon={<RotateCcw size={14} />} loading={actionBusy} disabled={!canRun} onClick={() => void retryReview()}>只重试最终复核</Button></div></div>}
-        {completedResultState === 'all_blocked' && !reviewBlocked && <div className="harness-result-notice warning" role="alert"><TriangleAlert size={18} /><div><strong>所有候选均被自动校验阻断</strong><p>候选仍保留用于核对问题，但暂不能复制或导出。请查看每套的具体阻断项，再决定改稿或创建独立重试。</p><Button variant="secondary" icon={<RotateCcw size={14} />} loading={actionBusy} onClick={() => void retry()}>创建独立重试运行</Button></div></div>}
+        {reviewBlocked && <div className="harness-result-notice warning" role="alert"><TriangleAlert size={18} /><div><strong>候选已保留，最终复核未完成</strong><p>{selected.reviewError || '事实盘点或结构化复核未完成；候选仍可查看和使用，相关项会保留为人工复核提醒。也可只重试最终复核，不会重新检索、读证据或生成正文。'}</p><Button variant="secondary" icon={<RotateCcw size={14} />} loading={actionBusy} disabled={!canRun} onClick={() => void retryReview()}>只重试最终复核</Button></div></div>}
+        {completedResultState === 'all_blocked' && !reviewBlocked && <div className="harness-result-notice warning" role="alert"><TriangleAlert size={18} /><div><strong>所有候选均命中机械硬门禁</strong><p>候选仍保留用于核对；只有必要结构、伪造证据/素材或公开控制语言等机械问题会阻止复制导出。</p><Button variant="secondary" icon={<RotateCcw size={14} />} loading={actionBusy} onClick={() => void retry()}>创建独立重试运行</Button></div></div>}
         <div className="harness-run-summary">
           <section><small>创作决策摘要</small><p>{selected.decisionSummary || '未提供摘要'}</p></section>
           <section><small>最终自评 / 事实盘点</small><p>{selected.reviewSummary || '未提供摘要'}</p><p>{selected.claimAuditSummary || '未提供事实盘点摘要'}</p></section>
@@ -979,17 +981,18 @@ export function AgentHarnessPage() {
           <div>{selected.traces?.map((trace) => <article key={trace.sequence}><span>{trace.sequence}</span><i>{trace.action === 'search_knowledge' ? <Search size={15} /> : trace.action === 'read_evidence' ? <Database size={15} /> : <Send size={15} />}</i><div><strong>{traceLabel(trace.action)}</strong><p>{trace.summary || '无额外摘要'}</p></div></article>)}</div>
         </details>
         {selected.candidates?.length ? <section className="harness-candidate-chooser" aria-label="候选方案对照">
-          <header><div><span className="v2-lab-id">COMPARE · THEN FOCUS</span><h3>先对照三套差异，再聚焦阅读一套</h3><p>这里比较的是结构与可用状态，不是未经标定的质量排名。</p></div><span>{selected.candidates.filter((candidate) => candidate.validation.valid).length}/{selected.candidates.length} 套可用</span></header>
+          <header><div><span className="v2-lab-id">COMPARE · THEN FOCUS</span><h3>先对照三套差异，再聚焦阅读一套</h3><p>这里比较的是结构与可用状态，不是未经标定的质量排名。</p></div><span>{selected.candidates.filter(harnessCandidateDeliverable).length}/{selected.candidates.length} 套可用</span></header>
           <div className="harness-approval" role="status" aria-live="polite"><div><strong>{selected.approvalStatus === 'approved' ? '已人工批准' : selected.selectedCandidateId ? '已选择终稿候选' : '尚未选择终稿'}</strong><small>{selected.approvedAt ? `批准于 ${formatDate(selected.approvedAt, true)}` : '选择候选后，再进行人工复核批准'}</small></div><input aria-label="批准备注" value={approvalNotes} onChange={(event) => setApprovalNotes(event.target.value)} maxLength={2000} placeholder="批准备注（可选）" /><Button variant="secondary" loading={actionBusy} disabled={!canExport || !selected.selectedCandidateId || selected.approvalStatus === 'approved'} onClick={() => void approveFinalCandidate()}>批准所选终稿</Button></div>
           <div className="harness-candidate-tabs">{selected.candidates.map((candidate) => {
             const issueCount = candidate.validation.issues.filter((issue) => issue.severity === 'error').length;
+            const deliverable = harnessCandidateDeliverable(candidate);
             return <button type="button" key={candidate.id} aria-pressed={activeCandidate?.id === candidate.id} className={activeCandidate?.id === candidate.id ? 'selected' : ''} onClick={() => setActiveCandidateId(candidate.id)}>
-              <span><i>方案 {candidate.candidateIndex + 1}</i><Badge tone={candidate.validation.valid ? 'positive' : 'danger'}>{candidate.validation.valid ? '可用' : `${issueCount} 阻断`}</Badge></span>
+              <span><i>方案 {candidate.candidateIndex + 1}</i><Badge tone={deliverable ? 'positive' : 'danger'}>{deliverable ? '可用' : `${issueCount} 硬阻断`}</Badge></span>
               <strong>{candidate.content.N.title}</strong><p>{candidate.concept}</p>
               <small>{candidate.content.N.body.length} 字正文 · {candidate.content.Cref.threads.length} 条问答 · {candidate.content.N.imageSequence.length} 张图</small>
             </button>;
           })}</div>
-          {activeCandidate && <div className="harness-final-choice"><span>当前聚焦：方案 {activeCandidate.candidateIndex + 1}</span><Button variant="secondary" loading={actionBusy} disabled={!canEdit || !activeCandidate.validation.valid || selected.selectedCandidateId === activeCandidate.id} onClick={() => void selectFinalCandidate(activeCandidate.id)}>{selected.selectedCandidateId === activeCandidate.id ? '已选为终稿' : '选为终稿候选'}</Button></div>}
+          {activeCandidate && <div className="harness-final-choice"><span>当前聚焦：方案 {activeCandidate.candidateIndex + 1}</span><Button variant="secondary" loading={actionBusy} disabled={!canEdit || !harnessCandidateDeliverable(activeCandidate) || selected.selectedCandidateId === activeCandidate.id} onClick={() => void selectFinalCandidate(activeCandidate.id)}>{selected.selectedCandidateId === activeCandidate.id ? '已选为终稿' : '选为终稿候选'}</Button></div>}
           <div className="harness-candidate-matrix" role="table" aria-label="候选结构对照">
             <div role="row"><span role="columnheader">对照维度</span>{selected.candidates.map((candidate) => <strong role="columnheader" key={candidate.id}>方案 {candidate.candidateIndex + 1}</strong>)}</div>
             <div role="row"><span role="rowheader">入口 / 身份</span>{selected.candidates.map((candidate) => <b role="cell" key={candidate.id}>{candidate.content.publishing.entryPoint}<small>{candidate.content.publishing.accountIdentity}</small></b>)}</div>

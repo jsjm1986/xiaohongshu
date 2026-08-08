@@ -2,27 +2,27 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { generationDeliveryState } from '../src/lib/generation-delivery';
 
-test('全候选失败时进入纯诊断态', () => {
+test('旧 valid=false 不再误杀，只有机械硬门禁或缺失校验拒绝交付', () => {
   assert.deepEqual(generationDeliveryState([
-    { validation: { valid: false, issues: [{ severity: 'error' }] } },
-    { validation: { valid: false, issues: [{ severity: 'warning' }] } },
+    { validation: { valid: false, issues: [{ code: 'future_semantic_rule', severity: 'error' }] } },
+    { validation: { valid: false, issues: [{ code: 'title_required', severity: 'error' }] } },
     {},
   ]), {
-    deliverableCount: 0,
-    rejectedCount: 3,
+    deliverableCount: 1,
+    rejectedCount: 2,
     hasCandidates: true,
-    allRejected: true,
+    allRejected: false,
   });
 });
 
-test('至少一个服务端明确通过时仍可展示交付结果', () => {
+test('正式校验对象即使旧 valid=false 也可展示交付结果', () => {
   const state = generationDeliveryState([
-    { validation: { valid: false } },
-    { validation: { valid: true } },
+    { validation: { valid: false, issues: [] } },
+    { validation: { valid: true, issues: [] } },
   ]);
   assert.equal(state.allRejected, false);
-  assert.equal(state.deliverableCount, 1);
-  assert.equal(state.rejectedCount, 1);
+  assert.equal(state.deliverableCount, 2);
+  assert.equal(state.rejectedCount, 0);
 });
 
 test('没有候选不是全失败，由空状态单独处理', () => {

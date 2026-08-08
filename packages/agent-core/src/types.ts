@@ -2019,6 +2019,8 @@ export interface PlanningContext {
   imageAnalyses?: ImageAssetAnalysis[];
   expressionStrategies?: ExpressionStrategy[];
   selectedOpportunityId?: string;
+  /** User supplied an explicit task theme without locking an approved opportunity. */
+  taskThemeLocked?: boolean;
   recentCoverage?: CoverageSignature[];
   recentCoverageSource?: OpportunityRankInputProvenance;
   orchestrationOptions?: PlanningOptions;

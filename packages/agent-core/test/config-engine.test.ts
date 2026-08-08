@@ -96,14 +96,14 @@ describe("observed generation cost controls", () => {
     expect(shouldCorrectCommentReadersFailure(new Error("parser error"), "")).toBe(false);
   });
 
-  it("skips model repair when a terminal hard error already makes the candidate non-publishable", () => {
+  it("keeps bounded local repair independent from publication disposition", () => {
     expect(shouldAttemptGenerationRepair([
       { code: "visible_claim_not_in_ledger", severity: "error", channel: "N.body", message: "repairable", repairable: true },
       { code: "gap_resolution_not_realized", severity: "error", channel: "N.body", message: "terminal", repairable: false },
-    ])).toBe(false);
+    ])).toBe(true);
     expect(shouldAttemptGenerationRepair([
       { code: "visible_claim_not_in_ledger", severity: "error", channel: "N.body", message: "AI-governed review", repairable: true },
-    ])).toBe(false);
+    ])).toBe(true);
     expect(shouldAttemptGenerationRepair([
       { code: "shape", severity: "warning", channel: "N.body", message: "warning", repairable: true },
     ])).toBe(false);
@@ -385,8 +385,9 @@ describe("three-candidate content generation engine", () => {
     }));
     expect(calls.every((item) => item.model === "provider-selected-model")).toBe(true);
     expect(result.packages.map((item) => item.validation.repairAttempts)).toEqual([1, 1, 1]);
-    expect(result.packages[0]!.validation.valid).toBe(false);
-    expect(result.packages[0]!.validation.issues.some((issue) => issue.disposition === "block" || issue.severity === "error")).toBe(true);
+    expect(result.packages[0]!.validation.valid).toBe(true);
+    expect(result.packages[0]!.validation.qualityStatus).toBe("needs_review");
+    expect(result.packages[0]!.validation.issues.some((issue) => issue.disposition === "review" && issue.severity === "warning")).toBe(true);
     expect(result.packages.slice(1).every((item) => item.validation.valid === true)).toBe(true);
   });
 
@@ -838,7 +839,7 @@ describe("three-candidate content generation engine", () => {
       .every((thread) => !thread.roleCard && !thread.replyPlan && !thread.primaryGapId && thread.evidenceIds.length === 0))).toBe(true);
     expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => thread.followUps.length <= 2))).toBe(true);
     expect(result.packages.some((item) => item.content.Cref.threads.some((thread) => thread.followUps.length === 0))).toBe(true);
-    // 无可用答复的 T1 机构位保持空缺并由校验阻断；T2 仍采用读者侧文案；
+    // 无可用答复的 T1 机构位保持空缺并进入复核；T2 仍采用读者侧文案；
     // T3 漂浮短反应恒空。系统不得用“当前无法确认”等模板伪装成已完成答复。
     expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => {
       const kind = thread.threadKind ?? "org_answer";
@@ -847,7 +848,9 @@ describe("three-candidate content generation engine", () => {
         && !/(?:官网|执照|资质|地址|预约|帮.*确认|稍后|私信|对接|安排|发给)/u.test(thread.answer);
     }))).toBe(true);
     expect(result.packages.every((item) => item.validation.issues.some((issue) =>
-      issue.code === "comment_answer_unavailable" && issue.disposition === "block"))).toBe(true);
+      issue.code === "comment_answer_unavailable"
+      && issue.disposition === "review"
+      && issue.severity === "warning"))).toBe(true);
     expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => !/直接回答\s*[：:]|NextQuestion\s*[：:]/u.test(thread.answer)))).toBe(true);
     expect(result.packages.every((item) => item.content.Cref.threads.every((thread) => !thread.question.includes("…")))).toBe(true);
     // 缺口边界流入 stage1/stage3 全量上下文(task_data)与机构侧逐 gap 口径;

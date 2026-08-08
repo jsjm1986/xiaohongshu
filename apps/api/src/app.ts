@@ -40,7 +40,16 @@ export async function createApplication(options: ApiOptionsInput = {}): Promise<
   const webDist = resolve(dirname(fileURLToPath(import.meta.url)), '../../web/dist');
   const webIndex = resolve(webDist, 'index.html');
   if (existsSync(webIndex)) {
-    app.useStaticAssets(webDist, { index: false });
+    // Hashed assets are immutable, but the SPA shell must never stay stale across
+    // deployments: an old index.html would keep importing chunks removed by the
+    // next Vite build and can strand an open tab in the global ErrorBoundary.
+    app.useStaticAssets(webDist, {
+      index: false,
+      setHeaders: (response, path) => {
+        if (path.endsWith('index.html')) response.setHeader('Cache-Control', 'no-store');
+        else if (path.includes('/assets/')) response.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      },
+    });
     app.getHttpAdapter().getInstance().use((request: Request, response: Response, next: NextFunction) => {
       if (
         request.method === 'GET' &&
@@ -52,6 +61,7 @@ export async function createApplication(options: ApiOptionsInput = {}): Promise<
         request.path !== '/health' &&
         !request.path.split('/').at(-1)?.includes('.')
       ) {
+        response.setHeader('Cache-Control', 'no-store');
         response.sendFile(webIndex);
         return;
       }

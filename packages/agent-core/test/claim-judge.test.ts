@@ -295,6 +295,15 @@ describe("judgeSensitiveClaimsWithModel 四类句子裁决", () => {
     expect(sensitiveClaimIssues(judged)).toEqual([]);
   });
 
+
+  it("群体体验和近绝对感受也进入证据判官，而不是作为普通文案漏过", async () => {
+    for (const body of ["很多人聊着天就做完了。", "操作时基本无痛。", "刺痛就几秒。"] as const) {
+      const draft = unanchoredDraft(body);
+      expect(collectUnanchoredSensitiveClaims(draft, reviewContext), body).toHaveLength(1);
+      expect(sensitiveClaimIssues(draft), body).toHaveLength(1);
+    }
+  });
+
   it("疼痛口径自然改写由 AI 语义裁决放行，越界比较仍由 AI 阻断", async () => {
     const evidenceId = "evidence_pain";
     const source = "打麻药的时候有短暂的进针刺痛感，之后操作无痛感，些许人会有酸胀、牵拉或压迫感；过程中可沟通并根据情况调整节奏。";
@@ -343,7 +352,8 @@ describe("judgeSensitiveClaimsWithModel 四类句子裁决", () => {
     })), comparison, painContext, {});
     const issues = sensitiveClaimIssues(unsupported, painContext);
     expect(issues).toContainEqual(expect.objectContaining({
-      code: "sensitive_claim_without_evidence", disposition: "block", origin: "agent",
+      code: "sensitive_claim_without_evidence", disposition: "review", origin: "agent",
+      severity: "warning", overridePolicy: "human_reviewable",
     }));
   });
 
@@ -360,7 +370,7 @@ describe("judgeSensitiveClaimsWithModel 四类句子裁决", () => {
     expect(sensitiveClaimIssues(judged)).toHaveLength(1);
   });
 
-  it("事实断言无据(编门口停车位,证据源没有)→ error 照旧", async () => {
+  it("事实断言无据(编门口停车位,证据源没有)→ 保留复核提醒但不阻断", async () => {
     const draft = unanchoredDraft("先记录一下。店门口有8个停车位。");
     const provider = spyProvider(JSON.stringify({
       judgments: [{ statementIndex: 0, classification: "factual_assertion", supported: false, quote: null }],
@@ -371,7 +381,7 @@ describe("judgeSensitiveClaimsWithModel 四类句子裁决", () => {
     ]);
     const issues = sensitiveClaimIssues(judged);
     expect(issues).toHaveLength(1);
-    expect(issues[0]!.severity).toBe("error");
+    expect(issues[0]).toMatchObject({ severity: "warning", disposition: "review", overridePolicy: "human_reviewable" });
     expect(issues[0]!.message).toContain("店门口有8个停车位。");
   });
 

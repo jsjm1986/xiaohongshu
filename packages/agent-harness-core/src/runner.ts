@@ -2,7 +2,7 @@ import type {
   HarnessAssetDecision, HarnessCandidate, HarnessClaimAudit, HarnessClaimAuditEntry, HarnessEvidenceSource,
   HarnessImagePlanItem, HarnessModelProvider, HarnessReviewInput, HarnessRunInput, HarnessRunResult, HarnessSoftMarketingStrategy, HarnessToolAction, HarnessToolTrace,
 } from "./types.js";
-import { publicationChecklistFor, validateHarnessCandidates, visibleCandidateText } from "./validation.js";
+import { harnessValidationValid, publicationChecklistFor, validateHarnessCandidates, visibleCandidateText } from "./validation.js";
 import { DEFAULT_HARNESS_SEEDING_MODE, HARNESS_BODY_LENGTH_TARGETS, HARNESS_PEER_BODY_MIN } from "./methods.js";
 import type { HarnessSeedingMode } from "./methods.js";
 
@@ -926,6 +926,7 @@ function bodyDraftPrompt(input: WithSeedingMode<HarnessRunInput>, expectedCount:
     "Use narrativePath=tension_first for candidate 0, observation_first for candidate 1, and question_first for candidate 2. tension_first opens from a bounded hesitation; observation_first opens from a concrete publisher-observable detail or action without inventing a person; question_first opens with the decision question itself. A directed revision keeps the source candidate index and may use the path that best satisfies the instruction.",
     ...SOFT_MARKETING_SKELETON_GUIDANCE[seedingMode],
     "Do not open with brand + technology + benefit. Do not write a knowledge summary, project introduction, mechanism lecture, checklist, FAQ, comparison table, slogan-plus-proof, or balanced corporate paragraph. Do not use scarcity, urgency, fear amplification, guaranteed outcomes, popularity or social proof.",
+    "Public copy must never expose internal planning labels such as 核验动作、信息边界、项目承接、认知翻转、读者欲望、隐藏卡点、低压力下一步 or 叙事路径. Translate the intended meaning into ordinary human speech instead.",
     BODY_VOICE_GUIDANCE[seedingMode],
     /*
      * 形状校准必须在**两个阶段**都下发。标题和正文由本阶段产出并随即冻结,
@@ -1178,7 +1179,7 @@ export async function reviewHarnessCandidates(input: WithSeedingMode<HarnessRevi
   const checklistMode = input.seedingMode ?? input.task.seedingMode ?? DEFAULT_HARNESS_SEEDING_MODE;
   const results = reconciledCandidates.map((candidate) => {
     const candidateIssues = issues.filter((issue) => issue.candidateIndex === candidate.candidateIndex || issue.candidateIndex === -1);
-    return { ...candidate, claimAudit: audit.claims.filter((claim) => claim.candidateIndex === candidate.candidateIndex), publicationChecklist: publicationChecklistFor(candidate, candidateIssues, checklistMode), validation: { valid: !candidateIssues.some((issue) => issue.severity === "error"), issues: candidateIssues } };
+    return { ...candidate, claimAudit: audit.claims.filter((claim) => claim.candidateIndex === candidate.candidateIndex), publicationChecklist: publicationChecklistFor(candidate, candidateIssues, checklistMode), validation: { valid: harnessValidationValid(candidateIssues), issues: candidateIssues } };
   });
   input.onProgress?.(100);
   return { candidates: results, reviewSummary, claimAuditSummary: audit.summary, readEvidenceIds: [...disclosed], reviewStatus, ...(reviewError ? { reviewError } : {}), usage };

@@ -743,8 +743,9 @@ test('最终复核空正文时保留候选，单独重试复核只增加一次�
   assert.equal(blocked.reviewStatus, 'blocked');
   assert.ok(blocked.candidateCheckpointAt, '候选必须在复核前留下持久化检查点');
   assert.equal(blocked.candidates.length, 3);
-  assert.ok(blocked.candidates.every((item: any) => item.validation.valid === false));
-  assert.ok(blocked.candidates.every((item: any) => item.validation.issues.some((issue: any) => issue.code === 'claim_audit_incomplete')));
+  assert.ok(blocked.candidates.every((item: any) => item.validation.valid === true),
+    '合并复核失败只保留提醒，不得锁死已经生成的正式候选');
+  assert.ok(blocked.candidates.every((item: any) => item.validation.issues.some((issue: any) => issue.code === 'claim_audit_incomplete' && issue.severity === 'warning')));
   assert.match(String(blocked.reviewError), /output text/u);
   const candidateIds = blocked.candidates.map((item: any) => item.id);
   const traceCount = blocked.traces.length;

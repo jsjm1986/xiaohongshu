@@ -118,7 +118,9 @@ test("部分成功时优先使用原始候选槽位，不把候选3压缩成候�
 
 test("可发布性带进 tab,让用户切换前就知道哪个能用", () => {
   const view = candidateDiffView(REAL_THREE);
-  assert.deepEqual(view.tabs.map((t) => t.publishable), [true, false, true]);
+  assert.deepEqual(view.tabs.map((t) => t.publishable), [true, true, true]);
+  const hard = candidateDiffView([{ id: 'hard', validation: { valid: true, repairAttempts: 0, issues: [{ code: 'title_required', severity: 'error', message: 'missing' }] } }]);
+  assert.equal(hard.tabs[0]?.publishable, false);
 });
 
 test("seed 保留:同款重跑要靠它", () => {

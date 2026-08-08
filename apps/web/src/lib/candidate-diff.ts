@@ -1,4 +1,5 @@
 import type { ReaderCandidate, ReaderStrategy } from '../types';
+import { deliveryReadiness } from './delivery-readiness';
 
 /**
  * 候选差异:把三个都叫「随机候选」的版本变成可区分的标签。
@@ -63,6 +64,7 @@ export interface CandidateDiffView {
 
 /** 差异视图与切换条共用的最小候选面。导出以免各组件各抄一份。 */
 export type DiffSource = Pick<ReaderCandidate, 'id' | 'seed' | 'strategy' | 'validation'>
+  & Partial<Pick<ReaderCandidate, 'generationMode' | 'artifactRealization'>>
   & Partial<Pick<ReaderCandidate, 'candidateIndex'>>;
 
 function axisValue(strategy: ReaderStrategy | undefined, key: keyof ReaderStrategy, mapped?: boolean): string | undefined {
@@ -93,7 +95,7 @@ export function candidateDiffView(candidates: DiffSource[]): CandidateDiffView {
   const tabs: CandidateDiffTab[] = candidates.map((c, i) => ({
     id: c.id,
     label: shortLabel(c, i),
-    publishable: c.validation?.valid === true,
+    publishable: deliveryReadiness(c.validation, { generationMode: c.generationMode, deliverability: c.artifactRealization?.deliverability }) === 'publishable',
     seed: c.seed,
   }));
 

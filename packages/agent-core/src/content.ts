@@ -1005,6 +1005,14 @@ function isPureShortConversationEcho(value: string): boolean {
 }
 
 /** Read-only continuity check used by editors and validators. */
+function missingExplicitTopicClauses(theme: string, visible: string): string[] {
+  const clauses = theme.split(/[，,。！？!?；;：:]/u)
+    .map((clause) => clause.replace(/^(?:请问|想问|关于)/u, "").replace(/(?:先)?(?:确认|了解|看看|怎么办|什么)$/u, "").trim())
+    .filter((clause) => normalizedComparable(clause).length >= 4);
+  if (clauses.length < 2) return [];
+  return clauses.filter((clause) => !meaningfulTextOverlap(clause, visible, 0.24));
+}
+
 export function readerExchangeContinuesTopic(question: string, answer: string): boolean {
   if (!question.trim() || !answer.trim()) return false;
   const pivotTail = answer.split(/(?:不过|但是|可我|更想|最怕|话说回来)/u).at(-1)?.trim() ?? "";
@@ -1737,6 +1745,11 @@ export const genericMeasuredClaim = /\d+(?:\.\d+)?\s*(?:%|％|k|K|元|万|天|�
 // 双号运营:助理(staff)答复中的承诺类营销表述(不一定带数字,敏感声明检查
 // 不一定覆盖),配合 genericMeasuredClaim 与受控声明 terms 一起做锚定复核。
 export const marketingPromiseClaim = /(?:优惠|折扣|免费|赠送|包干|保证|承诺|退款|名额|套餐|秒杀|团购|立减|满减|到店礼|活动价)/u;
+// Population-level or near-absolute experience claims are factual assertions,
+// not harmless style. They need the same evidence/AI-judge path as numbers and
+// controlled project claims. This catches production drift such as “很多人聊着
+// 天就做完了”, “基本无痛” and “就几秒”, while questions remain exempt below.
+export const experientialGeneralizationClaim = /(?:(?:很多人|不少人|大多数|多数人|部分人|有人|常有人|一般人).{0,24}(?:无痛|不痛|疼|痛|睡着|能忍|受得了|恢复|消肿|上班|见人|做完|结束)|(?:基本|完全|几乎).{0,8}(?:无痛|不痛)|(?:就|只)(?:是|有)?.{0,6}(?:几秒|一下).{0,8}(?:疼|痛|刺痛)|(?:疼|痛|刺痛).{0,6}(?:就|只)(?:是|有)?.{0,6}(?:几秒|一下))/u;
 
 /** 敏感面逐句拆分:句读/换行分段,去空白,弃空段。校验与自动锚定共用。 */
 export function splitSensitiveStatements(text: string): string[] {
@@ -1759,94 +1772,100 @@ export function isHashtagOnlyLine(statement: string): boolean {
 }
 
 /**
- * Cross-industry semantic judgments belong to the project-aware agents, not to
- * fixed vocabulary, token-overlap or Chinese phrasing heuristics. These codes
- * remain visible for audit and human review, but cannot hard-block delivery on
- * their own. Structural integrity, identity ownership, confidentiality and
- * source authenticity are deliberately absent from this set and stay hard.
+ * Publication is permissive by default. Only mechanically provable integrity
+ * failures may block a model-generated candidate. Any semantic, editorial,
+ * completeness, policy, wording, range, grounding or AI-judge conclusion that
+ * is not listed here is review-only — including future codes added elsewhere.
+ *
+ * This is intentionally an allowlist, not a downgrade list: a newly introduced
+ * validator can never silently become a publication gate merely by emitting an
+ * error or `disposition: block`.
  */
-const AI_GOVERNED_REVIEW_CODES = new Set([
-  "allocated_unknown_path_not_visible",
-  "author_fact_scope_exceeded",
-  "body_gap_false_resolution",
-  "comment_auxiliary_false_resolution",
-  "comment_discovery_as_evidence",
-  "comment_discovery_false_closure",
-  "comment_discovery_withholding",
-  "comment_gap_input_unspecified",
-  "comment_gap_silently_dropped",
-  "comment_gap_verification_unspecified",
-  "comment_host_state_inconsistency",
-  "comment_reply_topic_drift",
-  "comment_required_gap_deferred",
-  "comment_role_constraint_ungrounded",
-  "conflict_as_fact",
-  "consumer_body_organization_fact",
-  "creative_scenario_timeline_drift",
-  "duplicate_comment_answer",
-  "duplicate_comment_question",
-  "evidence_quote_not_supportive",
-  "fabricated_operational_experience",
-  "fabricated_testimonial",
-  "gap_resolution_not_realized",
-  "image_product_shape_drift",
-  "marketing_claim_grounding",
-  "plan_to_copy_alignment",
-  "planned_body_gap_not_realized",
-  "planned_comment_gap_not_realized",
-  "prohibited_claim",
-  "publishing_topology_voice_mismatch",
-  "reader_exchange_controlled_claim",
-  "reply_question_plan_drift",
-  "ungrounded_organization_service_commitment",
-  "unknown_as_fact",
-  "unsupported_narrative_history",
-  "visible_claim_not_in_ledger",
+export const NON_OVERRIDABLE_CONTENT_ISSUE_CODES = new Set<string>([
+  // No formal model artifact exists.
+  "model_not_invoked",
+  "deterministic_preview_non_deliverable",
+
+  // Minimum visible artifact shape.
+  "title_required",
+  "body_required",
+
+  // Confidential/internal material or model-control text reached public copy.
+  "restricted_source_content_visible",
+  "internal_audit_artifact_visible",
+  "frontstage_instruction_leak",
+  "comment_context_meta_leak",
+  "comment_source_language_surface_leak",
+  "comment_plan_language_surface_leak",
+
+  // Mechanical evidence authenticity: IDs, source availability, exact quotes,
+  // evidence role and ledger identity must not be fabricated or substituted.
+  "unknown_evidence",
+  "evidence_quote_empty",
+  "evidence_quote_not_exact",
+  "evidence_source_unavailable",
+  "evidence_reference_metadata_missing",
+  "evidence_role_cannot_support_fact",
+  "package_evidence_ledger_mismatch",
+  "fact_source_id_mismatch",
+  "author_fact_reference_invalid",
+  "author_fact_confirmation_mismatch",
+  "author_fact_project_evidence_mixed",
+
+  // Accountable identity ownership and frozen responder attribution.
+  "unaccountable_answer_identity",
+  "comment_identity_violation",
+  "host_reply_identity_violation",
+  "host_reply_unconfirmed_author",
+  "org_answer_identity_violation",
+  "comment_answer_identity_mismatch",
+  "publisher_narrative_identity_alias",
+  "reply_identity_plan_drift",
+  "reply_display_role_plan_drift",
 ]);
+
+export function isNonOverridableContentIssueCode(code: string): boolean {
+  return NON_OVERRIDABLE_CONTENT_ISSUE_CODES.has(code);
+}
 
 export function issueDisposition(
   issue: Pick<ContentValidationIssue, "code" | "severity" | "disposition">,
 ): NonNullable<ContentValidationIssue["disposition"]> {
-  if (AI_GOVERNED_REVIEW_CODES.has(issue.code)) return "review";
-  return issue.disposition ?? (issue.severity === "error" ? "block" : "advisory");
+  if (isNonOverridableContentIssueCode(issue.code)) return "block";
+  if (issue.disposition === "review" || issue.disposition === "block" || issue.severity === "error") return "review";
+  return "advisory";
 }
 
 export function issueOverridePolicy(
   issue: Pick<ContentValidationIssue, "code" | "severity" | "disposition" | "overridePolicy">,
 ): NonNullable<ContentValidationIssue["overridePolicy"]> {
-  // Central AI-governance policy wins over stale/legacy per-issue metadata.
-  // Otherwise a semantic code serialized earlier as non_overridable would stay
-  // hard-blocking even after the cross-industry policy moved it to review.
-  if (AI_GOVERNED_REVIEW_CODES.has(issue.code)) return "human_reviewable";
-  if (issue.overridePolicy) return issue.overridePolicy;
-  if (issue.code === "model_not_invoked") return "non_overridable";
-  const disposition = issueDisposition(issue);
-  return disposition === "block" ? "non_overridable"
-    : disposition === "review" ? "human_reviewable" : "not_required";
+  if (isNonOverridableContentIssueCode(issue.code)) return "non_overridable";
+  return issueDisposition(issue) === "advisory" ? "not_required" : "human_reviewable";
 }
 
 export function candidateQualityStatus(
-  validation: { valid?: boolean; issues: readonly ContentValidationIssue[] },
+  validation: {
+    valid?: boolean;
+    issues: readonly Pick<ContentValidationIssue, "code" | "severity" | "disposition">[];
+  },
 ): "passed" | "needs_review" | "blocked" {
-  if (validation.issues.some((issue) => issueDisposition(issue) === "block")) return "blocked";
-  if (validation.issues.some((issue) => issueDisposition(issue) === "review")) return "needs_review";
-  // Historical payloads may carry only valid=false without issue metadata.
-  return validation.valid === false ? "blocked" : "passed";
+  if (validation.issues.some((issue) => isNonOverridableContentIssueCode(issue.code))) return "blocked";
+  if (validation.issues.some((issue) => issueDisposition(issue) === "review") || validation.valid === false) return "needs_review";
+  return "passed";
 }
 
-/** Normalize semantic heuristics at the validator boundary, not only when an
- * engine later packages them. Direct API/test consumers must see the same AI-
- * governed review contract as generated packages. An explicit agent verdict
- * uses its own code/metadata and is therefore not weakened here. */
-function applyAiGovernanceToIssue(issue: ContentValidationIssue): ContentValidationIssue {
-  if (!AI_GOVERNED_REVIEW_CODES.has(issue.code)) return issue;
-  return {
-    ...issue,
-    severity: "warning",
-    disposition: "review",
-    overridePolicy: "human_reviewable",
-    repairable: false,
-  };
+/** Recompute action metadata from the hard-gate allowlist. Stale serialized
+ * `block/non_overridable` fields never outrank the current central policy. */
+export function normalizeContentValidationIssue(issue: ContentValidationIssue): ContentValidationIssue {
+  const disposition = issueDisposition(issue);
+  const overridePolicy = issueOverridePolicy({ ...issue, disposition });
+  if (disposition === "block") {
+    return { ...issue, severity: "error", disposition, overridePolicy };
+  }
+  if (disposition === "review") {
+    return { ...issue, severity: "warning", disposition, overridePolicy };
+  }
+  return { ...issue, severity: "warning", disposition, overridePolicy };
 }
 
 export function validateGenerationDraft(input: DraftValidationInput): ContentValidationIssue[] {
@@ -1867,6 +1886,20 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
   if (bodyLength < config.content.bodyMinChars) add("body_too_short", "error", "N.body", `Body has ${bodyLength} characters; minimum is ${config.content.bodyMinChars}.`);
   if (bodyLength > config.content.bodyMaxChars) add("body_too_long", "error", "N.body", `Body has ${bodyLength} characters; maximum is ${config.content.bodyMaxChars}.`);
   const publicText = allContentText(draft.content);
+  const missingTopicClauses = missingExplicitTopicClauses(
+    config.task.theme,
+    `${draft.content.N.title}\n${draft.content.N.body}`,
+  );
+  if (input.orchestrationPlan?.opportunitySelectionAudit?.selectionMode === "default_policy"
+    && missingTopicClauses.length) {
+    add(
+      "explicit_topic_not_realized",
+      "error",
+      "N.body",
+      `The final title/body does not visibly address these required parts of the explicit topic: ${missingTopicClauses.join(" | ")}.`,
+      true,
+    );
+  }
   const normalizedPublicText = normalizedComparable(publicText);
   const publicationRestrictions = [...new Set([
     ...(input.evidenceReferences ?? []).flatMap((reference) => reference.publicationRestrictions ?? []),
@@ -2128,7 +2161,7 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
       // 当成受控声明。标签的合规性由 H 通道自己的检查负责。
       if (isHashtagOnlyLine(statement)) continue;
       const matchedRules = controlledRules.filter((rule) => rule.terms.some((term) => term && statement.includes(term)));
-      if ((!genericMeasuredClaim.test(statement) && matchedRules.length === 0) || /[？?]$/u.test(statement)) continue;
+      if ((!genericMeasuredClaim.test(statement) && !experientialGeneralizationClaim.test(statement) && matchedRules.length === 0) || /[？?]$/u.test(statement)) continue;
       const judgment = claimJudgmentByStatement.get(statement);
       // 判官裁决:邀约/限定/疑问不需要证据,直接放行;事实断言 supported 放行、
       // unsupported 落到同一 error。无裁决时维持词面旧逻辑(fact 台账锚定判定)。
@@ -2937,7 +2970,7 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
       );
     }
   }
-  return issues.map(applyAiGovernanceToIssue);
+  return issues.map(normalizeContentValidationIssue);
 }
 
 export function diagnosticsFromValidation(issues: ContentValidationIssue[]): ContentDiagnostic[] {
@@ -3165,7 +3198,9 @@ export function applyGenerationPatch(current: GenerationDraft, patch: Generation
 
 export function channelsForIssues(issues: ContentValidationIssue[]): ContentChannel[] {
   const channels = new Set<ContentChannel>();
-  for (const issue of issues.filter((item) => item.repairable && issueDisposition(item) === "block")) {
+  // Repair routing is broader than publication blocking: review-only quality
+  // findings may still receive one bounded repair attempt.
+  for (const issue of issues.filter((item) => item.repairable && issueDisposition(item) !== "advisory")) {
     if (issue.channel === "package") {
       channels.add("H");
       channels.add("N.body");
