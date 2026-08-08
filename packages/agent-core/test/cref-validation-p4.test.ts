@@ -743,12 +743,13 @@ describe("P4 repair loop end-to-end", () => {
     // No throw: all three candidates survive and surface for human review.
     expect(result.packages).toHaveLength(3);
     for (const pkg of result.packages) {
-      expect(pkg.validation.valid).toBe(false);
-      // Exactly one terminal repair record (deduped across attempts), and the
-      // channel's original issue is preserved with the pre-repair content.
+      expect(pkg.validation.valid).toBe(true);
+      expect(pkg.validation.qualityStatus).toBe("needs_review");
+      // Exactly one terminal repair record (deduped across attempts). A failed
+      // quality repair stays visible but cannot lock a formal model artifact.
       const repairIssues = pkg.validation.issues.filter((issue) => issue.code === "repair_parse_failed");
       expect(repairIssues).toHaveLength(1);
-      expect(repairIssues[0]).toMatchObject({ severity: "error", repairable: false });
+      expect(repairIssues[0]).toMatchObject({ severity: "warning", disposition: "review", repairable: false });
       expect(pkg.validation.issues.map((issue) => issue.code)).toContain("missing_required_phrase");
       expect(pkg.content.N.body).toBe(brokenBody);
     }

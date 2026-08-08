@@ -4,6 +4,32 @@ import type {
 import { DEFAULT_HARNESS_SEEDING_MODE, HARNESS_BODY_LENGTH_TARGETS, HARNESS_PEER_BODY_MIN } from "./methods.js";
 import type { HarnessSeedingMode } from "./methods.js";
 
+/** Harness publication is permissive by default. Only mechanically verifiable
+ * missing artifacts, public control-language leaks and fake evidence/assets can
+ * block delivery. New validation codes default to review-only. */
+export const NON_OVERRIDABLE_HARNESS_ISSUE_CODES = new Set<string>([
+  "candidate_count", "candidate_index", "duplicate_candidate_index",
+  "missing_title", "missing_body", "missing_account_identity",
+  "audit_language_in_public_copy", "source_meta_in_public_copy", "planning_language_in_public_copy",
+  "empty_citation_statement", "citation_not_visible", "citation_without_evidence",
+  "unknown_evidence", "unread_evidence", "non_factual_evidence",
+  "new_design_asset_id", "unknown_asset_decision", "image_sequence_asset",
+]);
+
+export function isNonOverridableHarnessIssueCode(code: string): boolean {
+  return NON_OVERRIDABLE_HARNESS_ISSUE_CODES.has(code);
+}
+
+export function normalizeHarnessValidationIssue(issue: HarnessValidationIssue): HarnessValidationIssue {
+  return isNonOverridableHarnessIssueCode(issue.code)
+    ? { ...issue, severity: "error" }
+    : { ...issue, severity: "warning" };
+}
+
+export function harnessValidationValid(issues: readonly HarnessValidationIssue[]): boolean {
+  return !issues.some((issue) => isNonOverridableHarnessIssueCode(issue.code));
+}
+
 /*
  * 伪造口碑的营销话术。两种模式都是 ERROR。
  *
@@ -65,6 +91,7 @@ function hasThirdPartyExperienceClaim(text: string): boolean {
     .some((clause) => THIRD_PARTY_EXPERIENCE.test(clause) && !QUESTION_MARKER.test(clause));
 }
 const PUBLIC_AUDIT_LEAK = /(待人工审核|审核状态|证据编号|responseSla|\bSLA\b|发布计划|不代表已经发布|平台合规|终稿校对)/iu;
+const PUBLIC_PLANNING_ARTIFACT = /(?:核验动作|信息边界|项目承接|认知翻转|读者欲望|隐藏卡点|低压力下一步|叙事路径)/u;
 const PUBLIC_SOURCE_META = /(项目资料(?:显示|表明|支持|中的?)|现有资料(?:显示|表明|支持|中的?)|根据(?:项目)?知识库|证据(?:显示|表明|支持)|本轮证据|evidence_section_)/iu;
 const UNSUPPORTED_POPULATION_LANGUAGE = /(很多人|大家都|最怕|最关心|普遍|通常用户|真实用户都)/u;
 const EVIDENCE_ERROR_CODES = new Set(["claim_audit_incomplete", "claim_audit_not_visible", "undeclared_project_fact", "claim_audit_evidence_mismatch", "empty_citation_statement", "citation_not_visible", "citation_without_evidence", "unknown_evidence", "unread_evidence", "non_factual_evidence"]);
@@ -186,36 +213,40 @@ export function publicationChecklistFor(
   issues: HarnessValidationIssue[],
   seedingMode: HarnessSeedingMode = DEFAULT_HARNESS_SEEDING_MODE,
 ): HarnessPublicationCheck[] {
-  const errorCodes = new Set(issues.filter((issue) => issue.severity === "error").map((issue) => issue.code));
-  const evidenceBlocked = [...errorCodes].some((code) => EVIDENCE_ERROR_CODES.has(code));
-  const assetBlocked = [...errorCodes].some((code) => ASSET_ERROR_CODES.has(code));
-  const executionBlocked = [...errorCodes].some((code) => EXECUTION_ERROR_CODES.has(code));
-  const softMarketingBlocked = [...errorCodes].some((code) => SOFT_MARKETING_ERROR_CODES.has(code));
-  const simulationBlocked = [
+  const allCodes = new Set(issues.map((issue) => issue.code));
+  const hardCodes = new Set(issues.filter((issue) => issue.severity === "error").map((issue) => issue.code));
+  const statusFor = (codes: ReadonlySet<string>): HarnessPublicationCheck["status"] =>
+    [...hardCodes].some((code) => codes.has(code)) ? "blocked"
+      : [...allCodes].some((code) => codes.has(code)) ? "manual_review" : "ready";
+  const simulationCodes = new Set([
     // comment_disclaimer 已删:披露语不再是模型产出的交付字段,改为界面/导出固定携带。
     "missing_owned_first_comment", "empty_thread", "missing_thread_clarification",
     "missing_thread_next_step", "missing_thread_boundary", "missing_thread_stop_reason", "comment_thread_count",
     "comment_topology", "comment_growth", "missing_thread_display_name", "reader_exchange_incomplete",
     "organic_reaction_overbuilt", "organic_reaction_too_long",
-  ].some((code) => errorCodes.has(code));
+  ]);
+  const softStatus = statusFor(SOFT_MARKETING_ERROR_CODES);
+  const evidenceStatus = statusFor(EVIDENCE_ERROR_CODES);
+  const simulationStatus = statusFor(simulationCodes);
+  const executionStatus = statusFor(EXECUTION_ERROR_CODES);
+  const assetStatus = statusFor(ASSET_ERROR_CODES);
   return [
     {
-      key: "soft_marketing", status: softMarketingBlocked ? "blocked" : "ready",
-      // ready 文案必须与实际校验的内容一致,不能承诺校验没查的东西。
-      note: softMarketingBlocked
-        ? (seedingMode === "peer_seeding"
-          ? "用户欲望、顾虑入口、开放余味没写全，或提到项目时没有绑定出处。"
-          : "用户欲望、认知翻转或项目承接没有形成完整软营销推进。")
-        : (seedingMode === "peer_seeding"
-          ? "正文按素人自述成立：有顾虑入口与低压力余味；未强制认知翻转与项目承接，若提到项目则已绑定出处。"
-          : "正文已形成顾虑进入、认知翻转、项目承接与低压力余味。"),
+      key: "soft_marketing", status: softStatus,
+      note: softStatus === "blocked"
+        ? "软营销文案命中机械硬门禁。"
+        : softStatus === "manual_review"
+          ? "软营销推进存在体裁、顺序或表达提醒；候选仍可用，请按项目语境人工判断。"
+          : (seedingMode === "peer_seeding"
+            ? "正文按素人自述成立：有顾虑入口与低压力余味；未强制认知翻转与项目承接，若提到项目则已绑定出处。"
+            : "正文已形成顾虑进入、认知翻转、项目承接与低压力余味。"),
     },
-    { key: "evidence", status: evidenceBlocked ? "blocked" : "ready", note: evidenceBlocked ? "事实或证据绑定仍有阻断项。" : "可见事实已通过本轮证据校验。" },
-    { key: "simulation_disclosure", status: simulationBlocked ? "blocked" : "ready", note: simulationBlocked ? "模拟互动披露或评论结构不完整。" : "首评归属与模拟问答披露已明确。" },
-    { key: "execution_plan", status: executionBlocked ? "blocked" : "ready", note: executionBlocked ? "真实问题响应、分流、更新或停止规则不完整。" : "真实问题承接的响应、分流、更新与停止规则已齐备。" },
-    { key: "asset_authorization", status: assetBlocked ? "blocked" : "ready", note: assetBlocked ? "所选图片的使用/舍弃与证据绑定不完整。" : "每张所选图片已有可追溯使用或舍弃决定。" },
+    { key: "evidence", status: evidenceStatus, note: evidenceStatus === "blocked" ? "证据 ID、可见引用或来源状态存在机械硬门禁。" : evidenceStatus === "manual_review" ? "事实盘点或证据语义仍需人工复核；不阻止使用候选。" : "可见事实已通过本轮证据校验。" },
+    { key: "simulation_disclosure", status: simulationStatus, note: simulationStatus === "blocked" ? "模拟互动存在机械硬门禁。" : simulationStatus === "manual_review" ? "模拟互动结构有完整度提醒，请发布前复核。" : "首评归属与模拟问答披露已明确。" },
+    { key: "execution_plan", status: executionStatus, note: executionStatus === "blocked" ? "执行计划存在机械硬门禁。" : executionStatus === "manual_review" ? "真实问题响应、分流、更新或停止规则有完整度提醒。" : "真实问题承接的响应、分流、更新与停止规则已齐备。" },
+    { key: "asset_authorization", status: assetStatus, note: assetStatus === "blocked" ? "素材引用或授权绑定存在机械硬门禁。" : assetStatus === "manual_review" ? "所选图片的使用、舍弃或证据绑定仍需人工复核。" : "每张所选图片已有可追溯使用或舍弃决定。" },
     { key: "platform_compliance", status: "manual_review", note: "平台规则、敏感词和账号资质必须在实际发布前由人工按当时规则复核。" },
-    { key: "final_proofread", status: issues.some((issue) => issue.severity === "error") ? "blocked" : "manual_review", note: issues.some((issue) => issue.severity === "error") ? "先解决硬校验阻断，再进行终稿校对。" : "发布前仍需人工核对最终排版、素材授权、链接与时效信息。" },
+    { key: "final_proofread", status: hardCodes.size ? "blocked" : "manual_review", note: hardCodes.size ? "先解决机械硬门禁，再进行终稿校对。" : "发布前仍需人工核对最终排版、素材授权、链接与时效信息。" },
   ];
 }
 
@@ -482,6 +513,7 @@ export function validateHarnessCandidates(
         : "可见内容包含可能伪装真实经历或口碑的措辞。");
     }
     if (PUBLIC_AUDIT_LEAK.test(visible)) add(index, "audit_language_in_public_copy", "error", "公开文案混入了审核、SLA 或发布计划等后台语言，请只保留可直接阅读的成品表达。");
+    if (PUBLIC_PLANNING_ARTIFACT.test(visible)) add(index, "planning_language_in_public_copy", "error", "公开文案混入了核验动作、信息边界或认知翻转等内部策划标签，请改成读者会自然说的话。");
     if (PUBLIC_SOURCE_META.test(visible)) add(index, "source_meta_in_public_copy", "error", "公开文案混入了“项目资料/证据”后台口吻，请直接自然表达已支持的项目事实。");
     if (UNSUPPORTED_POPULATION_LANGUAGE.test(visible)) add(index, "unsupported_population_language", "warning", "公开文案使用了“很多人/最怕”等群体判断；没有总体证据时应改成直接问题或有边界的具体顾虑。");
     if (HARD_SELL_LANGUAGE.test(visible)) add(index, "hard_sell_language", "error", "公开文案出现催促、稀缺或强迫成交措辞，不符合软营销边界。");
@@ -641,5 +673,5 @@ export function validateHarnessCandidates(
       }
     }
   }
-  return issues;
+  return issues.map(normalizeHarnessValidationIssue);
 }

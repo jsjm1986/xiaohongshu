@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import {
   ContentGenerationAgent,
   GENERATION_PARAMETER_REGISTRY,
+  candidateQualityStatus,
   estimateTokens,
   ModelProviderError,
   OpenAICompatibleClient,
@@ -747,6 +748,24 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
    * opportunitySnapshot 与 resolvedConfig.task 保留:「再来一篇同款」的配方回填
    * (extractRecipe)靠它们,而且体积可控。
    */
+  /** Reproject persisted job quality through the current publication policy.
+   * Historical rows may still say blocked because an old semantic validator
+   * emitted error/block. Only inspect packages for completed non-passed rows;
+   * this preserves the lightweight list path for the common passed case. */
+  private projectedJobQualityStatus(row: JobRow): 'unknown' | 'passed' | 'needs_review' | 'blocked' {
+    const stored = jobQualityStatus(row);
+    if (row.status !== 'completed' || stored === 'passed') return stored;
+    const packages = this.packageRows(row.id).flatMap((item) => {
+      const raw = parseJson<unknown>(item.content_json, {});
+      // Very old or damaged rows may predate the validation contract entirely.
+      // Keep list/read endpoints available and fall back to the stored job state;
+      // only reproject packages whose issue list can be evaluated safely.
+      if (!isRecord(raw) || !isRecord(raw.validation) || !Array.isArray(raw.validation.issues)) return [];
+      return [normalizeContentPackageForApi(raw as unknown as ContentPackage)];
+    });
+    return packages.length ? deriveQualityStatus(packages) : stored;
+  }
+
   private mapJobForList(row: JobRow): Record<string, unknown> {
     const project = this.resources.projectRow(row.project_id);
     const config = parseJson<ResolvedGenerationConfig | null>(row.config_json, null);
@@ -760,7 +779,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       goal: row.goal,
       mode: row.mode,
       status: row.status,
-      qualityStatus: jobQualityStatus(row),
+      qualityStatus: this.projectedJobQualityStatus(row),
       progress: row.progress,
       seed: row.seed,
       // formula 可能缺失(历史任务或异常数据)。原来 mapJob 写的是
@@ -840,7 +859,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       topic: row.topic,
       goal: row.goal,
       status: row.status,
-      qualityStatus: jobQualityStatus(row),
+      qualityStatus: this.projectedJobQualityStatus(row),
       createdAt: row.created_at,
       completedAt: row.completed_at ?? undefined,
       error: row.error ?? undefined,
@@ -1899,10 +1918,10 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       goal: row.goal,
       mode: row.mode,
       status: row.status,
-      qualityStatus: jobQualityStatus(row),
+      qualityStatus: this.projectedJobQualityStatus(row),
       progress: row.progress,
       ...this.queueView(row.id),
-      candidates: includeCandidates && row.status === 'completed' ? this.packageRows(row.id).map((item) => this.mapCandidate(parseJson<ContentPackage>(item.content_json, {} as ContentPackage), deliveryConfirmationUserId)) : undefined,
+      candidates: includeCandidates && row.status === 'completed' ? this.packageRows(row.id).map((item) => this.mapCandidate(normalizeContentPackageForApi(parseJson<ContentPackage>(item.content_json, {} as ContentPackage)), deliveryConfirmationUserId)) : undefined,
       seed: row.seed,
       formulaVersion: config?.formula.versionId,
       presetId: row.preset_id,
@@ -2457,18 +2476,22 @@ export function deriveQualityStatus(
     validation: {
       valid: boolean;
       qualityStatus?: 'passed' | 'needs_review' | 'blocked';
-      issues: Array<{ severity?: 'error' | 'warning'; disposition?: 'block' | 'review' | 'advisory' }>;
+      issues: Array<{
+        code: string;
+        severity: 'error' | 'warning';
+        disposition?: 'block' | 'review' | 'advisory';
+      }>;
     };
   }>,
 ): 'passed' | 'needs_review' | 'blocked' {
-  const candidateStatus = (content: typeof packages[number]): 'passed' | 'needs_review' | 'blocked' => {
-    if (content.validation.qualityStatus) return content.validation.qualityStatus;
-    if (!content.validation.valid) return 'blocked';
-    if (content.validation.issues.some((issue) => issue.disposition === 'block' || issue.severity === 'error')) return 'blocked';
-    if (content.validation.issues.some((issue) => issue.disposition === 'review')) return 'needs_review';
-    return 'passed';
-  };
-  const statuses = packages.map(candidateStatus);
+  // Never trust a serialized qualityStatus or legacy error/block bit here.
+  // Job state follows the current Core hard-gate allowlist, exactly like detail,
+  // reader and export projections. Otherwise an old semantic rule can leave the
+  // list page blocked while the same candidate is immediately exportable.
+  const statuses = packages.map((content) => candidateQualityStatus({
+    valid: content.validation.valid,
+    issues: content.validation.issues,
+  }));
   if (statuses.includes('passed')) return 'passed';
   if (statuses.includes('needs_review')) return 'needs_review';
   return 'blocked';

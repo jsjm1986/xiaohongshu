@@ -1,9 +1,11 @@
-/**
- * 生成结果的交付状态只认服务端 validation.valid。
- * 全部候选失败时仍保留候选与诊断，但不得把任何草稿当成成品正文展示。
- */
+import { deliveryReadiness } from './delivery-readiness';
+
+/** Delivery is permissive for formal model artifacts; only the shared
+ * mechanical hard-gate allowlist remains non-deliverable. */
 export interface DeliveryCandidate {
-  validation?: { valid?: boolean; issues?: Array<{ severity?: string }> };
+  generationMode?: string;
+  artifactRealization?: { deliverability?: string };
+  validation?: { valid?: boolean; qualityStatus?: 'passed' | 'needs_review' | 'blocked'; issues?: any[] };
 }
 
 export interface GenerationDeliveryState {
@@ -15,7 +17,10 @@ export interface GenerationDeliveryState {
 
 export function generationDeliveryState(candidates: DeliveryCandidate[] | undefined): GenerationDeliveryState {
   const list = candidates ?? [];
-  const deliverableCount = list.filter((candidate) => candidate.validation?.valid === true).length;
+  const deliverableCount = list.filter((candidate) => deliveryReadiness(candidate.validation as never, {
+    generationMode: candidate.generationMode,
+    deliverability: candidate.artifactRealization?.deliverability,
+  }) === 'publishable').length;
   return {
     deliverableCount,
     rejectedCount: list.length - deliverableCount,

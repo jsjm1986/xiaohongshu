@@ -245,15 +245,17 @@ test('Property 6: retained hard gates always block prohibited claims and ungroun
       const code = scenario.violation === 'verified_no_evidence'
         ? 'verified_claim_without_evidence'
         : 'thread_evidence_ledger_mismatch';
-      const hit = issues.find((issue) => issue.code === code && issue.severity === 'error');
+      const hit = issues.find((issue) => issue.code === code
+        && issue.severity === 'warning'
+        && issue.disposition === 'review');
 
-      // 证据落地（需求 3.2）：被当作事实呈现却缺乏证据落地的声明恒产出 error 级校验，
-      // 驱动生成拒绝该草案——不产出 / 持久化无效稿。
-      assert.ok(hit, `证据落地门禁必须阻断该草案：期望命中 error 级 ${code}`);
-      // 命中即返回指明所命中门禁的原因（需求 3.8）。
+      // 无据事实判断仍必须留下可审计提醒，但它依赖语义/台账解释，不能仅凭
+      // error 位升级为发布硬门禁。精确引文、未知证据 ID 等机械真实性问题由
+      // Core 的 NON_OVERRIDABLE allowlist 回归单独保证。
+      assert.ok(hit, `证据落地问题必须保留 review 提醒：期望命中 ${code}`);
       assert.ok(
         hit && typeof hit.message === 'string' && hit.message.length > 0,
-        '证据落地门禁命中必须返回指明门禁的原因',
+        '证据落地提醒必须返回明确原因',
       );
     }),
     { numRuns: 200 },

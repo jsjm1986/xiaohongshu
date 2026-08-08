@@ -1,5 +1,6 @@
 import {
   commentThreadKindOf,
+  experientialGeneralizationClaim,
   genericMeasuredClaim,
   marketingPromiseClaim,
   splitEvidenceClaimAtoms,
@@ -122,6 +123,7 @@ function controlledClaimSurfaces(
   const collect = (text: string, location: ReasoningLocation, occurrence: ReasoningOccurrence): void => {
     for (const statement of splitEvidenceClaimAtoms(text)) {
       const controlledHit = genericMeasuredClaim.test(statement)
+        || experientialGeneralizationClaim.test(statement)
         || marketingPromiseClaim.test(statement)
         || controlledRules.some((rule) => rule.terms.some((term) => term && statement.includes(term)));
       if (!controlledHit || /[？?]$/u.test(statement)) continue;

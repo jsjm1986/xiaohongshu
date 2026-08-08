@@ -13,6 +13,10 @@
     "./methods": {
       "types": "./dist/methods.d.ts",
       "import": "./dist/methods.js"
+    },
+    "./validation": {
+      "types": "./dist/validation.d.ts",
+      "import": "./dist/validation.js"
     }
   },
   "files": [

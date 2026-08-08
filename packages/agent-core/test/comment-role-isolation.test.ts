@@ -1190,9 +1190,9 @@ describe("按侧+按角色隔离的引擎合并", () => {
       for (const thread of pkg.content.Cref.threads.filter((item) => item.threadKind === "org_answer")) {
         expect(thread.answer).toBe("");
       }
-      expect(pkg.validation.qualityStatus).toBe("blocked");
+      expect(pkg.validation.qualityStatus).toBe("needs_review");
       expect(pkg.validation.issues).toContainEqual(expect.objectContaining({
-        code: "comment_answer_unavailable", disposition: "block", origin: "deterministic",
+        code: "comment_answer_unavailable", disposition: "review", severity: "warning", origin: "deterministic",
       }));
       expect(pkg.validation.issues).toContainEqual(expect.objectContaining({
         code: "model_org_answer_skipped_no_evidence", disposition: "review", origin: "deterministic",

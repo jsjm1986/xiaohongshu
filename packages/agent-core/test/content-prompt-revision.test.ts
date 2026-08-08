@@ -945,7 +945,7 @@ describe("structured output parsing and validation", () => {
     const realized = evaluateGapCoverageRealization(draft, plan);
     expect(realized.entries[0]?.actualRealizations.find((item) => item.channel === "Cref")).toMatchObject({ findable: false, resolved: false });
     const issues = validateGenerationDraft({ draft, config, ledger: buildKnowledgeLedger([]), allowedEvidenceIds: ["evidence_d1"], orchestrationPlan: plan });
-    expect(issues).toContainEqual(expect.objectContaining({ code: "comment_gap_primary_thread_mismatch", severity: "error" }));
+    expect(issues).toContainEqual(expect.objectContaining({ code: "comment_gap_primary_thread_mismatch", severity: "warning", disposition: "review" }));
   });
 });
 

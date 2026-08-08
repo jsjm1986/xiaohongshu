@@ -76,7 +76,7 @@ test('运行管理支持筛选、冻结合同复核和可操作失败恢复', ()
   assert.ok(source.includes("navigate('/settings')"));
   assert.ok(source.includes('状态刷新暂时中断'));
   assert.ok(source.includes('运行已结束，但候选结果缺失'));
-  assert.ok(source.includes('所有候选均被自动校验阻断'));
+  assert.ok(source.includes('所有候选均命中机械硬门禁'));
   assert.ok(source.includes('回收站加载失败'));
   assert.ok(source.includes('批准所选终稿'));
   assert.ok(source.includes('永久删除'));
@@ -85,9 +85,9 @@ test('运行管理支持筛选、冻结合同复核和可操作失败恢复', ()
   assert.ok(source.includes('requestSequence !== sequence.current || requestedProjectId !== projectId'));
 });
 
-test('硬校验失败禁止复制导出，运行进度对读屏可见', () => {
-  assert.ok(source.includes('disabled={!candidate.validation.valid || !canExport}'));
-  assert.ok(source.includes("该候选仍有硬校验阻断，暂不能复制或导出"));
+test('只有动态机械硬门禁禁止复制导出，运行进度对读屏可见', () => {
+  assert.ok(source.includes('disabled={!deliverable || !canExport}'));
+  assert.ok(source.includes("该候选缺少必要结构或存在伪造证据/素材引用，暂不能复制或导出"));
   assert.ok(source.includes('role="progressbar"'));
   assert.ok(source.includes('aria-valuenow={selected.progress}'));
   assert.ok(source.includes('role="alert"'));

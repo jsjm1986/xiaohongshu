@@ -11,9 +11,19 @@ import {
 } from '../src/lib/agent-harness-view';
 import type { AgentHarnessJob } from '../src/types';
 
+import { readFileSync } from 'node:fs';
+
+const harnessViewSource = readFileSync(new URL('../src/lib/agent-harness-view.ts', import.meta.url), 'utf8');
+
 const job = (id: string, status: AgentHarnessJob['status'], topic: string): AgentHarnessJob => ({
   id, projectId: 'p', channel: 'agent_harness', status, progress: 0, topic, goal: '帮助比较', runKind: 'original',
   attemptCount: 0, createdAt: '2025-01-01', updatedAt: '2025-01-01',
+});
+
+
+test('浏览器只导入 validation 子入口，不加载含 node:crypto 的 Harness 根入口', () => {
+  assert.match(harnessViewSource, /@content-agent\/agent-harness-core\/validation/u);
+  assert.doesNotMatch(harnessViewSource, /from ['"]@content-agent\/agent-harness-core['"]/u);
 });
 
 test('运行筛选同时支持状态和主题/目标关键词', () => {
@@ -49,25 +59,22 @@ test('连续三次轮询失败才提示，避免瞬时网络抖动打扰用户',
   assert.equal(shouldWarnHarnessPolling(3), true);
 });
 
-test('完成态区分候选缺失、全部阻断和存在可用候选', () => {
+test('完成态只让机械硬门禁阻断，旧 valid=false 不再误杀', () => {
   const completed = { ...job('done', 'completed', '结果') };
   assert.equal(harnessCompletedResultState(completed), 'missing_candidates');
   assert.equal(canExportHarnessRun(completed), false, '空数组不能利用 every 的真空真值启用导出');
-  const blocked = {
+  const reviewOnly = {
     ...completed,
-    candidates: [{ validation: { valid: false, issues: [] } }],
+    candidates: [{ validation: { valid: false, issues: [{ code: 'future_style_rule', severity: 'error', candidateIndex: 0, message: 'review' }] } }],
   } as AgentHarnessJob;
-  assert.equal(harnessCompletedResultState(blocked), 'all_blocked');
-  assert.equal(canExportHarnessRun(blocked), false);
-  const mixed = {
+  assert.equal(harnessCompletedResultState(reviewOnly), 'ready');
+  assert.equal(canExportHarnessRun(reviewOnly), true);
+  const mechanicallyBlocked = {
     ...completed,
-    candidates: [
-      { validation: { valid: true, issues: [] } },
-      { validation: { valid: false, issues: [] } },
-    ],
+    candidates: [{ validation: { valid: true, issues: [{ code: 'missing_title', severity: 'warning', candidateIndex: 0, message: 'missing' }] } }],
   } as AgentHarnessJob;
-  assert.equal(harnessCompletedResultState(mixed), 'ready');
-  assert.equal(canExportHarnessRun(mixed), false, '整次导出仍要求所有候选通过');
+  assert.equal(harnessCompletedResultState(mechanicallyBlocked), 'all_blocked');
+  assert.equal(canExportHarnessRun(mechanicallyBlocked), false);
 });
 
 
@@ -81,5 +88,5 @@ test('复核阻断只在候选检查点存在时提供原位恢复', () => {
   assert.equal(harnessReviewBlocked(blocked), true);
   assert.equal(harnessReviewBlocked({ ...blocked, candidateCheckpointAt: null }), false);
   assert.equal(harnessReviewBlocked({ ...blocked, reviewStatus: 'completed' }), false);
-  assert.equal(canExportHarnessRun(blocked), false);
+  assert.equal(canExportHarnessRun(blocked), true, '复核阶段失败不再锁死已生成候选；提醒仍保留');
 });

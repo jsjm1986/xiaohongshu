@@ -7,6 +7,8 @@ import {
   getHarnessMethodProfile,
   HARNESS_SIMULATION_NOTICE,
   isHarnessMethodId,
+  harnessValidationValid,
+  normalizeHarnessValidationIssue,
   publicationChecklistFor,
   reviewHarnessCandidates,
   runAgentHarness,
@@ -20,6 +22,7 @@ import {
   type HarnessSeedingMode,
   type HarnessTask,
   type HarnessToolTrace,
+  type HarnessValidationIssue,
 } from '@content-agent/agent-harness-core';
 import {
   ModelProviderError,
@@ -543,10 +546,12 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
     ).get(candidateId, jobId) as { content_json: string; validation_json: string } | undefined;
     if (!row) throw new NotFoundException('Agent 候选不存在');
     const candidate = parseJson<HarnessCandidate>(row.content_json, {} as HarnessCandidate);
-    const validation = parseJson<{ valid?: boolean; issues?: unknown[] }>(row.validation_json, {});
+    const storedValidation = parseJson<{ valid?: boolean; issues?: HarnessValidationIssue[] }>(row.validation_json, {});
+    const issues = (storedValidation.issues ?? []).map(normalizeHarnessValidationIssue);
+    const validation = { ...storedValidation, valid: harnessValidationValid(issues), issues };
     const task = parseJson<HarnessTask>(job.task_json, { topic: job.topic, goal: job.goal, mustInclude: [], forbidden: [] });
     const runtimeContract = parseJson<Record<string, unknown>>(job.runtime_snapshot_json, {});
-    if (validation.valid !== true) throw new BadRequestException('候选未通过硬校验，禁止导出');
+    if (!validation.valid) throw new BadRequestException('候选缺少必要成品结构或存在伪造证据/素材引用，禁止导出');
     const title = String(((candidate.content as Record<string, any> | undefined)?.N as Record<string, unknown> | undefined)?.title ?? 'agent-candidate');
     const safeTitle = title.replace(/[\\/:*?"<>|\r\n]/gu, '_').slice(0, 60) || 'agent-candidate';
     if (format === 'json') {
@@ -567,13 +572,15 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
     const rows = this.database.prepare(
       'SELECT content_json, validation_json FROM agent_harness_candidates WHERE job_id=? ORDER BY candidate_index',
     ).all(jobId) as unknown as Array<{ content_json: string; validation_json: string }>;
-    const candidates = rows.map((row) => ({
-      candidate: parseJson<HarnessCandidate>(row.content_json, {} as HarnessCandidate),
-      validation: parseJson<{ valid?: boolean; issues?: unknown[] }>(row.validation_json, {}),
-    }));
+    const candidates = rows.map((row) => {
+      const candidate = parseJson<HarnessCandidate>(row.content_json, {} as HarnessCandidate);
+      const storedValidation = parseJson<{ valid?: boolean; issues?: HarnessValidationIssue[] }>(row.validation_json, {});
+      const issues = (storedValidation.issues ?? []).map(normalizeHarnessValidationIssue);
+      return { candidate, validation: { ...storedValidation, valid: harnessValidationValid(issues), issues } };
+    });
     if (!candidates.length) throw new BadRequestException('本次运行没有候选');
-    if (candidates.some((item) => item.validation.valid !== true)) {
-      throw new BadRequestException('整次导出要求所有候选通过硬校验');
+    if (candidates.some((item) => !item.validation.valid)) {
+      throw new BadRequestException('整次导出中存在缺少必要结构或伪造证据/素材引用的候选');
     }
     const safeTopic = job.topic.replace(/[\\/:*?"<>|\r\n]/gu, '_').slice(0, 60) || 'agent-harness-run';
     const taskContract = parseJson<HarnessTask>(job.task_json, { topic: job.topic, goal: job.goal, mustInclude: [], forbidden: [] });
@@ -1423,11 +1430,15 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
     if (!includeDetails) return base;
     const candidates = (this.database.prepare(
       'SELECT * FROM agent_harness_candidates WHERE job_id=? ORDER BY candidate_index',
-    ).all(row.id) as unknown as Array<Record<string, unknown>>).map((candidate) => ({
-      id: candidate.id,
-      ...parseJson<Record<string, unknown>>(candidate.content_json, {}),
-      validation: parseJson(candidate.validation_json, {}),
-    }));
+    ).all(row.id) as unknown as Array<Record<string, unknown>>).map((candidate) => {
+      const storedValidation = parseJson<{ valid?: boolean; issues?: HarnessValidationIssue[] }>(candidate.validation_json, {});
+      const issues = (storedValidation.issues ?? []).map(normalizeHarnessValidationIssue);
+      return {
+        id: candidate.id,
+        ...parseJson<Record<string, unknown>>(candidate.content_json, {}),
+        validation: { ...storedValidation, valid: harnessValidationValid(issues), issues },
+      };
+    });
     const traces = (this.database.prepare(
       'SELECT * FROM agent_harness_tool_calls WHERE job_id=? ORDER BY sequence',
     ).all(row.id) as unknown as Array<Record<string, unknown>>).map((trace) => ({

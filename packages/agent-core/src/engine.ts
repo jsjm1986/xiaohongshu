@@ -11,6 +11,7 @@ import {
   diagnosticsFromValidation,
   evaluateGapCoverageRealization,
   mergeCrefPatchById,
+  normalizeContentValidationIssue,
   parseStagedCommentEditor,
   readerExchangeContinuesTopic,
   parseGenerationDraft,
@@ -680,6 +681,41 @@ function defaultInformationGaps(
   });
 }
 
+function topicBigrams(value: string): Set<string> {
+  const normalized = value.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+  return new Set(Array.from({ length: Math.max(0, normalized.length - 1) }, (_, index) => normalized.slice(index, index + 2)));
+}
+
+function explicitThemePlanningGaps(
+  config: ResolvedGenerationConfig,
+  gaps: InformationGap[],
+): InformationGap[] {
+  const themePairs = topicBigrams(config.task.theme);
+  const scored = gaps.map((gap) => {
+    const surfacePairs = topicBigrams(`${gap.label} ${gap.question}`);
+    const overlap = [...themePairs].filter((pair) => surfacePairs.has(pair)).length;
+    return { gap, overlap };
+  }).filter((item) => item.overlap > 0)
+    .sort((left, right) => right.overlap - left.overlap || right.gap.importance - left.gap.importance)
+    .slice(0, 2)
+    .map((item) => item.gap);
+  const supportingEvidenceIds = [...new Set(scored.flatMap((gap) => gap.evidenceIds))];
+  const themeGap: InformationGap = {
+    id: `task_theme_${createHash("sha256").update(config.task.theme, "utf8").digest("hex").slice(0, 12)}`,
+    label: config.task.theme,
+    question: /[？?]$/u.test(config.task.theme) ? config.task.theme : `${config.task.theme}？`,
+    category: "decision",
+    audienceStages: [config.task.audienceStage],
+    importance: 1,
+    decisionLeverage: 1,
+    proofability: supportingEvidenceIds.length ? 0.75 : 0.4,
+    evidenceIds: supportingEvidenceIds,
+    required: true,
+    preferredChannels: ["N.body"],
+  };
+  return [themeGap, ...scored];
+}
+
 function defaultTopicOpportunity(
   config: ResolvedGenerationConfig,
   gaps: InformationGap[],
@@ -750,7 +786,16 @@ function resolveGenerationPlanning(
   const suppliedOpportunities = planning?.opportunities ?? [];
   let opportunity: TopicOpportunity;
   let opportunitySelectionAudit: OpportunitySelectionAudit;
-  if (planning?.selectedOpportunityId) {
+  if (planning?.taskThemeLocked && !planning.selectedOpportunityId) {
+    gaps = explicitThemePlanningGaps(input.config, gaps);
+    opportunity = defaultTopicOpportunity(input.config, gaps);
+    opportunitySelectionAudit = {
+      selectedOpportunityId: opportunity.id,
+      selectionMode: "default_policy",
+      rankStatus: "not_applied",
+      rankNotAppliedReason: "The user supplied an explicit topic; approved opportunity ranking was intentionally bypassed.",
+    };
+  } else if (planning?.selectedOpportunityId) {
     const selected = suppliedOpportunities.find((item) => item.id === planning.selectedOpportunityId);
     if (!selected) throw new Error(`Selected topic opportunity does not exist: ${planning.selectedOpportunityId}`);
     // An explicitly locked, approved dependency is rejected only when it is
@@ -2250,11 +2295,9 @@ function artifactRealizationFor(
 }
 
 function completeIssueMetadata(issues: readonly ContentValidationIssue[]): ContentValidationIssue[] {
-  return issues.map((issue) => ({
+  return issues.map((issue) => normalizeContentValidationIssue({
     ...issue,
-    disposition: issueDisposition(issue),
     origin: issue.origin ?? (issue.code.startsWith("model_") ? "infrastructure" : "deterministic"),
-    overridePolicy: issueOverridePolicy({ ...issue, disposition: issueDisposition(issue) }),
   }));
 }
 
@@ -2584,15 +2627,52 @@ const REPLAN_REQUIRED_CODES = new Set([
   "reply_identity_plan_drift", "reply_question_plan_drift",
 ]);
 
+// Automatic repair is deliberately bounded to defects for which a local patch
+// has a clear owner and measurable value. Review-only planning/completeness
+// findings stay visible but no longer trigger an expensive rewrite by default.
+const CORE_COPY_REPAIR_CODES = new Set([
+  "explicit_topic_not_realized", "missing_required_phrase", "forbidden_phrase",
+  "body_too_short", "body_too_long", "sensitive_claim_without_evidence",
+  "restricted_source_content_visible", "internal_audit_artifact_visible",
+  "frontstage_instruction_leak", "unsupported_narrative_history",
+  "publishing_topology_voice_mismatch",
+]);
+const COMMENT_COPY_REPAIR_CODES = new Set([
+  "comment_reply_topic_drift", "duplicate_comment_question", "duplicate_comment_answer",
+  "comment_context_meta_leak", "comment_source_language_surface_leak",
+  "comment_plan_language_surface_leak",
+]);
+
+function automaticRepairEligible(issue: ContentValidationIssue): boolean {
+  return LEDGER_REPAIR_CODES.has(issue.code)
+    || CORE_COPY_REPAIR_CODES.has(issue.code)
+    || COMMENT_COPY_REPAIR_CODES.has(issue.code);
+}
+
 /** Route every repairable blocker to one stage owner. Generic patches never own Cref. */
 export function repairResponsibilityForIssues(
   issues: readonly ContentValidationIssue[],
 ): { responsibility: RepairResponsibility; channels: ContentChannel[] } {
-  const blockers = issues.filter((issue) => issueDisposition(issue) === "block");
-  if (!blockers.length || blockers.some((issue) => !issue.repairable)) return { responsibility: "none", channels: [] };
-  if (blockers.some((issue) => REPLAN_REQUIRED_CODES.has(issue.code))) return { responsibility: "replan_required", channels: [] };
-  if (blockers.every((issue) => LEDGER_REPAIR_CODES.has(issue.code))) return { responsibility: "ledger_only", channels: [] };
-  const channels = channelsForIssues([...issues]);
+  // Delivery disposition and repair routing are intentionally independent.
+  // A semantic/editorial issue may be review-only for publication while still
+  // deserving one bounded quality repair. Terminal mechanical gates remain
+  // visible and non-deliverable, but must not suppress an independent local
+  // copy/ledger improvement in the same candidate.
+  const actionable = issues.filter((issue) => issue.repairable
+    && (issueDisposition(issue) === "block" || issueDisposition(issue) === "review"));
+  const repairable = actionable.filter(automaticRepairEligible);
+  if (!repairable.length) {
+    return actionable.some((issue) => REPLAN_REQUIRED_CODES.has(issue.code))
+      ? { responsibility: "replan_required", channels: [] }
+      : { responsibility: "none", channels: [] };
+  }
+  // Replanning findings are not patchable, but they must not suppress an
+  // independent local copy/ledger repair in the same candidate. Route the
+  // locally repairable subset first; leave replanning findings visible.
+  const locallyRepairable = repairable.filter((issue) => !REPLAN_REQUIRED_CODES.has(issue.code));
+  if (!locallyRepairable.length) return { responsibility: "replan_required", channels: [] };
+  if (locallyRepairable.every((issue) => LEDGER_REPAIR_CODES.has(issue.code))) return { responsibility: "ledger_only", channels: [] };
+  const channels = channelsForIssues(locallyRepairable);
   const hasComments = channels.includes("Cref");
   const hasCore = channels.some((channel) => channel !== "Cref");
   // A mixed failure cannot be atomically delegated to two agents in one bounded
@@ -2605,6 +2685,19 @@ export function repairResponsibilityForIssues(
 
 export function shouldAttemptGenerationRepair(issues: readonly ContentValidationIssue[]): boolean {
   return ["ledger_only", "core_copy", "comment_editor"].includes(repairResponsibilityForIssues(issues).responsibility);
+}
+
+function claimJudgeSurfaceFingerprint(draft: GenerationDraft): string {
+  return JSON.stringify({
+    body: draft.content.N.body,
+    answers: draft.content.Cref.threads
+      .filter((thread) => (thread.threadKind ?? "org_answer") === "org_answer")
+      .map((thread) => ({
+        id: thread.id,
+        answer: thread.answer,
+        followUps: thread.followUps.map((followUp) => followUp.answer),
+      })),
+  });
 }
 
 function validationTelemetrySummary(
@@ -3163,7 +3256,7 @@ export class ContentGenerationAgent implements GenerationEngine {
           stage: "org_answers", status: "skipped", reasons: [],
           summary: "当前评论网络没有可追责答复节点。", accepted: true, attempt: 0,
         });
-      } else if (accountableAnswerIssues.some((issue) => issue.disposition === "block" || issue.severity === "error")) {
+      } else if (accountableAnswerIssues.some((issue) => issueDisposition(issue) === "block")) {
         editorialAssessments.push({
           stage: "org_answers", status: "rejected",
           reasons: accountableAnswerIssues.map((issue) => issue.message),
@@ -3626,6 +3719,7 @@ export class ContentGenerationAgent implements GenerationEngine {
       const channels = repairRoute.channels;
       if (repairRoute.responsibility !== "ledger_only" && !channels.length) break;
       const beforeRepairFingerprint = repairConvergenceFingerprint(draft, issues);
+      const beforeJudgeSurface = claimJudgeSurfaceFingerprint(draft);
       emitGenerationTelemetry(input, {
         type: "candidate_repair_started",
         candidateIndex,
@@ -3643,7 +3737,7 @@ export class ContentGenerationAgent implements GenerationEngine {
             projectIntelligence: planning.intelligence, projectBlueprint: input.planningContext?.projectBlueprint,
             imageAnalyses: planning.imageAnalyses, orchestrationPlan, evidenceReferences: availableEvidence,
           };
-          const reasons = issues.filter((issue) => issueDisposition(issue) === "block" && issue.channel === "Cref").map((issue) => `${issue.code}: ${issue.message}`);
+          const reasons = issues.filter((issue) => issue.repairable && issueDisposition(issue) !== "advisory" && issue.channel === "Cref").map((issue) => `${issue.code}: ${issue.message}`);
           const prompt = buildStagedCommentNetworkEditorPrompt(commentPromptInput, { H: draft.content.H, N: draft.content.N }, commentsBefore, reasons);
           const response = await this.provider.generate({
             messages: prompt.messages, responseSchema: prompt.responseSchema, schemaName: "content_candidate_comment_network_editor",
@@ -3694,8 +3788,10 @@ export class ContentGenerationAgent implements GenerationEngine {
       draft = bindDialogueProvenance(draft, orchestrationPlan, allowedEvidenceIds, evidenceSources, availableEvidence);
       // 修复回路同样在校验前做证据自动锚定(幂等,已挂的不会重复挂)。
       draft = attachKnowledgeAnchors(draft, anchorContext);
-      if (this.provider && useProvider) {
-        // 修复后重跑判官:旧裁决已随 patch 丢弃,这里按当前句面重新裁决。
+      if (this.provider && useProvider && claimJudgeSurfaceFingerprint(draft) !== beforeJudgeSurface) {
+        // Only rerun the judge when a sensitive visible surface actually changed.
+        // Metadata/reader-only edits preserve prior judgments and avoid a costly
+        // no-op judge round.
         draft = await judgeSensitiveClaimsWithModel(this.provider, draft, anchorContext, {
           model: input.config.model.model,
           seed: seed + repairAttempts + 200,
