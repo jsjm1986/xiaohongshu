@@ -177,7 +177,10 @@ test('分析重试次数和指数退避读取统一配置，HTTP 200 的不完�
     assert.equal(requestTimes.length, 2);
     const delay = requestTimes[1]! - requestTimes[0]!;
     assert.ok(delay >= 70, `configured retry delay was ignored: ${delay}ms`);
-    assert.ok(delay < 2_000, `unexpected retry delay: ${delay}ms`);
+    // 上界只为区分「读了 90ms 测试配置」与「误用 4000ms 产线基数」(后者首次
+    // 重试必然 ≥4000ms)。全量测试 75 个文件并发时事件循环调度会把 90ms 定时器
+    // 拖到 2.6s+(实测两次误报),上界必须给足调度余量。
+    assert.ok(delay < 3_500, `unexpected retry delay: ${delay}ms`);
   });
 });
 

@@ -114,6 +114,10 @@ test('health endpoint and bootstrap login work', async () => {
   const health = await call('/health');
   assert.equal(health.response.status, 200);
   assert.equal(health.body.status, 'ok');
+  // 真探活:必须实际写库并报告队列/磁盘,不能只报版本装健康。
+  assert.equal(health.body.databaseWritable, true);
+  assert.ok(health.body.queuedJobs >= 0);
+  assert.ok(health.body.diskFreeBytes > 0);
 
   const session = await login('admin', ADMIN_PASSWORD);
   adminCookie = session.cookie;

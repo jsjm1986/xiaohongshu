@@ -13,7 +13,7 @@ export type SqlValue = string | number | bigint | Uint8Array | null;
  * 无关的测试变红——那不是回归信号,是维护噪声。测试断言这个常量,真正想验的
  * 「迁移到最新且表结构对得上」不变。
  */
-export const SCHEMA_VERSION = 27;
+export const SCHEMA_VERSION = 28;
 
 @Injectable()
 export class DatabaseService implements OnModuleDestroy {
@@ -1486,6 +1486,21 @@ export class DatabaseService implements OnModuleDestroy {
       this.db.exec('PRAGMA user_version = 27');
     });
     if (version < 27) version = 27;
+
+    if (version < 28) this.transaction(() => {
+      /*
+       * /health 写探测的落点。此前 /health 只返回版本常量:磁盘满、库文件损坏
+       * 时它照样报 ok,外部监控毫无感知。探测表单行 upsert,不与业务表混写。
+       */
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS health_probe (
+          id INTEGER PRIMARY KEY CHECK(id = 1),
+          checked_at TEXT NOT NULL
+        );
+      `);
+      this.db.exec('PRAGMA user_version = 28');
+    });
+    if (version < 28) version = 28;
   }
 
   onModuleDestroy(): void {

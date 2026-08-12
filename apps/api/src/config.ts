@@ -191,7 +191,7 @@ export function resolveOptions(input: ApiOptionsInput = {}): ApiOptions {
     throw new Error('CONTENT_AGENT_JOB_CLAIM_TIMEOUT_MS / 配置项 jobClaimTimeoutMs 必须大于心跳间隔');
   }
 
-  return {
+  const options: ApiOptions = {
     production,
     dataDir,
     databasePath: resolve(appRoot, input.databasePath ?? process.env.CONTENT_AGENT_DB_PATH ?? resolve(dataDir, 'app.db')),
@@ -255,4 +255,33 @@ export function resolveOptions(input: ApiOptionsInput = {}): ApiOptions {
     jobHeartbeatMs,
     jobClaimTimeoutMs,
   };
+  assertProductionSafeOptions(options);
+  return options;
+}
+
+/**
+ * 生产模式的启动安全校验（fail-fast）。
+ *
+ * 启动器用 `node --env-file-if-exists=…` 加载环境:.env 丢失/路径错时它**静默
+ * 跳过**,进程会带着回落默认值"看起来正常"地跑起来——管理员密码回落到公开的
+ * 占位值、master key 回落为空(BYOK 密钥形同弱钥加密)。这两种状态在生产里
+ * 没有任何合法场景,拒绝启动是唯一诚实的行为;错误信息直接指向最常见根因。
+ * 非生产(开发/测试)保持宽松:测试夹具依赖默认引导密码。
+ */
+function assertProductionSafeOptions(options: ApiOptions): void {
+  if (!options.production) return;
+  const problems: string[] = [];
+  if (!isUsableMasterEncryptionKey(options.masterEncryptionKey)) {
+    problems.push('MASTER_ENCRYPTION_KEY 缺失或过弱（不足 16 字符或为示例占位值），BYOK 密钥将以弱钥加密');
+  }
+  if (options.adminPassword === 'change-me-now-123!') {
+    problems.push('管理员密码仍是默认占位值');
+  }
+  if (problems.length) {
+    throw new Error(
+      `生产模式拒绝启动：${problems.join('；')}。`
+      + '最常见根因是环境文件未被加载——node --env-file-if-exists 在 .env 缺失或路径错误时会静默跳过；'
+      + '请确认 .env 存在并包含 MASTER_ENCRYPTION_KEY 与 BOOTSTRAP_ADMIN_PASSWORD。',
+    );
+  }
 }
