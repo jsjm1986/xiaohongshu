@@ -390,10 +390,59 @@ export class SettingsService {
     return JSON.stringify({ v: 1, iv: iv.toString('base64url'), tag: cipher.getAuthTag().toString('base64url'), data: encrypted.toString('base64url') });
   }
 
+  /**
+   * 解密带轮换回退:先试当前 master key,再逐个尝试 MASTER_ENCRYPTION_KEY_PREVIOUS
+   * 里的旧钥(GCM 认证标签保证错钥必然抛错,不会解出垃圾)。
+   *
+   * 此前换 master key 等于所有 BYOK 密钥永久报废——唯一出路是逐个通知客户
+   * 重新录入,等于对外承认安全事故。轮换流程:新钥写 MASTER_ENCRYPTION_KEY、
+   * 旧钥挪进 PREVIOUS → 重启 → 跑 scripts/rotate-byok-keys.mts 重加密存量 →
+   * 移除 PREVIOUS。加密永远只用当前钥。
+   */
   private decrypt(value: string): string {
     const payload = JSON.parse(value) as { iv: string; tag: string; data: string };
-    const decipher = createDecipheriv('aes-256-gcm', this.key(), Buffer.from(payload.iv, 'base64url'));
-    decipher.setAuthTag(Buffer.from(payload.tag, 'base64url'));
-    return Buffer.concat([decipher.update(Buffer.from(payload.data, 'base64url')), decipher.final()]).toString('utf8');
+    const candidates = [this.key(), ...this.options.previousMasterEncryptionKeys.map((key) => createHash('sha256').update(key).digest())];
+    let lastError: unknown;
+    for (const key of candidates) {
+      try {
+        const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(payload.iv, 'base64url'));
+        decipher.setAuthTag(Buffer.from(payload.tag, 'base64url'));
+        return Buffer.concat([decipher.update(Buffer.from(payload.data, 'base64url')), decipher.final()]).toString('utf8');
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError;
+  }
+
+  /** 是否需要用当前钥重加密(被旧钥解开的密文)。轮换脚本用它挑出待迁移行。 */
+  encryptedWithCurrentKey(value: string): boolean {
+    const payload = JSON.parse(value) as { iv: string; tag: string; data: string };
+    try {
+      const decipher = createDecipheriv('aes-256-gcm', this.key(), Buffer.from(payload.iv, 'base64url'));
+      decipher.setAuthTag(Buffer.from(payload.tag, 'base64url'));
+      decipher.update(Buffer.from(payload.data, 'base64url'));
+      decipher.final();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 用当前 master key 重加密一行 BYOK 密文(轮换收尾)。
+   * 解密走回退链,加密只用当前钥;调用方(轮换脚本)负责遍历与审计输出。
+   */
+  reencryptWorkspaceKey(workspaceId: string): boolean {
+    const row = this.database
+      .prepare('SELECT encrypted_api_key FROM workspace_settings WHERE workspace_id = ?')
+      .get(workspaceId) as { encrypted_api_key: string | null } | undefined;
+    if (!row?.encrypted_api_key) return false;
+    if (this.encryptedWithCurrentKey(row.encrypted_api_key)) return false;
+    const plain = this.decrypt(row.encrypted_api_key);
+    this.database
+      .prepare('UPDATE workspace_settings SET encrypted_api_key = ?, updated_at = ? WHERE workspace_id = ?')
+      .run(this.encrypt(plain), nowIso(), workspaceId);
+    return true;
   }
 }

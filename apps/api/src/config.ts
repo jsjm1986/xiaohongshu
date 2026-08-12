@@ -34,6 +34,7 @@ export interface ApiOptions {
   secureCookies: boolean;
   logger: boolean;
   masterEncryptionKey: string;
+  previousMasterEncryptionKeys: string[];
   platformApiKey: string;
   platformBaseUrl: string;
   platformModel: string;
@@ -213,6 +214,13 @@ export function resolveOptions(input: ApiOptionsInput = {}): ApiOptions {
       : validateBoolean(input.logger, '配置项 logger'),
     masterEncryptionKey:
       input.masterEncryptionKey ?? process.env.MASTER_ENCRYPTION_KEY ?? process.env.SESSION_SECRET ?? '',
+    // 轮换期的旧钥(逗号分隔):只用于解密回退,加密永远用当前钥。
+    // 跑完 scripts/rotate-byok-keys.mts 重加密存量后应清空此变量。
+    previousMasterEncryptionKeys:
+      (input.previousMasterEncryptionKeys
+        ?? (process.env.MASTER_ENCRYPTION_KEY_PREVIOUS ?? '').split(','))
+        .map((key) => key.trim())
+        .filter((key) => key.length >= 16),
     platformApiKey:
       input.platformApiKey ?? process.env.OPENAI_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN ?? '',
     platformBaseUrl:

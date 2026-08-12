@@ -12,31 +12,24 @@ test("服务器执行轨迹不出现在用户界面", () => {
   assert.doesNotMatch(css, /generation-execution-trace/u);
 });
 
-test("全部候选未通过时仍展示草稿，只有可复核候选能人工解锁，硬阻断必须修复", () => {
+test("全部候选未通过时仍展示草稿，交付判定两档：blocked 锁死，其余可交付", () => {
   assert.doesNotMatch(page, /if \(deliveryState\.allRejected\)/u);
   assert.match(page, /<h2>\{selected\.title\}<\/h2>/u);
   assert.match(page, /selected\.body[\s\S]*?split\("\\n"\)/u);
   assert.match(page, /selected\.comments\.map/u);
   assert.match(page, /const deliverable = candidateDeliverable\(/u);
-  assert.match(page, /const reviewable = readiness === "human_reviewable"/u);
-  assert.match(page, /reviewable && \(/u);
-  assert.match(page, /manuallyConfirmed \? "已人工确认，可复制与导出"/u);
-  assert.match(page, /我已核对事实、证据、身份与风险/u);
-  assert.match(page, /仅限当前用户与候选，自动校验结论保留/u);
-  assert.match(page, /setManualConfirmChecked\(false\)/u);
   assert.match(page, /存在硬阻断 · 必须修复/u);
+  // 人工确认的发起入口是永不可达的死分支,已按交付政策清理,不得回潮
+  assert.doesNotMatch(page, /reviewable && \(/u);
+  assert.doesNotMatch(page, /我已核对事实、证据、身份与风险/u);
+  assert.doesNotMatch(page, /manualConfirmChecked/u);
 });
 
-test("结果页把校验、人工确认和运行版本压缩为按需展开信息", () => {
+test("结果页把校验和运行版本压缩为按需展开信息", () => {
   assert.match(page, /<details className="validation-summary">/u);
   assert.match(page, /<details className="generation-release-proof">/u);
   assert.doesNotMatch(page, /没有候选通过自动校验，可以怎么用/u);
-  assert.match(page, /manual-delivery-confirmation__action--ready/u);
-  assert.match(page, />复制全部<\/Button>/u);
   assert.match(page, /api\.generations\.exportUrl\(job\.id, selected\.id/u);
-  assert.doesNotMatch(page, /没有候选通过自动校验，可以怎么用/u);
-  assert.match(css, /\.manual-delivery-confirmation \{[^}]*display: flex/u);
-  assert.match(css, /\.manual-delivery-confirmation\.is-confirmed/u);
 });
 
 

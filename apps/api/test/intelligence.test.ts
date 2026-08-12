@@ -1351,12 +1351,12 @@ test('planning CRUD, explicit approvals, image safety and generation snapshots w
   const blockedAutomaticExport = await request(automaticExportPath);
   assert.equal(blockedAutomaticExport.response.status, 400);
   assert.match(String(blockedAutomaticExport.body.message), /确定性预览.*禁止导出/u);
+  // 人工确认发起端点已按交付政策移除:预览没有"确认解锁"这条路,路由不存在。
   const rejectedAutomaticConfirmation = await request(
     `/api/generations/${automaticCompleted.id}/candidates/${reviewCandidate.id}/manual-delivery-confirmation`,
     { method: 'POST', body: JSON.stringify({ acknowledged: true }) },
   );
-  assert.equal(rejectedAutomaticConfirmation.response.status, 400);
-  assert.match(String(rejectedAutomaticConfirmation.body.message), /确定性预览.*不能通过人工确认/u);
+  assert.equal(rejectedAutomaticConfirmation.response.status, 404);
   const stillBlockedAutomaticExport = await request(automaticExportPath);
   assert.equal(stillBlockedAutomaticExport.response.status, 400);
 

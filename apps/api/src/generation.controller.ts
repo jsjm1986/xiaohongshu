@@ -83,20 +83,6 @@ export class GenerationController {
     return this.generations.restore(id);
   }
 
-  @Post(':id/candidates/:candidateId/manual-delivery-confirmation')
-  confirmManualDelivery(
-    @Req() request: Request,
-    @Param('id') id: string,
-    @Param('candidateId') candidateId: string,
-    @Body() rawBody: unknown,
-  ) {
-    const body = requireObject(rawBody);
-    if (body.acknowledged !== true) throw new BadRequestException('必须明确确认已逐条核对事实、证据、身份与风险');
-    const job = this.generations.jobRow(id);
-    this.assert(request, job.project_id, 'generation.export');
-    return this.generations.confirmManualDelivery(id, candidateId, this.principal(request));
-  }
-
   /**
    * 受理一次修改请求。入队即返回,不同步等模型——改稿耗时是分钟级,公网下会撞上
    * Cloudflare 约 100 秒超时。执行由 RevisionService 的队列负责。

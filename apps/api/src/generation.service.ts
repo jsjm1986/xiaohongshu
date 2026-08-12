@@ -4,6 +4,7 @@ import {
   ContentGenerationAgent,
   GENERATION_PARAMETER_REGISTRY,
   candidateQualityStatus,
+  normalizeContentValidationIssue,
   combinedEvidenceSupport,
   evidenceReferenceCanSupportFact,
   evidenceSensitiveRequiredClaim,
@@ -790,7 +791,27 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
   private projectedJobQualityStatus(row: JobRow): 'unknown' | 'passed' | 'needs_review' | 'blocked' {
     const stored = jobQualityStatus(row);
     if (row.status !== 'completed' || stored === 'passed') return stored;
-    const packages = this.packageRows(row.id).flatMap((item) => {
+    // 重投影优先走物化的 issue 摘要列(几百字节),不再对每个非 passed 任务的
+    // 每个候选包做 1MB 级整包 parse——这是列表轮询的最热路径,同步 SQLite 下
+    // parse 成本由全体并发请求分摊。摘要缺失的行(v30 回填前损坏)回退整包。
+    const summaryRows = this.database
+      .prepare('SELECT issue_summary_json, content_json FROM content_packages WHERE job_id = ? ORDER BY candidate_index')
+      .all(row.id) as Array<{ issue_summary_json: string | null; content_json: string }>;
+    const packages = summaryRows.flatMap((item) => {
+      if (item.issue_summary_json) {
+        const summary = parseJson<{ valid?: boolean; issues?: Array<{ code?: string; severity?: string; disposition?: string }> } | null>(item.issue_summary_json, null);
+        if (summary && Array.isArray(summary.issues)) {
+          return [{
+            validation: {
+              valid: summary.valid === true,
+              issues: summary.issues
+                .filter((issue): issue is { code: string; severity: 'error' | 'warning'; disposition?: 'block' | 'review' | 'advisory' } =>
+                  typeof issue.code === 'string' && (issue.severity === 'error' || issue.severity === 'warning'))
+                .map((issue) => normalizeContentValidationIssue(issue as unknown as Parameters<typeof normalizeContentValidationIssue>[0])),
+            },
+          }];
+        }
+      }
       const raw = parseJson<unknown>(item.content_json, {});
       // Very old or damaged rows may predate the validation contract entirely.
       // Keep list/read endpoints available and fall back to the stored job state;
@@ -930,7 +951,13 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
   contentPackage(jobId: string, candidateId: string): ContentPackage {
     const job = this.jobRow(jobId);
     const opportunitySnapshot = parseJson<Record<string, unknown>>(job.opportunity_snapshot_json, {});
-    for (const row of this.packageRows(jobId)) {
+    // 物化的 candidate_id 列直查(带索引),命中即只 parse 目标那一个包;
+    // 未命中(v30 回填前的损坏行)回退顺序扫描,行为不变。
+    const direct = this.database
+      .prepare('SELECT * FROM content_packages WHERE job_id = ? AND (candidate_id = ? OR id = ?) LIMIT 1')
+      .get(jobId, candidateId, candidateId) as PackageRow | undefined;
+    const rows = direct ? [direct] : this.packageRows(jobId);
+    for (const row of rows) {
       const value = parseJson<ContentPackage | null>(row.content_json, null);
       if (value && (value.candidateId === candidateId || value.id === candidateId)) {
         const record = value as unknown as Record<string, unknown>;
@@ -965,20 +992,11 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  private assertManualDeliveryEligible(content: ContentPackage): void {
-    if (content.generationMode === 'deterministic_preview' || content.artifactRealization?.deliverability === 'non_deliverable') {
-      throw new BadRequestException('确定性预览不是正式成品，不能通过人工确认升级为可交付内容；请重新生成');
-    }
-    if (content.validation.valid) throw new BadRequestException('候选已通过自动校验，无需人工交付确认');
-    const issues = content.validation.issues;
-    const nonOverridable = issues.filter((issue) => issueOverridePolicy(issue) === 'non_overridable');
-    if (nonOverridable.length) {
-      throw new BadRequestException(`候选包含不可人工覆盖的阻断项：${[...new Set(nonOverridable.map((issue) => issue.code))].join('、')}；请修复或重新生成`);
-    }
-    const reviewable = issues.filter((issue) => issueOverridePolicy(issue) === 'human_reviewable');
-    if (!reviewable.length) throw new BadRequestException('候选没有可人工确认的复核项；请修复或重新生成');
-  }
-
+  /**
+   * 历史人工确认记录的只读投影。发起确认的入口已按交付政策清理(正式产物即可
+   * 交付,人工确认点击不再是流程一环——见 delivery-readiness 的既定决策),
+   * 但历史包上的确认是真实发生过的交付决定,展示与导出审计附录都要能读到它。
+   */
   manualDeliveryConfirmation(packageId: string, userId: string): {
     confirmed: true; confirmedAt: string; confirmedBy: string; contentDigest: string; issueDigest: string; issueCodes: string[];
   } | null {
@@ -997,30 +1015,6 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     if (details.contentDigest !== current.contentDigest || details.issueDigest !== current.issueDigest) return null;
     if (content.validation.issues.some((issue) => issueOverridePolicy(issue) === 'non_overridable')) return null;
     return { confirmed: true, confirmedAt: row.created_at, confirmedBy: userId, ...current };
-  }
-
-  confirmManualDelivery(jobId: string, candidateId: string, principal: SessionPrincipal): Record<string, unknown> {
-    const job = this.jobRow(jobId);
-    const content = this.contentPackage(jobId, candidateId);
-    this.assertManualDeliveryEligible(content);
-    const snapshot = this.deliverySnapshot(content);
-    const existing = this.manualDeliveryConfirmation(content.id, principal.userId);
-    if (!existing) {
-      const project = this.resources.projectRow(job.project_id);
-      this.audit.record({
-        workspaceId: String(project.workspace_id), userId: principal.userId,
-        action: 'generation.manual-delivery-confirm', entityType: 'content_package', entityId: content.id,
-        details: {
-          jobId, candidateId: content.candidateId, packageId: content.id,
-          automaticValidationValid: content.validation.valid,
-          acknowledgement: 'reviewed_human_reviewable_issues',
-          ...snapshot,
-        },
-      });
-    }
-    const confirmation = this.manualDeliveryConfirmation(content.id, principal.userId);
-    if (!confirmation) throw new InternalServerErrorException('人工交付确认未能保存');
-    return { jobId, candidateId: content.candidateId, confirmation };
   }
 
   /**
@@ -1423,10 +1417,13 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
           this.database
             .prepare(
               `INSERT INTO content_packages
-                (id, job_id, project_id, candidate_index, content_json, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                (id, job_id, project_id, candidate_index, content_json, candidate_id, issue_summary_json, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
-            .run(content.id, jobId, job.project_id, content.candidateIndex, JSON.stringify(content), content.createdAt, content.createdAt);
+            .run(
+              content.id, jobId, job.project_id, content.candidateIndex, JSON.stringify(content),
+              content.candidateId, issueSummaryJson(content), content.createdAt, content.createdAt,
+            );
           this.intelligence.recordGenerationCoverage({
             projectId: job.project_id,
             jobId,
@@ -1655,8 +1652,8 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       const now = nowIso();
       this.database.transaction(() => {
         this.database
-          .prepare('UPDATE content_packages SET id=?, content_json=?, updated_at=? WHERE id=?')
-          .run(result.package.id, JSON.stringify(result.package), now, packageRow.id);
+          .prepare('UPDATE content_packages SET id=?, content_json=?, candidate_id=?, issue_summary_json=?, updated_at=? WHERE id=?')
+          .run(result.package.id, JSON.stringify(result.package), result.package.candidateId, issueSummaryJson(result.package), now, packageRow.id);
         // 平台模式本轮确实扣过一次时保留这一次；BYOK 或本轮没扣款时一笔不留，
         // 顺便退清历史中断遗留的余额。
         const refundedOnSuccess = this.settleRevisionQuota(
@@ -2635,6 +2632,19 @@ function jobQualityStatus(row: Pick<JobRow, 'quality_status' | 'delivery_quality
   return row.delivery_quality_status && row.delivery_quality_status !== 'unknown'
     ? row.delivery_quality_status
     : row.quality_status;
+}
+
+/**
+ * 物化的校验摘要(v30):列表重投影只需要 valid + issues 的三个判定字段,
+ * 写包同一事务落这几百字节,读路径不再为它 parse 1MB 整包。
+ */
+export function issueSummaryJson(content: ContentPackage): string {
+  return JSON.stringify({
+    valid: content.validation.valid === true,
+    issues: content.validation.issues.map((issue) => ({
+      code: issue.code, severity: issue.severity, disposition: issue.disposition,
+    })),
+  });
 }
 
 export function deriveQualityStatus(

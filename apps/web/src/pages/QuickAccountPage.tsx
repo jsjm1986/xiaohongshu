@@ -114,7 +114,7 @@ export function QuickAccountPage() {
             让用户猜是没额度还是坏了。拉取失败时 absenceNote 为 null,静默略过。 */}
         {(cell || absenceNote) && (
           <section className="qc-account__card">
-            <h2>本月额度</h2>
+            <h2>平台额度</h2>
             {cell ? (
               <>
                 <div className={`qc-account__quota qc-account__quota--${cell.tone}`}>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, RotateCcw } from 'lucide-react';
+import { ArrowLeft, ChevronLeft, ChevronRight, RotateCcw } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Button, useToast } from '../components/Ui';
 import { CandidateSwitch } from '../components/quick/CandidateSwitch';
@@ -10,8 +10,7 @@ import { WaitCard } from '../components/quick/WaitCard';
 import { api } from '../lib/api';
 import { clampCandidateIndex } from '../lib/note-view';
 import { readerPath } from '../lib/quick-nav';
-import { publishOrderText } from '../lib/publish-copy';
-import { candidateDeliverable, deliveryReadiness } from '../lib/delivery-readiness';
+import { candidateDeliverable } from '../lib/delivery-readiness';
 import { areaPath, QUICK_HOME_PATH } from '../lib/quick-routes';
 import { failureReason } from '../lib/retry-plan';
 import { retryJobOnce } from '../lib/single-retry';
@@ -42,8 +41,6 @@ export function QuickReaderPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [revisingId, setRevisingId] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
-  const [manualConfirmChecked, setManualConfirmChecked] = useState(false);
-  const [manualConfirming, setManualConfirming] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   /** 候选下标:预览区(NoteCard)与工作区(ReaderDetail)共用,所以归页面持有 */
   const [activeIndex, setActiveIndex] = useState(0);
@@ -139,31 +136,10 @@ export function QuickReaderPage() {
    */
   const failureNotice = revisionFailureNotice(job?.activeRevision);
   const activeCandidate = job?.candidates?.[clampCandidateIndex(activeIndex, job.candidates.length)];
-  const readiness = deliveryReadiness(activeCandidate?.validation, { generationMode: activeCandidate?.generationMode, deliverability: activeCandidate?.artifactRealization?.deliverability });
-  const publishable = readiness === 'publishable';
-  const reviewable = readiness === 'human_reviewable';
-  const manuallyConfirmed = reviewable && activeCandidate?.manualDeliveryConfirmation?.confirmed === true;
-  const deliverable = candidateDeliverable(activeCandidate?.validation, manuallyConfirmed, { generationMode: activeCandidate?.generationMode, deliverability: activeCandidate?.artifactRealization?.deliverability });
-
-  useEffect(() => {
-    // 人工确认与本地勾选都只属于当前候选，切换版本时不得继承。
-    setManualConfirmChecked(false);
-  }, [activeCandidate?.id]);
-
-  const confirmManualDelivery = async () => {
-    if (!activeCandidate || !reviewable || manuallyConfirmed || !manualConfirmChecked || manualConfirming) return;
-    setManualConfirming(true);
-    try {
-      await api.generations.confirmManualDelivery(jobId, activeCandidate.id);
-      setJob(await api.generations.reader(jobId));
-      setManualConfirmChecked(false);
-      // 成功状态在原交付栏内持续呈现，不再让用户追右上角提示。
-    } catch (e) {
-      fail(e, '人工交付确认失败');
-    } finally {
-      setManualConfirming(false);
-    }
-  };
+  // 交付判定只有两档:硬门禁 blocked 锁死,其余正式产物即可交付(deliveryReadiness
+  // 的既定决策)。人工确认流程的发起入口是永不可达的死分支,已按该决策清理;
+  // 历史包上的确认记录仍随校验结论展示,不删审计痕迹。
+  const deliverable = candidateDeliverable(activeCandidate?.validation, false, { generationMode: activeCandidate?.generationMode, deliverability: activeCandidate?.artifactRealization?.deliverability });
 
   const retry = async () => {
     if (!project || !job) return;
@@ -181,21 +157,12 @@ export function QuickReaderPage() {
     } catch (e) { fail(e, '重试失败'); } finally { setRetrying(false); }
   };
 
-  const copyConfirmedCandidate = async (candidate: ReaderCandidate) => {
-    try {
-      await navigator.clipboard.writeText(publishOrderText(candidate));
-      toast.push('已复制全文');
-    } catch {
-      toast.push('复制失败，请手动选择文本', 'error');
-    }
-  };
-
   const exportAs = (candidate: ReaderCandidate, format: ExportFormat) => {
-    if (!candidateDeliverable(candidate.validation, candidate.manualDeliveryConfirmation?.confirmed === true, { generationMode: candidate.generationMode, deliverability: candidate.artifactRealization?.deliverability })) {
-      toast.push('请先完成人工交付确认', 'error');
+    if (!candidateDeliverable(candidate.validation, false, { generationMode: candidate.generationMode, deliverability: candidate.artifactRealization?.deliverability })) {
+      toast.push('该候选未通过交付硬门禁，不能导出', 'error');
       return;
     }
-    // 四种格式统一走服务端：人工确认记录与原始校验结论会进入导出审计附录。
+    // 四种格式统一走服务端：历史确认记录与原始校验结论会进入导出审计附录。
     window.location.assign(api.generations.exportUrl(jobId, candidate.id, format));
   };
 
@@ -333,51 +300,6 @@ export function QuickReaderPage() {
               manuallyConfirmed={current.manualDeliveryConfirmation?.confirmed === true}
               onSeeDetail={() => workbenchRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
             />
-
-            {deliveryReadiness(current.validation, { generationMode: current.generationMode, deliverability: current.artifactRealization?.deliverability }) === 'human_reviewable' && (
-              <section className={`manual-delivery-confirmation qc-manual-delivery${current.manualDeliveryConfirmation?.confirmed ? ' is-confirmed' : ''}`} aria-label="人工交付确认">
-                <div className="manual-delivery-confirmation__summary">
-                  <strong>
-                    {current.manualDeliveryConfirmation?.confirmed && <CheckCircle2 size={15} />}
-                    {current.manualDeliveryConfirmation?.confirmed ? '已人工确认，可复制与导出' : '人工核对后解锁复制与导出'}
-                  </strong>
-                  <small>{current.manualDeliveryConfirmation?.confirmed ? '当前候选已解锁，自动校验结论仍保留' : '仅限当前用户与候选，自动校验结论保留'}</small>
-                </div>
-                {current.manualDeliveryConfirmation?.confirmed ? (
-                  <div className="manual-delivery-confirmation__action manual-delivery-confirmation__action--ready">
-                    <Button variant="secondary" icon={<Copy size={15} />} onClick={() => void copyConfirmedCandidate(current)}>复制全文</Button>
-                    <div className="export-menu">
-                      <Button icon={<Download size={15} />}>导出 <ChevronDown size={13} /></Button>
-                      <div className="export-menu__dropdown">
-                        {(['markdown', 'json', 'docx', 'pdf'] as const).map((format) => (
-                          <button type="button" key={format} onClick={() => exportAs(current, format)}>{format === 'markdown' ? 'Markdown' : format.toUpperCase()}</button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="manual-delivery-confirmation__action">
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={manualConfirmChecked}
-                        onChange={(event) => setManualConfirmChecked(event.target.checked)}
-                      />
-                      <span>我已核对事实、证据、身份与风险，并承担本次交付决定。</span>
-                    </label>
-                    <Button
-                      variant="secondary"
-                      icon={<CheckCircle2 size={15} />}
-                      disabled={!manualConfirmChecked}
-                      loading={manualConfirming}
-                      onClick={() => void confirmManualDelivery()}
-                    >
-                      确认并解锁
-                    </Button>
-                  </div>
-                )}
-              </section>
-            )}
 
             <NoteCard candidate={current} job={job} projectName={project?.name} copyEnabled={deliverable} />
 

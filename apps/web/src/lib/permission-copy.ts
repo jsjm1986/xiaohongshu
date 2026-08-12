@@ -40,7 +40,7 @@ export const PERMISSION_COPY: Record<string, PermissionCopy> = {
   'workspace.manage': { label: '管理工作区', hint: '改工作区名称、删除工作区', group: 'workspace' },
   'member.manage': { label: '管理成员', hint: '增删成员、改成员角色与细分权限', group: 'workspace' },
   'provider.manage': { label: '管理模型凭据', hint: '配置模型服务商与自带密钥(BYOK)', group: 'workspace' },
-  'quota.manage': { label: '管理用量额度', hint: '设置每月可用的生成额度', group: 'workspace' },
+  'quota.manage': { label: '管理用量额度', hint: '设置平台生成额度上限', group: 'workspace' },
   'project.read': { label: '查看项目', hint: '查看项目列表与项目配置', group: 'project' },
   'project.write': { label: '编辑项目', hint: '新建项目、修改项目配置与选题', group: 'project' },
   'project.delete': { label: '删除项目', hint: '删除项目(连带其下的内容与配置)', group: 'project' },

@@ -82,8 +82,6 @@ export function GenerationResultPage() {
   const [selectedId, setSelectedId] = useState("");
   const [revision, setRevision] = useState("");
   const [detailsOpen, setDetailsOpen] = useState(true);
-  const [manualConfirmChecked, setManualConfirmChecked] = useState(false);
-  const [manualConfirming, setManualConfirming] = useState(false);
   const toast = useToast();
   const navigate = useNavigate();
 
@@ -142,16 +140,12 @@ export function GenerationResultPage() {
       job?.candidates?.[0],
     [job, selectedId],
   );
-  useEffect(() => {
-    // Acknowledgement is candidate-scoped. Never carry an unchecked server
-    // decision or a local checkbox across candidate switches.
-    setManualConfirmChecked(false);
-  }, [selected?.id]);
+  // 交付判定只有两档:硬门禁 blocked 锁死,其余正式产物即可交付(deliveryReadiness
+  // 的既定决策)。人工确认的发起入口是永不可达的死分支,已按该决策清理;
+  // 历史确认记录仍随校验结论展示,不删审计痕迹。
   const readiness = deliveryReadiness(selected?.validation, { generationMode: selected?.generationMode, deliverability: selected?.artifactRealization?.deliverability });
   const publishable = readiness === "publishable";
-  const reviewable = readiness === "human_reviewable";
-  const manuallyConfirmed = reviewable && selected?.manualDeliveryConfirmation?.confirmed === true;
-  const deliverable = candidateDeliverable(selected?.validation, manuallyConfirmed, { generationMode: selected?.generationMode, deliverability: selected?.artifactRealization?.deliverability });
+  const deliverable = candidateDeliverable(selected?.validation, false, { generationMode: selected?.generationMode, deliverability: selected?.artifactRealization?.deliverability });
   const candidateCount = job?.candidates?.length ?? 0;
   const partiallyGenerated = candidateCount > 0 && candidateCount < 3;
   const formalReviewIssues = (selected?.validation?.issues ?? []).filter((issue) =>
@@ -228,22 +222,7 @@ export function GenerationResultPage() {
       return;
     }
     await navigator.clipboard.writeText(candidateToMarkdown(selected));
-    toast.push(manuallyConfirmed ? "完整内容已复制（人工确认交付）" : "完整内容已复制");
-  };
-
-  const confirmManualDelivery = async () => {
-    if (!job || !selected || !reviewable || manuallyConfirmed || !manualConfirmChecked || manualConfirming) return;
-    setManualConfirming(true);
-    try {
-      await api.generations.confirmManualDelivery(job.id, selected.id);
-      setJob(await api.generations.get(job.id));
-      setManualConfirmChecked(false);
-      // 成功状态在原交付栏内持续呈现，不再让用户追右上角的一闪而过提示。
-    } catch (error) {
-      toast.push(errorMessage(error, "人工交付确认失败"), "error");
-    } finally {
-      setManualConfirming(false);
-    }
+    toast.push("完整内容已复制");
   };
 
   const revisionBox = revisionBoxState(job, selected?.id);
@@ -333,8 +312,8 @@ export function GenerationResultPage() {
         actions={
           <>
             {!publishable && (
-              <Badge tone={manuallyConfirmed ? "warning" : "danger"}>
-                <TriangleAlert size={13} /> {manuallyConfirmed ? "自动校验需复核 · 已人工确认交付" : reviewable ? "自动校验需复核 · 确认后可复制与导出" : "存在硬阻断 · 必须修复"}
+              <Badge tone="danger">
+                <TriangleAlert size={13} /> 存在硬阻断 · 必须修复
               </Badge>
             )}
             {publishable && (
@@ -372,52 +351,6 @@ export function GenerationResultPage() {
 
       {!publishable && selected.validation && (
         <ValidationSummaryCard candidate={selected} />
-      )}
-
-      {reviewable && (
-        <section className={`manual-delivery-confirmation${manuallyConfirmed ? " is-confirmed" : ""}`} aria-label="人工交付确认">
-          <div className="manual-delivery-confirmation__summary">
-            <strong>
-              {manuallyConfirmed && <CheckCircle2 size={15} />}
-              {manuallyConfirmed ? "已人工确认，可复制与导出" : "人工核对后解锁复制与导出"}
-            </strong>
-            <small>{manuallyConfirmed ? "当前候选已解锁，自动校验结论仍保留" : "仅限当前用户与候选，自动校验结论保留"}</small>
-          </div>
-          {manuallyConfirmed ? (
-            <div className="manual-delivery-confirmation__action manual-delivery-confirmation__action--ready">
-              <Button variant="secondary" icon={<Clipboard size={15} />} onClick={copyContent}>复制全部</Button>
-              <div className="export-menu">
-                <Button icon={<Download size={15} />}>导出 <ChevronDown size={13} /></Button>
-                <div className="export-menu__dropdown">
-                  <button type="button" onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "markdown"))}><FileText size={15} />Markdown</button>
-                  <button type="button" onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "json"))}><FileJson size={15} />JSON</button>
-                  <button type="button" onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "docx"))}><FileText size={15} />DOCX</button>
-                  <button type="button" onClick={() => window.location.assign(api.generations.exportUrl(job.id, selected.id, "pdf"))}><FileText size={15} />PDF</button>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="manual-delivery-confirmation__action">
-              <label>
-                <input
-                  type="checkbox"
-                  checked={manualConfirmChecked}
-                  onChange={(event) => setManualConfirmChecked(event.target.checked)}
-                />
-                <span>我已核对事实、证据、身份与风险，并承担本次交付决定。</span>
-              </label>
-              <Button
-                variant="secondary"
-                icon={<CheckCircle2 size={15} />}
-                disabled={!manualConfirmChecked}
-                loading={manualConfirming}
-                onClick={() => void confirmManualDelivery()}
-              >
-                确认并解锁
-              </Button>
-            </div>
-          )}
-        </section>
       )}
 
       {job.releaseManifestId && <details className="generation-release-proof">

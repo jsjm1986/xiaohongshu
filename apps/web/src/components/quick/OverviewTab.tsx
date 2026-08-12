@@ -228,7 +228,7 @@ export function OverviewTab({ project, busy, setBusy, fail, goTo, onProjectUpdat
           <V2InstrumentCell
             tone={quotaInfo.tone}
             icon={<Gauge size={14} />}
-            label="本月额度"
+            label="平台额度"
             value={quotaInfo.value}
             unit={quotaInfo.unit}
             note={quotaInfo.note}

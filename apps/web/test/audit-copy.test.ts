@@ -42,13 +42,19 @@ test('后端写入的每条 action 都有中文文案', () => {
   assert.deepEqual(missing, [], `以下 action 缺少中文文案:${missing.join(', ')}`);
 });
 
+/*
+  后端已停写、但生产库里存在历史行的动作:文案必须保留,否则历史审计降级成
+  裸标识符。往这里加名字前确认两件事:后端确实不再写入,且历史行确实存在过。
+*/
+const HISTORICAL_ACTIONS = new Set(['generation.manual-delivery-confirm']);
+
 test('文案表里没有后端已不再写入的僵尸条目', () => {
   /*
     反向检查会误伤:approveResource 用 `${action}.approve` 拼接,静态正则扫不到
-    这些。所以豁免 .approve 后缀,其余必须能在后端源码里找到出处。
+    这些。所以豁免 .approve 后缀与显式历史名单,其余必须能在后端源码里找到出处。
   */
   const stale = Object.keys(AUDIT_ACTION_COPY).filter(
-    (action) => !action.endsWith('.approve') && !backendActions.includes(action),
+    (action) => !action.endsWith('.approve') && !HISTORICAL_ACTIONS.has(action) && !backendActions.includes(action),
   );
   assert.deepEqual(stale, [], `以下 action 在后端已找不到出处:${stale.join(', ')}`);
 });

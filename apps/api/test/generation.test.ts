@@ -812,12 +812,13 @@ test('formula registry, settings and deterministic generation form one working f
   const unconfirmedMarkdown = await request(`/api/generations/${jobId}/candidates/${encodeURIComponent(exportCandidateId)}/export?format=markdown`);
   assert.equal(unconfirmedMarkdown.response.status, 400);
   assert.match(String(unconfirmedMarkdown.body.message), /预览不是正式成品|禁止导出/u);
+  // 人工确认的发起端点已按交付政策移除(正式产物即可交付;预览与硬门禁靠
+  // 导出层拒绝,不再有"确认解锁"这条路)。路由必须整体不存在。
   const exportConfirmation = await request(
     `/api/generations/${jobId}/candidates/${encodeURIComponent(exportCandidateId)}/manual-delivery-confirmation`,
     { method: 'POST', body: JSON.stringify({ acknowledged: true }) },
   );
-  assert.equal(exportConfirmation.response.status, 400);
-  assert.match(String(exportConfirmation.body.message), /预览不是正式成品|不能通过人工确认/u);
+  assert.equal(exportConfirmation.response.status, 404);
   for (const format of ['markdown', 'json', 'docx', 'pdf']) {
     const rejected = await request(`/api/generations/${jobId}/candidates/${encodeURIComponent(exportCandidateId)}/export?format=${format}`);
     assert.equal(rejected.response.status, 400, `${format} 不得导出 preview`);
@@ -860,13 +861,6 @@ test('formula registry, settings and deterministic generation form one working f
       && issue.severity === 'warning'
       && issue.disposition === 'review'));
 
-  const unnecessaryConfirmation = await request(
-    `/api/generations/${jobId}/candidates/${encodeURIComponent(deliveryCandidateId)}/manual-delivery-confirmation`,
-    { method: 'POST', body: JSON.stringify({ acknowledged: true }) },
-  );
-  assert.equal(unnecessaryConfirmation.response.status, 400);
-  assert.match(String(unnecessaryConfirmation.body.message), /无需人工交付确认/u);
-
   deliveryContent.validation = {
     valid: true,
     qualityStatus: 'passed',
@@ -883,12 +877,6 @@ test('formula registry, settings and deterministic generation form one working f
   const blockedExport = await request(`${deliveryExportPath}?format=json`);
   assert.equal(blockedExport.response.status, 400);
   assert.match(String(blockedExport.body.message), /硬门禁|禁止导出/u);
-  const blockedConfirmation = await request(
-    `/api/generations/${jobId}/candidates/${encodeURIComponent(deliveryCandidateId)}/manual-delivery-confirmation`,
-    { method: 'POST', body: JSON.stringify({ acknowledged: true }) },
-  );
-  assert.equal(blockedConfirmation.response.status, 400);
-  assert.match(String(blockedConfirmation.body.message), /不可人工覆盖/u);
 
   deliveryDatabase.prepare('UPDATE content_packages SET content_json=? WHERE id=?')
     .run(deliveryRow.content_json, deliveryRow.id);

@@ -237,13 +237,14 @@ test('SaaS 的正式复核候选无需人工解锁，reader 直接投影为可�
   };
   db.prepare('UPDATE content_packages SET content_json=? WHERE id=?').run(JSON.stringify(reviewable), `${jobId}-pkg`);
 
+  // 人工确认的发起端点已按交付政策移除(正式产物即可交付):路由必须不存在,
+  // 而不是返回业务错误——留着 400 的端点等于流程还在,只是被劝退。
   const path = `/api/generations/${jobId}/candidates/${jobId}-cand/manual-delivery-confirmation`;
-  const unnecessary = await request(path, {
+  const removed = await request(path, {
     method: 'POST',
     body: JSON.stringify({ acknowledged: true }),
   }, saasCookie, saasCsrf);
-  assert.equal(unnecessary.response.status, 400);
-  assert.match(String(unnecessary.body.message), /无需人工交付确认/u);
+  assert.equal(removed.response.status, 404);
 
   const refreshed = await request(`/api/generations/${jobId}/reader`, {}, saasCookie, '');
   assert.equal(refreshed.response.status, 200);
@@ -264,11 +265,6 @@ test('SaaS 的正式复核候选无需人工解锁，reader 直接投影为可�
   preview.validation = { valid: true, qualityStatus: 'passed', repairAttempts: 0, issues: [] };
   db.prepare('UPDATE content_packages SET content_json=? WHERE id=?').run(JSON.stringify(preview), `${jobId}-pkg`);
 
-  const rejectedPreview = await request(path, {
-    method: 'POST', body: JSON.stringify({ acknowledged: true }),
-  }, saasCookie, saasCsrf);
-  assert.equal(rejectedPreview.response.status, 400);
-  assert.match(String(rejectedPreview.body.message), /确定性预览不是正式成品/u);
   const previewReader = await request(`/api/generations/${jobId}/reader`, {}, saasCookie, '');
   assert.equal(previewReader.body.candidates[0].manualDeliveryConfirmation, undefined, '切换为 preview 后旧确认必须失效');
 });

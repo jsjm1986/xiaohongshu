@@ -13,7 +13,7 @@ export type SqlValue = string | number | bigint | Uint8Array | null;
  * 无关的测试变红——那不是回归信号,是维护噪声。测试断言这个常量,真正想验的
  * 「迁移到最新且表结构对得上」不变。
  */
-export const SCHEMA_VERSION = 29;
+export const SCHEMA_VERSION = 30;
 
 @Injectable()
 export class DatabaseService implements OnModuleDestroy {
@@ -1531,6 +1531,61 @@ export class DatabaseService implements OnModuleDestroy {
       this.db.exec('PRAGMA user_version = 29');
     });
     if (version < 29) version = 29;
+
+    if (version < 30) this.transaction(() => {
+      /*
+       * content_json 整包单列(实测单包可达 1MB)曾让所有热路径付 parse 税:
+       * 列表轮询对每个非 passed 任务全包 parse 重投影;按 candidateId 找包是
+       * 顺序全量 parse。物化两列消掉这两处大头(写包同一事务落值,读路径优先
+       * 走小列,缺失回退旧路径——历史损坏行不阻断):
+       * - candidate_id:直查代替顺序扫描;
+       * - issue_summary_json:重投影只需要 {valid, issues[{code,severity,
+       *   disposition}]},几百字节代替 1MB。
+       * 回填遍历存量包 parse 一次;parse 失败的行留 NULL,读取回退兜底。
+       */
+      const hasPackages = Boolean(
+        this.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='content_packages'").get(),
+      );
+      if (hasPackages) {
+        const columns = new Set(
+          (this.prepare("SELECT name FROM pragma_table_info('content_packages')").all() as { name: string }[])
+            .map((row) => row.name),
+        );
+        if (!columns.has('candidate_id')) this.db.exec('ALTER TABLE content_packages ADD COLUMN candidate_id TEXT');
+        if (!columns.has('issue_summary_json')) this.db.exec('ALTER TABLE content_packages ADD COLUMN issue_summary_json TEXT');
+        // 迁移测试的 v3 快照库没有 job_id 列(真实老库不可能没有,但迁移链
+        // 必须能跑完 fixture,见本文件其他迁移的同款防御);缺列时只建单列索引。
+        if (columns.has('job_id')) {
+          this.db.exec('CREATE INDEX IF NOT EXISTS content_packages_candidate_idx ON content_packages(job_id, candidate_id)');
+        } else {
+          this.db.exec('CREATE INDEX IF NOT EXISTS content_packages_candidate_idx ON content_packages(candidate_id)');
+        }
+        // 同款 fixture 防御:v3 快照库连 content_json 列都没有,回填只对真实形状执行。
+        const rows = columns.has('content_json')
+          ? this.prepare('SELECT id, content_json FROM content_packages WHERE candidate_id IS NULL').all() as Array<{ id: string; content_json: string }>
+          : [];
+        const update = this.prepare('UPDATE content_packages SET candidate_id=?, issue_summary_json=? WHERE id=?');
+        for (const row of rows) {
+          try {
+            const content = JSON.parse(row.content_json) as {
+              candidateId?: string;
+              validation?: { valid?: boolean; issues?: Array<{ code?: string; severity?: string; disposition?: string }> };
+            };
+            const summary = content.validation
+              ? JSON.stringify({
+                valid: content.validation.valid === true,
+                issues: (content.validation.issues ?? []).map((issue) => ({
+                  code: issue.code, severity: issue.severity, disposition: issue.disposition,
+                })),
+              })
+              : null;
+            update.run(content.candidateId ?? null, summary, row.id);
+          } catch { /* 损坏行留 NULL,读取路径回退整包 parse */ }
+        }
+      }
+      this.db.exec('PRAGMA user_version = 30');
+    });
+    if (version < 30) version = 30;
   }
 
   onModuleDestroy(): void {

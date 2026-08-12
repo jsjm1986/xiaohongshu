@@ -75,7 +75,7 @@ function QuickShellContent() {
             <NavLink
               to={SAAS_ACCOUNT_PATH}
               className={`qs-quota qs-quota--${cell.tone}`}
-              title={cell.note ?? '本月剩余生成次数'}
+              title={cell.note ?? '平台额度剩余生成次数'}
             >
               <Gauge size={13} />
               <strong>{cell.value}</strong>

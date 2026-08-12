@@ -34,6 +34,8 @@ export const AUDIT_ACTION_COPY: Record<string, AuditCopy> = {
   'workspace.create': { label: '创建工作区' },
   'workspace.update': { label: '修改工作区' },
   'workspace.delete': { label: '删除工作区' },
+  'workspace.export': { label: '导出工作区全量数据' },
+  'workspace.purge': { label: '物理清除工作区' },
   'member.upsert': { label: '设置成员角色与权限' },
   'member.delete': { label: '移除成员' },
   'user.create': { label: '创建用户' },
@@ -60,6 +62,8 @@ export const AUDIT_ACTION_COPY: Record<string, AuditCopy> = {
   // 项目首次需要公式时由系统建 v1,不是用户点出来的,所以是 automatic。
   'formula.bootstrap': { label: '自动创建初始公式版本', automatic: true },
   'generation.create': { label: '发起生成' },
+  // 历史动作:发起入口已按交付政策移除(正式产物即可交付),但生产库里的
+  // 历史确认行是真实发生过的交付决定,必须保持可读。
   'generation.manual-delivery-confirm': { label: '人工确认交付未通过候选' },
   'agent-harness.create': { label: '发起 Agent 独立创作' },
   'agent-harness.retry': { label: '重新运行 Agent 独立创作' },
