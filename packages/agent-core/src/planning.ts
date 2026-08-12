@@ -1547,7 +1547,7 @@ function deriveThreadFunction(
  */
 function deriveThreadNextStep(gap: InformationGapPlanningCard): string {
   const grounded = Boolean((gap.answer ?? gap.framework) && gap.evidenceIds.length > 0);
-  if (grounded) return "按证据来源核验自己的适用条件";
+  if (grounded) return "核实自己的适用条件";
   const subject = (gap.question || gap.label).trim();
   if (subject) {
     const base = `向项目方可追责渠道核实“${subject}”`;

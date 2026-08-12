@@ -9,13 +9,17 @@ import {
   createDefaultGenerationConfig,
   DEFAULT_FORMULA_VERSION,
   evaluateGapCoverageRealization,
+  evidenceSensitiveRequiredClaim,
   indexKnowledgeSource,
   mergeContentByChannels,
   normalizeProjectCreativeBlueprint,
   parseGenerationDraft,
+  parseStagedCommentGrowth,
   parseGenerationPatch,
   planTopicOrchestrations,
   selectKnowledgeContext,
+  verifyOrgAnswerSelfReview,
+  STAGED_COMMENTS_JSON_SCHEMA,
   validateGenerationDraft,
 } from "../src/index.js";
 import type { GenerationDraft, InformationGap, TopicOpportunity } from "../src/index.js";
@@ -44,6 +48,94 @@ function validDraftJson(body = "这是有依据且保留边界的正文内容，
 }
 
 describe("structured output parsing and validation", () => {
+  it("mechanically enforces complete AI self-review and scoped verbatim evidence", () => {
+    const answer = "当前口径是甲。具体情况仍需单独确认。";
+    const evidence = [{ id: "evidence_1", quote: "已确认口径是甲，适用范围有限。" }];
+    expect(verifyOrgAnswerSelfReview(answer, {
+      status: "accept",
+      claims: [{
+        statement: "当前口径是甲。",
+        classification: "factual_assertion",
+        supported: true,
+        evidenceId: "evidence_1",
+        quote: "口径是甲",
+      }, {
+        statement: "具体情况仍需单独确认。",
+        classification: "hedge_or_unknown",
+        supported: null,
+        evidenceId: null,
+        quote: null,
+      }],
+      reasons: [],
+    }, evidence)).toEqual({ accepted: true });
+
+    expect(verifyOrgAnswerSelfReview(answer, {
+      status: "accept",
+      claims: [{
+        statement: answer,
+        classification: "factual_assertion",
+        supported: true,
+        evidenceId: "evidence_1",
+        quote: "口径是甲",
+      }],
+      reasons: [],
+    }, evidence)).toEqual({ accepted: false, reason: "self_review_sentence_coverage_mismatch" });
+
+    expect(verifyOrgAnswerSelfReview("当前口径是乙。", {
+      status: "accept",
+      claims: [{
+        statement: "当前口径是乙。",
+        classification: "factual_assertion",
+        supported: true,
+        evidenceId: "evidence_1",
+        quote: "不存在的引文",
+      }],
+      reasons: [],
+    }, evidence)).toEqual({ accepted: false, reason: "self_review_evidence_invalid:0" });
+
+    expect(verifyOrgAnswerSelfReview("当前不能确认。", {
+      status: "reject",
+      claims: [{
+        statement: "当前不能确认。",
+        classification: "hedge_or_unknown",
+        supported: null,
+        evidenceId: null,
+        quote: null,
+      }],
+      reasons: ["审核不通过"],
+    }, evidence)).toEqual({ accepted: false, reason: "审核不通过" });
+  });
+
+  it("declares growth level and stopReason in the strict response schema", () => {
+    const threadItems = ((STAGED_COMMENTS_JSON_SCHEMA.properties as any).threads.items.properties.followUps.items);
+    expect(threadItems.properties.level.enum).toEqual(["L1", "L2", "L3"]);
+    expect(threadItems.properties.stopReason.enum).toEqual(["answered", "unknown_pending_evidence", "route_to_professional"]);
+  });
+
+  it("parses growth as follow-up patches even when a frozen root field is malformed", () => {
+    expect(parseStagedCommentGrowth(JSON.stringify({
+      threads: [
+        { id: "thread_1", followUps: [{ question: "那恢复时间呢？", answer: "", level: "L1" }] },
+        // organic reaction roots frequently omitted question/answer in real output;
+        // growth owns neither field, so this remains a valid empty patch.
+        { id: "thread_2", answer: null, followUps: [] },
+      ],
+    }), ["thread_1", "thread_2"])).toEqual([
+      { id: "thread_1", followUps: [{ question: "那恢复时间呢？", answer: "", kind: undefined, boundary: undefined, level: "L1", stopReason: undefined }] },
+      { id: "thread_2", followUps: [] },
+    ]);
+  });
+
+  it("classifies only evidence-sensitive required wording as factual preflight material", () => {
+    expect(evidenceSensitiveRequiredClaim("2分钟建立清单")).toBe(true);
+    expect(evidenceSensitiveRequiredClaim("核心功能免费且无广告")).toBe(true);
+    expect(evidenceSensitiveRequiredClaim("先判断问题类型")).toBe(false);
+    expect(evidenceSensitiveRequiredClaim("必须说明星级", [{
+      requiresEvidence: true,
+      terms: ["星级"],
+    }])).toBe(true);
+  });
+
   it("parses JSON code fences, normalizes hashtags and validates nested threads", () => {
     const draft = parseGenerationDraft(`Here is the result:\n\`\`\`json\n${JSON.stringify(validDraftJson())}\n\`\`\``);
     expect(draft.content.H.hashtags).toEqual(["信息", "选择"]);
@@ -405,6 +497,58 @@ describe("structured output parsing and validation", () => {
       }],
     });
     expect(issues).toContainEqual(expect.objectContaining({ code: "evidence_role_cannot_support_fact", severity: "error" }));
+  });
+
+  it("deduplicates repeated scope/caveat warnings per evidence without hiding distinct evidence sources", () => {
+    const config = createDefaultGenerationConfig(project, DEFAULT_FORMULA_VERSION);
+    config.content.bodyMinChars = 1;
+    config.content.bodyMaxChars = 500;
+    config.content.hashtagMin = 0;
+    config.content.commentThreadMin = 1;
+    const value = validDraftJson("支持公开查询。也支持现场查询。");
+    value.evidenceIds = ["evidence_d1", "evidence_d2"];
+    value.reasoning = [{
+      statement: "支持公开查询。",
+      location: "N.body",
+      occurrence: { field: "body" },
+      status: "fact",
+      evidenceIds: ["evidence_d1"],
+      sourceSpans: [
+        { evidenceId: "evidence_d1", quote: "支持公开查询" },
+        // A repeated exact span used to emit the same two warnings twice.
+        { evidenceId: "evidence_d1", quote: "支持公开查询" },
+      ],
+    }, {
+      statement: "也支持现场查询。",
+      location: "N.body",
+      occurrence: { field: "body" },
+      status: "fact",
+      evidenceIds: ["evidence_d2"],
+      sourceSpans: [{ evidenceId: "evidence_d2", quote: "也支持现场查询" }],
+    }] as any;
+    const issues = validateGenerationDraft({
+      draft: parseGenerationDraft(JSON.stringify(value)),
+      config,
+      ledger: buildKnowledgeLedger([]),
+      allowedEvidenceIds: ["evidence_d1", "evidence_d2"],
+      evidenceSources: {
+        evidence_d1: "支持公开查询",
+        evidence_d2: "也支持现场查询",
+      },
+      evidenceReferences: [{
+        id: "evidence_d1", documentId: "d1", path: "facts-1.md", kind: "fact",
+        evidenceStatus: "observed", scope: ["仅限甲渠道"], caveats: ["不可外推"],
+      }, {
+        id: "evidence_d2", documentId: "d2", path: "facts-2.md", kind: "fact",
+        evidenceStatus: "observed", scope: ["仅限乙渠道"], caveats: ["不可外推"],
+      }],
+    });
+    const scopes = issues.filter((issue) => issue.code === "evidence_scope_not_visible");
+    const caveats = issues.filter((issue) => issue.code === "evidence_caveat_not_visible");
+    expect(scopes).toHaveLength(2);
+    expect(caveats).toHaveLength(2);
+    expect(scopes.map((issue) => issue.message).join("\n")).toContain("evidence_d1");
+    expect(scopes.map((issue) => issue.message).join("\n")).toContain("evidence_d2");
   });
 
   it("labels creative experience and reputation as warnings but still rejects an unaccountable testimonial answer", () => {

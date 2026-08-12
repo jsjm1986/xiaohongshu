@@ -663,6 +663,21 @@ describe("P4 repair loop end-to-end", () => {
     }));
   }
 
+  function acceptedOrgReview(answer: string) {
+    const statements = answer.split(/(?<=[。！？!?；;])|\n+/u).map((item) => item.trim()).filter(Boolean);
+    return {
+      status: "accept" as const,
+      claims: statements.map((statement) => ({
+        statement, classification: "hedge_or_unknown" as const, supported: null, evidenceId: null, quote: null,
+      })),
+      reasons: [],
+    };
+  }
+
+  function selfReviewedAnswers(request: ModelGenerationRequest, answer: string) {
+    return stagedThreadIds(request).map((id) => ({ id, answer, review: acceptedOrgReview(answer) }));
+  }
+
   const coreResponse = (body: string) => JSON.stringify({
     content: {
       H: { hashtags: ["方案选择", "信息", "核验"] },
@@ -684,7 +699,7 @@ describe("P4 repair loop end-to-end", () => {
           return { text: JSON.stringify({ threads: stagedThreads(request) }), raw: {} };
         }
         if (purpose === "generate_org_answers") {
-          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "先看自己的情况。" })) }), raw: {} };
+          return { text: JSON.stringify({ answers: selfReviewedAnswers(request, "先看自己的情况。") }), raw: {} };
         }
         if (purpose === "generate_ledger") {
           return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
@@ -727,7 +742,7 @@ describe("P4 repair loop end-to-end", () => {
           return { text: JSON.stringify({ threads: stagedThreads(request) }), raw: {} };
         }
         if (purpose === "generate_org_answers") {
-          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "先看自己的情况。" })) }), raw: {} };
+          return { text: JSON.stringify({ answers: selfReviewedAnswers(request, "先看自己的情况。") }), raw: {} };
         }
         if (purpose === "generate_ledger") {
           return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };

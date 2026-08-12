@@ -98,6 +98,21 @@ function stagedThreadIds(request: ModelGenerationRequest): string[] {
   return [...new Set([...requestText(request).matchAll(/"id"\s*:\s*"([^"]*_thread_\d+)"/gu)].map((match) => match[1]!))];
 }
 
+function acceptedOrgReview(answer: string) {
+  const statements = answer.split(/(?<=[。！？!?；;])|\n+/u).map((item) => item.trim()).filter(Boolean);
+  return {
+    status: "accept" as const,
+    claims: statements.map((statement) => ({
+      statement, classification: "hedge_or_unknown" as const, supported: null, evidenceId: null, quote: null,
+    })),
+    reasons: [],
+  };
+}
+
+function selfReviewedAnswers(request: ModelGenerationRequest, answer: string) {
+  return stagedThreadIds(request).map((id) => ({ id, answer, review: acceptedOrgReview(answer) }));
+}
+
 function stagedThreadSkeletons(request: ModelGenerationRequest) {
   return stagedThreadIds(request).map((id, index) => ({
     id,
@@ -196,8 +211,15 @@ describe("Cref contract v1.1 binding", () => {
           // 机构答复调用只回可见答复;首评仅 publisher 调用产出。
           return {
             text: JSON.stringify({
-              answers: stagedThreadIds(request).map((id) => ({ id, answer: "按资料逐项核实。" })),
-              ...(request.metadata?.identity === "publisher" ? { ownedFirstComment: "置顶：价格以当期为准，详见 evidence_d1。" } : {}),
+              answers: selfReviewedAnswers(request, "按资料逐项核实。"),
+              ...(request.metadata?.identity === "publisher" ? {
+                ownedFirstComment: "当前信息仍需单独确认。",
+                ownedFirstCommentReview: {
+                  status: "accept",
+                  claims: [{ statement: "当前信息仍需单独确认。", classification: "hedge_or_unknown", supported: null, evidenceId: null, quote: null }],
+                  reasons: [],
+                },
+              } : {}),
             }),
             raw: {},
           };
@@ -298,7 +320,7 @@ describe("Cref contract v1.1 binding", () => {
           return { text: JSON.stringify({ threads }), raw: {} };
         }
         if (purpose === "generate_org_answers") {
-          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "按资料逐项核实。" })) }), raw: {} };
+          return { text: JSON.stringify({ answers: selfReviewedAnswers(request, "按资料逐项核实。") }), raw: {} };
         }
         if (purpose === "generate_ledger") {
           return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
@@ -408,8 +430,10 @@ describe("Cref contract v1.1 parse compatibility", () => {
 
 describe("Cref contract v1.1 prompt contract", () => {
   it("bumps the prompt contract version and exposes the new optional staged-schema fields", () => {
-    // 2.7.0: topology-specific projection and low-pressure organization disclosure cards.
-    expect(PROMPT_CONTRACT_VERSION).toBe("2.7.0");
+    // 2.8.0: org answers carry a same-call per-sentence evidence self-review
+    // (2A-O/2B-O schema), growth parses as followUps-only patches, and the
+    // network editor may no longer rewrite accountable answers.
+    expect(PROMPT_CONTRACT_VERSION).toBe("2.8.0");
     const properties = STAGED_COMMENTS_JSON_SCHEMA.properties as Record<string, any>;
     expect(STAGED_COMMENTS_JSON_SCHEMA.required).toEqual(["disclaimer", "threads"]);
     expect(properties.ownedFirstComment).toEqual({ type: "string" });
@@ -438,9 +462,11 @@ describe("Cref contract v1.1 prompt contract", () => {
     const orgProperties = STAGED_ORG_ANSWERS_JSON_SCHEMA.properties as Record<string, any>;
     expect(STAGED_ORG_ANSWERS_JSON_SCHEMA.required).toEqual(["answers"]);
     expect(orgProperties.ownedFirstComment).toEqual({ type: "string" });
-    expect(orgProperties.answers.items.required).toEqual(["id", "answer"]);
+    expect(orgProperties.answers.items.required).toEqual(["id", "answer", "review"]);
     expect(orgProperties.answers.items.properties.answerKind).toEqual({ enum: ["question", "answer", "follow_up", "clarification"] });
     expect(orgProperties.answers.items.properties.boundary).toEqual({ type: "string" });
+    expect(orgProperties.answers.items.properties.review.required).toEqual(["status", "claims", "reasons"]);
+    expect(orgProperties.ownedFirstCommentReview.required).toEqual(["status", "claims", "reasons"]);
   });
 
   it("places the large stable knowledge prefix before candidate-specific orchestration", () => {
@@ -558,7 +584,7 @@ describe("Cref contract v1.1 staged prompt text", () => {
       questionIntent: "哪些条件影响适用性？",
       answerRequirements: [],
       followUpIntent: "",
-      nextStep: "按证据来源核验自己的适用条件",
+      nextStep: "核实自己的适用条件",
       sourceClusterIds: [],
       evidenceIds: [],
       boundaryRequired: false,

@@ -12,12 +12,15 @@ import {
   evaluateGapCoverageRealization,
   mergeCrefPatchById,
   normalizeContentValidationIssue,
+  normalizePublicCommentBoundary,
   parseStagedCommentEditor,
+  publicCommentSurfaceReasons,
   readerExchangeContinuesTopic,
   parseGenerationDraft,
   parseGenerationPatch,
   parseJsonObject,
   parseStagedCommentCopy,
+  parseStagedCommentGrowth,
   parseStagedCommentNetworkEditor,
   parseStagedCommentReaders,
   parseStagedCoreCopy,
@@ -27,6 +30,7 @@ import {
   STAGED_COMMENT_DISCLAIMER,
   type StagedCommentCopy,
   type StagedOrgAnswersCopy,
+  verifyOrgAnswerSelfReview,
   validateGenerationDraft,
   validatePublishingTopologyCopy,
 } from "./content.js";
@@ -1736,7 +1740,9 @@ function bindDialogueProvenance(
       // fall back to the planned reply boundary. A boundary is never invented.
       kind: base.kind ?? "question" as const,
       answerKind: base.answerKind ?? "answer" as const,
-      boundary: ownsPrimaryGap ? (base.boundary ?? planned.replyPlan?.boundary) : undefined,
+      boundary: ownsPrimaryGap
+        ? normalizePublicCommentBoundary(base.boundary ?? planned.replyPlan?.boundary)
+        : undefined,
       postingIdentity: planned.postingIdentity,
       answerIdentity: threadKind === "reader_exchange"
         ? "simulated_reader" as const
@@ -2237,7 +2243,9 @@ function answerRealizationFor(
   if (related.some((issue) => issue.code === "model_org_answer_skipped_no_evidence")) {
     return { availability: "withheld_no_evidence", reasonCode: "model_org_answer_skipped_no_evidence", stage: "org_answer" };
   }
-  const failed = related.find((issue) => issue.code === "model_org_answer_failed" || issue.code === "model_host_answer_failed");
+  const failed = related.find((issue) => issue.code === "model_org_answer_failed"
+    || issue.code === "model_org_answer_self_review_rejected"
+    || issue.code === "model_host_answer_failed");
   if (failed) return {
     availability: failed.origin === "infrastructure" ? "failed_provider" : "withheld_unsupported",
     reasonCode: failed.code,
@@ -2447,6 +2455,9 @@ function readerStageEditorialReasons(
     }
     const kind = planned.threadKind ?? "org_answer";
     if (QUESTIONNAIRE_QUESTION.test(thread.question)) reasons.push(`线程 ${thread.id} 使用采访或审核清单腔`);
+    for (const reason of publicCommentSurfaceReasons(`${thread.question}\n${thread.answer}`)) {
+      reasons.push(`线程 ${thread.id} 的读者公开文案${reason}`);
+    }
     if (kind === "org_answer") {
       const card = cards.get(planned.primaryGapId);
       if (!card || !questionMatchesPlannedGap(thread.question, card)) reasons.push(`线程 ${thread.id} 偏离冻结主缺口 ${planned.primaryGapId}`);
@@ -2473,7 +2484,6 @@ function acceptReaderStageEdit(
   claimRules: Parameters<typeof guardedReplyIdentitiesForQuestion>[1],
 ): ReturnType<typeof parseStagedCommentReaders> {
   if (edited.threads.length !== original.threads.length) throw new CommentEditorContractError("Reader editor changed thread count.");
-  const cards = new Map((plan.gapPlanningCards ?? []).map((card) => [card.gapId, card]));
   const threads = edited.threads.map((thread, index) => {
     const before = original.threads[index]!;
     const planned = plan.dialogueThreads[index]!;
@@ -2481,18 +2491,21 @@ function acceptReaderStageEdit(
     const kind = planned.threadKind ?? "org_answer";
     if (kind !== "reader_exchange" && thread.answer.trim()) throw new CommentEditorContractError(`Reader editor wrote an answer for ${thread.id}.`);
     if (kind === "reader_exchange" && !thread.answer.trim()) throw new CommentEditorContractError(`Reader editor removed reader-B speech from ${thread.id}.`);
-    // Question meaning and responder suitability are judged by the reader
-    // editor itself. The server owns only thread identity and answer topology;
-    // it must not reinterpret another industry's language with fixed terms.
     return { ...before, question: thread.question, answer: thread.answer };
   });
-  return { threads };
+  const candidate = { threads };
+  const remaining = readerStageEditorialReasons(candidate, plan, claimRules);
+  if (remaining.length) {
+    throw new CommentEditorContractError(`Reader editor left frozen-contract defects: ${remaining.join("; ")}`);
+  }
+  return candidate;
 }
 
 /** Server-owned trigger for complete-network editing; no vocabulary is treated as a quality score. */
 export function commentNetworkEditorialReasons(
   comments: StagedCommentCopy,
   plan: OrchestrationPlan,
+  claimRules: Parameters<typeof guardedReplyIdentitiesForQuestion>[1] = [],
 ): string[] {
   const reasons: string[] = [];
   const seenAnswers = new Map<string, string>();
@@ -2518,11 +2531,23 @@ export function commentNetworkEditorialReasons(
       else seenAnswers.set(compactAnswer, thread.id);
     }
     const kind = planned.threadKind ?? "org_answer";
+    const publicNodes = [thread.question, thread.answer, thread.boundary ?? "",
+      ...thread.followUps.flatMap((followUp) => [followUp.question, followUp.answer, followUp.boundary ?? ""])];
+    for (const reason of publicNodes.flatMap(publicCommentSurfaceReasons)) {
+      reasons.push(`线程 ${thread.id} 的公开文案${reason}`);
+    }
     if (kind === "org_answer") {
       const card = plan.gapPlanningCards?.find((item) => item.gapId === planned.primaryGapId);
       if (card && !questionMatchesPlannedGap(thread.question, card)) {
         reasons.push(`线程 ${thread.id} 的问题偏离冻结主缺口 ${card.gapId}`);
       }
+      const guarded = guardedReplyIdentitiesForQuestion(thread.question, claimRules);
+      if ([...guarded].some((identity) => identity !== planned.postingIdentity)) {
+        reasons.push(`线程 ${thread.id} 的问题改变了冻结答复身份`);
+      }
+    }
+    if (kind === "host_reply" && guardedReplyIdentitiesForQuestion(thread.question, claimRules).size) {
+      reasons.push(`线程 ${thread.id} 的问题越过楼主个人事实边界`);
     }
     if (kind === "reader_exchange" && thread.question.trim() && thread.answer.trim()
       && !readerExchangeContinuesTopic(thread.question, thread.answer)) {
@@ -2548,11 +2573,10 @@ function acceptCommentNetworkEdit(
   original: StagedCommentCopy,
   edited: ReturnType<typeof parseStagedCommentNetworkEditor>,
   plan: OrchestrationPlan,
-  references: EvidenceReference[],
+  claimRules: Parameters<typeof guardedReplyIdentitiesForQuestion>[1],
 ): StagedCommentCopy {
   if (edited.disclaimer !== original.disclaimer) throw new CommentEditorContractError("Comment editor changed the deterministic disclaimer.");
   if (edited.threads.length !== original.threads.length) throw new CommentEditorContractError("Comment editor changed thread count.");
-  const cards = new Map((plan.gapPlanningCards ?? []).map((card) => [card.gapId, card]));
   const threads = edited.threads.map((thread, index) => {
     const before = original.threads[index]!;
     const planned = plan.dialogueThreads[index]!;
@@ -2566,10 +2590,13 @@ function acceptCommentNetworkEdit(
       if (before.answer.trim() && !thread.answer.trim()) {
         throw new CommentEditorContractError(`Comment editor removed an available organization answer from ${thread.id}.`);
       }
-      // Evidence semantics are owned by the downstream AI claim judge. The
-      // network editor may naturalize an existing accountable answer, but may
-      // neither manufacture one for an unavailable node nor erase one that the
-      // accountable answer agent already produced.
+      if (thread.answer !== before.answer) {
+        throw new CommentEditorContractError(`Comment editor changed self-reviewed organization copy in ${thread.id}.`);
+      }
+      if (thread.followUps.some((followUp, followUpIndex) =>
+        followUp.answer !== before.followUps[followUpIndex]?.answer)) {
+        throw new CommentEditorContractError(`Comment editor changed a self-reviewed organization follow-up in ${thread.id}.`);
+      }
     }
     if (kind === "organic_reaction" && (thread.answer.trim() || thread.followUps.length)) throw new CommentEditorContractError(`Comment editor expanded organic reaction ${thread.id}.`);
     if (kind === "host_reply" && thread.followUps.length) throw new CommentEditorContractError(`Comment editor expanded host thread ${thread.id}.`);
@@ -2580,7 +2607,24 @@ function acceptCommentNetworkEdit(
       followUps: thread.followUps.map((followUp, followUpIndex) => ({ ...before.followUps[followUpIndex]!, ...followUp })),
     };
   });
-  return { ...original, threads };
+  const candidate = { ...original, threads };
+  const originalReasons = commentNetworkEditorialReasons(original, plan, claimRules);
+  const remaining = commentNetworkEditorialReasons(candidate, plan, claimRules);
+  const introduced = remaining.filter((reason) => !originalReasons.includes(reason));
+  if (introduced.length || remaining.length > originalReasons.length) {
+    throw new CommentEditorContractError(`Comment editor introduced or worsened defects: ${introduced.join("; ") || remaining.join("; ")}`);
+  }
+  const publicLeaks = candidate.threads.flatMap((thread) => [
+    thread.question, thread.answer, thread.boundary ?? "",
+    ...thread.followUps.flatMap((followUp) => [followUp.question, followUp.answer, followUp.boundary ?? ""]),
+  ]).flatMap(publicCommentSurfaceReasons);
+  if (publicLeaks.length) {
+    throw new CommentEditorContractError(`Comment editor left public-language leaks: ${[...new Set(publicLeaks)].join("; ")}`);
+  }
+  if (edited.assessment.status === "pass" && remaining.length) {
+    throw new CommentEditorContractError(`Comment editor reported pass with unresolved defects: ${remaining.join("; ")}`);
+  }
+  return candidate;
 }
 
 /** The editor returned valid JSON but attempted to renegotiate a server-owned contract. */
@@ -3215,15 +3259,43 @@ export class ContentGenerationAgent implements GenerationEngine {
           });
           const orgSide = parseStagedOrgAnswers(orgResponse.text);
           if (identity === "publisher" && orgSide.ownedFirstComment?.trim()) {
-            ownedFirstComment = orgSide.ownedFirstComment;
+            const publisherEvidence = [...evidenceByThread.values()].flatMap((references) => references)
+              .flatMap((reference) => reference.quote ? [{ id: reference.id, quote: reference.quote }] : []);
+            const review = verifyOrgAnswerSelfReview(
+              orgSide.ownedFirstComment,
+              orgSide.ownedFirstCommentReview,
+              publisherEvidence,
+            );
+            if (review.accepted) ownedFirstComment = orgSide.ownedFirstComment;
+            else stageIssues.push({
+              code: "model_org_first_comment_self_review_rejected",
+              severity: "warning", channel: "Cref",
+              message: `发布账号首评未通过同次 AI 逐句自检，已省略：${review.reason}`,
+              repairable: false, disposition: "review", origin: "agent",
+            });
           }
           for (const { planned } of modelEligibleThreads) {
             const found = orgSide.answers.find((answer) => answer.id === planned.id);
             if (found?.answer.trim()) {
-              // The answer model received only this thread's approved evidence
-              // scope. Preserve its natural wording; the unified AI claim judge
-              // later decides semantic support and records exact source quotes.
-              orgAnswersById.set(planned.id, found);
+              const review = verifyOrgAnswerSelfReview(
+                found.answer,
+                found.review,
+                (evidenceByThread.get(planned.id) ?? []).flatMap((reference) =>
+                  reference.quote ? [{ id: reference.id, quote: reference.quote }] : []),
+              );
+              if (!review.accepted) {
+                stageIssues.push({
+                  code: "model_org_answer_self_review_rejected",
+                  severity: "warning",
+                  channel: "Cref",
+                  message: `线程 ${planned.id} 的机构答复未通过同次 AI 逐句自检，已在进入公开评论前整条拒收：${review.reason}`,
+                  repairable: false,
+                  disposition: "review",
+                  origin: "agent",
+                });
+              } else {
+                orgAnswersById.set(planned.id, found);
+              }
             } else {
               stageIssues.push({
                 code: "model_org_answer_failed",
@@ -3303,7 +3375,9 @@ export class ContentGenerationAgent implements GenerationEngine {
                   : (orgAnswer?.answer ?? ""),
             kind: reader.kind,
             answerKind: hostAnswer?.answerKind ?? orgAnswer?.answerKind ?? reader.answerKind,
-            boundary: threadKind === "host_reply" ? undefined : (orgAnswer?.boundary ?? reader.boundary),
+            boundary: threadKind === "host_reply"
+              ? undefined
+              : normalizePublicCommentBoundary(orgAnswer?.boundary ?? reader.boundary ?? planned.replyPlan?.boundary),
             function: reader.function,
             followUps: [],
           };
@@ -3345,11 +3419,11 @@ export class ContentGenerationAgent implements GenerationEngine {
             maxOutputTokens: input.config.model.maxOutputTokens,
             metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_comment_growth", stage: 2.2 },
           });
-          const grown = parseStagedCommentCopy(growthResponse.text);
-          const grownById = new Map(grown.threads.map((thread) => [thread.id, thread]));
-          if (normalizedRoots.threads.some((thread) => !grownById.has(thread.id))) {
-            throw new Error("Comment growth output omitted one or more root thread IDs.");
-          }
+          const growthPatches = parseStagedCommentGrowth(
+            growthResponse.text,
+            normalizedRoots.threads.map((thread) => thread.id),
+          );
+          const grownById = new Map(growthPatches.map((thread) => [thread.id, thread]));
           comments = {
             ...normalizedRoots,
             threads: normalizedRoots.threads.map((root) => ({
@@ -3426,7 +3500,25 @@ export class ContentGenerationAgent implements GenerationEngine {
               const requestId = `${thread.id}:fu:${followUpIndex}`;
               const found = followUpSide.answers.find((answer) => answer.id === requestId);
               if (found?.answer.trim()) {
-                filledAnswers.set(requestId, found.answer);
+                const review = verifyOrgAnswerSelfReview(
+                  found.answer,
+                  found.review,
+                  (evidenceByRequestId.get(requestId) ?? []).flatMap((reference) =>
+                    reference.quote ? [{ id: reference.id, quote: reference.quote }] : []),
+                );
+                if (!review.accepted) {
+                  stageIssues.push({
+                    code: "model_org_answer_self_review_rejected",
+                    severity: "warning",
+                    channel: "Cref",
+                    message: `线程 ${thread.id} 的第 ${followUpIndex + 1} 条机构补答未通过同次 AI 逐句自检，已丢弃：${review.reason}`,
+                    repairable: false,
+                    disposition: "review",
+                    origin: "agent",
+                  });
+                } else {
+                  filledAnswers.set(requestId, found.answer);
+                }
               } else {
                 stageIssues.push({
                   code: "model_org_answer_failed",
@@ -3475,7 +3567,7 @@ export class ContentGenerationAgent implements GenerationEngine {
       // Stage 2E: edit the complete network only when deterministic structure
       // exposes a concrete problem. All answers and follow-ups are now visible;
       // server acceptance keeps IDs, responsibilities, evidence and unknowns frozen.
-      const networkReasons = commentNetworkEditorialReasons(comments, orchestrationPlan);
+      const networkReasons = commentNetworkEditorialReasons(comments, orchestrationPlan, claimRules);
       if (!networkReasons.length) editorialAssessments.push({ stage: "comment_network", status: "skipped", reasons: [], summary: "完整评论网络未触发终编。", accepted: true, attempt: 0 });
       if (networkReasons.length) {
         try {
@@ -3491,8 +3583,8 @@ export class ContentGenerationAgent implements GenerationEngine {
             metadata: { jobId: input.jobId, candidateIndex, purpose: "edit_comment_readers", stage: 2.4 },
           });
           const edited = parseStagedCommentNetworkEditor(editorResponse.text);
-          const accepted = acceptCommentNetworkEdit(comments, edited, orchestrationPlan, availableEvidence);
-          const remainingNetworkReasons = commentNetworkEditorialReasons(accepted, orchestrationPlan);
+          const accepted = acceptCommentNetworkEdit(comments, edited, orchestrationPlan, claimRules);
+          const remainingNetworkReasons = commentNetworkEditorialReasons(accepted, orchestrationPlan, claimRules);
           comments = accepted;
           commentEditorialAssessment = edited.assessment;
           editorialAssessments.push({ stage: "comment_network", status: edited.assessment.status, reasons: [...edited.assessment.reasons], summary: edited.assessment.summary, accepted: true, attempt: 1 });
@@ -3746,7 +3838,12 @@ export class ContentGenerationAgent implements GenerationEngine {
             metadata: { jobId: input.jobId, candidateIndex, purpose: "repair_comment_network", attempt: repairAttempts, stage: 4.1 },
           });
           const edited = parseStagedCommentNetworkEditor(response.text);
-          const accepted = acceptCommentNetworkEdit(commentsBefore, edited, orchestrationPlan, availableEvidence);
+          const accepted = acceptCommentNetworkEdit(
+            commentsBefore,
+            edited,
+            orchestrationPlan,
+            input.planningContext?.projectBlueprint?.claimPolicy.rules ?? [],
+          );
           draft = applyAcceptedCommentNetwork(draft, accepted);
           editorialAssessments.push({ stage: "comment_network", status: edited.assessment.status, reasons: [...edited.assessment.reasons], summary: edited.assessment.summary, accepted: true, attempt: repairAttempts + 1 });
         } catch (error) {
@@ -4032,7 +4129,12 @@ export class ContentGenerationAgent implements GenerationEngine {
           metadata: { jobId: input.package.jobId, candidateIndex: input.package.candidateIndex, purpose: "revision_comment_network", stage: "comment_network" },
         });
         const edited = parseStagedCommentNetworkEditor(response.text);
-        const accepted = acceptCommentNetworkEdit(before, edited, plan, availableEvidence);
+        const accepted = acceptCommentNetworkEdit(
+          before,
+          edited,
+          plan,
+          input.planningContext?.projectBlueprint?.claimPolicy.rules ?? [],
+        );
         revised = applyAcceptedCommentNetwork(revised, accepted);
         revised.commentEditorialAssessment = edited.assessment;
         editorialAssessments.push({

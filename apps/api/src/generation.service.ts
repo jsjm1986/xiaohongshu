@@ -4,11 +4,15 @@ import {
   ContentGenerationAgent,
   GENERATION_PARAMETER_REGISTRY,
   candidateQualityStatus,
+  combinedEvidenceSupport,
+  evidenceReferenceCanSupportFact,
+  evidenceSensitiveRequiredClaim,
   estimateTokens,
   ModelProviderError,
   OpenAICompatibleClient,
   indexKnowledgeSource,
   issueOverridePolicy,
+  redactPublicationRestrictedText,
   type ContentPackage,
   type FormulaVersion,
   type GenerationParameterSelection,
@@ -441,6 +445,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
   async create(raw: Record<string, unknown>, principal: SessionPrincipal): Promise<Record<string, unknown>> {
     const projectId = this.requiredString(raw.projectId, 'projectId');
     const sourceSnapshot = await this.intelligence.preflightGenerationSource(projectId);
+    await this.assertRequiredClaimsSupported(raw, principal);
     // 扣额度、任务、queued 事件和审计必须同生共死。批量入口已有外层事务；
     // 单篇也显式包裹，避免插入失败或进程在两条语句间退出后留下“扣费但无任务”。
     const id = this.database.transaction(() => {
@@ -577,6 +582,10 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     if (!jobs.length) throw new BadRequestException('批量任务不能为空');
     if (jobs.length > 60) throw new BadRequestException('单批任务不能超过 60 篇');
     const sourceSnapshot: GenerationSourceSnapshot = await this.intelligence.preflightGenerationSource(projectId);
+    // Read and validate every job before opening the write transaction. A
+    // single unsupported required claim therefore leaves neither a batch row
+    // nor partially inserted jobs/quota charges behind.
+    for (const job of jobs) await this.assertRequiredClaimsSupported({ ...job, projectId }, principal);
     const name = typeof raw.name === 'string' ? raw.name.trim().slice(0, 120) : '';
     const batchId = randomUUID();
     const now = nowIso();
@@ -1677,6 +1686,66 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     operation: string,
   ): void {
     assertKnowledgeRowsBudget(operation, this.selectedKnowledgeRows(projectId, config));
+  }
+
+  /** Reject evidence-sensitive must-include copy before quota use or enqueue. */
+  private async assertRequiredClaimsSupported(
+    raw: Record<string, unknown>,
+    principal: SessionPrincipal,
+  ): Promise<void> {
+    const projectId = this.requiredString(raw.projectId, 'projectId');
+    const project = this.resources.projectRow(projectId);
+    // 预检现在是 create/createBatch 的第一站,必须沿用正式路径的顺序:先
+    // bootstrap(会就地自愈「代码合同 digest 漂移且未绑定研究产物」的基线发布
+    // 清单),再取 active 快照。直接取快照会让漂移项目在预检就 400
+    // 「运行合同已经过期」,把本该自愈的生成挡死——这正是 heal 修复要防的回归。
+    this.research.bootstrapProject(projectId, principal.userId);
+    const releaseSnapshot = this.research.activeRuntimeSnapshot(projectId);
+    const releaseFormulaId = typeof releaseSnapshot.id === 'string'
+      && typeof releaseSnapshot.formulaVersionId === 'string'
+      ? releaseSnapshot.formulaVersionId
+      : undefined;
+    const planning = this.intelligence.prepareGeneration(projectId, raw);
+    const normalizedRaw = {
+      ...raw,
+      ...(releaseFormulaId ? { formulaVersion: releaseFormulaId } : {}),
+      topic: planning.topic,
+      parameterValues: {
+        ...(isRecord(releaseSnapshot.parameterOverrides) ? releaseSnapshot.parameterOverrides : {}),
+        ...(isRecord(raw.parameterValues) ? raw.parameterValues : {}),
+      },
+    };
+    const resolution = this.presets.resolve(projectId, normalizedRaw, principal);
+    const config = resolution.resolvedConfig;
+    this.assertLatestSelectedKnowledge(projectId, config.knowledge.selectedFileIds);
+    this.assertGenerationKnowledgeBudget(projectId, config.knowledge, '内容生成预检');
+
+    const blueprint = isRecord(planning.planningContext.projectBlueprint)
+      ? planning.planningContext.projectBlueprint as unknown as {
+          claimPolicy?: { rules?: Array<{ requiresEvidence: boolean; terms: string[] }> };
+        }
+      : undefined;
+    const rules = blueprint?.claimPolicy?.rules ?? [];
+    const sensitive = config.task.mustMention.filter((claim) =>
+      evidenceSensitiveRequiredClaim(claim, rules));
+    if (!sensitive.length) return;
+
+    const documents = await this.loadKnowledge(projectId, config.knowledge, '必含声明证据预检');
+    const factualSources = documents
+      .filter((document) => evidenceReferenceCanSupportFact({
+        kind: document.metadata.kind,
+        evidenceStatus: document.metadata.evidenceStatus,
+      }))
+      .map((document) => redactPublicationRestrictedText(document.content))
+      .filter(Boolean);
+    const unsupported = sensitive.filter((claim) => !combinedEvidenceSupport(claim, factualSources));
+    if (unsupported.length) {
+      throw new BadRequestException({
+        message: `以下必含声明缺少当前知识库事实依据：${unsupported.join('；')}。请补充并确认知识，或删除该必含要求后再生成。`,
+        code: 'MUST_INCLUDE_EVIDENCE_UNSUPPORTED',
+        unsupportedClaims: unsupported,
+      });
+    }
   }
 
   private async loadKnowledge(

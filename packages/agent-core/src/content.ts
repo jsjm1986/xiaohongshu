@@ -385,7 +385,14 @@ export interface StagedCommentCopy {
      * wins over the planning fallback; illegal values parse as absent.
      */
     function?: NonNullable<ContentPackageContent["Cref"]["threads"][number]["function"]>;
-    followUps: Array<{ question: string; answer: string; kind?: CommentNodeKind; boundary?: string }>;
+    followUps: Array<{
+      question: string;
+      answer: string;
+      kind?: CommentNodeKind;
+      boundary?: string;
+      level?: "L1" | "L2" | "L3";
+      stopReason?: "answered" | "unknown_pending_evidence" | "route_to_professional";
+    }>;
   }>;
 }
 
@@ -428,6 +435,55 @@ function parseStagedThreadArray(container: Record<string, unknown>, errorLabel: 
       function: commentThreadFunction(thread.function),
       followUps,
     };
+  });
+}
+
+/**
+ * Parse stage-2B growth as a patch over frozen roots.
+ *
+ * Root question/answer fields are deliberately ignored: growth owns only
+ * followUps. This prevents an otherwise useful growth response from being
+ * discarded when the model omits or pollutes a root field (most commonly an
+ * organic_reaction answer). Every frozen ID must still be present exactly once;
+ * malformed individual follow-ups are dropped instead of poisoning the batch.
+ */
+export function parseStagedCommentGrowth(
+  text: string,
+  expectedThreadIds: readonly string[],
+): Array<{ id: string; followUps: StagedCommentCopy["threads"][number]["followUps"] }> {
+  const value = parseJsonObject(text);
+  const content = isRecord(value.content) ? value.content : undefined;
+  const container = content && isRecord(content.Cref)
+    ? content.Cref
+    : isRecord(value.Cref) ? value.Cref : value;
+  if (!Array.isArray(container.threads)) throw new Error("Staged comment growth output must include a threads array.");
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const raw of container.threads) {
+    if (!isRecord(raw) || typeof raw.id !== "string" || !expectedThreadIds.includes(raw.id)) continue;
+    if (byId.has(raw.id)) throw new Error(`Staged comment growth duplicated thread ${raw.id}.`);
+    byId.set(raw.id, raw);
+  }
+  return expectedThreadIds.map((id) => {
+    const raw = byId.get(id);
+    if (!raw) throw new Error(`Staged comment growth omitted frozen thread ${id}.`);
+    const input = Array.isArray(raw.followUps)
+      ? raw.followUps
+      : Array.isArray(raw.follow_ups) ? raw.follow_ups : [];
+    const followUps = input.flatMap((item) => {
+      if (!isRecord(item)) return [];
+      const question = typeof item.question === "string" ? item.question : item.q;
+      const answer = typeof item.answer === "string" ? item.answer : item.a;
+      if (typeof question !== "string" || typeof answer !== "string" || !question.trim()) return [];
+      return [{
+        question: question.trim(),
+        answer: answer.trim(),
+        kind: commentNodeKind(item.kind),
+        boundary: optionalTrimmedText(item.boundary),
+        level: commentFollowUpLevel(item.level),
+        stopReason: commentFollowUpStopReason(item.stopReason),
+      }];
+    });
+    return { id, followUps };
   });
 }
 
@@ -496,16 +552,61 @@ export function parseStagedCommentNetworkEditor(text: string): StagedCommentNetw
   };
 }
 
-/** 2A-O/2B-O 机构侧输出:本角色线程(或待承接追问)的答复列表。 */
+export type OrgAnswerClaimClassification =
+  | "factual_assertion"
+  | "organization_commitment"
+  | "hedge_or_unknown"
+  | "question_or_nonclaim";
+
+export interface OrgAnswerSelfReview {
+  status: "accept" | "reject";
+  claims: Array<{
+    statement: string;
+    classification: OrgAnswerClaimClassification;
+    supported: boolean | null;
+    evidenceId: string | null;
+    quote: string | null;
+  }>;
+  reasons: string[];
+}
+
+/** 2A-O/2B-O 机构侧输出:答复与同次逐句证据自检。 */
 export interface StagedOrgAnswersCopy {
   answers: Array<{
     id: string;
     answer: string;
     answerKind?: CommentNodeKind;
     boundary?: string;
+    review?: OrgAnswerSelfReview;
   }>;
   /** 仅 publisher 答复调用可能产出;其余角色调用不读该字段。 */
   ownedFirstComment?: string;
+  ownedFirstCommentReview?: OrgAnswerSelfReview;
+}
+
+function parseOrgAnswerSelfReview(value: unknown): OrgAnswerSelfReview | undefined {
+  if (!isRecord(value) || (value.status !== "accept" && value.status !== "reject")
+    || !Array.isArray(value.claims) || !Array.isArray(value.reasons)) return undefined;
+  const classifications = new Set<OrgAnswerClaimClassification>([
+    "factual_assertion", "organization_commitment", "hedge_or_unknown", "question_or_nonclaim",
+  ]);
+  const claims: OrgAnswerSelfReview["claims"] = [];
+  for (const item of value.claims) {
+    if (!isRecord(item) || typeof item.statement !== "string"
+      || !classifications.has(item.classification as OrgAnswerClaimClassification)
+      || ![true, false, null].includes(item.supported as boolean | null)
+      || !(typeof item.evidenceId === "string" || item.evidenceId === null)
+      || !(typeof item.quote === "string" || item.quote === null)) return undefined;
+    claims.push({
+      statement: item.statement.trim(),
+      classification: item.classification as OrgAnswerClaimClassification,
+      supported: item.supported as boolean | null,
+      evidenceId: typeof item.evidenceId === "string" ? item.evidenceId.trim() : null,
+      quote: typeof item.quote === "string" ? item.quote.trim() : null,
+    });
+  }
+  if (!value.reasons.every((reason) => typeof reason === "string")) return undefined;
+  return { status: value.status, claims, reasons: value.reasons.map((reason) => String(reason).trim()).filter(Boolean) };
 }
 
 export function parseStagedOrgAnswers(text: string): StagedOrgAnswersCopy {
@@ -521,9 +622,48 @@ export function parseStagedOrgAnswers(text: string): StagedOrgAnswersCopy {
       answer: entry.answer.trim(),
       answerKind: commentNodeKind(entry.answerKind),
       boundary: optionalTrimmedText(entry.boundary),
+      review: parseOrgAnswerSelfReview(entry.review),
     };
   });
-  return { answers, ownedFirstComment: optionalTrimmedText(container.ownedFirstComment) };
+  return {
+    answers,
+    ownedFirstComment: optionalTrimmedText(container.ownedFirstComment),
+    ownedFirstCommentReview: parseOrgAnswerSelfReview(container.ownedFirstCommentReview),
+  };
+}
+
+/**
+ * Mechanically verify an AI self-review without interpreting business meaning.
+ * The model owns classification and semantic support; the server owns complete
+ * sentence coverage, evidence scope, source identity and verbatim quote checks.
+ */
+export function verifyOrgAnswerSelfReview(
+  answer: string,
+  review: OrgAnswerSelfReview | undefined,
+  evidenceSources: readonly { id: string; quote: string }[],
+): { accepted: boolean; reason?: string } {
+  if (!review) return { accepted: false, reason: "missing_or_invalid_self_review" };
+  if (review.status !== "accept") return { accepted: false, reason: review.reasons.join("；") || "self_review_rejected" };
+  const statements = splitSensitiveStatements(answer);
+  if (!statements.length || review.claims.length !== statements.length) {
+    return { accepted: false, reason: "self_review_sentence_coverage_mismatch" };
+  }
+  const sourceById = new Map(evidenceSources.map((source) => [source.id, source.quote]));
+  for (let index = 0; index < statements.length; index += 1) {
+    const statement = statements[index]!;
+    const claim = review.claims[index]!;
+    if (claim.statement !== statement) return { accepted: false, reason: `self_review_statement_mismatch:${index}` };
+    const needsEvidence = claim.classification === "factual_assertion" || claim.classification === "organization_commitment";
+    if (needsEvidence) {
+      const source = claim.evidenceId ? sourceById.get(claim.evidenceId) : undefined;
+      if (claim.supported !== true || !source || !claim.quote || !source.includes(claim.quote)) {
+        return { accepted: false, reason: `self_review_evidence_invalid:${index}` };
+      }
+    } else if (claim.supported !== null || claim.evidenceId !== null || claim.quote !== null) {
+      return { accepted: false, reason: `self_review_nonclaim_provenance_invalid:${index}` };
+    }
+  }
+  return { accepted: true };
 }
 
 function answerRealization(value: unknown): ContentPackageContent["Cref"]["threads"][number]["answerRealization"] {
@@ -835,7 +975,7 @@ function visibleCommentNodes(content: ContentPackageContent): string[] {
   ].map((value) => value.trim()).filter(Boolean);
 }
 
-const INTERNAL_PLANNING_LANGUAGE = /\bevidence_[\w:.-]+\b|(?:sourceClusterId|reasoning|replyPlan|discoveryPlan|followUpIntent)|(?:本线程|该线程|线程内)|(?:待核实维度|已披露地点范围)[：:]|(?:问题职责|开口人物|角色池|线程规格|冻结(?:合同|职责|ID)|主缺口|接龙方向|后台库存)|\b(?:TODO|TBD)\b/iu;
+const INTERNAL_PLANNING_LANGUAGE = /\bevidence_[\w:.-]+\b|(?:sourceClusterId|reasoning|replyPlan|discoveryPlan|followUpIntent)|(?:本线程|该线程|线程内)|(?:待核实维度|已披露地点范围)[：:]|(?:问题职责|开口人物|角色池|线程规格|冻结(?:合同|职责|ID)|主缺口|接龙方向|后台库存|核验动作|信息边界|当前上下文)|\b(?:TODO|TBD)\b/iu;
 
 const MODEL_OR_OUTPUT_PROTOCOL_LANGUAGE = /(?:作为|我是|身为)(?:一名|一个)?\s*(?:AI|人工智能)\s*(?:助手|语言模型)|(?:系统|开发者)指令|提示词|system\s*prompt|(?:根据|按照)(?:当前|上述|本次|用户)?(?:的)?(?:生成|写作|内容)?任务要求|候选(?:版本)?\s*[一二三四五六七八九十\d]+|只(?:需|要)?返回(?:有效的?)?\s*JSON|(?:JSON\s*)?(?:输出格式|字段名)|(?:生成|写作|内容)任务/iu;
 
@@ -852,15 +992,54 @@ const FRONTSTAGE_POLICY_INSTRUCTION_LANGUAGE = /(?:不允许|不得|禁止|不�
 const COMMENT_CONTEXT_META_LANGUAGE = /(?:(?:正文|文中|上文|文章(?:里|中)?|这篇(?:笔记|帖子|内容|文章)?|这条(?:笔记|帖子|内容)|这个帖子)(?:里|中)?(?:说|提到|写(?:了|着|道)?|讲(?:了|到)?|显示|表示|说明|没(?:有)?(?:写|提|讲|说明)|未(?:写|提|讲|说明))|(?:跟|和|按)(?:这篇|这个)帖子(?:里|中)?说)/u;
 
 const GENERIC_COMMENT_SOURCE_LANGUAGE = /(?:根据|依据|按照|按|看|查(?:到|过)?|翻(?:到|过)?)?\s*(?:这些|相关|现有|手头|查到的)?资料(?:里|中)?(?:说|称|显示|表明|写(?:明|着|了)?|提到|记载|披露)/u;
+const BARE_INTERNAL_COMMENT_SOURCE_LANGUAGE = /(?:源资料|项目资料|可用证据|证据来源|知识库)/u;
 
 function exposesGenericCommentSourceLanguage(value: string): boolean {
-  if (INTERNAL_SOURCE_CONTAINER_LANGUAGE.test(value)) return true;
+  if (INTERNAL_SOURCE_CONTAINER_LANGUAGE.test(value)
+    || BARE_INTERNAL_COMMENT_SOURCE_LANGUAGE.test(value)) return true;
   // Named public sources are legitimate provenance, not internal containers.
   const withoutNamedPublicSources = value.replace(
     /(?:官网|官方网站|合同|协议|病历|检查报告|说明书)(?:中|里|上)?(?:写(?:明|着|了)?|显示|记录|注明|约定|说明|提到)/gu,
     "",
   );
   return GENERIC_COMMENT_SOURCE_LANGUAGE.test(withoutNamedPublicSources);
+}
+
+/** Mechanical public-language contract shared by staged editors and final validation. */
+export function publicCommentSurfaceReasons(value: string): string[] {
+  const text = value.trim();
+  if (!text) return [];
+  const reasons: string[] = [];
+  if (COMMENT_CONTEXT_META_LANGUAGE.test(text)) reasons.push("引用正文或帖子上下文的元叙事");
+  if (exposesGenericCommentSourceLanguage(text)) reasons.push("暴露内部或泛化资料来源");
+  if (INTERNAL_PLANNING_LANGUAGE.test(text)) reasons.push("暴露规划、证据或线程控制语言");
+  if (MODEL_OR_OUTPUT_PROTOCOL_LANGUAGE.test(text)) reasons.push("暴露模型或输出协议信息");
+  if (FRONTSTAGE_POLICY_INSTRUCTION_LANGUAGE.test(text)) reasons.push("把后台写作规则写进公开评论");
+  return [...new Set(reasons)];
+}
+
+/**
+ * A planned boundary is server-owned visible copy, so it cannot wait for the
+ * network editor (whose schema intentionally cannot edit boundary fields).
+ * Keep public caveats and remove only clauses that expose internal provenance.
+ */
+export function normalizePublicCommentBoundary(value: string | undefined): string | undefined {
+  const original = value?.trim();
+  if (!original) return undefined;
+  const clauses = [...original.matchAll(/([^，,；;。！？!?\n]+)([，,；;。！？!?]|\n|$)/gu)]
+    .map((match) => ({ text: match[1]!.trim(), terminal: match[2] ?? "" }))
+    .filter((clause) => Boolean(clause.text));
+  const publicClauses = clauses.filter((clause) => publicCommentSurfaceReasons(clause.text).length === 0);
+  if (publicClauses.length === clauses.length) return original;
+  if (publicClauses.length) {
+    const terminal = /[。！？!?]/u.test(publicClauses.at(-1)!.terminal)
+      ? publicClauses.at(-1)!.terminal
+      : "";
+    return `${publicClauses.map((clause) => clause.text).join("；")}${terminal}`;
+  }
+  if (/(?:界面|版本|操作)/u.test(original)) return "具体操作以当前版本界面为准。";
+  if (/(?:个体|条件|适用|效果|结果)/u.test(original)) return "具体情况会受实际条件影响。";
+  return undefined;
 }
 
 function visibleTextForReasoningLocation(
@@ -1741,10 +1920,10 @@ export function evaluateGapCoverageRealization(
  * 受控声明词面命中规则与敏感面拆句规则。sensitive_claim_without_evidence 校验
  * 与自动锚定(knowledge-anchor.ts)必须使用同一份判定,避免两侧各自拷贝后漂移。
  */
-export const genericMeasuredClaim = /\d+(?:\.\d+)?\s*(?:%|％|k|K|元|万|天|周|月|年|次|个|套|人|毫米|厘米|mm|cm)/iu;
+export const genericMeasuredClaim = /\d+(?:\.\d+)?\s*(?:%|％|k|K|元|万|秒|分钟|小时|天|周|月|年|次|个|套|人|毫米|厘米|mm|cm)/iu;
 // 双号运营:助理(staff)答复中的承诺类营销表述(不一定带数字,敏感声明检查
 // 不一定覆盖),配合 genericMeasuredClaim 与受控声明 terms 一起做锚定复核。
-export const marketingPromiseClaim = /(?:优惠|折扣|免费|赠送|包干|保证|承诺|退款|名额|套餐|秒杀|团购|立减|满减|到店礼|活动价)/u;
+export const marketingPromiseClaim = /(?:优惠|折扣|免费|无广告|免广告|赠送|包干|保证|承诺|退款|名额|套餐|秒杀|团购|立减|满减|到店礼|活动价)/u;
 // Population-level or near-absolute experience claims are factual assertions,
 // not harmless style. They need the same evidence/AI-judge path as numbers and
 // controlled project claims. This catches production drift such as “很多人聊着
@@ -1759,6 +1938,19 @@ export function splitSensitiveStatements(text: string): string[] {
 /** Evidence-sensitive claims are validated at factual-atom granularity. */
 export function splitEvidenceClaimAtoms(text: string): string[] {
   return splitSensitiveStatements(text).flatMap((statement) => evidenceClaimAtoms(statement));
+}
+
+/** True only for required wording that would assert an evidence-sensitive fact. */
+export function evidenceSensitiveRequiredClaim(
+  statement: string,
+  controlledRules: readonly { requiresEvidence: boolean; terms: readonly string[] }[] = [],
+): boolean {
+  return splitEvidenceClaimAtoms(statement).some((atom) =>
+    genericMeasuredClaim.test(atom)
+    || marketingPromiseClaim.test(atom)
+    || experientialGeneralizationClaim.test(atom)
+    || controlledRules.some((rule) => rule.requiresEvidence
+      && rule.terms.some((term) => Boolean(term) && atom.includes(term))));
 }
 
 /**
@@ -1965,14 +2157,14 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     add("frontstage_instruction_leak", "error", "package", "User-visible copy contains backend instructions, model identity, or audit phrasing instead of natural human speech.");
   }
   const commentNodes = visibleCommentNodes(draft.content);
-  const visibleCommentText = commentNodes.join("\n");
   // A reader may react to visible details, but must not narrate that the model was
   // given a body/article as context. Phrases such as “正文说…” are prompt traces,
   // not natural first-person speech, and must be repaired in the comment channel.
-  if (COMMENT_CONTEXT_META_LANGUAGE.test(visibleCommentText)) {
+  if (commentNodes.some((node) => publicCommentSurfaceReasons(node).includes("引用正文或帖子上下文的元叙事"))) {
     add("comment_context_meta_leak", "error", "Cref", "Reader-visible comment narrates the supplied article/body context instead of speaking naturally.");
   }
-  const sourceLanguageLeak = commentNodes.find(exposesGenericCommentSourceLanguage);
+  const sourceLanguageLeak = commentNodes.find((node) =>
+    publicCommentSurfaceReasons(node).includes("暴露内部或泛化资料来源"));
   if (sourceLanguageLeak) {
     add("comment_source_language_surface_leak", "error", "Cref", `A visible comment exposes source/audit language instead of speaking naturally: ${sourceLanguageLeak}`);
   }
@@ -2970,7 +3162,11 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
       );
     }
   }
-  return issues.map(normalizeContentValidationIssue);
+  const normalized = issues.map(normalizeContentValidationIssue);
+  return [...new Map(normalized.map((issue) => [
+    `${issue.code}\u0000${issue.channel}\u0000${issue.message}`,
+    issue,
+  ])).values()];
 }
 
 export function diagnosticsFromValidation(issues: ContentValidationIssue[]): ContentDiagnostic[] {

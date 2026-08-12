@@ -70,6 +70,21 @@ function stagedThreadIds(request: ModelGenerationRequest): string[] {
   return [...new Set([...requestText(request).matchAll(/"id"\s*:\s*"([^"]*_thread_\d+)"/gu)].map((match) => match[1]!))];
 }
 
+function acceptedOrgReview(answer: string) {
+  const statements = answer.split(/(?<=[。！？!?；;])|\n+/u).map((item) => item.trim()).filter(Boolean);
+  return {
+    status: "accept" as const,
+    claims: statements.map((statement) => ({
+      statement, classification: "hedge_or_unknown" as const, supported: null, evidenceId: null, quote: null,
+    })),
+    reasons: [],
+  };
+}
+
+function selfReviewedAnswers(request: ModelGenerationRequest, answer: string) {
+  return stagedThreadIds(request).map((id) => ({ id, answer, review: acceptedOrgReview(answer) }));
+}
+
 function stagedCommentThreads(request: ModelGenerationRequest, answer: string) {
   return stagedThreadIds(request).map((id, index) => ({
     id,
@@ -333,7 +348,7 @@ describe("three-candidate content generation engine", () => {
           raw: {},
         };
         if (String(request.metadata?.purpose) === "generate_org_answers") return {
-          text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "按资料逐项核实。" })) }),
+          text: JSON.stringify({ answers: selfReviewedAnswers(request, "按资料逐项核实。") }),
           raw: {},
         };
         if (String(request.metadata?.purpose) === "generate_comment_growth") return {
@@ -402,7 +417,7 @@ describe("three-candidate content generation engine", () => {
           raw: {},
         };
         if (String(request.metadata?.purpose) === "generate_org_answers") return {
-          text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "先确认问题类型，再核实适用边界。" })) }),
+          text: JSON.stringify({ answers: selfReviewedAnswers(request, "先确认问题类型，再核实适用边界。") }),
           raw: {},
         };
         if (String(request.metadata?.purpose) === "generate_comment_growth") return {
@@ -495,7 +510,7 @@ describe("three-candidate content generation engine", () => {
           raw: {},
         };
         if (purpose === "generate_org_answers") return {
-          text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "具体要结合已披露条件核实。" })) }),
+          text: JSON.stringify({ answers: selfReviewedAnswers(request, "具体要结合已披露条件核实。") }),
           raw: {},
         };
         if (purpose === "generate_ledger") return {
@@ -692,7 +707,7 @@ describe("three-candidate content generation engine", () => {
           raw: {},
         };
         if (String(request.metadata?.purpose) === "generate_org_answers") return {
-          text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "按资料来源逐项核验。" })) }),
+          text: JSON.stringify({ answers: selfReviewedAnswers(request, "按资料来源逐项核验。") }),
           raw: {},
         };
         if (String(request.metadata?.purpose) === "generate_comment_growth") return {
@@ -926,7 +941,7 @@ describe("three-candidate content generation engine", () => {
           raw: {},
         };
         if (purpose === "generate_org_answers") return {
-          text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "按资料逐项核实。" })) }),
+          text: JSON.stringify({ answers: selfReviewedAnswers(request, "按资料逐项核实。") }),
           raw: {},
         };
         return {
@@ -1001,7 +1016,7 @@ describe("three-candidate content generation engine", () => {
           raw: {},
         };
         if (purpose === "generate_org_answers") return {
-          text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "按资料逐项核实。" })) }),
+          text: JSON.stringify({ answers: selfReviewedAnswers(request, "按资料逐项核实。") }),
           raw: {},
         };
         return {
@@ -1073,7 +1088,7 @@ describe("three-candidate content generation engine", () => {
           raw: {},
         };
         if (purpose === "generate_org_answers") return {
-          text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "按资料逐项核实。" })) }),
+          text: JSON.stringify({ answers: selfReviewedAnswers(request, "按资料逐项核实。") }),
           raw: {},
         };
         return {

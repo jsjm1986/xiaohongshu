@@ -330,6 +330,21 @@ function stagedThreadIds(request: ModelGenerationRequest): string[] {
   return [...new Set([...requestText(request).matchAll(/"id"\s*:\s*"([^"]*_thread_\d+)"/gu)].map((match) => match[1]!))];
 }
 
+function acceptedOrgReview(answer: string) {
+  const statements = answer.split(/(?<=[。！？!?；;])|\n+/u).map((item) => item.trim()).filter(Boolean);
+  return {
+    status: "accept" as const,
+    claims: statements.map((statement) => ({
+      statement, classification: "hedge_or_unknown" as const, supported: null, evidenceId: null, quote: null,
+    })),
+    reasons: [],
+  };
+}
+
+function selfReviewedAnswers(request: ModelGenerationRequest, answer: string) {
+  return stagedThreadIds(request).map((id) => ({ id, answer, review: acceptedOrgReview(answer) }));
+}
+
 describe("公开文案 Prompt 防泄漏合同覆盖", () => {
   it("所有传统生成与改稿入口都携带前台语言合同", () => {
     const plan = isolationPlan();
@@ -870,15 +885,22 @@ describe("阶段化解析器(按侧拆分)", () => {
     expect("disclaimer" in parsed).toBe(false);
   });
 
-  it("parseStagedOrgAnswers 读答复列表与可选首评", () => {
+  it("parseStagedOrgAnswers 读取答复、自检与可选首评", () => {
+    const review = {
+      status: "accept", claims: [{ statement: "按口径答。", classification: "hedge_or_unknown", supported: null, evidenceId: null, quote: null }], reasons: [],
+    };
     const parsed = parseStagedOrgAnswers(JSON.stringify({
-      answers: [{ id: "t1", answer: "按口径答。", answerKind: "answer", boundary: "边界" }, { id: "t2", answer: "转人工。" }],
+      answers: [{ id: "t1", answer: "按口径答。", answerKind: "answer", boundary: "边界", review }, {
+        id: "t2", answer: "转人工。", review: { ...review, claims: [{ ...review.claims[0], statement: "转人工。" }] },
+      }],
       ownedFirstComment: "置顶：常见问题整理。",
+      ownedFirstCommentReview: { ...review, claims: [{ ...review.claims[0], statement: "置顶：常见问题整理。" }] },
     }));
     expect(parsed.answers).toHaveLength(2);
-    expect(parsed.answers[0]).toMatchObject({ id: "t1", answer: "按口径答。", answerKind: "answer", boundary: "边界" });
+    expect(parsed.answers[0]).toMatchObject({ id: "t1", answer: "按口径答。", answerKind: "answer", boundary: "边界", review });
     expect(parsed.answers[1]!.answerKind).toBeUndefined();
     expect(parsed.ownedFirstComment).toBe("置顶：常见问题整理。");
+    expect(parsed.ownedFirstCommentReview?.status).toBe("accept");
   });
 });
 
@@ -963,7 +985,7 @@ describe("按侧+按角色隔离的引擎合并", () => {
           return { text: JSON.stringify(completeNetworkEditorResponse(request)), raw: {} };
         }
         if (purpose === "generate_org_answers") {
-          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "需要结合对应条件确认。" })) }), raw: {} };
+          return { text: JSON.stringify({ answers: selfReviewedAnswers(request, "需要结合对应条件确认。") }), raw: {} };
         }
         if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
         return { text: coreResponse(), raw: {} };
@@ -982,7 +1004,7 @@ describe("按侧+按角色隔离的引擎合并", () => {
     }
   });
 
-  it("完整评论终编语义由 Agent assessment 治理，不再被固定 gap 词表二次否决", async () => {
+  it("完整评论终编即使自称 pass，偏离冻结 gap 仍被服务器原子拒收", async () => {
     let editorCalls = 0;
     const provider: ModelProvider = {
       async generate(request) {
@@ -1003,10 +1025,10 @@ describe("按侧+按角色隔离的引擎合并", () => {
 
     expect(result.packages).toHaveLength(3);
     expect(editorCalls).toBe(3);
-    expect(result.packages.every((pkg) => pkg.commentEditorialAssessment?.status === "pass")).toBe(true);
-    expect(result.packages.every((pkg) => !pkg.validation.issues.some((issue) =>
+    expect(result.packages.every((pkg) => pkg.validation.issues.some((issue) =>
       issue.code === "comment_editor_contract_rejected"))).toBe(true);
-    expect(result.packages.flatMap((pkg) => pkg.content.Cref.threads).some((thread) => thread.question === "今天天气怎么样？")).toBe(true);
+    expect(result.packages.flatMap((pkg) => pkg.content.Cref.threads)
+      .some((thread) => thread.question === "今天天气怎么样？")).toBe(false);
   });
 
   it("采访腔由读者编辑Agent纠正，原子验收后才进入答复阶段", async () => {
@@ -1038,7 +1060,7 @@ describe("按侧+按角色隔离的引擎合并", () => {
           };
         }
         if (purpose === "generate_org_answers") {
-          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "这一项先按现有依据确认。" })) }), raw: {} };
+          return { text: JSON.stringify({ answers: selfReviewedAnswers(request, "这一项先按现有依据确认。") }), raw: {} };
         }
         if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
         return { text: coreResponse(), raw: {} };
@@ -1114,13 +1136,13 @@ describe("按侧+按角色隔离的引擎合并", () => {
         if (purpose === "generate_host_answers") {
           return {
             text: JSON.stringify({
-              answers: stagedThreadIds(request).map((id) => ({ id, answer: "我目前还没决定" })),
+              answers: selfReviewedAnswers(request, "我目前还没决定"),
             }),
             raw: {},
           };
         }
         if (purpose === "generate_org_answers") {
-          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "这个需要按项目口径确认。" })) }), raw: {} };
+          return { text: JSON.stringify({ answers: selfReviewedAnswers(request, "这个需要按项目口径确认。") }), raw: {} };
         }
         if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
         return { text: coreResponse(), raw: {} };
@@ -1215,7 +1237,7 @@ describe("按侧+按角色隔离的引擎合并", () => {
           };
         }
         if (purpose === "generate_org_answers") {
-          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "按口径回答。" })) }), raw: {} };
+          return { text: JSON.stringify({ answers: selfReviewedAnswers(request, "按口径回答。") }), raw: {} };
         }
         if (purpose === "generate_comment_growth") {
           // 每条线程长出一个 answer 为空的追问(机构承接类)。
@@ -1291,7 +1313,7 @@ describe("按侧+按角色隔离的引擎合并", () => {
           };
         }
         if (purpose === "generate_org_answers") {
-          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({ id, answer: "得看条件，我先不乱说。" })) }), raw: {} };
+          return { text: JSON.stringify({ answers: selfReviewedAnswers(request, "得看条件，我先不乱说。") }), raw: {} };
         }
         if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
         return { text: coreResponse(), raw: {} };
@@ -1310,6 +1332,68 @@ describe("按侧+按角色隔离的引擎合并", () => {
       });
     return result.packages.map((pkg) => pkg.validation.issues.filter((issue) => issue.code === "accountable_identity_incomplete"));
   }
+
+  it("机构模型自检判 reject 时在公开合并前整条拒收", async () => {
+    const confirmation = { confirmedBy: "owner-1", confirmedAt: "2026-08-05T00:00:00.000Z" };
+    const groundedGaps: InformationGap[] = isolationGaps.map((gap) => ({
+      ...gap,
+      answer: gap.id === "price_gap"
+        ? "单次体验 680 起，以当期确认为准"
+        : gap.id === "address_gap"
+          ? "当前只确认位于目标商圈附近，具体位置以当期确认为准"
+          : "适用条件需要结合个人情况评估",
+      sourceStatus: "user_supplied",
+      humanConfirmation: confirmation,
+    }));
+    const provider: ModelProvider = {
+      async generate(request) {
+        const purpose = String(request.metadata?.purpose);
+        if (purpose === "generate_comment_readers") {
+          return { text: JSON.stringify({ threads: frozenReaderThreads(request) }), raw: {} };
+        }
+        if (purpose === "edit_comment_readers") {
+          return { text: JSON.stringify({
+            threads: frozenReaderThreads(request),
+            assessment: { status: "pass", reasons: [], summary: "保持冻结问题。" },
+          }), raw: {} };
+        }
+        if (purpose === "generate_org_answers") {
+          return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({
+            id,
+            answer: "声明甲。",
+            review: {
+              status: "reject",
+              claims: [{ statement: "声明甲。", classification: "factual_assertion", supported: false, evidenceId: null, quote: null }],
+              reasons: ["当前线程证据不支持该声明"],
+            },
+          })) }), raw: {} };
+        }
+        if (purpose === "generate_ledger") return { text: JSON.stringify({ evidenceIds: [], reasoning: [], unknowns: [] }), raw: {} };
+        return { text: coreResponse(), raw: {} };
+      },
+    };
+    const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-08-05T00:00:00Z") })
+      .generate({
+        jobId: "org-answer-premerge-rejection",
+        config: engineConfig(),
+        formulaVersion: DEFAULT_FORMULA_VERSION,
+        knowledge,
+        planningContext: { informationGaps: groundedGaps, projectBlueprint: isolationBlueprint() },
+      });
+
+    expect(result.packages).toHaveLength(3);
+    for (const pkg of result.packages) {
+      expect(pkg.content.Cref.threads.filter((thread) => thread.threadKind === "org_answer")
+        .every((thread) => thread.answer === "")).toBe(true);
+      expect(pkg.validation.issues).toContainEqual(expect.objectContaining({
+        code: "model_org_answer_self_review_rejected",
+        channel: "Cref",
+        disposition: "review",
+        origin: "agent",
+      }));
+      expect(pkg.content.Cref.threads.some((thread) => thread.answer.includes("声明甲"))).toBe(false);
+    }
+  });
 
   it("有事实 scope 时保留机构模型自然答复，证据语义交给 Claim Judge", async () => {
     const calls: ModelGenerationRequest[] = [];
@@ -1346,8 +1430,18 @@ describe("按侧+按角色隔离的引擎合并", () => {
               answers: stagedThreadIds(request).map((id) => ({
                 id,
                 answer: "具体要结合个人情况评估，先不下统一结论。",
+                review: {
+                  status: "accept",
+                  claims: [{ statement: "具体要结合个人情况评估，先不下统一结论。", classification: "hedge_or_unknown", supported: null, evidenceId: null, quote: null }],
+                  reasons: [],
+                },
               })),
               ownedFirstComment: "具体情况不同，先结合个人条件判断。",
+              ownedFirstCommentReview: {
+                status: "accept",
+                claims: [{ statement: "具体情况不同，先结合个人条件判断。", classification: "hedge_or_unknown", supported: null, evidenceId: null, quote: null }],
+                reasons: [],
+              },
             }),
             raw: {},
           };

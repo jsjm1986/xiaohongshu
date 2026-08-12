@@ -4,6 +4,8 @@ import {
   commentNetworkEditorialReasons,
   compileContentIntentCard,
   coreEditorialReasons,
+  normalizePublicCommentBoundary,
+  publicCommentSurfaceReasons,
   repairResponsibilityForIssues,
   STAGED_COMMENT_DISCLAIMER,
 } from "../src/index.js";
@@ -139,6 +141,37 @@ describe("domain-neutral editorial orchestration", () => {
       ],
     };
     expect(commentNetworkEditorialReasons(comments, plan)).toContain("线程 thread_2 与 thread_1 的根答复重复");
+  });
+
+  it("detects production comment meta leaks and keeps named public sources", () => {
+    expect(publicCommentSurfaceReasons("第一次用，按正文说的直接创建行程就行吗？"))
+      .toContain("引用正文或帖子上下文的元叙事");
+    expect(publicCommentSurfaceReasons("步骤来自源资料推荐，具体界面以当期产品为准。"))
+      .toContain("暴露内部或泛化资料来源");
+    expect(publicCommentSurfaceReasons("官网写明周末可以预约。"))
+      .toEqual([]);
+    expect(normalizePublicCommentBoundary("步骤来自源资料推荐，具体界面以当期产品为准。"))
+      .toBe("具体界面以当期产品为准。");
+  });
+
+  it("detects reader-B drift and multi-step topic drift in the complete network", () => {
+    const plan = planFor(domains[2]);
+    plan.dialogueThreads[1]!.threadKind = "reader_exchange";
+    const comments = {
+      disclaimer: STAGED_COMMENT_DISCLAIMER,
+      threads: [
+        { id: "thread_1", question: domains[2].bodyQuestion, answer: "先核对当前系统版本。", followUps: [] },
+        {
+          id: "thread_2",
+          question: "手机上建好的清单，换电脑还能继续改吗？",
+          answer: "我现在都先截图留着，怕找不到。",
+          followUps: [{ question: "那要不要再导出 Excel？", answer: "表格可能更方便。" }],
+        },
+      ],
+    };
+    const reasons = commentNetworkEditorialReasons(comments, plan);
+    expect(reasons).toContain("线程 thread_2 的读者B接话没有承接根问题");
+    expect(reasons.some((reason) => reason.includes("追问 1 没有承接"))).toBe(true);
   });
 });
 

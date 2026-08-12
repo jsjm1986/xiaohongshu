@@ -15,7 +15,11 @@ COPY --from=build /app/package*.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/apps/api/dist ./apps/api/dist
 COPY --from=build /app/apps/api/package.json ./apps/api/package.json
+# npm workspaces may place package-specific runtime dependencies here instead
+# of hoisting them to /app/node_modules (for example reflect-metadata/Nest).
+COPY --from=build /app/apps/api/node_modules ./apps/api/node_modules
 COPY --from=build /app/apps/web/dist ./apps/web/dist
+COPY docs/audit/formula-evidence-catalog.json ./docs/audit/formula-evidence-catalog.json
 COPY --from=build /app/packages/agent-core/dist ./packages/agent-core/dist
 COPY --from=build /app/packages/agent-core/package.json ./packages/agent-core/package.json
 COPY --from=build /app/packages/agent-harness-core/dist ./packages/agent-harness-core/dist

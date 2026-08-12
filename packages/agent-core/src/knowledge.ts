@@ -778,7 +778,7 @@ function evidenceBigrams(value: string): Set<string> {
   return grams;
 }
 
-const QUANTITY_PATTERN = /(-?\d+(?:\.\d+)?)\s*(%|％|元|万元|万|天|周|个月|月|年|次|例|人|毫米|厘米|mm|cm|ml|毫升|kg|千克)/giu;
+const QUANTITY_PATTERN = /(-?\d+(?:\.\d+)?)\s*(%|％|元|万元|万|秒|分钟|小时|天|周|个月|月|年|次|例|人|毫米|厘米|mm|cm|ml|毫升|kg|千克)/giu;
 const NEGATION_PATTERN = /(?:不|无|未|没(?:有)?|不能|不会|并非|禁止|避免|否认|not|never|without)/iu;
 const UNCERTAINTY_PATTERN = /(?:可能|也许|大概|推测|假设|尚不确定|未知|待核实|据称|或许|may|might|possibly|unknown)/iu;
 

@@ -1097,7 +1097,7 @@ describe("P3 comment orchestration contract", () => {
       expect(plan.selectedGapIds).toHaveLength(4);
       const byGap = new Map(plan.dialogueThreads.map((thread) => [thread.gapId, thread.nextStep]));
       // Grounded: verify own applicability against the evidence sources.
-      expect(byGap.get("answered")).toBe("按证据来源核验自己的适用条件");
+      expect(byGap.get("answered")).toBe("核实自己的适用条件");
       // Unanswered but verifiable: a concrete "verify what with whom" sentence in
       // natural language built from the card — never raw field names.
       const routed = byGap.get("required_unknown")!;

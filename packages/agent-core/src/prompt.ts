@@ -265,6 +265,8 @@ const STAGED_FOLLOW_UP_NODE_SCHEMA: Record<string, unknown> = {
     answer: { type: "string" },
     kind: { enum: ["question", "answer", "follow_up", "clarification"] },
     boundary: { type: "string" },
+    level: { enum: ["L1", "L2", "L3"] },
+    stopReason: { enum: ["answered", "unknown_pending_evidence", "route_to_professional"] },
   },
 };
 
@@ -293,6 +295,30 @@ export const STAGED_COMMENTS_JSON_SCHEMA: Record<string, unknown> = {
             type: "array",
             items: STAGED_FOLLOW_UP_NODE_SCHEMA,
           },
+        },
+      },
+    },
+  },
+};
+
+/** Stage 2B owns only followUps; frozen root copy is server-owned. */
+export const STAGED_COMMENT_GROWTH_JSON_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["threads"],
+  properties: {
+    disclaimer: { type: "string" },
+    threads: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "followUps"],
+        properties: {
+          id: { type: "string" },
+          question: { type: "string" },
+          answer: { type: "string" },
+          followUps: { type: "array", items: STAGED_FOLLOW_UP_NODE_SCHEMA },
         },
       },
     },
@@ -351,24 +377,51 @@ export const STAGED_COMMENT_NETWORK_EDITOR_JSON_SCHEMA: Record<string, unknown> 
   },
 };
 
-/** 2A-O/2B-O 机构侧 schema:本角色线程(或待承接追问)的答复列表。 */
+const ORG_ANSWER_SELF_REVIEW_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["status", "claims", "reasons"],
+  properties: {
+    status: { enum: ["accept", "reject"] },
+    claims: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["statement", "classification", "supported", "evidenceId", "quote"],
+        properties: {
+          statement: { type: "string" },
+          classification: { enum: ["factual_assertion", "organization_commitment", "hedge_or_unknown", "question_or_nonclaim"] },
+          supported: { type: ["boolean", "null"] },
+          evidenceId: { type: ["string", "null"] },
+          quote: { type: ["string", "null"] },
+        },
+      },
+    },
+    reasons: { type: "array", items: { type: "string" } },
+  },
+};
+
+/** 2A-O/2B-O 机构侧 schema:答复与同次逐句证据自检。 */
 export const STAGED_ORG_ANSWERS_JSON_SCHEMA: Record<string, unknown> = {
   type: "object",
   additionalProperties: false,
   required: ["answers"],
   properties: {
     ownedFirstComment: { type: "string" },
+    ownedFirstCommentReview: ORG_ANSWER_SELF_REVIEW_SCHEMA,
     answers: {
       type: "array",
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["id", "answer"],
+        required: ["id", "answer", "review"],
         properties: {
           id: { type: "string" },
           answer: { type: "string" },
           answerKind: { enum: ["question", "answer", "follow_up", "clarification"] },
           boundary: { type: "string" },
+          review: ORG_ANSWER_SELF_REVIEW_SCHEMA,
         },
       },
     },
@@ -525,7 +578,12 @@ ${ISOLATED_PUBLIC_COPY_LANGUAGE_CONTRACT}`;
 //
 // 2.6.0: 发布视角分治：自动用户视角允许消费者亲历创作但不把亲历当证据；
 // 机构视角阻断隐含消费者叙事；内部/保密来源片段不得进入前台；评论编辑强制同题承接。
-export const PROMPT_CONTRACT_VERSION = "2.7.0";
+//
+// 2.8.0: 机构答复带同次逐句证据自检(2A-O/2B-O schema 增加 review 字段,服务端
+// verifyOrgAnswerSelfReview 机械核验);评论生长改为只补 followUps 的补丁式解析;
+// 终编禁止改机构答复。digest 覆盖 stagedOrgAnswersSchema,版本随之移动;既有
+// active release 由 baseline-heal 按既定流程自愈或重新激活。
+export const PROMPT_CONTRACT_VERSION = "2.8.0";
 export const PROMPT_CONTRACT_DIGEST = createHash("sha256")
   .update(JSON.stringify({
     version: PROMPT_CONTRACT_VERSION,
@@ -1348,8 +1406,11 @@ ${safeJson(reasons)}
 
 硬合同：
 - 保留disclaimer、线程数量、顺序、id；不得改变任何线程的责任、答复身份或primary gap。
-- 可以改question、answer和followUps的可见措辞，也可删掉不自然的followUps；不得新增followUp。
-- 机构/作者答复只可压缩或改顺序，不得新增事实、数字、承诺或改变未知状态；原answer为空表示答复不可用，必须继续为空，不能补成“暂无法确认”等话术。读者侧不得替机构回答项目事实。
+- 可以改读者侧question及读者接话，也可删掉不自然的followUps；不得新增followUp。
+- 机构答复及机构补答已经完成逐句 AI 自检，必须逐字保持，不得压缩、改顺序或改写；原answer为空表示答复不可用，必须继续为空，不能补成“暂无法确认”等话术。读者侧不得替机构回答项目事实。
+- 所有公开问题、回答和追问都必须直接像人物说话。必须删除或自然改写“正文说/文中提到/文章里写/这个帖子说/按正文步骤操作”等上下文转述。
+- 禁止“根据资料/资料显示/源资料/知识库/证据来源”，也禁止“核验动作/信息边界/规划/审计/当前上下文/任务要求/角色职责/接龙方向”等后台语言；只有明确存在的官网、合同、病历、说明书等公开来源名可以自然保留。
+- reader_exchange 的读者B必须直接承接读者A已经说出的人、事、条件或情绪；追问必须承接上一句的可见对象或条件，不能从手机切到电脑、再漂到截图或表格等新话题。
 - 同一信息增量只保留一个主要回答节点；不同线程必须有不同现实切口。无法在冻结职责内修好时保持原文并写review。
 - 不输出分数；assessment只报告仍未解决的问题。
 
@@ -1749,9 +1810,10 @@ export function buildStagedOrgAnswersPrompt(
   const ownedFirstCommentRule = identity === "publisher"
     ? "\n- 首评（可选）：ownedFirstComment是发布账号可单独发布的首评，不是模拟读者评论。只在有已核验口径时，先回应一个最影响判断的顾虑，再自然补充1—2个有用信息点；只保留会改变判断的必要边界。默认不催促行动，不重复私信、预约、到店或留联系方式；确有必要时只给一个最低压力的下一步。不得写成FAQ清单、客服串词、用户证言或伪造互动；信息不足时省略整个字段。"
     : "";
+  const reviewSample = `"review":{"status":"accept|reject","claims":[{"statement":"answer中的完整句子","classification":"factual_assertion|organization_commitment|hedge_or_unknown|question_or_nonclaim","supported":true,"evidenceId":"该线程证据ID","quote":"该证据中的逐字原文"}],"reasons":[]}`;
   const sample = identity === "publisher"
-    ? `{"answers":[{"id":"清单ID","answer":"自然答复","answerKind":"answer","boundary":"有明确边界时写出，否则省略"}],"ownedFirstComment":"可选，可答内容不足时整字段省略"}`
-    : `{"answers":[{"id":"清单ID","answer":"自然答复","answerKind":"answer","boundary":"有明确边界时写出，否则省略"}]}`;
+    ? `{"answers":[{"id":"清单ID","answer":"自然答复","answerKind":"answer",${reviewSample}}],"ownedFirstComment":"可选首评","ownedFirstCommentReview":{"status":"accept|reject","claims":[{"statement":"首评中的完整句子","classification":"factual_assertion|organization_commitment|hedge_or_unknown|question_or_nonclaim","supported":true,"evidenceId":"该线程证据ID","quote":"该证据中的逐字原文"}],"reasons":[]}}`
+    : `{"answers":[{"id":"清单ID","answer":"自然答复","answerKind":"answer",${reviewSample}}]}`;
   const phase = `阶段2A-O：图文与读者评论已经完成。现在以你的身份逐条答复下方列出的线程，不改图文，也不答复未列出的线程。
 
 本角色线程清单（每条附“你手里的口径”：答复要点＋钉到该gap的证据原文；没有证据的按硬约束明确保留未知，不承诺未来服务动作）：
@@ -1760,6 +1822,12 @@ ${writerSafeJson(input, threadList)}
 每条线程必须：
 - id严格沿用清单ID，覆盖清单中的每一条；answer紧接读者提问，通常一小句或两小句。
 - answerKind常规为answer；该线程有明确边界时写出boundary，没有就省略该字段。${ownedFirstCommentRule}
+- 写完answer后立即逐句自检：review.claims必须按answer句子原顺序逐句覆盖，不得遗漏、拆改或合并句子。
+- 事实陈述归 factual_assertion；机构现在或未来会做什么、收费/保障/处理方式归 organization_commitment；明确保留未知或限定范围归 hedge_or_unknown；纯提问或非声明归 question_or_nonclaim。不要用 hedge_or_unknown 掩盖承诺或事实。
+- factual_assertion 与 organization_commitment 只有在本线程“证据原文”语义支持时才可 supported=true，并必须附该线程 evidenceId 与其中逐字连续 quote；否则 review.status 必须为 reject。其他两类的 supported/evidenceId/quote 必须为 null。
+- factual_assertion与organization_commitment都必须由本线程“证据原文”语义支持；supported=true时evidenceId必须属于本线程，quote必须是该证据中的逐字连续原文。没有支持就status=reject，不得用常识或推断放行。
+- hedge_or_unknown与question_or_nonclaim不要求证据，supported/evidenceId/quote填null。只有每句都合规时status=accept；reasons简述拒绝原因，不改写证据。
+- ownedFirstComment存在时必须同时给ownedFirstCommentReview并按同一规则自检；缺少可支持口径时省略首评及其review。
 
 只返回：${sample}`;
   const messages: PromptMessage[] = [
@@ -1865,8 +1933,9 @@ ${writerSafeJson(input, followUpList)}
 每条必须：
 - id严格沿用清单ID，覆盖清单中的每一条；answer紧接追问，一小句或两小句。
 - answerKind常规为clarification；有明确边界时写出boundary，没有就省略该字段。
+- review.claims按answer句子原顺序逐句覆盖。事实断言和机构承诺只有在本线程证据原文语义支持时才能status=accept，并附本线程evidenceId与逐字quote；限定、保留未知或非声明节点填null。缺少支持必须status=reject。
 
-只返回：{"answers":[{"id":"清单ID","answer":"自然补答","answerKind":"clarification","boundary":"有明确边界时写出，否则省略"}]}`;
+只返回：{"answers":[{"id":"清单ID","answer":"自然补答","answerKind":"clarification","review":{"status":"accept|reject","claims":[{"statement":"answer中的完整句子","classification":"factual_assertion|organization_commitment|hedge_or_unknown|question_or_nonclaim","supported":true,"evidenceId":"证据ID","quote":"逐字原文"}],"reasons":[]}}]}`;
   const messages: PromptMessage[] = [
     { role: "system", content: STAGED_ISOLATED_SYSTEM_PROMPT },
     { role: "user", content: context },
