@@ -146,6 +146,31 @@ export class WorkspaceController {
         .get(workspaceId) as { value: number };
       const analysisRefund = Number(activeAnalysisQuota.value);
       if (analysisRefund > 0) this.settings.refundPlatformQuota(workspaceId, analysisRefund);
+      // 排队/在跑的生成任务被删除终止 = 零产出,入队扣款退还;工作区可恢复,
+      // 账目必须在删除时刻就是对的。
+      const activeGenerationQuota = this.database
+        .prepare(
+          `SELECT COALESCE(SUM(j.quota_consumed_count), 0) AS value
+             FROM generation_jobs j
+             JOIN projects p ON p.id = j.project_id
+            WHERE p.workspace_id = ? AND j.status IN ('queued', 'running')
+              AND j.deleted_at IS NULL`,
+        )
+        .get(workspaceId) as { value: number };
+      const generationRefund = Number(activeGenerationQuota.value);
+      if (generationRefund > 0) this.settings.refundPlatformQuota(workspaceId, generationRefund);
+      // Harness 沿用它自己的可退语义:provider 已启动的运行成本已经发生,不退。
+      const activeHarnessQuota = this.database
+        .prepare(
+          `SELECT COALESCE(SUM(h.quota_consumed_count), 0) AS value
+             FROM agent_harness_jobs h
+             JOIN projects p ON p.id = h.project_id
+            WHERE p.workspace_id = ? AND h.status IN ('queued', 'running')
+              AND h.provider_started_at IS NULL AND h.deleted_at IS NULL`,
+        )
+        .get(workspaceId) as { value: number };
+      const harnessRefund = Number(activeHarnessQuota.value);
+      if (harnessRefund > 0) this.settings.refundPlatformQuota(workspaceId, harnessRefund);
 
       const stoppedMessage = '工作区已删除，任务已停止';
       this.database
@@ -165,7 +190,7 @@ export class WorkspaceController {
         .prepare(
           `UPDATE generation_jobs
               SET status='failed', progress=100, error=?, completed_at=?, updated_at=?,
-                  claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL
+                  claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, quota_consumed_count=0
             WHERE status IN ('queued', 'running')
               AND project_id IN (SELECT id FROM projects WHERE workspace_id = ?)`,
         )
@@ -179,6 +204,18 @@ export class WorkspaceController {
               AND project_id IN (SELECT id FROM projects WHERE workspace_id = ?)`,
         )
         .run(stoppedMessage, now, now, workspaceId);
+      // 与项目删除同理:软删工作区后 harness 任务不再有 CASCADE 兜底,必须显式结清,
+      // 否则排队/在跑的运行占着队列名额、额度永久挂账。
+      this.database
+        .prepare(
+          `UPDATE agent_harness_jobs
+              SET status='failed', error=?, failure_stage='cancelled', completed_at=?, updated_at=?,
+                  claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, quota_consumed_count=0,
+                  cancelled_at=?, cancelled_by=?
+            WHERE status IN ('queued', 'running') AND deleted_at IS NULL
+              AND project_id IN (SELECT id FROM projects WHERE workspace_id = ?)`,
+        )
+        .run(stoppedMessage, now, now, now, principal.userId, workspaceId);
       const removed = this.database
         .prepare('UPDATE workspaces SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL')
         .run(now, now, workspaceId);

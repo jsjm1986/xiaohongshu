@@ -13,7 +13,7 @@ export type SqlValue = string | number | bigint | Uint8Array | null;
  * 无关的测试变红——那不是回归信号,是维护噪声。测试断言这个常量,真正想验的
  * 「迁移到最新且表结构对得上」不变。
  */
-export const SCHEMA_VERSION = 26;
+export const SCHEMA_VERSION = 27;
 
 @Injectable()
 export class DatabaseService implements OnModuleDestroy {
@@ -1462,6 +1462,30 @@ export class DatabaseService implements OnModuleDestroy {
       this.db.exec('PRAGMA user_version = 26');
     });
     if (version < 26) version = 26;
+
+    if (version < 27) this.transaction(() => {
+      const hasGenerationJobs = Boolean(
+        this.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='generation_jobs'").get(),
+      );
+      if (hasGenerationJobs) {
+        const columns = new Set(
+          (this.prepare("SELECT name FROM pragma_table_info('generation_jobs')").all() as { name: string }[])
+            .map((row) => row.name),
+        );
+        /*
+         * 生成任务的「已扣未退」额度余额,语义与 revision_tasks 同名列一致:
+         * 入队时平台扣 1 就记 1,终态结算按「交付了产出留 1,零产出留 0」退还差额。
+         * 此前入队扣款没有任何记账,失败/删除/断供清队一律不退——用户零产出照样
+         * 扣费,而修改任务同样情形是退的。存量行保持 0:历史任务无法区分是否已
+         * 交付,不做追溯退款。
+         */
+        if (!columns.has('quota_consumed_count')) {
+          this.db.exec('ALTER TABLE generation_jobs ADD COLUMN quota_consumed_count INTEGER NOT NULL DEFAULT 0 CHECK(quota_consumed_count >= 0)');
+        }
+      }
+      this.db.exec('PRAGMA user_version = 27');
+    });
+    if (version < 27) version = 27;
   }
 
   onModuleDestroy(): void {

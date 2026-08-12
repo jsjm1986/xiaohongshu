@@ -402,12 +402,20 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
    * 触顶判 failed。
    */
   private reclaimAndDrain(): void {
-    const result = reclaimStaleJobs(this.database, nowIso(), this.options.jobClaimTimeoutMs);
+    // 回收判死 = 零产出,入队扣款在同一事务内结清退还(与修改任务的回收一致)。
+    const refundedByJob = new Map<string, number>();
+    const result = reclaimStaleJobs(this.database, nowIso(), this.options.jobClaimTimeoutMs, (id) => {
+      refundedByJob.set(id, this.settleGenerationQuota(id, this.requiredWorkspaceIdForJob(id), 0));
+    });
     for (const jobId of result.requeued) {
       this.event(jobId, 'requeued', { reason: 'claim_timeout' });
     }
     for (const jobId of result.failed) {
-      this.event(jobId, 'failed', { message: '任务被反复打断，已停止自动重跑' });
+      const refundedQuota = refundedByJob.get(jobId) ?? 0;
+      this.event(jobId, 'failed', {
+        message: '任务被反复打断，已停止自动重跑',
+        ...(refundedQuota ? { refundedQuota } : {}),
+      });
     }
     this.drainQueue();
 
@@ -510,7 +518,10 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     this.assertLatestSelectedKnowledge(projectId, config.knowledge.selectedFileIds);
     this.assertGenerationKnowledgeBudget(projectId, config.knowledge, '内容生成');
     const provider = this.settings.provider(workspaceId, principal.userId);
-    if (provider.mode === 'platform' && provider.apiKey) this.settings.consumePlatformQuota(workspaceId);
+    // 扣款必须记账(quota_consumed_count=1):终态结算按「交付了产出留 1,零产出
+    // 留 0」退差额,与修改任务同一原则。不记账就无从退,失败/删除只能白扣。
+    const charged = provider.mode === 'platform' && Boolean(provider.apiKey);
+    if (charged) this.settings.consumePlatformQuota(workspaceId);
 
     const id = randomUUID();
     const now = nowIso();
@@ -522,8 +533,8 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
            created_at, updated_at, topic, goal, mode, progress, knowledge_context_json,
            preset_id, style_profile_version, resolution_snapshot_json, config_impact_json,
            opportunity_id, opportunity_snapshot_json, planning_context_json, image_context_json,
-           release_manifest_id, research_snapshot_json, batch_id)
-         VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, 2, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           release_manifest_id, research_snapshot_json, batch_id, quota_consumed_count)
+         VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, 2, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${charged ? 1 : 0})`,
       )
       .run(
         id,
@@ -663,15 +674,16 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
    * 软删一条产出。返回撤销所需的信息。
    *
    * 不物理删:内容包、生成事件、批次都靠 job_id 外键挂着,物理删会连带清掉审计
-   * 痕迹;而且付费产品里「删错了」必须有退路。生成本身已扣的额度不退——记录还在
-   * 才解释得清账;但尚未交付结果的改稿必须结清余额,否则删除会让任务失去父级、余额
-   * 永久挂账。
+   * 痕迹;而且付费产品里「删错了」必须有退路。额度按「交付了产出留 1,零产出留 0」
+   * 结清:已完成任务的扣款不退(产出已交付,记录还在才解释得清账);排队/在跑中被
+   * 删掉的任务什么都没交付,入队扣款与改稿余额都退还,否则余额永久挂账。
    */
   softDelete(jobId: string): Record<string, unknown> {
     const row = this.jobRow(jobId);
     if (row.deleted_at) return { id: row.id, topic: row.topic, alreadyDeleted: true };
     const now = nowIso();
     const stoppedRevisionIds: string[] = [];
+    let generationRefund = 0;
     const deleted = this.database.transaction(() => {
       const current = this.database
         .prepare('SELECT status, deleted_at FROM generation_jobs WHERE id=?')
@@ -689,6 +701,10 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
         .get(jobId) as { value: number };
       const revisionRefund = Number(activeRevisionQuota.value);
       if (revisionRefund > 0) this.settings.refundPlatformQuota(workspaceId, revisionRefund);
+      // 排队/在跑中被删 = 零产出,入队扣款退还;终态任务不动它的账。
+      if (current.status === 'queued' || current.status === 'running') {
+        generationRefund = this.settleGenerationQuota(jobId, workspaceId, 0);
+      }
 
       const stoppedMessage = '生成任务已删除，任务已停止';
       const revisions = this.database
@@ -719,6 +735,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
         removedFromQueue: current.status === 'queued',
         stoppedRevisions: stoppedRevisionIds.length,
         refundedRevisionQuota: revisionRefund,
+        ...(generationRefund ? { refundedGenerationQuota: generationRefund } : {}),
       });
       return true;
     });
@@ -1047,15 +1064,26 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     // 就是避免每篇再花 16 分钟撞同一面墙。
     return this.database.transaction(() => {
       const now = nowIso();
+      // 被清掉的任务从未执行,入队扣款全额退还。先读余额再清零,
+      // RETURNING 返回的是更新后的值,拿不到退款数。
+      const refundTotal = Number((this.database
+        .prepare(
+          `SELECT COALESCE(SUM(quota_consumed_count), 0) AS value FROM generation_jobs
+            WHERE project_id=? AND status='queued' AND deleted_at IS NULL`,
+        )
+        .get(projectId) as { value: number }).value);
       const cleared = this.database
         .prepare(
           `UPDATE generation_jobs
               SET status='failed', error=?, progress=100, completed_at=?, updated_at=?,
-                  claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL
+                  claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, quota_consumed_count=0
             WHERE project_id=? AND status='queued' AND deleted_at IS NULL
             RETURNING id`,
         )
         .all(reason, now, now, projectId) as unknown as Array<{ id: string }>;
+      if (refundTotal > 0 && cleared.length > 0) {
+        this.settings.refundPlatformQuota(this.requiredWorkspaceIdForJob(cleared[0]!.id), refundTotal);
+      }
       for (const row of cleared) {
         this.event(row.id, 'failed', { message: reason, providerOutage: true });
       }
@@ -1207,6 +1235,47 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     if (result.changes !== 1) throw new Error('修改任务额度余额发生并发变化');
     this.settings.refundPlatformQuota(workspaceId, refund);
     return refund;
+  }
+
+  /**
+   * 结清一条生成任务的额度账,原则与 settleRevisionQuota 完全一致:
+   * 交付了产出留 1,零产出留 0,差额退回工作区。
+   *
+   * 生成任务只在入队时扣一次(insertJob 记 quota_consumed_count=1),所以余额非
+   * 0 即 1;keep=1 用于「真的调了模型且完成交付」,keep=0 用于失败、断供清队、
+   * 回收判死与删除——这些路径用户拿到的都是零产出。用确定性预览完成的任务
+   * (扣了款但没配模型)同样按 keep=0 退:钱是为模型调用付的。
+   *
+   * 与 settleRevisionQuota 相同,本方法不自行开事务,调用方必须把它放进任务
+   * 终态事务里,保证任务余额与工作区额度同生共死。
+   */
+  private settleGenerationQuota(jobId: string, workspaceId: string, keep: 0 | 1): number {
+    const row = this.database
+      .prepare('SELECT quota_consumed_count FROM generation_jobs WHERE id=?')
+      .get(jobId) as { quota_consumed_count: number } | undefined;
+    if (!row) throw new Error('生成任务不存在，无法结清额度');
+    const consumed = Number(row.quota_consumed_count);
+    const refund = Math.max(0, consumed - keep);
+    if (!refund) return 0;
+    const result = this.database
+      .prepare('UPDATE generation_jobs SET quota_consumed_count=? WHERE id=? AND quota_consumed_count=?')
+      .run(consumed - refund, jobId, consumed);
+    if (result.changes !== 1) throw new Error('生成任务额度余额发生并发变化');
+    this.settings.refundPlatformQuota(workspaceId, refund);
+    return refund;
+  }
+
+  /** 生成任务所属工作区;供回收路径使用,不过滤软删(退款对象是工作区,不是项目)。 */
+  private requiredWorkspaceIdForJob(jobId: string): string {
+    const row = this.database
+      .prepare(
+        `SELECT p.workspace_id FROM generation_jobs j
+           JOIN projects p ON p.id = j.project_id
+          WHERE j.id = ?`,
+      )
+      .get(jobId) as { workspace_id: string } | undefined;
+    if (!row) throw new Error('生成任务所属工作区不存在');
+    return String(row.workspace_id);
   }
 
   /** 推进改稿进度。CAS 未命中说明归属已易主,旧执行者必须立即停手。 */
@@ -1383,12 +1452,17 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
             this.options.instanceId,
           );
         if (completed.changes !== 1) throw new ClaimLostError('generation');
+        // 交付了产出留 1;确定性预览(没配模型)按零模型消耗全退。
+        const refundedQuota = this.settleGenerationQuota(
+          jobId, String(project.workspace_id), providerSettings.apiKey ? 1 : 0,
+        );
         this.event(jobId, 'completed', {
           candidateCount: result.packages.length,
           validCandidateCount,
           qualityStatus,
           knowledgeMode: result.knowledgeContext.mode,
           selectedDocuments: result.knowledgeContext.selectedDocumentIds,
+          ...(refundedQuota ? { refundedQuota } : {}),
         });
       });
     } catch (error) {
@@ -1412,7 +1486,9 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
             )
             .run(message, now, now, jobId, this.options.instanceId);
           if (failed.changes !== 1) throw new ClaimLostError('generation');
-          this.event(jobId, 'failed', { message });
+          // 零产出不扣费:与修改任务同一原则,入队时的扣款在失败终态全额退还。
+          const refundedQuota = this.settleGenerationQuota(jobId, this.requiredWorkspaceIdForJob(jobId), 0);
+          this.event(jobId, 'failed', { message, ...(refundedQuota ? { refundedQuota } : {}) });
         });
       } catch (settleError) {
         if (settleError instanceof ClaimLostError) return;

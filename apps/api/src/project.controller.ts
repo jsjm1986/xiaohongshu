@@ -160,7 +160,25 @@ export class ProjectController {
             WHERE project_id = ? AND status IN ('queued', 'running')`,
         )
         .get(projectId) as { value: number };
-      const quotaRefund = Number(activeRevisionQuota.value) + Number(activeAnalysisQuota.value);
+      // 排队/在跑的生成任务被删除终止 = 零产出,入队扣款一并退还(与改稿/分析同权)。
+      const activeGenerationQuota = this.database
+        .prepare(
+          `SELECT COALESCE(SUM(quota_consumed_count), 0) AS value
+             FROM generation_jobs
+            WHERE project_id = ? AND status IN ('queued', 'running') AND deleted_at IS NULL`,
+        )
+        .get(projectId) as { value: number };
+      // Harness 沿用它自己的可退语义:provider 已启动的运行成本已经发生,不退。
+      const activeHarnessQuota = this.database
+        .prepare(
+          `SELECT COALESCE(SUM(quota_consumed_count), 0) AS value
+             FROM agent_harness_jobs
+            WHERE project_id = ? AND status IN ('queued', 'running')
+              AND provider_started_at IS NULL AND deleted_at IS NULL`,
+        )
+        .get(projectId) as { value: number };
+      const quotaRefund = Number(activeRevisionQuota.value) + Number(activeAnalysisQuota.value)
+        + Number(activeGenerationQuota.value) + Number(activeHarnessQuota.value);
       if (quotaRefund > 0) this.settings.refundPlatformQuota(workspaceId, quotaRefund);
 
       const stoppedMessage = '项目已删除，任务已停止';
@@ -177,7 +195,7 @@ export class ProjectController {
         .prepare(
           `UPDATE generation_jobs
               SET status='failed', progress=100, error=?, completed_at=?, updated_at=?,
-                  claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL
+                  claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, quota_consumed_count=0
             WHERE status IN ('queued', 'running') AND project_id = ?`,
         )
         .run(stoppedMessage, now, now, projectId);
@@ -189,6 +207,18 @@ export class ProjectController {
             WHERE status IN ('queued', 'running') AND project_id = ?`,
         )
         .run(stoppedMessage, now, now, projectId);
+      // 此前删除项目对 harness 只靠 ON DELETE CASCADE(物理删才生效),软删后
+      // 排队/在跑的 harness 任务无人终止:占队列名额、被回收循环反复重试,额度
+      // 也永久挂账。这里与其余任务同一事务结清。
+      this.database
+        .prepare(
+          `UPDATE agent_harness_jobs
+              SET status='failed', error=?, failure_stage='cancelled', completed_at=?, updated_at=?,
+                  claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, quota_consumed_count=0,
+                  cancelled_at=?, cancelled_by=?
+            WHERE status IN ('queued', 'running') AND project_id = ? AND deleted_at IS NULL`,
+        )
+        .run(stoppedMessage, now, now, now, principal.userId, projectId);
       const removed = this.database
         .prepare('UPDATE projects SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL')
         .run(now, now, projectId);

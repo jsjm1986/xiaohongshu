@@ -340,6 +340,8 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   private analysisTail: Promise<void> = Promise.resolve();
   /** 在跑分析的心跳定时器,按 taskId 索引;任务收尾时清掉。 */
   private readonly taskHeartbeats = new Map<string, NodeJS.Timeout>();
+  /** 心跳失速任务的周期回收;与 generation/harness 的回收循环同一节奏。 */
+  private reclaimTimer?: NodeJS.Timeout;
   /** 已关停。心跳回调据此静默放弃,避免撞上已关闭的数据库连接。 */
   private stopped = false;
 
@@ -352,17 +354,19 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   /**
-   * 重启后清理本实例遗留的分析任务。
+   * 清理心跳失速的分析任务:启动时跑一次,之后按 jobHeartbeatMs 周期跑。
    *
    * 分析任务是 insert 时直接 running 的同步 inline 执行,没有队列可回,所以语义
-   * 仍是「重启即失败、重试安全」。改的是**范围**:原来无条件把全表 queued/running
-   * 标 failed,多实例下 B 启动会杀掉 A 正在跑的分析——用户那边表现为分析莫名失败。
+   * 仍是「中断即失败、重试安全」。原来只在启动时清一次——实例一崩(或多实例下
+   * 某个实例死掉),它正在跑的分析就永久停在 running:入口被「已有分析在跑」的
+   * 查重挡住,额度也挂死,直到**随便哪个**实例重启才解锁。generation/harness
+   * 都有周期回收循环,分析任务是唯一的漏网,这里补齐。
    *
    * 判据只看心跳、不看归属:instanceId 含 pid 与随机后缀,进程重启后是新身份,
    * 所以「心跳新鲜」就等于「有活着的实例在跑」。旧进程留下的行心跳必然停更,
    * 靠超时一样能清掉。心跳为 NULL 的是迁移前的存量行,当作孤儿清理。
    */
-  onModuleInit(): void {
+  private reclaimStaleAnalysisTasks(message: string): void {
     const now = nowIso();
     const deadline = new Date(Date.now() - this.options.jobClaimTimeoutMs).toISOString();
     this.database.transaction(() => {
@@ -385,12 +389,25 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
                 claimed_by=NULL, heartbeat_at=NULL, quota_consumed_count=0
          WHERE status IN ('queued', 'running') AND deleted_at IS NULL
            AND (heartbeat_at IS NULL OR heartbeat_at < ?)`,
-      ).run('Application restart interrupted the analysis; retry is safe.', now, now, deadline);
+      ).run(message, now, now, deadline);
     });
+  }
+
+  onModuleInit(): void {
+    this.reclaimStaleAnalysisTasks('Application restart interrupted the analysis; retry is safe.');
+    this.reclaimTimer = setInterval(() => {
+      if (this.stopped) return;
+      // 关停竞态或瞬时锁冲突:静默放弃,下一拍再来(与 generation 的 tick 同策略)。
+      try {
+        this.reclaimStaleAnalysisTasks('The analysis instance stopped heartbeating; the task was reclaimed. Retry is safe.');
+      } catch { /* noop */ }
+    }, this.options.jobHeartbeatMs);
+    this.reclaimTimer.unref();
   }
 
   onModuleDestroy(): void {
     this.stopped = true;
+    if (this.reclaimTimer) clearInterval(this.reclaimTimer);
     for (const timer of this.taskHeartbeats.values()) clearInterval(timer);
     this.taskHeartbeats.clear();
   }

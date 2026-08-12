@@ -275,10 +275,12 @@ export function reclaimStaleJobs(
   database: DatabaseService,
   now: string,
   claimTimeoutMs: number,
+  onFailed?: (id: string) => void,
 ): ReclaimResult {
   return reclaimStale(
     database, GENERATION_JOBS_SPEC, now, claimTimeoutMs,
     (attempts) => `任务被反复打断（${attempts} 次），已停止自动重跑，请检查服务稳定性后手动重新生成`,
+    onFailed,
   );
 }
 

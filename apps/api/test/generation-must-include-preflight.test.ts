@@ -40,6 +40,24 @@ function quotaUsed(): number {
   return Number(row.quota_used);
 }
 
+/**
+ * 等任务进入终态再断言账目。
+ *
+ * 测试环境的模型地址故意不可达(127.0.0.1:1),入队成功的任务会被异步领取、
+ * 快速失败;失败终态按「零产出留 0」退还入队扣款。不等终态就读 quota_used,
+ * 断言会与异步退款竞态。
+ */
+async function waitForTerminal(jobId: string): Promise<string> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const row = app.get(DatabaseService)
+      .prepare('SELECT status FROM generation_jobs WHERE id=?')
+      .get(jobId) as { status: string } | undefined;
+    if (row && (row.status === 'completed' || row.status === 'failed')) return row.status;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('任务未在预期时间内进入终态');
+}
+
 before(async () => {
   dataDir = await mkdtemp(join(tmpdir(), 'must-include-preflight-'));
   app = await createApplication({
@@ -126,7 +144,15 @@ test('普通写作要求不需要知识证据，仍可正常入队', async () =>
   });
   assert.equal(result.response.status, 201, JSON.stringify(result.body));
   assert.equal(count('SELECT COUNT(*) AS total FROM generation_jobs WHERE project_id=?', projectId), jobsBefore + 1);
-  assert.equal(quotaUsed(), quotaBefore + 1);
+  // 模型不可达 → 任务快速失败;失败终态按「零产出留 0」退还入队扣款,
+  // 账目回到起点。扣款确实发生过:failed 事件里带 refundedQuota=1。
+  const status = await waitForTerminal(String(result.body.id));
+  assert.equal(status, 'failed');
+  assert.equal(quotaUsed(), quotaBefore);
+  const failedEvent = app.get(DatabaseService)
+    .prepare("SELECT details_json FROM generation_events WHERE job_id=? AND event='failed' ORDER BY id DESC LIMIT 1")
+    .get(String(result.body.id)) as { details_json: string };
+  assert.equal(JSON.parse(failedEvent.details_json).refundedQuota, 1);
 });
 
 test('有精确事实依据的敏感必含声明可以正常入队', async () => {
@@ -142,7 +168,10 @@ test('有精确事实依据的敏感必含声明可以正常入队', async () =>
   });
   assert.equal(result.response.status, 201, JSON.stringify(result.body));
   assert.equal(count('SELECT COUNT(*) AS total FROM generation_jobs WHERE project_id=?', projectId), jobsBefore + 1);
-  assert.equal(quotaUsed(), quotaBefore + 1);
+  // 同上:等终态,避免额度断言与异步「失败退款」竞态。
+  const status = await waitForTerminal(String(result.body.id));
+  assert.equal(status, 'failed');
+  assert.equal(quotaUsed(), quotaBefore);
 });
 
 test('批量中任一强制声明无依据时不留下批次、任务或额度扣款', async () => {
