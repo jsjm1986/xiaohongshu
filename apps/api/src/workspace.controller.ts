@@ -134,7 +134,11 @@ export class WorkspaceController {
         )
         .get(workspaceId) as { value: number };
       const revisionRefund = Number(activeRevisionQuota.value);
-      if (revisionRefund > 0) this.settings.refundPlatformQuota(workspaceId, revisionRefund);
+      if (revisionRefund > 0) {
+        this.settings.refundPlatformQuota(workspaceId, revisionRefund, {
+          reason: 'workspace_delete_revision_refund', entityType: 'workspace', entityId: workspaceId,
+        });
+      }
       const activeAnalysisQuota = this.database
         .prepare(
           `SELECT COALESCE(SUM(t.quota_consumed_count), 0) AS value
@@ -145,7 +149,11 @@ export class WorkspaceController {
         )
         .get(workspaceId) as { value: number };
       const analysisRefund = Number(activeAnalysisQuota.value);
-      if (analysisRefund > 0) this.settings.refundPlatformQuota(workspaceId, analysisRefund);
+      if (analysisRefund > 0) {
+        this.settings.refundPlatformQuota(workspaceId, analysisRefund, {
+          reason: 'workspace_delete_analysis_refund', entityType: 'workspace', entityId: workspaceId,
+        });
+      }
       // 排队/在跑的生成任务被删除终止 = 零产出,入队扣款退还;工作区可恢复,
       // 账目必须在删除时刻就是对的。
       const activeGenerationQuota = this.database
@@ -158,7 +166,11 @@ export class WorkspaceController {
         )
         .get(workspaceId) as { value: number };
       const generationRefund = Number(activeGenerationQuota.value);
-      if (generationRefund > 0) this.settings.refundPlatformQuota(workspaceId, generationRefund);
+      if (generationRefund > 0) {
+        this.settings.refundPlatformQuota(workspaceId, generationRefund, {
+          reason: 'workspace_delete_generation_refund', entityType: 'workspace', entityId: workspaceId,
+        });
+      }
       // Harness 沿用它自己的可退语义:provider 已启动的运行成本已经发生,不退。
       const activeHarnessQuota = this.database
         .prepare(
@@ -170,7 +182,11 @@ export class WorkspaceController {
         )
         .get(workspaceId) as { value: number };
       const harnessRefund = Number(activeHarnessQuota.value);
-      if (harnessRefund > 0) this.settings.refundPlatformQuota(workspaceId, harnessRefund);
+      if (harnessRefund > 0) {
+        this.settings.refundPlatformQuota(workspaceId, harnessRefund, {
+          reason: 'workspace_delete_harness_refund', entityType: 'workspace', entityId: workspaceId,
+        });
+      }
 
       const stoppedMessage = '工作区已删除，任务已停止';
       this.database

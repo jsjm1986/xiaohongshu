@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { candidateDeliverable, deliveryReadiness } from '../src/lib/delivery-readiness.js';
+import { NON_OVERRIDABLE_CONTENT_ISSUE_CODES } from '@content-agent/agent-core/delivery-policy';
+import { candidateDeliverable, deliveryReadiness, NON_OVERRIDABLE_DELIVERY_ISSUE_CODES } from '../src/lib/delivery-readiness.js';
+
+// 浏览器端交付门禁与领域层白名单必须同源。这里曾是 29 个 code 的手抄副本,
+// agent-core 新增硬门禁 code 时 web 不知道,被阻断内容就会从前端复制出口漏走。
+test('web 交付门禁与 agent-core 硬门禁白名单是同一个对象,不是副本', () => {
+  assert.equal(NON_OVERRIDABLE_DELIVERY_ISSUE_CODES, NON_OVERRIDABLE_CONTENT_ISSUE_CODES);
+  assert.ok(NON_OVERRIDABLE_DELIVERY_ISSUE_CODES.has('restricted_source_content_visible'));
+});
 
 test('formal review findings are immediately deliverable and only mechanical gates block', () => {
   const passed = { valid: true, qualityStatus: 'passed' as const, repairAttempts: 0, issues: [] };

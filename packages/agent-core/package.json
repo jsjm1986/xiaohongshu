@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./delivery-policy": {
+      "types": "./dist/delivery-policy.d.ts",
+      "import": "./dist/delivery-policy.js"
     }
   },
   "files": [

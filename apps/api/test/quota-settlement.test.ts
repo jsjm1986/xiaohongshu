@@ -9,6 +9,7 @@ import { createApplication } from '../src/app.js';
 import { DatabaseService } from '../src/database.service.js';
 import { GenerationService } from '../src/generation.service.js';
 import { IntelligenceService } from '../src/intelligence.service.js';
+import { SettingsService } from '../src/settings.service.js';
 
 /**
  * 额度结算的统一原则:交付了产出留 1,零产出留 0。
@@ -259,4 +260,65 @@ test('分析任务心跳失速由周期回收清理并退款，不再依赖重�
   const freshRow = database.prepare('SELECT status FROM analysis_tasks WHERE id=?')
     .get(freshId) as { status: string };
   assert.equal(freshRow.status, 'running', '心跳新鲜的任务不能被误杀');
+});
+
+test('额度流水：每笔扣退同事务落账、记实际发生额、月度对账可自证', async () => {
+  // 独立工作区:seedProject 共享 admin 默认工作区,其他测试的退款流水会污染
+  // 本测试对账本的精确断言。
+  const workspace = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ name: '额度流水测试' }) });
+  assert.equal(workspace.response.status, 201, JSON.stringify(workspace.body));
+  const workspaceId = String(workspace.body.id);
+  const database = app.get(DatabaseService);
+  const settings = app.get(SettingsService);
+  // 平台模式 + 上限,让 consume 真正扣账
+  database.prepare(
+    `INSERT INTO workspace_settings (workspace_id, provider_mode, monthly_quota, quota_used, updated_at)
+     VALUES (?, 'platform', 100, 0, ?)
+     ON CONFLICT(workspace_id) DO UPDATE SET provider_mode='platform', monthly_quota=100, quota_used=0`,
+  ).run(workspaceId, new Date().toISOString());
+
+  const jobId = randomUUID();
+  settings.consumePlatformQuota(workspaceId, { reason: 'generation_enqueue', entityType: 'generation_job', entityId: jobId });
+  settings.consumePlatformQuota(workspaceId, { reason: 'analysis_charge', entityType: 'analysis_task', entityId: 'task-1' });
+  settings.refundPlatformQuota(workspaceId, 1, { reason: 'generation_settle_refund', entityType: 'generation_job', entityId: jobId });
+
+  const rows = database.prepare(
+    'SELECT delta, balance_after, reason, entity_type, entity_id FROM quota_ledger WHERE workspace_id=? ORDER BY id',
+  ).all(workspaceId) as Array<{ delta: number; balance_after: number; reason: string; entity_type: string | null; entity_id: string | null }>;
+  assert.deepEqual(rows.map((r) => [r.delta, r.balance_after, r.reason]), [
+    [1, 1, 'generation_enqueue'],
+    [1, 2, 'analysis_charge'],
+    [-1, 1, 'generation_settle_refund'],
+  ], 'delta 与 balance_after 快照必须与计数器联立自洽');
+  assert.equal(rows[0]!.entity_id, jobId, '每笔账要能指回具体任务');
+
+  // MAX(0) 下限:请求退 5、账上只剩 1,流水必须记实际发生的 -1 而不是请求额
+  settings.refundPlatformQuota(workspaceId, 5, { reason: 'over_refund_probe' });
+  const last = database.prepare(
+    'SELECT delta, balance_after FROM quota_ledger WHERE workspace_id=? ORDER BY id DESC LIMIT 1',
+  ).get(workspaceId) as { delta: number; balance_after: number };
+  assert.equal(last.delta, -1, '下限保护下账本记实际退还额');
+  assert.equal(last.balance_after, 0);
+  assert.equal(quotaUsed(workspaceId), 0);
+
+  // 对账端点语义(服务层):汇总与流水一致,月度过滤生效
+  const statement = settings.quotaLedger(workspaceId) as { consumed: number; refunded: number; net: number; items: unknown[] };
+  assert.equal(statement.consumed, 2);
+  assert.equal(statement.refunded, 2);
+  assert.equal(statement.net, 0);
+  assert.equal(statement.items.length, 4);
+  const thisMonth = new Date().toISOString().slice(0, 7);
+  const monthly = settings.quotaLedger(workspaceId, thisMonth) as { items: unknown[] };
+  assert.equal(monthly.items.length, 4, '本月过滤应含全部四笔');
+  const otherMonth = settings.quotaLedger(workspaceId, '2020-01') as { items: unknown[]; consumed: number };
+  assert.equal(otherMonth.items.length, 0);
+  assert.equal(otherMonth.consumed, 0);
+
+  // BYOK 模式不产生平台扣款,也不允许伪造流水
+  database.prepare("UPDATE workspace_settings SET provider_mode='byok' WHERE workspace_id=?").run(workspaceId);
+  settings.consumePlatformQuota(workspaceId, { reason: 'should_not_record' });
+  const byokRows = database.prepare(
+    "SELECT COUNT(*) AS value FROM quota_ledger WHERE workspace_id=? AND reason='should_not_record'",
+  ).get(workspaceId) as { value: number };
+  assert.equal(Number(byokRows.value), 0, 'BYOK 模式无平台消耗,不得记账');
 });

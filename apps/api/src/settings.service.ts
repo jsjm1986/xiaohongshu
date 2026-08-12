@@ -10,6 +10,13 @@ import { QUOTA_EXHAUSTED_MESSAGE } from './support.js';
 import { assertJsonComplexity, nowIso, parseJson, requireString } from './utils.js';
 
 const MAX_API_KEY_LENGTH = 8_192;
+
+/** 额度流水的归属上下文:每一笔扣退都要能回答「因为什么、落在哪个实体上」。 */
+export interface QuotaLedgerContext {
+  reason: string;
+  entityType?: string;
+  entityId?: string;
+}
 const MAX_MONTHLY_QUOTA = 1_000_000;
 
 interface SettingsRow {
@@ -233,7 +240,7 @@ export class SettingsService {
    * 下推进 SQL 之后,「不超额」由 DB 保证:UPDATE 的 WHERE 与自增原子生效,
    * changes===0 就是「已到上限」。
    */
-  consumePlatformQuota(workspaceId: string): void {
+  consumePlatformQuota(workspaceId: string, context?: QuotaLedgerContext): void {
     const row = this.ensure(workspaceId);
     if (row.provider_mode !== 'platform') return;
     const result = this.database
@@ -244,6 +251,7 @@ export class SettingsService {
       .run(nowIso(), workspaceId);
     // 话术见 support.ts:「联系管理员 / 配置 BYOK」对付费 SaaS 用户是两条走不通的路
     if (!result.changes) throw new ForbiddenException(QUOTA_EXHAUSTED_MESSAGE);
+    this.recordQuotaLedger(workspaceId, 1, context ?? { reason: 'consume' });
   }
 
   /**
@@ -258,15 +266,79 @@ export class SettingsService {
    * 额度还没退」的崩溃窗口。这里也不按当前 provider_mode 过滤:任务可能在 platform
    * 模式扣款后才切到 BYOK,历史扣款仍然必须退。
    */
-  refundPlatformQuota(workspaceId: string, count = 1): void {
+  refundPlatformQuota(workspaceId: string, count = 1, context?: QuotaLedgerContext): void {
     const normalizedCount = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
     if (!normalizedCount) return;
+    // 先读变动前的用量:MAX(0,…) 下限保护意味着实际退还可能小于请求数,
+    // 账本必须记真实发生额而不是请求额。读与写在调用方的同一事务里,无竞态。
+    const before = this.database
+      .prepare('SELECT quota_used FROM workspace_settings WHERE workspace_id = ?')
+      .get(workspaceId) as { quota_used: number } | undefined;
     const result = this.database
       .prepare('UPDATE workspace_settings SET quota_used = MAX(0, quota_used - ?), updated_at = ? WHERE workspace_id = ?')
       .run(normalizedCount, nowIso(), workspaceId);
     // 有扣款账却没有 settings 行属于数据损坏。抛错让调用方的外层事务整体回滚,
     // 不能把任务账先清掉、把用户应退额度静默丢掉。
-    if (!result.changes) throw new Error('工作区额度设置不存在，无法退还额度');
+    if (!result.changes || !before) throw new Error('工作区额度设置不存在，无法退还额度');
+    const actualRefund = Math.min(normalizedCount, Number(before.quota_used));
+    if (actualRefund > 0) {
+      this.recordQuotaLedger(workspaceId, -actualRefund, context ?? { reason: 'refund' });
+    }
+  }
+
+  /**
+   * 平台额度逐笔流水,与扣退款同事务写入。
+   *
+   * quota_used 单计数器保证「账不会错」,流水保证「账能自证」:客户质疑
+   * 「这个月为什么扣了 87 次」时,每一笔都能归属到具体任务/事件与时间点。
+   * delta 为 quota_used 的实际变化(+消耗/−退还),balance_after 是变动后
+   * 快照——两者联立可机器校验流水与计数器不漂移。
+   */
+  private recordQuotaLedger(workspaceId: string, delta: number, context: QuotaLedgerContext): void {
+    const row = this.database
+      .prepare('SELECT quota_used FROM workspace_settings WHERE workspace_id = ?')
+      .get(workspaceId) as { quota_used: number };
+    this.database
+      .prepare(
+        `INSERT INTO quota_ledger (workspace_id, delta, balance_after, reason, entity_type, entity_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        workspaceId, delta, Number(row.quota_used), context.reason,
+        context.entityType ?? null, context.entityId ?? null, nowIso(),
+      );
+  }
+
+  /**
+   * 月度对账:流水明细 + 汇总。month 形如 YYYY-MM,缺省为全部。
+   * 只读,不做任何清零——「月度」是记账分桶语义,不是额度重置语义。
+   */
+  quotaLedger(workspaceId: string, month?: string, limit = 500): Record<string, unknown> {
+    const monthFilter = month && /^\d{4}-\d{2}$/u.test(month) ? month : undefined;
+    const items = this.database
+      .prepare(
+        `SELECT id, delta, balance_after AS balanceAfter, reason, entity_type AS entityType,
+                entity_id AS entityId, created_at AS createdAt
+           FROM quota_ledger
+          WHERE workspace_id = ? AND (? IS NULL OR substr(created_at, 1, 7) = ?)
+          ORDER BY id DESC LIMIT ?`,
+      )
+      .all(workspaceId, monthFilter ?? null, monthFilter ?? null, Math.min(Math.max(1, limit), 1000));
+    const summary = this.database
+      .prepare(
+        `SELECT COALESCE(SUM(CASE WHEN delta > 0 THEN delta ELSE 0 END), 0) AS consumed,
+                COALESCE(SUM(CASE WHEN delta < 0 THEN -delta ELSE 0 END), 0) AS refunded
+           FROM quota_ledger
+          WHERE workspace_id = ? AND (? IS NULL OR substr(created_at, 1, 7) = ?)`,
+      )
+      .get(workspaceId, monthFilter ?? null, monthFilter ?? null) as { consumed: number; refunded: number };
+    return {
+      month: monthFilter ?? null,
+      consumed: Number(summary.consumed),
+      refunded: Number(summary.refunded),
+      net: Number(summary.consumed) - Number(summary.refunded),
+      items,
+    };
   }
 
   workspaceConfig(workspaceId: string): Record<string, unknown> {

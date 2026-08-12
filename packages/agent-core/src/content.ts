@@ -19,6 +19,13 @@ import type {
   UnknownItem,
 } from "./types.js";
 import { evaluatePlanToCopyAlignment, isProhibitiveBoundary } from "./artifacts.js";
+import {
+  candidateQualityStatus,
+  isNonOverridableContentIssueCode,
+  issueDisposition,
+  issueOverridePolicy,
+  normalizeContentValidationIssue,
+} from "./delivery-policy.js";
 import { combinedEvidenceSupport, conservativeEvidenceSupport, evidenceClaimAtoms, evidenceReferenceCanSupportFact } from "./knowledge.js";
 import { assertModelJsonComplexity } from "./model.js";
 import { guardedReplyIdentitiesForQuestion, questionMatchesPlannedGap } from "./planning.js";
@@ -1963,102 +1970,20 @@ export function isHashtagOnlyLine(statement: string): boolean {
   return /^(?:#[^#\s]+[\s、,，]*)+$/u.test(trimmed);
 }
 
-/**
- * Publication is permissive by default. Only mechanically provable integrity
- * failures may block a model-generated candidate. Any semantic, editorial,
- * completeness, policy, wording, range, grounding or AI-judge conclusion that
- * is not listed here is review-only — including future codes added elsewhere.
- *
- * This is intentionally an allowlist, not a downgrade list: a newly introduced
- * validator can never silently become a publication gate merely by emitting an
- * error or `disposition: block`.
+/*
+ * 交付硬门禁政策移居 delivery-policy.ts(零运行时依赖,浏览器可打包):
+ * web 曾手抄这份白名单 29 个 code 靠注释对齐,漏抄新增 code 就等于给被阻断
+ * 内容开了前端复制出口。re-export 保持既有 import 路径不破;本文件内部
+ * 使用的绑定在顶部 import。
  */
-export const NON_OVERRIDABLE_CONTENT_ISSUE_CODES = new Set<string>([
-  // No formal model artifact exists.
-  "model_not_invoked",
-  "deterministic_preview_non_deliverable",
-
-  // Minimum visible artifact shape.
-  "title_required",
-  "body_required",
-
-  // Confidential/internal material or model-control text reached public copy.
-  "restricted_source_content_visible",
-  "internal_audit_artifact_visible",
-  "frontstage_instruction_leak",
-  "comment_context_meta_leak",
-  "comment_source_language_surface_leak",
-  "comment_plan_language_surface_leak",
-
-  // Mechanical evidence authenticity: IDs, source availability, exact quotes,
-  // evidence role and ledger identity must not be fabricated or substituted.
-  "unknown_evidence",
-  "evidence_quote_empty",
-  "evidence_quote_not_exact",
-  "evidence_source_unavailable",
-  "evidence_reference_metadata_missing",
-  "evidence_role_cannot_support_fact",
-  "package_evidence_ledger_mismatch",
-  "fact_source_id_mismatch",
-  "author_fact_reference_invalid",
-  "author_fact_confirmation_mismatch",
-  "author_fact_project_evidence_mixed",
-
-  // Accountable identity ownership and frozen responder attribution.
-  "unaccountable_answer_identity",
-  "comment_identity_violation",
-  "host_reply_identity_violation",
-  "host_reply_unconfirmed_author",
-  "org_answer_identity_violation",
-  "comment_answer_identity_mismatch",
-  "publisher_narrative_identity_alias",
-  "reply_identity_plan_drift",
-  "reply_display_role_plan_drift",
-]);
-
-export function isNonOverridableContentIssueCode(code: string): boolean {
-  return NON_OVERRIDABLE_CONTENT_ISSUE_CODES.has(code);
-}
-
-export function issueDisposition(
-  issue: Pick<ContentValidationIssue, "code" | "severity" | "disposition">,
-): NonNullable<ContentValidationIssue["disposition"]> {
-  if (isNonOverridableContentIssueCode(issue.code)) return "block";
-  if (issue.disposition === "review" || issue.disposition === "block" || issue.severity === "error") return "review";
-  return "advisory";
-}
-
-export function issueOverridePolicy(
-  issue: Pick<ContentValidationIssue, "code" | "severity" | "disposition" | "overridePolicy">,
-): NonNullable<ContentValidationIssue["overridePolicy"]> {
-  if (isNonOverridableContentIssueCode(issue.code)) return "non_overridable";
-  return issueDisposition(issue) === "advisory" ? "not_required" : "human_reviewable";
-}
-
-export function candidateQualityStatus(
-  validation: {
-    valid?: boolean;
-    issues: readonly Pick<ContentValidationIssue, "code" | "severity" | "disposition">[];
-  },
-): "passed" | "needs_review" | "blocked" {
-  if (validation.issues.some((issue) => isNonOverridableContentIssueCode(issue.code))) return "blocked";
-  if (validation.issues.some((issue) => issueDisposition(issue) === "review") || validation.valid === false) return "needs_review";
-  return "passed";
-}
-
-/** Recompute action metadata from the hard-gate allowlist. Stale serialized
- * `block/non_overridable` fields never outrank the current central policy. */
-export function normalizeContentValidationIssue(issue: ContentValidationIssue): ContentValidationIssue {
-  const disposition = issueDisposition(issue);
-  const overridePolicy = issueOverridePolicy({ ...issue, disposition });
-  if (disposition === "block") {
-    return { ...issue, severity: "error", disposition, overridePolicy };
-  }
-  if (disposition === "review") {
-    return { ...issue, severity: "warning", disposition, overridePolicy };
-  }
-  return { ...issue, severity: "warning", disposition, overridePolicy };
-}
+export {
+  NON_OVERRIDABLE_CONTENT_ISSUE_CODES,
+  candidateQualityStatus,
+  isNonOverridableContentIssueCode,
+  issueDisposition,
+  issueOverridePolicy,
+  normalizeContentValidationIssue,
+} from "./delivery-policy.js";
 
 export function validateGenerationDraft(input: DraftValidationInput): ContentValidationIssue[] {
   const { draft, config, ledger } = input;

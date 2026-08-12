@@ -1,30 +1,21 @@
+import {
+  isNonOverridableContentIssueCode,
+  NON_OVERRIDABLE_CONTENT_ISSUE_CODES,
+} from '@content-agent/agent-core/delivery-policy';
 import type { CandidateValidation, CandidateValidationIssue } from '../types';
 
 export type DeliveryReadiness = 'publishable' | 'human_reviewable' | 'blocked';
 
-/** Keep this browser boundary aligned with agent-core's mechanical hard-gate
- * allowlist. Everything else, including stale `non_overridable` metadata, is a
- * visible review note and never disables a formal model artifact. */
-export const NON_OVERRIDABLE_DELIVERY_ISSUE_CODES = new Set([
-  'model_not_invoked', 'deterministic_preview_non_deliverable',
-  'title_required', 'body_required',
-  'restricted_source_content_visible', 'internal_audit_artifact_visible',
-  'frontstage_instruction_leak', 'comment_context_meta_leak',
-  'comment_source_language_surface_leak', 'comment_plan_language_surface_leak',
-  'unknown_evidence', 'evidence_quote_empty', 'evidence_quote_not_exact',
-  'evidence_source_unavailable', 'evidence_reference_metadata_missing',
-  'evidence_role_cannot_support_fact', 'package_evidence_ledger_mismatch',
-  'fact_source_id_mismatch', 'author_fact_reference_invalid',
-  'author_fact_confirmation_mismatch', 'author_fact_project_evidence_mixed',
-  'unaccountable_answer_identity', 'comment_identity_violation',
-  'host_reply_identity_violation', 'host_reply_unconfirmed_author',
-  'org_answer_identity_violation', 'comment_answer_identity_mismatch',
-  'publisher_narrative_identity_alias', 'reply_identity_plan_drift',
-  'reply_display_role_plan_drift',
-]);
+/**
+ * 浏览器端的交付门禁直接消费 agent-core 的权威白名单(零 node 依赖子路径)。
+ * 这里曾是 29 个 code 的手抄副本,靠一行注释与领域层对齐——agent-core 每新增
+ * 一个硬门禁 code,web 不知道它就会照常解锁复制,被阻断内容从前端出口漏走。
+ * re-export 仅为兼容既有引用;新代码直接从 agent-core 导入。
+ */
+export const NON_OVERRIDABLE_DELIVERY_ISSUE_CODES: ReadonlySet<string> = NON_OVERRIDABLE_CONTENT_ISSUE_CODES;
 
 export function issueOverridePolicy(issue: CandidateValidationIssue): 'not_required' | 'human_reviewable' | 'non_overridable' {
-  if (issue.code && NON_OVERRIDABLE_DELIVERY_ISSUE_CODES.has(issue.code)) return 'non_overridable';
+  if (issue.code && isNonOverridableContentIssueCode(issue.code)) return 'non_overridable';
   if (issue.disposition === 'advisory' && issue.severity !== 'error') return 'not_required';
   return 'human_reviewable';
 }

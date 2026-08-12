@@ -13,7 +13,7 @@ export type SqlValue = string | number | bigint | Uint8Array | null;
  * 无关的测试变红——那不是回归信号,是维护噪声。测试断言这个常量,真正想验的
  * 「迁移到最新且表结构对得上」不变。
  */
-export const SCHEMA_VERSION = 28;
+export const SCHEMA_VERSION = 29;
 
 @Injectable()
 export class DatabaseService implements OnModuleDestroy {
@@ -1501,6 +1501,36 @@ export class DatabaseService implements OnModuleDestroy {
       this.db.exec('PRAGMA user_version = 28');
     });
     if (version < 28) version = 28;
+
+    if (version < 29) this.transaction(() => {
+      /*
+       * 平台额度逐笔流水。此前 quota_used 是工作区级单计数器,扣退款正确但
+       * **不可自证**:客户质疑「这个月为什么扣了我 87 次」时,只能人工考古
+       * 事件表且有洞(分析任务完成时把 quota_consumed_count 清零,扣费痕迹
+       * 被抹掉)。流水在 consume/refund 的同一事务内写入:
+       * - delta:+1 消耗 / 负数为退还(记**实际**变动——refund 的 MAX(0,…)
+       *   下限保护意味着实际退还可能小于请求数,账本必须记真实发生额);
+       * - balance_after:变动后 quota_used 快照,对账锚点;
+       * - reason/entity_type/entity_id:归属到具体任务或删除/断供事件。
+       * 月度对账按 created_at 的 YYYY-MM 前缀分桶,不清零计数器。
+       */
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS quota_ledger (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+          delta INTEGER NOT NULL CHECK(delta != 0),
+          balance_after INTEGER NOT NULL CHECK(balance_after >= 0),
+          reason TEXT NOT NULL,
+          entity_type TEXT,
+          entity_id TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS quota_ledger_workspace_idx
+          ON quota_ledger(workspace_id, created_at);
+      `);
+      this.db.exec('PRAGMA user_version = 29');
+    });
+    if (version < 29) version = 29;
   }
 
   onModuleDestroy(): void {

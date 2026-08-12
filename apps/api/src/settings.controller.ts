@@ -40,6 +40,25 @@ export class SettingsController {
     return this.settings.quotaSnapshot(workspaceId, principal.userId);
   }
 
+  /**
+   * 额度逐笔流水与月度对账。回答「这个月为什么扣了我 N 次」:每一笔
+   * 扣退都归属到具体任务/事件与时间点。month 形如 YYYY-MM;只读。
+   * 权限与 GET /quota 一致(project.read):能看余量就能看自己的账单。
+   */
+  @Get('quota/ledger')
+  quotaLedger(
+    @Req() request: Request,
+    @Query('workspaceId') requested?: string,
+    @Query('month') month?: string,
+  ) {
+    const principal = this.principal(request);
+    const workspaceId = this.resources.inferWorkspace(principal, requested);
+    if (principal.systemRole !== 'admin' && !this.permissions.hasPermission(principal.userId, workspaceId, 'project.read')) {
+      throw new ForbiddenException('无权读取该工作区额度流水');
+    }
+    return this.settings.quotaLedger(workspaceId, month);
+  }
+
   @Patch()
   update(@Req() request: Request, @Body() rawBody: unknown) {
     const principal = this.principal(request);

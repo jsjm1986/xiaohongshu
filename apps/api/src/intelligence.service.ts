@@ -382,7 +382,11 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
         const count = Math.max(0, Number(row.quota_consumed_count));
         if (count > 0) refunds.set(row.workspace_id, (refunds.get(row.workspace_id) ?? 0) + count);
       }
-      for (const [workspaceId, count] of refunds) this.settings.refundPlatformQuota(workspaceId, count);
+      for (const [workspaceId, count] of refunds) {
+        this.settings.refundPlatformQuota(workspaceId, count, {
+          reason: 'analysis_reclaim_refund', entityType: 'workspace', entityId: workspaceId,
+        });
+      }
 
       this.database.prepare(
         `UPDATE analysis_tasks SET status='failed', error=?, completed_at=?, updated_at=?,
@@ -2649,7 +2653,9 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       const platform = settings.mode === 'platform';
       if (platform) {
         // 一次项目分析是一个产品动作。八个内部 turn 共享这一笔额度。
-        this.settings.consumePlatformQuota(workspaceId);
+        this.settings.consumePlatformQuota(workspaceId, {
+          reason: 'analysis_charge', entityType: 'analysis_task', entityId: taskId,
+        });
         const recorded = this.database.prepare(
           `UPDATE analysis_tasks SET quota_consumed_count=quota_consumed_count+1, updated_at=?
             WHERE id=? AND project_id=? AND status='running' AND claimed_by=? AND deleted_at IS NULL`,
@@ -2928,7 +2934,9 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       const platform = settings.mode === 'platform';
       if (platform) {
         // The quota increment and task-side balance are one atomic accounting entry.
-        this.settings.consumePlatformQuota(workspaceId);
+        this.settings.consumePlatformQuota(workspaceId, {
+          reason: 'analysis_charge', entityType: 'analysis_task', entityId: taskId,
+        });
         const recorded = this.database.prepare(
           `UPDATE analysis_tasks
               SET quota_consumed_count=quota_consumed_count + 1, updated_at=?
@@ -3043,7 +3051,11 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
           WHERE id=? AND quota_consumed_count > 0
             AND project_id IN (SELECT id FROM projects WHERE workspace_id=?)`,
       ).run(nowIso(), taskId, workspaceId);
-      if (deducted.changes === 1) this.settings.refundPlatformQuota(workspaceId);
+      if (deducted.changes === 1) {
+        this.settings.refundPlatformQuota(workspaceId, 1, {
+          reason: 'analysis_refund', entityType: 'analysis_task', entityId: taskId,
+        });
+      }
     });
   }
 
@@ -3430,7 +3442,11 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
             AND quota_consumed_count=?`,
       ).run(message, now, now, id, this.options.instanceId, task.quota_consumed_count);
       if (failed.changes !== 1) throw new AnalysisClaimLostError();
-      if (quotaBalance > 0) this.settings.refundPlatformQuota(task.workspace_id, quotaBalance);
+      if (quotaBalance > 0) {
+        this.settings.refundPlatformQuota(task.workspace_id, quotaBalance, {
+          reason: 'analysis_failure_refund', entityType: 'analysis_task', entityId: id,
+        });
+      }
     });
   }
 

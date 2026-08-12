@@ -179,7 +179,11 @@ export class ProjectController {
         .get(projectId) as { value: number };
       const quotaRefund = Number(activeRevisionQuota.value) + Number(activeAnalysisQuota.value)
         + Number(activeGenerationQuota.value) + Number(activeHarnessQuota.value);
-      if (quotaRefund > 0) this.settings.refundPlatformQuota(workspaceId, quotaRefund);
+      if (quotaRefund > 0) {
+        this.settings.refundPlatformQuota(workspaceId, quotaRefund, {
+          reason: 'project_delete_refund', entityType: 'project', entityId: projectId,
+        });
+      }
 
       const stoppedMessage = '项目已删除，任务已停止';
       this.database

@@ -154,8 +154,45 @@ export function heartbeatTask(
 }
 
 /** 保留签名以免动 generation.service 的调用点;实现见 claimNext。 */
+/**
+ * 生成任务认领:工作区公平优先,同工作区内 FIFO。
+ *
+ * 原来是全局 FIFO(ORDER BY created_at):并发槽只有 2,一个客户提 60 篇批量,
+ * 另一个客户的单篇要排到第 61 位——60÷2 × 每篇 5-16 分钟 ≈ 2.5 至 8 小时,
+ * 体验上等于"提交了没反应"。现在先按「该工作区正在运行的任务数」升序,再按
+ * 提交时间:并发槽在活跃工作区之间均分,B 客户的单篇最多等 A 客户一篇的时长。
+ * 单工作区场景排序键恒为 0,行为退化回 FIFO,与旧语义一致。
+ *
+ * 候选选择、状态确认、归属写入仍在同一条 SQLite 写语句里:running 计数子查询
+ * 与认领在同一写锁下求值,并发实例看到的是串行一致的队列。
+ * 修改任务(revision)保持全局 FIFO:它是交互式操作,有独立并发槽,不参与
+ * 批量拥塞。
+ */
 export function claimNextJob(database: DatabaseService, instanceId: string, now: string): string | undefined {
-  return claimNext(database, GENERATION_JOBS_SPEC, instanceId, now);
+  const claimed = database
+    .prepare(
+      `UPDATE generation_jobs
+          SET status='running', claimed_by=?, claimed_at=?, heartbeat_at=?, updated_at=?
+        WHERE id=(
+          SELECT j.id FROM generation_jobs j
+          JOIN projects p ON p.id = j.project_id
+          JOIN workspaces w ON w.id = p.workspace_id
+          WHERE j.status='queued' AND j.deleted_at IS NULL
+            AND p.deleted_at IS NULL AND w.deleted_at IS NULL
+          ORDER BY (
+              SELECT COUNT(*) FROM generation_jobs r
+              JOIN projects rp ON rp.id = r.project_id
+              WHERE r.status='running' AND r.deleted_at IS NULL
+                AND rp.workspace_id = p.workspace_id
+            ) ASC,
+            j.created_at ASC, j.id ASC
+          LIMIT 1
+        )
+          AND status='queued'${aliveClause(GENERATION_JOBS_SPEC)}
+        RETURNING id`,
+    )
+    .get(instanceId, now, now, now) as { id: string } | undefined;
+  return claimed?.id;
 }
 
 /** 保留签名以免动 generation.service 的调用点;实现见 heartbeatTask。 */
@@ -303,19 +340,30 @@ export function queuedJobCount(database: DatabaseService): number {
  * 「还要等几个」。
  */
 export function queuedJobPosition(database: DatabaseService, jobId: string): number | undefined {
+  // 软删的项目/工作区不参与队列语义(与 aliveClause 同一判定,只是内联进
+  // JOIN 以便取 workspace_id):被删父级下的任务既不该有位次,也不该被计数。
   const self = database
     .prepare(
-      `SELECT created_at FROM generation_jobs
-        WHERE id=? AND status='queued'${aliveClause(GENERATION_JOBS_SPEC)}`,
+      `SELECT j.created_at, p.workspace_id FROM generation_jobs j
+        JOIN projects p ON p.id = j.project_id
+        JOIN workspaces w ON w.id = p.workspace_id
+        WHERE j.id=? AND j.status='queued' AND j.deleted_at IS NULL
+          AND p.deleted_at IS NULL AND w.deleted_at IS NULL`,
     )
-    .get(jobId) as { created_at: string } | undefined;
+    .get(jobId) as { created_at: string; workspace_id: string } | undefined;
   if (!self) return undefined;
+  // 位次按**同工作区**计:认领改为工作区公平轮转后,全局位次不再对应真实的
+  // 服务顺序(别的工作区的 60 篇批量不会排在你前面)。「你前面还有 N 篇你自己
+  // 工作区的任务」才是用户能核对、也真实成立的等待语义。
   const row = database
     .prepare(
-      `SELECT COUNT(*) AS value FROM generation_jobs
-        WHERE status='queued'${aliveClause(GENERATION_JOBS_SPEC)}
-          AND (created_at < ? OR (created_at = ? AND id < ?))`,
+      `SELECT COUNT(*) AS value FROM generation_jobs j
+        JOIN projects p ON p.id = j.project_id
+        WHERE j.status='queued' AND j.deleted_at IS NULL
+          AND p.deleted_at IS NULL
+          AND p.workspace_id = ?
+          AND (j.created_at < ? OR (j.created_at = ? AND j.id < ?))`,
     )
-    .get(self.created_at, self.created_at, jobId) as { value: number };
+    .get(self.workspace_id, self.created_at, self.created_at, jobId) as { value: number };
   return Number(row.value) + 1;
 }

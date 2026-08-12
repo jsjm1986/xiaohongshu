@@ -521,9 +521,14 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     // 扣款必须记账(quota_consumed_count=1):终态结算按「交付了产出留 1,零产出
     // 留 0」退差额,与修改任务同一原则。不记账就无从退,失败/删除只能白扣。
     const charged = provider.mode === 'platform' && Boolean(provider.apiKey);
-    if (charged) this.settings.consumePlatformQuota(workspaceId);
-
+    // id 先于扣款生成:流水的 entityId 要能指回这条任务。
     const id = randomUUID();
+    if (charged) {
+      this.settings.consumePlatformQuota(workspaceId, {
+        reason: 'generation_enqueue', entityType: 'generation_job', entityId: id,
+      });
+    }
+
     const now = nowIso();
     const mode = raw.mode === 'advanced' ? 'advanced' : 'simple';
     this.database
@@ -700,7 +705,11 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
         )
         .get(jobId) as { value: number };
       const revisionRefund = Number(activeRevisionQuota.value);
-      if (revisionRefund > 0) this.settings.refundPlatformQuota(workspaceId, revisionRefund);
+      if (revisionRefund > 0) {
+        this.settings.refundPlatformQuota(workspaceId, revisionRefund, {
+          reason: 'job_delete_revision_refund', entityType: 'generation_job', entityId: jobId,
+        });
+      }
       // 排队/在跑中被删 = 零产出,入队扣款退还;终态任务不动它的账。
       if (current.status === 'queued' || current.status === 'running') {
         generationRefund = this.settleGenerationQuota(jobId, workspaceId, 0);
@@ -1082,7 +1091,9 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
         )
         .all(reason, now, now, projectId) as unknown as Array<{ id: string }>;
       if (refundTotal > 0 && cleared.length > 0) {
-        this.settings.refundPlatformQuota(this.requiredWorkspaceIdForJob(cleared[0]!.id), refundTotal);
+        this.settings.refundPlatformQuota(this.requiredWorkspaceIdForJob(cleared[0]!.id), refundTotal, {
+          reason: 'provider_outage_refund', entityType: 'project', entityId: projectId,
+        });
       }
       for (const row of cleared) {
         this.event(row.id, 'failed', { message: reason, providerOutage: true });
@@ -1233,7 +1244,9 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       .prepare('UPDATE revision_tasks SET quota_consumed_count=? WHERE id=? AND quota_consumed_count=?')
       .run(consumed - refund, revisionId, consumed);
     if (result.changes !== 1) throw new Error('修改任务额度余额发生并发变化');
-    this.settings.refundPlatformQuota(workspaceId, refund);
+    this.settings.refundPlatformQuota(workspaceId, refund, {
+      reason: 'revision_settle_refund', entityType: 'revision_task', entityId: revisionId,
+    });
     return refund;
   }
 
@@ -1261,7 +1274,9 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       .prepare('UPDATE generation_jobs SET quota_consumed_count=? WHERE id=? AND quota_consumed_count=?')
       .run(consumed - refund, jobId, consumed);
     if (result.changes !== 1) throw new Error('生成任务额度余额发生并发变化');
-    this.settings.refundPlatformQuota(workspaceId, refund);
+    this.settings.refundPlatformQuota(workspaceId, refund, {
+      reason: 'generation_settle_refund', entityType: 'generation_job', entityId: jobId,
+    });
     return refund;
   }
 
@@ -1573,7 +1588,9 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       */
       if (providerSettings.mode === 'platform' && providerSettings.apiKey) {
         this.database.transaction(() => {
-          this.settings.consumePlatformQuota(workspaceId);
+          this.settings.consumePlatformQuota(workspaceId, {
+            reason: 'revision_charge', entityType: 'revision_task', entityId: revisionId,
+          });
           const recorded = this.database
             .prepare(
               `UPDATE revision_tasks

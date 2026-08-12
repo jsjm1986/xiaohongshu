@@ -370,7 +370,11 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
       ).get(row.project_id) as { value: number }).value);
       if (pendingUser >= MAX_PENDING_PER_USER) throw new ConflictException('你的 Agent 队列已满，请稍后再重试复核');
       if (pendingProject >= MAX_PENDING_PER_PROJECT) throw new ConflictException('当前项目的 Agent 队列已满，请稍后再重试复核');
-      if (settings.mode === 'platform') this.settings.consumePlatformQuota(workspaceId);
+      if (settings.mode === 'platform') {
+        this.settings.consumePlatformQuota(workspaceId, {
+          reason: 'harness_review_retry_charge', entityType: 'agent_harness_job', entityId: id,
+        });
+      }
       const updated = this.database.prepare(
         `UPDATE agent_harness_jobs SET status='queued', progress=75, review_status='pending', review_error='',
            error=NULL, failure_stage='', completed_at=NULL, claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL,
@@ -378,7 +382,11 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
          WHERE id=? AND status='completed' AND review_status='blocked' AND deleted_at IS NULL`,
       ).run(settings.mode === 'platform' ? 1 : 0, now, id);
       if (updated.changes !== 1) {
-        if (settings.mode === 'platform') this.settings.refundPlatformQuota(workspaceId);
+        if (settings.mode === 'platform') {
+          this.settings.refundPlatformQuota(workspaceId, 1, {
+            reason: 'harness_review_retry_rollback', entityType: 'agent_harness_job', entityId: id,
+          });
+        }
         throw new ConflictException('该运行状态已变化，请刷新后重试');
       }
       this.audit.record({ workspaceId, userId: principal.userId,
@@ -423,7 +431,11 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
     const purgeAfter = new Date(Date.now() + TRASH_RETENTION_DAYS * 86_400_000).toISOString();
     const refundable = row.quota_consumed_count > 0 && !row.provider_started_at;
     this.database.transaction(() => {
-      if (refundable) this.settings.refundPlatformQuota(String(project.workspace_id), row.quota_consumed_count);
+      if (refundable) {
+        this.settings.refundPlatformQuota(String(project.workspace_id), row.quota_consumed_count, {
+          reason: 'harness_delete_refund', entityType: 'agent_harness_job', entityId: id,
+        });
+      }
       this.database.prepare(
         `UPDATE agent_harness_jobs SET deleted_at=?, purge_after=?, updated_at=?,
            status=CASE WHEN status IN ('queued','running') THEN 'failed' ELSE status END,
@@ -710,7 +722,11 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
           );
         }
       }
-      if (settings.mode === 'platform') this.settings.consumePlatformQuota(String(project.workspace_id));
+      if (settings.mode === 'platform') {
+        this.settings.consumePlatformQuota(String(project.workspace_id), {
+          reason: 'harness_enqueue', entityType: 'agent_harness_job', entityId: id,
+        });
+      }
       this.database.prepare(
         `INSERT INTO agent_harness_jobs
          (id, project_id, status, progress, topic, goal, task_json, runtime_snapshot_json,
@@ -1098,7 +1114,11 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
           ).get(id, this.options.instanceId) as { quota_consumed_count: number; provider_started_at: string | null; candidate_checkpoint_at: string | null } | undefined;
           if (!current) throw new HarnessClaimLostError();
           const refundable = current.quota_consumed_count > 0 && !current.provider_started_at;
-          if (refundable) this.settings.refundPlatformQuota(workspaceId, current.quota_consumed_count);
+          if (refundable) {
+            this.settings.refundPlatformQuota(workspaceId, current.quota_consumed_count, {
+              reason: 'harness_failure_refund', entityType: 'agent_harness_job', entityId: id,
+            });
+          }
           const message = error instanceof BadRequestException || error instanceof ConflictException
             ? error.message
             : publicFailure(error, parseJson<{ mode?: 'platform' | 'byok' }>(job.provider_snapshot_json, {}).mode ?? 'platform', refundable);
@@ -1141,7 +1161,11 @@ export class AgentHarnessService implements OnModuleInit, OnModuleDestroy {
     if (!row?.quota_consumed_count) return;
     // A stale lease may have died after dispatch. Once dispatch started, supplier
     // cost is possible and the platform charge must remain settled.
-    if (!row.provider_started_at) this.settings.refundPlatformQuota(row.workspace_id, row.quota_consumed_count);
+    if (!row.provider_started_at) {
+      this.settings.refundPlatformQuota(row.workspace_id, row.quota_consumed_count, {
+        reason: 'harness_reclaim_refund', entityType: 'agent_harness_job', entityId: id,
+      });
+    }
     this.database.prepare(
       'UPDATE agent_harness_jobs SET quota_consumed_count=0 WHERE id=?',
     ).run(id);
