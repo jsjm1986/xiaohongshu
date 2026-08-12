@@ -1,6 +1,6 @@
 {
   "schemaVersion": "1.0",
-  "catalogVersion": "2026-07-21.r14-f10-runtime-contract",
+  "catalogVersion": "2026-08-13.policy-digest-sync",
   "reviewedAt": "2026-07-21",
   "runtimeUse": "audit/evidence metadata only; production executes only separately reviewed runtime contracts and handlers",
   "defaultFormulaVersion": {
@@ -1802,5 +1802,5 @@
     }
   ],
   "executionPolicyVersion": "3.6.0",
-  "executionPolicyDigest": "607e6af95a91104b38c452b9e3947d32f0665068229e0ff566422dc8c6b92111"
+  "executionPolicyDigest": "376e44c8c0fd25f639712f38828a85f17e88240046954997dc98038de40b1755"
 }

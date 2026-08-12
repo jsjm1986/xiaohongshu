@@ -72,6 +72,12 @@ F33 附近确实存在评论线程、来源身份、信息闭合等硬校验，�
 - 默认公式 digest：`59ea9291887f1c9b4ae534a6d93adf2471348de68613d6714c0dc76e4a711c3c`
 - 执行策略：`3.6.0`
 - 执行策略 digest：`607e6af95a91104b38c452b9e3947d32f0665068229e0ff566422dc8c6b92111`
+  - 2026-08-13 勘误：上述 digest 是本报告成稿时的快照值。此后 `formula.ts` 的
+    实现复核文本更新使运行时 digest 移动为
+    `376e44c8c0fd25f639712f38828a85f17e88240046954997dc98038de40b1755`，
+    但 `formula-evidence-catalog.json` 一度未同步（漂移期间无启动校验兜底）。
+    现已同步，并在 `validateCatalogAgainstRuntime` 增加 executionPolicy
+    版本与 digest 的启动强校验，防止再次静默漂移。当前值以 catalog 为准。
 - F32 当前指纹：`b1e3d133995e6773ff0d89cd389bc384a881d857b4e290dfdbe29711a807c0a9`
 - F33 当前指纹：`06b84308f3fd72c8c066ab819b70524a01f56ab922ad2d76d1578e85822fe6f4`
 

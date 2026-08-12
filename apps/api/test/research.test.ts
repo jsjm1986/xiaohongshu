@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { after, before, test } from 'node:test';
-import { PROMPT_CONTRACT_DIGEST } from '@content-agent/agent-core';
+import { fileURLToPath } from 'node:url';
+import {
+  FORMULA_EXECUTION_POLICY_DIGEST,
+  FORMULA_EXECUTION_POLICY_VERSION,
+  PROMPT_CONTRACT_DIGEST,
+} from '@content-agent/agent-core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { createApplication } from '../src/app.js';
 import { DatabaseService } from '../src/database.service.js';
@@ -73,7 +79,7 @@ test('catalog and sample data are imported with explicit non-causal boundaries',
   assert.equal(overview.body.isolationPolicy.experimentsAutoApply, false);
   assert.equal(overview.body.isolationPolicy.runtimeChangesRequireActiveRelease, true);
   assert.equal(overview.body.activeRelease.version, '0.1.0-baseline');
-  assert.equal(overview.body.catalog.version, '2026-07-21.r14-f10-runtime-contract');
+  assert.equal(overview.body.catalog.version, '2026-08-13.policy-digest-sync');
   assert.equal(overview.body.activeRelease.evidenceCatalogDigest, overview.body.catalog.digest);
   assert.ok(overview.body.activeRelease.promptDigest);
   assert.ok(overview.body.activeRelease.parameterPolicyDigest);
@@ -440,4 +446,18 @@ test('experiment result review rechecks project ownership at the final write bou
   assert.equal(stored.reviewed_by, null);
   assert.equal(stored.reviewed_at, null);
   assert.equal(auditCount(), beforeAuditCount, 'a rejected cross-project review must not be audited as successful');
+});
+
+test('公式证据目录与运行时执行策略合同同步（防审计文档静默漂移）', () => {
+  // r13 报告的执行策略 digest 曾在 formula.ts 更新后漂移近一个月而无人发现——
+  // catalog 是给人与外部审计读的实现状态快照,它描述的必须是正在跑的代码。
+  // 服务端 validateCatalogAgainstRuntime 在启动时强校验;这里再显式断言一次,
+  // 让漂移在测试报告里有一条指名道姓的失败,而不是几十个「应用启动失败」。
+  const catalogPath = resolve(dirname(fileURLToPath(import.meta.url)), '../../../docs/audit/formula-evidence-catalog.json');
+  const catalog = JSON.parse(readFileSync(catalogPath, 'utf8')) as {
+    executionPolicyVersion?: string;
+    executionPolicyDigest?: string;
+  };
+  assert.equal(catalog.executionPolicyVersion, FORMULA_EXECUTION_POLICY_VERSION);
+  assert.equal(catalog.executionPolicyDigest, FORMULA_EXECUTION_POLICY_DIGEST);
 });

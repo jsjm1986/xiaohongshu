@@ -59,6 +59,8 @@ interface EvidenceCatalog {
   };
   sources?: CatalogSource[];
   formulaEvidence?: CatalogFormula[];
+  executionPolicyVersion?: string;
+  executionPolicyDigest?: string;
 }
 
 @Injectable()
@@ -938,6 +940,15 @@ export class ResearchService implements OnModuleInit {
     }
     if (data.defaultFormulaVersion?.digest !== DEFAULT_FORMULA_VERSION.digest) {
       issues.push(`默认公式 digest 不一致：catalog=${data.defaultFormulaVersion?.digest ?? 'missing'} runtime=${DEFAULT_FORMULA_VERSION.digest}`);
+    }
+    // 执行策略合同与公式条目同等硬:catalog 是给人与外部审计读的公式实现状态
+    // 快照,digest 不同步意味着「审计文档描述的不是正在跑的代码」。r13 报告的
+    // digest 曾静默漂移近一个月,就是因为这里没有校验。
+    if (data.executionPolicyVersion !== FORMULA_EXECUTION_POLICY_VERSION) {
+      issues.push(`执行策略版本不一致：catalog=${data.executionPolicyVersion ?? 'missing'} runtime=${FORMULA_EXECUTION_POLICY_VERSION}`);
+    }
+    if (data.executionPolicyDigest !== FORMULA_EXECUTION_POLICY_DIGEST) {
+      issues.push(`执行策略 digest 不一致：catalog=${data.executionPolicyDigest ?? 'missing'} runtime=${FORMULA_EXECUTION_POLICY_DIGEST}`);
     }
     const entries = new Map<string, CatalogFormula>();
     for (const entry of data.formulaEvidence ?? []) {
