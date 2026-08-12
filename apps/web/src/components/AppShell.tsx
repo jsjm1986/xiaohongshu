@@ -1,8 +1,9 @@
 import { Bell, ChevronDown, CircleAlert, Gauge, LogOut, Menu, RefreshCcw, Settings, Sparkles, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "./AuthContext";
 import { EditionSwitch } from "./EditionSwitch";
+import { api } from "../lib/api";
 import { CHANNELS, SETTINGS_CHANNEL } from "../lib/channels";
 import { groupNavItems, navItemForPath, visibleNavItems } from "../lib/nav-groups";
 import { ProjectProvider, useProjects } from "./ProjectContext";
@@ -17,6 +18,19 @@ const navigation = CHANNELS;
 function ShellContent() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  /*
+    侧栏的 CORE/POLICY 版本必须来自运行时自报(/health),不能写死:硬编码
+    字符串在 formula.ts 升版后就开始说谎——与证据目录 digest 漂移同性质。
+    读不到时如实显示未知,不回退到任何字面量。
+  */
+  const [runtime, setRuntime] = useState<{ coreVersion?: string; executionPolicyVersion?: string } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api.health()
+      .then((snapshot) => { if (!cancelled) setRuntime(snapshot); })
+      .catch(() => { if (!cancelled) setRuntime(null); });
+    return () => { cancelled = true; };
+  }, []);
   const { user, logout } = useAuth();
   const { projects, projectId, setProjectId, loading, error, refresh } = useProjects();
   const location = useLocation();
@@ -83,8 +97,9 @@ function ShellContent() {
             <strong>SQLite</strong>
           </div>
           <span className="v2-console">
-            CORE <b>v1.6.0</b> · POLICY <b>3.6.0</b><br />
-            <i>●</i> 系统正常 · 无向量服务
+            {runtime?.coreVersion
+              ? <>CORE <b>v{runtime.coreVersion}</b> · POLICY <b>{runtime.executionPolicyVersion}</b><br /><i>●</i> 系统正常 · 无向量服务</>
+              : <>CORE/POLICY 版本未知<br /><i>●</i> 运行时未自报版本</>}
           </span>
         </div>
         <nav className="sidebar__nav sidebar__nav--bottom">

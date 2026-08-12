@@ -782,6 +782,9 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  /** 运行时版本自报。侧栏展示用:版本号必须来自运行时,写死在 UI 里会说谎。 */
+  health: () =>
+    request<{ status: string; coreVersion?: string; executionPolicyVersion?: string }>("/health"),
   auth: {
     me: async () => {
       csrfToken ||= decodeURIComponent(cookieValue("ca_csrf"));

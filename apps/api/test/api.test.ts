@@ -645,3 +645,60 @@ test('read-only API keys are workspace-scoped', async () => {
   assert.equal(knowledge.body.length, 2);
   assert.equal(knowledge.body[0].content, undefined);
 });
+
+test('V1 内容包端点与交付硬门禁同线：blocked 候选不提供可见文案', async () => {
+  const createdKey = await call(`/api/workspaces/${workspaceId}/api-keys`, {
+    method: 'POST',
+    cookie: adminCookie,
+    csrf: adminCsrf,
+    body: JSON.stringify({ name: 'delivery-gate-test' }),
+  });
+  assert.equal(createdKey.response.status, 201);
+  const auth = { authorization: `Bearer ${createdKey.body.key}` };
+
+  // 直接落库两个内容包:一个带不可覆盖硬门禁 issue,一个仅 needs_review。
+  const database = app.get(DatabaseService);
+  const adminId = String((database.prepare('SELECT id FROM users LIMIT 1').get() as { id: string }).id);
+  const jobId = randomUUID();
+  const now = new Date().toISOString();
+  database.prepare(
+    `INSERT INTO generation_jobs (id, project_id, status, config_json, seed, created_by, created_at, updated_at)
+     VALUES (?, ?, 'completed', '{}', '1', ?, ?, ?)`,
+  ).run(jobId, projectId, adminId, now, now);
+  const basePackage = {
+    content: { H: { hashtags: [] }, N: { title: '标题', body: '正文' }, Cref: { disclaimer: '模拟情景', threads: [] } },
+  };
+  const blockedId = randomUUID();
+  database.prepare(
+    `INSERT INTO content_packages (id, job_id, project_id, candidate_index, content_json, created_at, updated_at)
+     VALUES (?, ?, ?, 0, ?, ?, ?)`,
+  ).run(blockedId, jobId, projectId, JSON.stringify({
+    ...basePackage,
+    // restricted_source_content_visible 在不可覆盖硬门禁白名单里;顺带钉住的
+    // 事实是:不在白名单里的 code(如 fabricated_testimonial)会被归一化层降为
+    // 可人工覆盖的 review,不触发本门禁——白名单是唯一判据。
+    validation: { valid: false, issues: [{ code: 'restricted_source_content_visible', severity: 'error', message: '保密来源内容出现在可见文案' }] },
+  }), now, now);
+  const reviewableId = randomUUID();
+  database.prepare(
+    `INSERT INTO content_packages (id, job_id, project_id, candidate_index, content_json, created_at, updated_at)
+     VALUES (?, ?, ?, 1, ?, ?, ?)`,
+  ).run(reviewableId, jobId, projectId, JSON.stringify({
+    ...basePackage,
+    validation: { valid: false, issues: [{ code: 'gap_resolution_not_realized', severity: 'error', message: '计划缺口未达成' }] },
+  }), now, now);
+
+  // 硬门禁候选:Web 复制门控与后端导出都拒绝,只读 API 必须同线,
+  // 否则程序化集成成了唯一能拿到 blocked 全文的出口。
+  const blocked = await call(`/v1/content-packages/${blockedId}`, { headers: auth });
+  assert.equal(blocked.response.status, 403, JSON.stringify(blocked.body));
+  assert.equal(blocked.body.code, 'CONTENT_PACKAGE_DELIVERY_BLOCKED');
+  assert.equal(JSON.stringify(blocked.body).includes('正文'), false, '硬门禁候选的可见文案不得出现在响应里');
+
+  // needs_review(可人工覆盖)照常返回,qualityStatus 让集成方不解析全部
+  // issues 就能判断「需人工复核」。
+  const reviewable = await call(`/v1/content-packages/${reviewableId}`, { headers: auth });
+  assert.equal(reviewable.response.status, 200, JSON.stringify(reviewable.body));
+  assert.equal(reviewable.body.qualityStatus, 'needs_review');
+  assert.equal(reviewable.body.content.content.N.body, '正文');
+});
