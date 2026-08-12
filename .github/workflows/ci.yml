@@ -1,0 +1,31 @@
+# 四包统一验证:build -> typecheck -> test。
+#
+# 顺序不可省:@content-agent/agent-core 与 agent-harness-core 的入口指向 dist/,
+# web/api 的 typecheck 与测试都要先有这两个包的构建产物。npm test 串行跑
+# agent-core(vitest) -> harness(vitest) -> web(node:test) -> api(node:test),
+# 与本地 `npm test` 完全一致——CI 不引入本地复现不了的差异。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm test

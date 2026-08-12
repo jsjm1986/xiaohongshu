@@ -712,13 +712,25 @@ test('formula registry, settings and deterministic generation form one working f
     && comment.surfaceRoleCard?.speechPattern && !/DirectAnswer|本线程/u.test(`${comment.question}${comment.answer}`))));
   // displayRole is a planned social position, not a per-candidate quota. The
   // frozen contract requires every visible thread to carry a complete role card;
-  // diversity is verified across candidate plans rather than forcing 3 roles into
-  // every candidate regardless of its selected topology.
+  // diversity is verified across candidate *plans* (structureDistance 强制的
+  // 策略/状态/缺口轴),而角色集合不在距离度量里——两个合法计划完全可以选中同
+  // 一批人物。候选种子掺入随机 jobId(可复现性锚定在任务上,不锚定在请求参数
+  // 上),所以只比角色集合的断言是概率性的,曾以约 1/6 的频率误报。这里按引擎
+  // 真正强制的合同断言:候选计划的复合签名(策略轴+缺口顺序+角色集合)互异。
   const candidateRoleSignatures = job.candidates.map((item: any) => [...new Set(
     item.comments.map((comment: any) => comment.surfaceRoleCard?.displayRole).filter(Boolean),
   )].sort().join('|'));
   assert.ok(candidateRoleSignatures.every(Boolean));
-  assert.ok(new Set(candidateRoleSignatures).size >= 2);
+  const candidatePlanSignatures = job.candidates.map((item: any, index: number) => {
+    const plan = item.orchestrationSnapshot ?? {};
+    const strategy = plan.strategy ?? {};
+    return [
+      strategy.id, strategy.openingMode, strategy.narrativeMode, strategy.commentMode, strategy.voice,
+      (plan.selectedGapIds ?? []).join('>'),
+      candidateRoleSignatures[index],
+    ].join('#');
+  });
+  assert.ok(new Set(candidatePlanSignatures).size >= 2, `候选计划不得互为克隆: ${JSON.stringify(candidatePlanSignatures)}`);
   assert.ok(job.candidates.every((item: any) => item.gapCoverageLedger?.closureRate === 1 && item.gapCoverageLedger?.uncoveredGapIds?.length === 0));
   assert.ok(job.candidates.every((item: any) => item.effectiveThreadCount === item.comments.length));
   assert.ok(job.candidates.every((item: any) => item.comments.every((comment: any) => ['publisher', 'brand', 'staff', 'expert'].includes(comment.postingIdentity))));
