@@ -92,7 +92,7 @@ export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, ret
   const verdict = issueVerdict(current.validation);
 
   const copyText = async (text: string) => {
-    if (!deliverable) { toast.push('请先完成人工交付确认', 'error'); return; }
+    if (!deliverable) { toast.push('该候选未通过可发布校验，不能复制或导出', 'error'); return; }
     try { await navigator.clipboard.writeText(text); toast.push('已复制'); }
     catch { toast.push('复制失败，请手动选择文本', 'error'); }
   };

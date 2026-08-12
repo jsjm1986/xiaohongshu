@@ -96,6 +96,7 @@ export function BatchBoard({ project, activeBatchId, fail, onOpenJob, onReuseRec
 
       const notes = [`已导出 ${plan.total} 篇`];
       if (plan.skippedUnpublishable > 0) notes.push(`${plan.skippedUnpublishable} 篇未通过校验已跳过`);
+      if (plan.draftWatermarked > 0) notes.push(`${plan.draftWatermarked} 篇未过校验，已带「仅供核对」水印`);
       if (plan.skippedUnfinished > 0) notes.push(`${plan.skippedUnfinished} 篇未完成已跳过`);
       toast.push(notes.join('，'));
     } catch (e) { fail(e, '批量导出失败'); } finally { setExporting(null); }

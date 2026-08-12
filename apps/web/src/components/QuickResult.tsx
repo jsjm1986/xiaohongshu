@@ -1,6 +1,7 @@
 import { Copy } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Button, useToast } from './Ui';
+import { deliveryReadiness } from '../lib/delivery-readiness';
 import { quickCandidateToMarkdown, type QuickCandidateView } from '../lib/quick-generation';
 import { CommentPlanCard } from './quick/CommentPlanCard';
 import { DeploymentPlanCard } from './quick/DeploymentPlanCard';
@@ -28,8 +29,19 @@ export function QuickResult({ candidates, projectName, onRegenerate, onPickAnoth
   const toast = useToast();
   const [active, setActive] = useState(0);
   const [instruction, setInstruction] = useState('');
-  const view = candidates[active];
+  // 再生成/改稿后候选数组换了身份:下标要回到第一版,改稿意见也不能带给另一版。
+  // 否则候选变少时 candidates[active] 为 undefined,整块静默消失,像「结果丢了」。
+  useEffect(() => {
+    setActive(0);
+    setInstruction('');
+  }, [candidates]);
+  const view = candidates[active] ?? candidates[0];
   if (!view) return null;
+  /**
+   * 创作区与阅读页同一道交付门:未通过机械硬门禁的候选,任何复制入口都不开放。
+   * 原来这里没传 copyEnabled(缺省 true),生成完当场复制成了唯一绕过门禁的出口。
+   */
+  const deliverable = deliveryReadiness(view.validation) === 'publishable';
 
   const submitRevise = () => {
     if (!onRevise) return;
@@ -62,7 +74,7 @@ export function QuickResult({ candidates, projectName, onRegenerate, onPickAnoth
       {/* 生成完先给「发出去长什么样」,与阅读页同一个 NoteCard——原来这里是
           标题/正文/标签/图片简报各一张字段卡,同一份内容在 SaaS 里长两个样,
           而用户先看到的偏偏是字段清单那套。字段级复制没丢:NoteCard 自带逐字段复制。 */}
-      <NoteCard candidate={view} job={{}} projectName={projectName} />
+      <NoteCard candidate={view} job={{}} projectName={projectName} copyEnabled={deliverable} />
 
       {/* 评论核对:边界要求/下一步核验这些编排字段原来平铺在「问答话术」卡里,
           换成仿真预览后预览区不再展示它们(它们是写给生成器的内部指令,不是发布文案)。
@@ -94,7 +106,15 @@ export function QuickResult({ candidates, projectName, onRegenerate, onPickAnoth
 
       {(onRegenerate || onPickAnotherTopic) && (
         <div className="quick-result__actions">
-          <Button variant="secondary" icon={<Copy size={15} />} onClick={() => void copyText(quickCandidateToMarkdown(view), toast)}>复制全部</Button>
+          <Button
+            variant="secondary"
+            icon={<Copy size={15} />}
+            disabled={!deliverable}
+            title={deliverable ? undefined : '该版本未通过可发布校验，不能复制或导出'}
+            onClick={() => void copyText(quickCandidateToMarkdown(view), toast)}
+          >
+            复制全部
+          </Button>
           {onRegenerate && <Button variant="ghost" onClick={onRegenerate}>再来一批</Button>}
           {onPickAnotherTopic && <Button variant="ghost" onClick={onPickAnotherTopic}>换个选题</Button>}
         </div>

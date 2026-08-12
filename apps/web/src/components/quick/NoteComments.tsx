@@ -3,6 +3,7 @@ import { Copy, Info } from 'lucide-react';
 import { Button, useToast } from '../Ui';
 import { commentSectionView, gapNameMap } from '../../lib/comment-view';
 import { avatarTone } from '../../lib/note-view';
+import { labeledCommentCopy, type CommentCopyNode } from '../../lib/simulation-notice';
 import type { ReaderCandidate, ReaderComment } from '../../types';
 
 /**
@@ -112,9 +113,15 @@ export function NoteComments({ candidate, accountLabel, copyEnabled = true }: No
   );
   if (!view) return null;
 
-  const copyOne = async (text: string) => {
-    if (!copyEnabled) { toast.push('请先完成人工交付确认', 'error'); return; }
-    try { await navigator.clipboard.writeText(text); toast.push('已复制'); }
+  /**
+   * 逐条复制必须经 labeledCommentCopy:模拟读者的发言（提问/接话/短反应）离开界面
+   * 后就没有 ⓘ 声明护体了,复制物自带「勿代发」标注是合规红线,不是体验偏好。
+   * 可追责答复(org_answer/host_reply 的 answer)按原文复制——那是本账号自己的话。
+   */
+  const copyOne = async (text: string, threadKind?: string, node?: CommentCopyNode) => {
+    if (!copyEnabled) { toast.push('该候选未通过可发布校验，不能复制或导出', 'error'); return; }
+    const payload = node ? labeledCommentCopy(threadKind, node, text) : text;
+    try { await navigator.clipboard.writeText(payload); toast.push('已复制'); }
     catch { toast.push('复制失败，请手动选择文本', 'error'); }
   };
 
@@ -168,7 +175,7 @@ export function NoteComments({ candidate, accountLabel, copyEnabled = true }: No
             key={row.id ?? `${row.question}-${i}`}
             name={row.displayName || '读者'}
             text={row.question}
-            onCopy={() => void copyOne(row.question)}
+            onCopy={() => void copyOne(row.question, row.threadKind, 'question')}
             unavailableReply={unavailableAnswerText(source?.answerRealization)}
             reply={
               row.answer?.trim() && identity
@@ -178,12 +185,12 @@ export function NoteComments({ candidate, accountLabel, copyEnabled = true }: No
                     // 文案上——改个措辞就会把读者接话集体署名成机构。
                     ...identity,
                     text: row.answer,
-                    onCopy: () => void copyOne(row.answer),
+                    onCopy: () => void copyOne(row.answer, row.threadKind, 'answer'),
                   }
                 : undefined
             }
             followUps={row.followUps.filter((f) => f.question?.trim())}
-            onCopyFollow={(text) => void copyOne(text)}
+            onCopyFollow={(text, node) => void copyOne(text, row.threadKind, node)}
             followReply={identity}
             copyEnabled={copyEnabled}
           />
@@ -201,7 +208,7 @@ interface RowProps {
   reply?: { name: string; badge?: string; text: string; onCopy: () => void };
   unavailableReply?: string;
   followUps?: Array<{ question: string; answer: string }>;
-  onCopyFollow?: (text: string) => void;
+  onCopyFollow?: (text: string, node: CommentCopyNode) => void;
   /** 追问答复的署名:与主答复同一套判定结果(replyIdentity),只有 reader_exchange 不带「作者」标 */
   followReply?: { name: string; badge?: string };
   copyEnabled?: boolean;
@@ -242,7 +249,7 @@ function Row({ name, badge, text, onCopy, reply, unavailableReply, followUps = [
             <div className="xhs-comment__name">
               读者
               {onCopyFollow && (
-                <Button variant="ghost" icon={<Copy size={11} />} disabled={!copyEnabled} onClick={() => onCopyFollow(f.question)} aria-label="复制追问" />
+                <Button variant="ghost" icon={<Copy size={11} />} disabled={!copyEnabled} onClick={() => onCopyFollow(f.question, 'follow_up_question')} aria-label="复制追问" />
               )}
             </div>
             <p className="xhs-comment__text">{f.question}</p>
@@ -254,7 +261,7 @@ function Row({ name, badge, text, onCopy, reply, unavailableReply, followUps = [
                   {followReply?.name ?? '读者'}
                   {followReply?.badge && <em>{followReply.badge}</em>}
                   {onCopyFollow && (
-                    <Button variant="ghost" icon={<Copy size={11} />} disabled={!copyEnabled} onClick={() => onCopyFollow(f.answer)} aria-label="复制追问答复" />
+                    <Button variant="ghost" icon={<Copy size={11} />} disabled={!copyEnabled} onClick={() => onCopyFollow(f.answer, 'follow_up_answer')} aria-label="复制追问答复" />
                   )}
                 </div>
                 <p className="xhs-comment__text">{f.answer}</p>

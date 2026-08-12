@@ -18,12 +18,21 @@ test('只导出可发布候选,未通过校验的计入 skipped', () => {
   assert.equal(plan.skippedUnpublishable, 1);
 });
 
-test('markdown 格式不筛:本地导出不经后端,无校验门槛', () => {
+test('markdown 格式不筛但要计水印数:未过校验的稿子带「仅供核对」水印导出', () => {
   const plan = planBatchExport([
     job('j1', 'completed', [cand('c1', true), cand('c2', false)]),
   ], 'markdown');
   assert.equal(plan.items.length, 2);
   assert.equal(plan.skippedUnpublishable, 0);
+  // 调用方要据此在结果提示里如实说明;文档本身的水印由 quickCandidateToMarkdown 负责。
+  assert.equal(plan.draftWatermarked, 1);
+});
+
+test('非 markdown 格式不产生水印计数', () => {
+  const plan = planBatchExport([
+    job('j1', 'completed', [cand('c1', true), cand('c2', false)]),
+  ], 'docx');
+  assert.equal(plan.draftWatermarked, 0);
 });
 
 test('未完成任务整个跳过,单独计数', () => {

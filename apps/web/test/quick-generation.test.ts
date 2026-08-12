@@ -120,6 +120,44 @@ test('quickCandidateToMarkdown includes usable copy and no audit appendix', () =
   assert.doesNotMatch(md, /primaryGapId/);
 });
 
+// 出口层合规:导出的 Markdown 离开产品后没有界面声明护体,必须自带角色标注。
+test('quickCandidateToMarkdown 恒带模拟情景声明与角色标注', () => {
+  const md = quickCandidateToMarkdown(quickCandidateFields(fullCandidate));
+  assert.match(md, /## 评论区话术参考（模拟情景 · 非真实评论）/);
+  assert.match(md, /不得由任何账号代发/);
+  assert.match(md, /模拟提问（勿代发）: 会反弹吗？/);
+  assert.match(md, /本账号答复参考: 结构性去除不易反弹/);
+  assert.match(md, /· 模拟追问（勿代发）: 恢复期多久？/);
+  // 声明不依赖 candidate 自带 disclaimer:去掉它照样有段落级声明。
+  const bare = quickCandidateToMarkdown(quickCandidateFields({ ...fullCandidate, commentDisclaimer: undefined } as any));
+  assert.match(bare, /不得由任何账号代发/);
+  // 可发布稿不带水印
+  assert.doesNotMatch(md, /仅供人工核对/);
+});
+
+test('quickCandidateToMarkdown 给未过校验的稿子加顶部水印', () => {
+  const md = quickCandidateToMarkdown(quickCandidateFields({
+    ...fullCandidate,
+    validation: { valid: false, repairAttempts: 0, issues: [{ severity: 'error', message: 'x' }] },
+  } as any));
+  assert.ok(md.startsWith('> ⚠ 本稿未通过可发布校验'), md.slice(0, 60));
+  assert.match(md, /不得直接发布/);
+});
+
+test('reader_exchange 的接话在 Markdown 里标为模拟读者,不冒充本账号答复', () => {
+  const md = quickCandidateToMarkdown(quickCandidateFields({
+    ...fullCandidate,
+    comments: [{
+      question: '我也在纠结这个',
+      answer: '同感，我先等等看',
+      threadKind: 'reader_exchange',
+      followUps: [],
+    }],
+  } as any));
+  assert.match(md, /模拟读者接话（勿代发）: 同感，我先等等看/);
+  assert.doesNotMatch(md, /本账号答复参考: 同感/);
+});
+
 test('quickCandidateFields preserves label used for result tabs', () => {
   const withLabel = quickCandidateFields({ id: 'c3', label: '版本二', title: 't', body: 'b', tags: [], comments: [] } as any);
   assert.equal(withLabel.label, '版本二');

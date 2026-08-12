@@ -2,6 +2,7 @@ import type { Candidate, CommentThread, GenerateInput, GenerationJob, Project, T
 import { api } from './api';
 import { isRevisionInFlight } from './revision-progress';
 import { isOpportunityAvailableForCreation } from './quick-channel-state';
+import { DRAFT_EXPORT_WATERMARK, SIMULATED_COMMENT_COPY_NOTICE } from './simulation-notice';
 import { buildSimpleGenerateInput, resolveSimpleGenerationSettings } from './simple-generation';
 import type { SimpleSettingOverrides } from './simple-generation';
 import type { RetryPublishingContract } from './quick-recipe';
@@ -108,6 +109,12 @@ export function quickCandidateFields(candidate: Candidate): QuickCandidateView {
 
 export function quickCandidateToMarkdown(view: QuickCandidateView): string {
   const parts: string[] = [];
+  // 本地导出不经后端门禁,文档必须自我声明状态:未过校验的稿子带顶部水印,
+  // 谁拿到文件都能看出它只供核对。
+  if (!view.publishable) {
+    parts.push(`> ${DRAFT_EXPORT_WATERMARK}`);
+    parts.push('');
+  }
   parts.push(`# ${view.title}`);
   parts.push('');
   parts.push(view.body);
@@ -122,30 +129,38 @@ export function quickCandidateToMarkdown(view: QuickCandidateView): string {
   }
   if (view.commentOwnedFirstComment) {
     parts.push('');
-    parts.push(`## 可发布首评`);
+    parts.push(`## 自备首评（本账号发布）`);
     parts.push(view.commentOwnedFirstComment);
   }
   if (view.comments.length) {
     parts.push('');
-    parts.push(`## 问答话术`);
+    parts.push(`## 评论区话术参考（模拟情景 · 非真实评论）`);
+    parts.push('');
+    // 段落声明恒在:candidate 自带的 disclaimer 是补充,不是这句的替代。
+    parts.push(`> ${SIMULATED_COMMENT_COPY_NOTICE}`);
     if (view.commentDisclaimer) {
-      parts.push('');
       parts.push(`免责声明: ${view.commentDisclaimer}`);
     }
     for (const c of view.comments) {
       parts.push('');
       if (c.threadKind === 'organic_reaction') {
         const speaker = c.displayName?.trim() ? `${c.displayName.trim()}: ` : '';
-        parts.push(`漂浮短反应: ${speaker}${c.question}`);
+        parts.push(`模拟读者短反应（勿代发）: ${speaker}${c.question}`);
         continue;
       }
-      parts.push(`Q: ${c.question}`);
-      parts.push(c.threadKind === 'host_reply' ? `楼主本人: ${c.answer}` : `A: ${c.answer}`);
+      parts.push(`模拟提问（勿代发）: ${c.question}`);
+      parts.push(c.threadKind === 'host_reply'
+        ? `楼主本人答复参考: ${c.answer}`
+        : c.threadKind === 'reader_exchange'
+          ? `模拟读者接话（勿代发）: ${c.answer}`
+          : `本账号答复参考: ${c.answer}`);
       if (c.boundary) parts.push(`边界: ${c.boundary}`);
       if (c.nextStep) parts.push(`下一步: ${c.nextStep}`);
       for (const f of c.followUps ?? []) {
-        parts.push(`  · 追问: ${f.question}`);
-        parts.push(`    回应: ${f.answer}`);
+        parts.push(`  · 模拟追问（勿代发）: ${f.question}`);
+        parts.push(c.threadKind === 'reader_exchange'
+          ? `    模拟读者接话（勿代发）: ${f.answer}`
+          : `    本账号答复参考: ${f.answer}`);
       }
     }
   }

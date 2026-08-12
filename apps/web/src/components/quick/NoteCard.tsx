@@ -44,7 +44,7 @@ export function NoteCard({ candidate, job, projectName, copyEnabled = true }: Pr
   const comments = commentTotal(candidate);
 
   const copy = async (text: string, label = '已复制') => {
-    if (!copyEnabled) { toast.push('请先完成人工交付确认', 'error'); return; }
+    if (!copyEnabled) { toast.push('该候选未通过可发布校验，不能复制或导出', 'error'); return; }
     try { await navigator.clipboard.writeText(text); toast.push(label); }
     catch { toast.push('复制失败，请手动选择文本', 'error'); }
   };
