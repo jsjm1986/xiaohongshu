@@ -1072,6 +1072,89 @@ describe("three-candidate content generation engine", () => {
   });
 
   /**
+   * 台账阶段的瞬时故障要先重试再放弃。生产实测(2026-07/08 共 145 个失败)全部
+   * 是网关流中断/空响应/坏 JSON 这类瞬时形态,而台账只精炼审计信息、不改可见
+   * 文案,重试幂等。此前一次失败即弃,直接把锚定率打到人均 0.2。
+   */
+  it("台账瞬时故障重试一次成功后不留失败痕迹", async () => {
+    const ledgerAttemptsByCandidate = new Map<number, number>();
+    const calls: ModelGenerationRequest[] = [];
+    const provider: ModelProvider = {
+      async generate(request) {
+        calls.push(request);
+        const purpose = String(request.metadata?.purpose);
+        if (purpose === "generate_ledger") {
+          const candidateIndex = Number(request.metadata?.candidateIndex);
+          const attempt = (ledgerAttemptsByCandidate.get(candidateIndex) ?? 0) + 1;
+          ledgerAttemptsByCandidate.set(candidateIndex, attempt);
+          if (attempt === 1) throw new Error("读取响应失败: error decoding response body");
+          return { text: JSON.stringify({ evidenceIds: ["evidence_d1"], reasoning: [{ statement: "使用项目资料", status: "fact", evidenceIds: ["evidence_d1"] }], unknowns: [] }), raw: {} };
+        }
+        if (purpose === "generate_comment_readers") return {
+          text: JSON.stringify({ threads: stagedCommentThreads(request, "按资料逐项核实。") }),
+          raw: {},
+        };
+        if (purpose === "generate_org_answers") return {
+          text: JSON.stringify({ answers: selfReviewedAnswers(request, "按资料逐项核实。") }),
+          raw: {},
+        };
+        return {
+          text: JSON.stringify({
+            content: {
+              H: { hashtags: ["信息补全", "比较方法"] },
+              N: {
+                imageBrief: "核验清单",
+                title: "先核验再选择",
+                body: "正文明确说明适用边界，并把已知、未知和需要核验的信息分开。".repeat(8),
+              },
+              Cref: {
+                disclaimer: "以下为评论区问答参考模板，不代表真实用户发言。",
+                threads: [0, 1].map((index) => ({
+                  id: `t${index}`,
+                  stage: "比较方案",
+                  gap: "fit",
+                  function: "verification",
+                  question: "哪些条件需要核验？",
+                  answer: "按资料逐项核实。",
+                  followUps: [],
+                  nextStep: "记录自己的条件。",
+                  postingIdentity: "author",
+                  sourceClusterIds: ["d1"],
+                  evidenceIds: ["evidence_d1"],
+                })),
+              },
+            },
+            evidenceIds: ["evidence_d1"],
+            reasoning: [{ statement: "使用项目资料", status: "fact", evidenceIds: ["evidence_d1"] }],
+            unknowns: [],
+          }),
+          raw: {},
+        };
+      },
+    };
+    const value = config();
+    value.content.bodyMinChars = 20;
+    value.content.commentThreadMin = 2;
+    value.generation.maxRepairAttempts = 0;
+    const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-08-13T00:00:00Z") })
+      .generate({ jobId: "ledger-retry-job", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge: [knowledge[0]!] });
+    // 重试成功 = 没有失败:不留 model_ledger_failed,台账取自第二次尝试的产物。
+    const ledgerIssues = result.packages.flatMap((item) =>
+      item.validation.issues.filter((issue) => issue.code === "model_ledger_failed"));
+    expect(ledgerIssues).toHaveLength(0);
+    for (const item of result.packages) {
+      const assessment = item.editorialAssessments?.find((entry) => entry.stage === "ledger");
+      expect(assessment?.status).toBe("pass");
+      expect(assessment?.attempt).toBe(2);
+      expect(assessment?.summary).toContain("第 2 次尝试");
+    }
+    // 每候选恰好两次台账调用(初次失败 + 重试成功),序号写进 metadata 可审计。
+    const ledgerCalls = calls.filter((call) => call.metadata?.purpose === "generate_ledger");
+    expect(ledgerCalls).toHaveLength(result.packages.length * 2);
+    expect(ledgerCalls.every((call) => [1, 2].includes(Number(call.metadata?.stageAttempt)))).toBe(true);
+  });
+
+  /**
    * 判官失效必须留下信号。生产实测:174 个包 claimJudgments 全为 0、60 个包报出
    * sensitive_claim_without_evidence,却没有任何 issue 指向判官——受控声明是按
    * 语义裁决还是按裸词面判定,从产物上完全看不出来。
@@ -1135,8 +1218,16 @@ describe("three-candidate content generation engine", () => {
     const failures = result.packages.flatMap((item) =>
       item.validation.issues.filter((issue) => issue.code === "model_claim_judge_failed"));
     const judgeCalls = calls.filter((call) => call.metadata?.purpose === "claim_judge");
-    expect(judgeCalls).toHaveLength(result.packages.length);
+    // 瞬时故障重试:每候选初次 + 一次阶段级重试(生产 2026-08 有 12% 的包判官
+    // 因网关抖动缺席,放大了敏感声明的词面严判),仍失败才降级并记 warning。
+    expect(judgeCalls).toHaveLength(result.packages.length * 2);
     expect(new Set(judgeCalls.map((call) => call.metadata?.candidateIndex)).size).toBe(result.packages.length);
+    for (const index of [0, 1, 2]) {
+      const attempts = judgeCalls
+        .filter((call) => call.metadata?.candidateIndex === index)
+        .map((call) => call.metadata?.stageAttempt);
+      expect(attempts.sort()).toEqual([1, 2]);
+    }
     expect(judgeCalls.every((call) => call.schemaName === "claim_judge"
       && call.maxOutputTokens === GENERATION_REVIEW_OUTPUT_TOKENS)).toBe(true);
     expect(calls.some((call) => call.schemaName === "knowledge_anchor_review"

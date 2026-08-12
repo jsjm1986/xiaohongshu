@@ -243,6 +243,40 @@ export interface ContentGenerationEngineOptions {
  * error(与旧行为同码)。无未锚定句不调用(零成本);调用或解析失败安全降级为
  * 无裁决——校验层走词面旧逻辑,error 照旧,不更坏。
  */
+/**
+ * 阶段级瞬时故障重试。
+ *
+ * provider 层的 retryModelProvider 已经处理 HTTP 级瞬时错误,但生产数据
+ * (2026-07/08 共 145 个台账阶段失败)显示端到端失败几乎全是它兜不住的形态:
+ * 网关流中断(unexpected EOF / 解码失败,101 例)、空响应(reasoning-only,
+ * 17 例)、输出截断或坏 JSON(11 例)——这些要么发生在响应体读取阶段,要么
+ * 要到解析时才暴露。单发阶段(台账/判官/修复补丁)此前一次失败即放弃,把
+ * 瞬时故障固化成候选级缺陷:锚定缺失、敏感声明按词面严判、修复轮整轮报废。
+ *
+ * 重试由调用方换 seed:同 seed 复读对「内容触发的确定性坏输出」无效。
+ * attempt 序号记录在调用方的评估条目/元数据里,不破坏可追溯性。
+ */
+async function withStageRetry<T>(
+  attempts: number,
+  run: (attempt: number) => Promise<T>,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await run(attempt);
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 400 * attempt));
+    }
+  }
+  throw lastError;
+}
+
+/** 重试换 seed 的确定性偏移;undefined 保持 undefined(不强造种子)。 */
+function retrySeed(seed: number | undefined, attempt: number): number | undefined {
+  return seed === undefined ? undefined : seed + (attempt - 1) * 101;
+}
+
 export async function judgeSensitiveClaimsWithModel(
   provider: ModelProvider,
   draft: GenerationDraft,
@@ -273,17 +307,22 @@ export async function judgeSensitiveClaimsWithModel(
     evidenceSources: evidencePool,
   });
   try {
-    const response = await provider.generate({
-      messages: prompt.messages,
-      responseSchema: prompt.responseSchema,
-      schemaName: "claim_judge",
-      model: request.model,
-      seed: request.seed,
-      temperature: request.temperature,
-      maxOutputTokens: request.maxOutputTokens,
-      metadata: request.metadata,
+    // 判官失败的代价不对称:缺席时校验回退词面命中,合规邀约/限定句照样落
+    // error(实测 8 月 12% 的包判官失败,放大了 sensitive_claim_without_evidence
+    // 严判)。瞬时故障重试一次,仍失败才降级。
+    const verdicts = await withStageRetry(2, async (attempt) => {
+      const response = await provider.generate({
+        messages: prompt.messages,
+        responseSchema: prompt.responseSchema,
+        schemaName: "claim_judge",
+        model: request.model,
+        seed: retrySeed(request.seed, attempt),
+        temperature: request.temperature,
+        maxOutputTokens: request.maxOutputTokens,
+        metadata: { ...(request.metadata ?? {}), stageAttempt: attempt },
+      });
+      return parseClaimJudgeVerdicts(parseJsonObject(response.text), claims.length);
     });
-    const verdicts = parseClaimJudgeVerdicts(parseJsonObject(response.text), claims.length);
     const anchored = attachKnowledgeAnchorSelections(
       draft,
       context,
@@ -3702,25 +3741,33 @@ export class ContentGenerationAgent implements GenerationEngine {
       };
       const ledgerPrompt = buildStagedLedgerPrompt(promptInput, stagedContent);
       try {
-        const ledgerResponse = await this.provider.generate({
-          messages: ledgerPrompt.messages,
-          responseSchema: ledgerPrompt.responseSchema,
-          schemaName: "content_candidate_ledger",
-          model: input.config.model.model,
-          seed: seed + 3,
-          temperature: Math.min(input.config.model.temperature, 0.2),
-          maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_LEDGER_OUTPUT_TOKENS),
-          metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_ledger", stage: 3 },
+        // 台账失败在生产里全是瞬时形态(网关流中断/空响应/坏 JSON,见
+        // withStageRetry 注释的分布),而这一阶段只精炼审计信息、不改可见文案,
+        // 重试幂等且便宜。此前单次失败即弃,直接把锚定率打到人均 0.2。
+        const { parsed, attempt: ledgerAttempt } = await withStageRetry(2, async (attempt) => {
+          const ledgerResponse = await this.provider!.generate({
+            messages: ledgerPrompt.messages,
+            responseSchema: ledgerPrompt.responseSchema,
+            schemaName: "content_candidate_ledger",
+            model: input.config.model.model,
+            seed: retrySeed(seed + 3, attempt),
+            temperature: Math.min(input.config.model.temperature, 0.2),
+            maxOutputTokens: Math.min(input.config.model.maxOutputTokens, GENERATION_LEDGER_OUTPUT_TOKENS),
+            metadata: { jobId: input.jobId, candidateIndex, purpose: "generate_ledger", stage: 3, stageAttempt: attempt },
+          });
+          const ledgerObject = parseJsonObject(ledgerResponse.text);
+          return {
+            parsed: parseGenerationDraft(JSON.stringify({ ...ledgerObject, content: stagedContent })),
+            attempt,
+          };
         });
-        const ledgerObject = parseJsonObject(ledgerResponse.text);
-        const parsed = parseGenerationDraft(JSON.stringify({ ...ledgerObject, content: stagedContent }));
         draft = {
           ...draft,
           evidenceIds: parsed.evidenceIds,
           reasoning: parsed.reasoning,
           unknowns: parsed.unknowns,
         };
-        editorialAssessments.push({ stage: "ledger", status: "pass", reasons: [], summary: "事实台账已生成并解析。", accepted: true, attempt: 1 });
+        editorialAssessments.push({ stage: "ledger", status: "pass", reasons: [], summary: ledgerAttempt > 1 ? `事实台账已生成并解析（第 ${ledgerAttempt} 次尝试）。` : "事实台账已生成并解析。", accepted: true, attempt: ledgerAttempt });
       } catch (error) {
         // 与同类阶段失败对齐为 warning。判官/机构答复/评论生长失败都是 warning,
         // 只有台账判 error,于是中继一抖动 quality_status 就归零——实测 18 篇产出
@@ -3730,7 +3777,7 @@ export class ContentGenerationAgent implements GenerationEngine {
         // reasoning 均非空(catch 保留了前序阶段的产出,只是没被本阶段精炼);它降低
         // 的是事实锚定率(人均 fact 0.8 → 0.2)。这是质量削弱,不是内容失效,可发布
         // 但需人工复核锚定——故 warning + repairable:false,并在文案里点明后果。
-        editorialAssessments.push({ stage: "ledger", status: "unavailable", reasons: [error instanceof Error ? error.message : String(error)], summary: "事实台账阶段不可用，保留前序台账。", accepted: false, attempt: 1 });
+        editorialAssessments.push({ stage: "ledger", status: "unavailable", reasons: [error instanceof Error ? error.message : String(error)], summary: "事实台账阶段不可用（含一次重试），保留前序台账。", accepted: false, attempt: 2 });
         stageIssues.push({
           code: "model_ledger_failed",
           severity: "warning",
@@ -3861,14 +3908,20 @@ export class ContentGenerationAgent implements GenerationEngine {
           imageAnalyses: planning.imageAnalyses, orchestrationPlan, evidenceReferences: availableEvidence,
         });
         try {
-          const response = await this.provider.generate({
-            messages: prompt.messages, responseSchema: prompt.responseSchema, schemaName: "content_repair_patch",
-            model: input.config.model.model, seed: seed + repairAttempts, temperature: Math.min(input.config.model.temperature, 0.4),
-            maxOutputTokens: input.config.model.maxOutputTokens,
-            metadata: { jobId: input.jobId, candidateIndex, purpose: "repair", attempt: repairAttempts },
+          // 修复轮上限本就只有 1(省 token 的刻意决策),一次瞬时坏输出会让整轮
+          // 报废(8 月 repair_parse_failed 10/65 包)。这里的重试是「本轮的传输
+          // 重试」,不是加修复轮;补丁越权写 Cref 也随重采样一并再给一次机会。
+          const patch = await withStageRetry(2, async (attempt) => {
+            const response = await this.provider!.generate({
+              messages: prompt.messages, responseSchema: prompt.responseSchema, schemaName: "content_repair_patch",
+              model: input.config.model.model, seed: retrySeed(seed + repairAttempts, attempt), temperature: Math.min(input.config.model.temperature, 0.4),
+              maxOutputTokens: input.config.model.maxOutputTokens,
+              metadata: { jobId: input.jobId, candidateIndex, purpose: "repair", attempt: repairAttempts, stageAttempt: attempt },
+            });
+            const parsedPatch = parseGenerationPatch(response.text);
+            if (parsedPatch.Cref) throw new CommentEditorContractError("Generic repair attempted to write Cref; comments belong to the network editor.");
+            return parsedPatch;
           });
-          const patch = parseGenerationPatch(response.text);
-          if (patch.Cref) throw new CommentEditorContractError("Generic repair attempted to write Cref; comments belong to the network editor.");
           draft = applyGenerationPatch(draft, patch);
         } catch (error) {
           emitGenerationTelemetry(input, { type: "candidate_repair_failed", candidateIndex, repairAttempt: repairAttempts, errorName: error instanceof Error ? error.name.slice(0, 80) : "UnknownError" });
