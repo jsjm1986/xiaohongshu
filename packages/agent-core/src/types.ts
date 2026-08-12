@@ -1908,6 +1908,16 @@ export interface DeploymentPlan {
   ownedFirstComment: boolean;
   /** Legal thread-function values only; historical snapshots may contain other strings. */
   pinPriority: Array<NonNullable<CommentReferenceThread["function"]>>;
+  /**
+   * 逐包实现:置顶建议落到终稿里的具体线程(id + 问题摘录),运营者不用再
+   * 按 function 类别反查哪条话术是 verification。缺省表示历史包(实现前生成)。
+   */
+  pinnedThreads?: Array<{ threadId: string; function?: string; excerpt: string }>;
+  /**
+   * 逐包实现:本篇的禁答清单——终稿明确保留为未知的问题,被真实评论问到时
+   * 不代填,按 liveRouting 的未知路径进更新队列。
+   */
+  doNotAnswer?: string[];
   /** Response-time tier for the operating account (static template text). */
   sla?: string;
   /** @deprecated Historical snapshots stored the SLA here. Kept so they stay readable. */

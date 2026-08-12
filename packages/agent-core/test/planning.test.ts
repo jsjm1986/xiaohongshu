@@ -10,6 +10,7 @@ import {
   OpportunityRankHeuristicV1DefaultPolicy,
   planTopicOrchestrations,
   rankTopicOpportunities,
+  realizeDeploymentPlan,
   structureDistance,
 } from "../src/index.js";
 import type { CommentGapCoverageLedger, InformationGap, PlanningRandomizationDimension, TopicOpportunity } from "../src/index.js";
@@ -1208,5 +1209,65 @@ describe("speaker disclosure routing", () => {
         expect(card?.boundary ?? "").not.toContain("不得公开机构全称");
       }
     }
+  });
+});
+
+describe("realizeDeploymentPlan（aC 逐包实现）", () => {
+  const basePlan = {
+    deploymentPlan: {
+      postingIdentity: "publisher",
+      ownedFirstComment: true,
+      pinPriority: ["verification", "next_step"],
+      sla: "工作日 24h 内答复真实评论",
+      liveRouting: [],
+      updateTriggers: [],
+      stopRules: ["无法核验时不代填答案"],
+    },
+  } as unknown as Parameters<typeof realizeDeploymentPlan>[0];
+
+  const draftWith = (threads: Array<Record<string, unknown>>, unknowns: Array<Record<string, unknown>> = []) => ({
+    content: { H: { hashtags: [] }, N: { title: "t", body: "b" }, Cref: { disclaimer: "d", threads } },
+    evidenceIds: [],
+    reasoning: [],
+    unknowns,
+  }) as unknown as Parameters<typeof realizeDeploymentPlan>[1];
+
+  it("置顶建议落到终稿具体线程：按 pinPriority 顺序各取一条，摘录截 40 字", () => {
+    const longQuestion = `这是一个非常长的问题${"字".repeat(50)}`;
+    const plan = realizeDeploymentPlan(basePlan, draftWith([
+      { id: "t1", function: "answer", question: "普通回答" },
+      { id: "t2", function: "verification", question: longQuestion },
+      { id: "t3", function: "next_step", question: "下一步该做什么？" },
+    ], [{ id: "u1", question: "价格区间是多少？" }]));
+    expect(plan.pinnedThreads).toEqual([
+      { threadId: "t2", function: "verification", excerpt: [...longQuestion].slice(0, 40).join("") },
+      { threadId: "t3", function: "next_step", excerpt: "下一步该做什么？" },
+    ]);
+    expect(plan.doNotAnswer).toEqual(["价格区间是多少？"]);
+    // 模板字段原样保留:通用规则不因逐包组装而丢失
+    expect(plan.sla).toBe("工作日 24h 内答复真实评论");
+    expect(plan.stopRules).toEqual(["无法核验时不代填答案"]);
+  });
+
+  it("终稿没有命中线程或未知时不加逐包字段，与历史包形状一致", () => {
+    const plan = realizeDeploymentPlan(basePlan, draftWith([
+      { id: "t1", function: "answer", question: "只有回答类" },
+    ]));
+    expect(plan.pinnedThreads).toBeUndefined();
+    expect(plan.doNotAnswer).toBeUndefined();
+  });
+
+  it("同一线程不会被两个优先级重复置顶，未知问题去重", () => {
+    const plan = realizeDeploymentPlan(
+      {
+        deploymentPlan: { ...basePlan.deploymentPlan, pinPriority: ["verification", "verification"] },
+      } as unknown as Parameters<typeof realizeDeploymentPlan>[0],
+      draftWith(
+        [{ id: "t1", function: "verification", question: "怎么核验？" }],
+        [{ id: "u1", question: "同一个问题" }, { id: "u2", question: "同一个问题" }],
+      ),
+    );
+    expect(plan.pinnedThreads).toHaveLength(1);
+    expect(plan.doNotAnswer).toEqual(["同一个问题"]);
   });
 });

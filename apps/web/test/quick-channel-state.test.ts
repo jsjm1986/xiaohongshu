@@ -144,3 +144,19 @@ test('pruneCheckedIds 未勾选该选题时返回原数组引用,避免无意义
   assert.equal(pruneCheckedIds(checked, 'zzz'), checked);
   assert.equal(pruneCheckedIds([], 'a').length, 0);
 });
+
+// 复核聚焦档:批量 24 篇跑完后,复核者只看「需要我处理的」。口径与概况条
+// 同源——completed 但没有 qualityStatus 的老任务算待核对,不算可发布。
+test('filterGenerationJobs:可发布/待核对档按 qualityStatus 细分已完成', () => {
+  const items = [
+    { id: 'p1', status: 'completed', qualityStatus: 'passed' },
+    { id: 'r1', status: 'completed', qualityStatus: 'needs_review' },
+    { id: 'r2', status: 'completed' }, // 老任务无 qualityStatus → 待核对
+    { id: 'f1', status: 'failed' },
+    { id: 'q1', status: 'queued' },
+  ];
+  assert.deepEqual(filterGenerationJobs(items, { status: 'passed' }).map((i) => i.id), ['p1']);
+  assert.deepEqual(filterGenerationJobs(items, { status: 'needs_review' }).map((i) => i.id), ['r1', 'r2']);
+  // 笼统的 completed 档保留:两个质量档都是它的子集
+  assert.deepEqual(filterGenerationJobs(items, { status: 'completed' }).map((i) => i.id), ['p1', 'r1', 'r2']);
+});

@@ -92,19 +92,26 @@ export function filterOpportunities<T extends CreationOpportunityState & { colle
   return current.filter((item) => item.collectionStatus !== 'archived');
 }
 
-export type GenerationStatusFilter = 'all' | 'completed' | 'running' | 'failed';
+export type GenerationStatusFilter = 'all' | 'completed' | 'passed' | 'needs_review' | 'running' | 'failed';
 
 /**
  * 历史筛选:状态('running' 含 queued+running)+ 标题关键词。
  * 关键词 trim 后转小写做包含匹配,空关键词不过滤。
+ *
+ * 'passed' / 'needs_review' 是复核聚焦档:批量 24 篇跑完后,复核者要的是
+ * 「只看需要我处理的那几篇」,而不是在全部已完成里逐篇点开辨认。口径与
+ * overview-digest 一致——可发布 = completed 且 qualityStatus==='passed',
+ * completed 但没有 qualityStatus 的老任务算待核对,不算可发布。
  */
-export function filterGenerationJobs<T extends { status: string; topic?: string }>(
+export function filterGenerationJobs<T extends { status: string; topic?: string; qualityStatus?: string }>(
   items: T[],
   filter: { status: GenerationStatusFilter; keyword?: string },
 ): T[] {
   const keyword = (filter.keyword ?? '').trim().toLowerCase();
   return items.filter((job) => {
     if (filter.status === 'completed' && job.status !== 'completed') return false;
+    if (filter.status === 'passed' && !(job.status === 'completed' && job.qualityStatus === 'passed')) return false;
+    if (filter.status === 'needs_review' && !(job.status === 'completed' && job.qualityStatus !== 'passed')) return false;
     if (filter.status === 'failed' && job.status !== 'failed') return false;
     if (filter.status === 'running' && job.status !== 'queued' && job.status !== 'running') return false;
     if (keyword && !(job.topic ?? '').toLowerCase().includes(keyword)) return false;

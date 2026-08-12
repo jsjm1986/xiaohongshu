@@ -35,12 +35,22 @@ export interface RoutingRule {
   action: string;
 }
 
+export interface PinnedThreadView {
+  /** 问题摘录:运营者按它在评论区认出要置顶哪条 */
+  excerpt: string;
+  functionLabel: string | null;
+}
+
 export interface DeploymentPlanView {
   identityLabel: string;
   ownedFirstComment: boolean;
   /** 答复时限承诺;没有则 null */
   sla: string | null;
   pinLabels: string[];
+  /** 逐包置顶建议(指到终稿具体话术);历史包没有,回退显示 pinLabels 类别 */
+  pinnedThreads: PinnedThreadView[];
+  /** 本篇的禁答清单:被真实评论问到时不代填,进更新队列 */
+  doNotAnswer: string[];
   routing: RoutingRule[];
   updateTriggers: string[];
   updatePolicy: string[];
@@ -58,6 +68,15 @@ export function deploymentPlanView(plan: unknown): DeploymentPlanView | null {
   const identity = str(p.postingIdentity);
   const sla = str(p.sla);
   const pinLabels = list(p.pinPriority).map((fn) => PIN_FUNCTION_LABEL[fn] ?? fn);
+  const pinnedThreads: PinnedThreadView[] = (Array.isArray(p.pinnedThreads) ? p.pinnedThreads : [])
+    .map((raw) => {
+      const item = (raw ?? {}) as Record<string, unknown>;
+      const excerpt = str(item.excerpt);
+      const fn = str(item.function);
+      return excerpt ? { excerpt, functionLabel: fn ? (PIN_FUNCTION_LABEL[fn] ?? fn) : null } : null;
+    })
+    .filter((item): item is PinnedThreadView => Boolean(item));
+  const doNotAnswer = list(p.doNotAnswer);
   const updateTriggers = list(p.updateTriggers);
   const updatePolicy = list(p.updatePolicy);
   const stopRules = list(p.stopRules);
@@ -81,10 +100,13 @@ export function deploymentPlanView(plan: unknown): DeploymentPlanView | null {
     ownedFirstComment: p.ownedFirstComment === true,
     sla,
     pinLabels,
+    pinnedThreads,
+    doNotAnswer,
     routing,
     updateTriggers,
     updatePolicy,
     stopRules,
-    hasDetail: routing.length > 0 || stopRules.length > 0 || updateTriggers.length > 0 || updatePolicy.length > 0,
+    hasDetail: routing.length > 0 || stopRules.length > 0 || updateTriggers.length > 0
+      || updatePolicy.length > 0 || pinnedThreads.length > 0 || doNotAnswer.length > 0,
   };
 }

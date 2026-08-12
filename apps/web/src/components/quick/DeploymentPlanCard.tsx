@@ -27,11 +27,34 @@ export function DeploymentPlanCard({ candidate }: { candidate?: PlanSource }) {
 
       {plan.sla && <p className="qc-deploy__sla">答复时限：{plan.sla}</p>}
 
-      {plan.pinLabels.length > 0 && (
+      {/* 逐包置顶建议:直接给终稿里那条话术的摘录,运营者不用按类别反查。
+          历史包(实现前生成)没有 pinnedThreads,回退显示 function 类别。 */}
+      {plan.pinnedThreads.length > 0 ? (
+        <div className="qc-deploy__pin">
+          <p><Pin size={12} />置顶这几条（按顺序）：</p>
+          <ol className="qc-deploy__pinned">
+            {plan.pinnedThreads.map((item) => (
+              <li key={item.excerpt}>
+                「{item.excerpt}」{item.functionLabel && <small> · {item.functionLabel}</small>}
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : plan.pinLabels.length > 0 && (
         <p className="qc-deploy__pin">
           <Pin size={12} />
           优先置顶：{plan.pinLabels.join(' · ')}
         </p>
+      )}
+
+      {/* 本篇禁答清单:终稿明确保留为未知的问题,被真实评论问到时不代填 */}
+      {plan.doNotAnswer.length > 0 && (
+        <div className="qc-deploy__block qc-deploy__donot">
+          <h4>被问到这些时不要代填（进更新队列）</h4>
+          <ul>
+            {plan.doNotAnswer.map((question) => <li key={question}>{question}</li>)}
+          </ul>
+        </div>
       )}
 
       {plan.hasDetail && (

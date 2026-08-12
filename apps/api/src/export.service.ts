@@ -661,15 +661,27 @@ function appendDeploymentOperations(lines: string[], pkg: JsonObject): void {
     (rule) => typeof rule === 'object' && rule !== null && !Array.isArray(rule)
       && ('route' in rule || 'condition' in rule || 'action' in rule),
   );
+  const pinnedThreads = objectArray(deployment.pinnedThreads);
+  const doNotAnswer = stringArray(deployment.doNotAnswer);
   const hasV11Operations = Boolean(text(deployment.sla))
     || stringArray(deployment.updatePolicy).length > 0
-    || hasStructuredRouting;
+    || hasStructuredRouting
+    || pinnedThreads.length > 0
+    || doNotAnswer.length > 0;
   if (!hasV11Operations) return;
 
   lines.push('## aC · 评论运营规则（运营动作计划，非 Cref 内容，非已执行）', '');
   if (text(deployment.sla) || text(deployment.responseSla)) {
     lines.push(`- 答复时效（SLA）：${text(deployment.sla) || text(deployment.responseSla)}`);
   }
+  // 逐包置顶建议:指到终稿具体话术,运营者按摘录在评论区认出要置顶哪条。
+  pinnedThreads.forEach((pinned, index) => {
+    const excerpt = text(pinned.excerpt);
+    if (!excerpt) return;
+    lines.push(`- 置顶第 ${index + 1} 条：「${excerpt}」${text(pinned.function) ? `（${text(pinned.function)}）` : ''}`);
+  });
+  // 本篇禁答清单:终稿明确保留为未知的问题,被真实评论问到时不代填。
+  for (const question of doNotAnswer) lines.push(`- 被问到不代填（进更新队列）：${question}`);
   for (const rule of routing) {
     if (typeof rule === 'string') {
       lines.push(`- 路由：${rule}`);

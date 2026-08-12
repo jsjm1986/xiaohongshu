@@ -82,6 +82,7 @@ import {
   diagnoseAccountableIdentities,
   guardedReplyIdentitiesForQuestion,
   planTopicOrchestrations,
+  realizeDeploymentPlan,
   questionMatchesPlannedGap,
   rankTopicOpportunities,
   createCoverageSignature,
@@ -4044,7 +4045,9 @@ export class ContentGenerationAgent implements GenerationEngine {
       imagePlan: structuredClone(orchestrationPlan.imagePlan),
       productionArtifacts,
       dialogueThreads: structuredClone(orchestrationPlan.dialogueThreads),
-      deploymentPlan: structuredClone(orchestrationPlan.deploymentPlan),
+      // aC 逐包实现:置顶落到终稿具体线程、未知问题生成禁答清单(见
+      // realizeDeploymentPlan 注释)。静态模板时代 359 个包同一张卡。
+      deploymentPlan: realizeDeploymentPlan(orchestrationPlan, draft),
       orchestrationSnapshot: structuredClone(realizedOrchestrationPlan),
       coverageSignature: createCoverageSignature(realizedOrchestrationPlan, planning.opportunity.topic),
       content: draft.content,
@@ -4295,6 +4298,11 @@ export class ContentGenerationAgent implements GenerationEngine {
       diagnostics: [...diagnosticsFromValidation(issues), ...buildParameterDiagnostics(impactReport)],
       configSnapshot: cloneConfig(config), resolutionSnapshot: compilation.resolutionSnapshot, impactReport,
       validation: { valid: qualityStatus !== "blocked", qualityStatus, repairAttempts: 0, issues },
+      // 改稿可能换掉线程与未知,aC 的置顶摘录/禁答清单要跟着终稿重算,
+      // 不能从旧包 spread 里继承过时值。无编排快照的历史包保留原值。
+      ...(revisionPlanWithoutArtifacts
+        ? { deploymentPlan: realizeDeploymentPlan(revisionPlanWithoutArtifacts, revised) }
+        : {}),
       revisions: [...input.package.revisions, revision],
     };
     return { package: revisedPackage, dependency };

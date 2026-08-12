@@ -3451,7 +3451,9 @@ div.qc-topic { cursor: default; }
   border-radius: var(--v2-radius); background: var(--v2-canvas);
 }
 .qc-history-summary__counts { display: flex; flex-wrap: wrap; gap: 6px 20px; }
-.qc-hs-stat { display: inline-flex; align-items: baseline; gap: 5px; font-size: var(--v2-fs-xs); color: var(--v2-muted); }
+/* 计数现在是筛选入口(button):清掉原生按钮样式,悬停给出可点暗示 */
+.qc-hs-stat { display: inline-flex; align-items: baseline; gap: 5px; font-size: var(--v2-fs-xs); color: var(--v2-muted); background: none; border: none; padding: 0; font-family: inherit; cursor: pointer; }
+.qc-hs-stat:hover { text-decoration: underline; text-underline-offset: 3px; }
 .qc-hs-stat b { font-size: var(--v2-fs-lg); font-weight: 700; color: var(--v2-ink); font-variant-numeric: tabular-nums; }
 .qc-history-summary__counts .qc-hs-stat:nth-child(1) b { color: var(--v2-ok); }
 .qc-history-summary__counts .qc-hs-stat:nth-child(2) b { color: var(--v2-warn); }

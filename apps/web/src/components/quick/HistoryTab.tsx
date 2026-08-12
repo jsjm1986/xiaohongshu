@@ -40,9 +40,12 @@ const STATUS_LABEL: Record<string, { text: string; tone: 'ok' | 'warn' | 'error'
   failed: { text: '失败', tone: 'error' },
 };
 
+// 「已完成」拆成可发布/待核对两档:批量复核要的是「只看需要我处理的」,
+// 笼统的已完成档位对 24 篇批次毫无聚焦作用。口径与概况条同源(overview-digest)。
 const STATUS_CHIPS: Array<{ key: GenerationStatusFilter; label: string }> = [
   { key: 'all', label: '全部' },
-  { key: 'completed', label: '已完成' },
+  { key: 'passed', label: '可发布' },
+  { key: 'needs_review', label: '待核对' },
   { key: 'running', label: '进行中' },
   { key: 'failed', label: '失败' },
 ];
@@ -239,11 +242,23 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
           「哪些能用、失败为什么、能不能一次修好」。这条先给结论。 */}
       {digest.total > 0 && (
         <div className="qc-history-summary">
+          {/* 计数即筛选入口:「12 需人工核对」点一下就只看那 12 篇,
+              不用先记住数字再去下面找筛选条。 */}
           <div className="qc-history-summary__counts">
-            <span className="qc-hs-stat"><b>{digest.publishable}</b>可直接发布</span>
-            <span className="qc-hs-stat"><b>{digest.needsReview}</b>需人工核对</span>
-            <span className="qc-hs-stat"><b>{digest.failed}</b>失败</span>
-            {digest.inFlight > 0 && <span className="qc-hs-stat"><b>{digest.inFlight}</b>进行中</span>}
+            <button type="button" className="qc-hs-stat" onClick={() => setStatusFilter('passed')}>
+              <b>{digest.publishable}</b>可直接发布
+            </button>
+            <button type="button" className="qc-hs-stat" onClick={() => setStatusFilter('needs_review')}>
+              <b>{digest.needsReview}</b>需人工核对
+            </button>
+            <button type="button" className="qc-hs-stat" onClick={() => setStatusFilter('failed')}>
+              <b>{digest.failed}</b>失败
+            </button>
+            {digest.inFlight > 0 && (
+              <button type="button" className="qc-hs-stat" onClick={() => setStatusFilter('running')}>
+                <b>{digest.inFlight}</b>进行中
+              </button>
+            )}
           </div>
           {digest.failed > 0 && (
             <div className="qc-history-summary__fix">
@@ -310,7 +325,16 @@ export function HistoryTab({ project, history, fail, setHistory, activeBatchId, 
             <li key={job.id} className="qc-history-item">
               <div className="qc-project-row">
                 <strong>{job.topic || '未命名选题'}</strong>
-                {(() => { const s = STATUS_LABEL[job.status] ?? { text: job.status, tone: 'muted' as const }; return <span className={`qc-badge qc-badge--${s.tone}`}>{s.text}</span>; })()}
+                {/* 已完成细分质量档:复核者扫一眼列表就知道哪几篇需要处理,
+                    不用逐篇点开辨认。口径与概况条/筛选 chips 同源。 */}
+                {(() => {
+                  const s = done
+                    ? (job.qualityStatus === 'passed'
+                      ? { text: '可发布', tone: 'ok' as const }
+                      : { text: '待核对', tone: 'warn' as const })
+                    : (STATUS_LABEL[job.status] ?? { text: job.status, tone: 'muted' as const });
+                  return <span className={`qc-badge qc-badge--${s.tone}`}>{s.text}</span>;
+                })()}
                 {/* 未完成任务在收起状态也报位次/耗时,不用展开才知道自己排在哪 */}
                 {running && (() => {
                   const s = waitStatus(job, now);

@@ -8,6 +8,8 @@ import type {
   ContentChannel,
   ContentIntentCard,
   CoverageSignature,
+  DeploymentPlan,
+  GenerationDraft,
   DialogueThreadPlan,
   EditorialFocusContract,
   ExpressionStrategy,
@@ -2989,4 +2991,45 @@ export function downrankRecentCoverage(
   if (recentCoverage.length === 0) return 0;
   const similarity = Math.max(...recentCoverage.map((recent) => 1 - coverageSignatureDistance(signature, recent)));
   return clamp01(similarity * clamp01(penaltyWeight));
+}
+
+/** 置顶摘录:问题首句截 40 字,够运营者在评论区里认出是哪条。 */
+function deploymentExcerpt(question: string): string {
+  const trimmed = question.trim().replace(/\s+/gu, " ");
+  return [...trimmed].slice(0, 40).join("");
+}
+
+/**
+ * aC 发布执行规则的逐包实现。
+ *
+ * 规划层的 deploymentPlan 是静态模板:生产库 359 个包的 SLA 只有 1 种文本、
+ * 停止规则只有 2 种,运营者第二次见到就永久忽略——而 aC 是 H+N+Cref+aC 的
+ * 四分之一交付物。通用规则(分流/更新/停止)本来就该稳定,真正缺的是逐包
+ * 信息,而它们全在终稿里,可确定性组装、零模型成本:
+ * - 置顶建议落到具体线程:按 pinPriority 的 function 顺序各取一条实际存在的
+ *   话术(id + 问题摘录),不再让运营者按类别反查;
+ * - 禁答清单:终稿明确保留为未知的问题——被真实评论问到时不代填,按
+ *   liveRouting 的未知路径进更新队列。
+ *
+ * 在包组装时调用(终稿已定);修订后重组包会重算,与终稿保持一致。
+ */
+export function realizeDeploymentPlan(plan: OrchestrationPlan, draft: GenerationDraft): DeploymentPlan {
+  const base = structuredClone(plan.deploymentPlan);
+  const threads = draft.content.Cref.threads;
+  const pinnedThreads: NonNullable<DeploymentPlan["pinnedThreads"]> = [];
+  for (const priority of base.pinPriority) {
+    const hit = threads.find((thread) =>
+      thread.function === priority
+      && thread.question?.trim()
+      && !pinnedThreads.some((pinned) => pinned.threadId === thread.id));
+    if (hit?.id) pinnedThreads.push({ threadId: hit.id, function: priority, excerpt: deploymentExcerpt(hit.question) });
+  }
+  const doNotAnswer = [...new Set(
+    draft.unknowns.map((unknown) => unknown.question?.trim()).filter((question): question is string => Boolean(question)),
+  )].slice(0, 12);
+  return {
+    ...base,
+    ...(pinnedThreads.length ? { pinnedThreads } : {}),
+    ...(doNotAnswer.length ? { doNotAnswer } : {}),
+  };
 }
