@@ -1,8 +1,9 @@
 import { Copy } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button, useToast } from './Ui';
 import { deliveryReadiness } from '../lib/delivery-readiness';
-import { quickCandidateToMarkdown, type QuickCandidateView } from '../lib/quick-generation';
+import { clampCandidateIndex } from '../lib/note-view';
+import { isFreshCandidateBatch, quickCandidateToMarkdown, type QuickCandidateView } from '../lib/quick-generation';
 import { CommentPlanCard } from './quick/CommentPlanCard';
 import { DeploymentPlanCard } from './quick/DeploymentPlanCard';
 import { NoteCard } from './quick/NoteCard';
@@ -29,11 +30,20 @@ export function QuickResult({ candidates, projectName, onRegenerate, onPickAnoth
   const toast = useToast();
   const [active, setActive] = useState(0);
   const [instruction, setInstruction] = useState('');
-  // 再生成/改稿后候选数组换了身份:下标要回到第一版,改稿意见也不能带给另一版。
-  // 否则候选变少时 candidates[active] 为 undefined,整块静默消失,像「结果丢了」。
+  const previousIdsRef = useRef<readonly string[]>([]);
+  // 候选数组换身份时分两种情况:「再来一批」(id 全新)回到第一版并清掉旧改稿
+  // 意见;「改稿」(保序替换一个候选,其余 id 不变)保持当前版本——曾经这里
+  // 无条件重置,在第 3 版上提交修改会被跳回第 1 版,看不到自己的修改结果。
+  // 候选变少时收敛下标,避免 candidates[active] 越界白屏。
   useEffect(() => {
-    setActive(0);
-    setInstruction('');
+    const previousIds = previousIdsRef.current;
+    previousIdsRef.current = candidates.map((candidate) => candidate.id);
+    if (isFreshCandidateBatch(previousIds, previousIdsRef.current)) {
+      setActive(0);
+      setInstruction('');
+      return;
+    }
+    setActive((current) => clampCandidateIndex(current, candidates.length));
   }, [candidates]);
   const view = candidates[active] ?? candidates[0];
   if (!view) return null;

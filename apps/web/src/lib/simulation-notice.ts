@@ -26,15 +26,25 @@ export const DRAFT_EXPORT_WATERMARK = '⚠ 本稿未通过可发布校验，仅�
 export type CommentCopyNode = 'question' | 'answer' | 'follow_up_question' | 'follow_up_answer';
 
 /**
+ * 可追责答复线程的白名单：只有这两类的 answer 出自可追责账号，允许原文复制。
+ *
+ * 判定用白名单而不是排除法（fail-closed）：将来新增一种模拟读者线程类型时，
+ * 未升级的这段代码会把它的答复当模拟发言标注（多标无害），而不是当可追责
+ * 发言原文放行（漏标即合规事故）。threadKind 缺失的历史包按 org_answer 处理，
+ * 与 NoteComments.replyIdentity 的兜底一致。
+ */
+const ACCOUNTABLE_ANSWER_THREAD_KINDS = new Set(['org_answer', 'host_reply']);
+
+/**
  * 单条评论节点的复制载荷。
  *
  * 判定只由 threadKind 与节点位置决定（与 NoteComments.replyIdentity 同一原则：
  * 身份归属不挂在展示文案上）：
  * - 一切提问侧节点都是模拟读者发言 → 带「勿代发」标注；
  * - organic_reaction 整条只有一个模拟读者短反应；
- * - reader_exchange 的答复是第二位模拟读者 → 同样「勿代发」；
- * - org_answer / host_reply 的答复出自可追责账号 → 原文返回，允许该账号在
- *   回应真实提问时直接使用。
+ * - 白名单内（org_answer / host_reply）的答复出自可追责账号 → 原文返回，
+ *   允许该账号在回应真实提问时直接使用；
+ * - 其余（reader_exchange 与任何未知形态）的答复按模拟读者接话标注。
  */
 export function labeledCommentCopy(
   threadKind: string | undefined,
@@ -46,6 +56,6 @@ export function labeledCommentCopy(
   if (node === 'question' || node === 'follow_up_question') {
     return `${SIMULATED_QUESTION_COPY_LABEL}\n${text}`;
   }
-  if (kind === 'reader_exchange') return `${SIMULATED_REPLY_COPY_LABEL}\n${text}`;
-  return text;
+  if (ACCOUNTABLE_ANSWER_THREAD_KINDS.has(kind)) return text;
+  return `${SIMULATED_REPLY_COPY_LABEL}\n${text}`;
 }

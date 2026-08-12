@@ -142,25 +142,29 @@ export function quickCandidateToMarkdown(view: QuickCandidateView): string {
       parts.push(`免责声明: ${view.commentDisclaimer}`);
     }
     for (const c of view.comments) {
+      // 白名单 fail-closed:threadKind 缺失的历史包按 org_answer 处理,
+      // 未知的新形态一律按模拟读者标注,不冒充本账号发言。
+      const kind = c.threadKind ?? 'org_answer';
+      const accountableAnswer = kind === 'org_answer' || kind === 'host_reply';
       parts.push('');
-      if (c.threadKind === 'organic_reaction') {
+      if (kind === 'organic_reaction') {
         const speaker = c.displayName?.trim() ? `${c.displayName.trim()}: ` : '';
         parts.push(`模拟读者短反应（勿代发）: ${speaker}${c.question}`);
         continue;
       }
       parts.push(`模拟提问（勿代发）: ${c.question}`);
-      parts.push(c.threadKind === 'host_reply'
+      parts.push(kind === 'host_reply'
         ? `楼主本人答复参考: ${c.answer}`
-        : c.threadKind === 'reader_exchange'
-          ? `模拟读者接话（勿代发）: ${c.answer}`
-          : `本账号答复参考: ${c.answer}`);
+        : accountableAnswer
+          ? `本账号答复参考: ${c.answer}`
+          : `模拟读者接话（勿代发）: ${c.answer}`);
       if (c.boundary) parts.push(`边界: ${c.boundary}`);
       if (c.nextStep) parts.push(`下一步: ${c.nextStep}`);
       for (const f of c.followUps ?? []) {
         parts.push(`  · 模拟追问（勿代发）: ${f.question}`);
-        parts.push(c.threadKind === 'reader_exchange'
-          ? `    模拟读者接话（勿代发）: ${f.answer}`
-          : `    本账号答复参考: ${f.answer}`);
+        parts.push(accountableAnswer
+          ? `    本账号答复参考: ${f.answer}`
+          : `    模拟读者接话（勿代发）: ${f.answer}`);
       }
     }
   }
@@ -170,6 +174,20 @@ export function quickCandidateToMarkdown(view: QuickCandidateView): string {
     for (const gap of view.commentUncoveredGaps) parts.push(`- ${gap}`);
   }
   return parts.join('\n');
+}
+
+/**
+ * 候选数组换身份时,判断这是不是一批全新产出。
+ *
+ * 改稿是「保序替换一个候选」:其余候选 id 不变,交集必然非空——用户正看着的
+ * 版本必须保持,改稿意见输入框也不该被外力清空。只有与上一批完全无交集
+ * (「再来一批」)才算新批次,此时回到第一版才是对的。
+ * 首次装载(previousIds 为空)不算新批次:初始状态本来就在第一版。
+ */
+export function isFreshCandidateBatch(previousIds: readonly string[], nextIds: readonly string[]): boolean {
+  if (!previousIds.length || !nextIds.length) return false;
+  const next = new Set(nextIds);
+  return previousIds.every((id) => !next.has(id));
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

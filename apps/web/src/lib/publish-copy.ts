@@ -59,14 +59,14 @@ export function publishBlocks(candidate: Source): PublishBlocks {
       comments.push(`${SIMULATED_REACTION_COPY_LABEL}\n${c.question}`);
       continue;
     }
-    // 读者互聊:提问与接话都是模拟读者,两侧都不得代发。
-    if (kind === 'reader_exchange') {
-      comments.push(`${SIMULATED_QUESTION_COPY_LABEL}\n${c.question}\n${SIMULATED_REPLY_COPY_LABEL}\n${c.answer}`);
+    // org_answer / host_reply(白名单,fail-closed):提问是模拟读者视角的预判,
+    // 答复出自可追责账号,供本账号在收到真实提问后参考使用。
+    if (kind === 'org_answer' || kind === 'host_reply') {
+      comments.push(`${SIMULATED_QUESTION_COPY_LABEL}\n${c.question}\n${ACCOUNTABLE_ANSWER_COPY_LABEL}\n${c.answer}`);
       continue;
     }
-    // org_answer / host_reply:提问是模拟读者视角的预判,答复出自可追责账号,
-    // 供本账号在收到真实提问后参考使用。
-    comments.push(`${SIMULATED_QUESTION_COPY_LABEL}\n${c.question}\n${ACCOUNTABLE_ANSWER_COPY_LABEL}\n${c.answer}`);
+    // reader_exchange 与任何未知形态:两侧都是模拟读者,均不得代发。
+    comments.push(`${SIMULATED_QUESTION_COPY_LABEL}\n${c.question}\n${SIMULATED_REPLY_COPY_LABEL}\n${c.answer}`);
   }
 
   return { post: post.join('\n'), comments, imageBrief: candidate.imageBrief };
@@ -90,22 +90,24 @@ export function readerCandidateToMarkdown(
     parts.push('', '## 评论区话术参考（模拟情景 · 非真实评论）', `> ${SIMULATED_COMMENT_COPY_NOTICE}`);
     for (const c of candidate.comments) {
       const kind = c.threadKind ?? 'org_answer';
+      // 白名单 fail-closed:未知线程形态的答复按模拟读者标注,不冒充本账号发言。
+      const accountableAnswer = kind === 'org_answer' || kind === 'host_reply';
       parts.push('');
       if (kind === 'organic_reaction') {
         parts.push(`模拟读者短反应（勿代发）: ${c.question}`);
         continue;
       }
       parts.push(`模拟提问（勿代发）: ${c.question}`);
-      parts.push(kind === 'reader_exchange'
-        ? `模拟读者接话（勿代发）: ${c.answer}`
-        : `本账号答复参考: ${c.answer}`);
+      parts.push(accountableAnswer
+        ? `本账号答复参考: ${c.answer}`
+        : `模拟读者接话（勿代发）: ${c.answer}`);
       if (c.boundary) parts.push(`边界: ${c.boundary}`);
       if (c.nextStep) parts.push(`下一步: ${c.nextStep}`);
       for (const f of c.followUps ?? []) {
         parts.push(`  · 模拟追问（勿代发）: ${f.question}`);
-        parts.push(kind === 'reader_exchange'
-          ? `    模拟读者接话（勿代发）: ${f.answer}`
-          : `    本账号答复参考: ${f.answer}`);
+        parts.push(accountableAnswer
+          ? `    本账号答复参考: ${f.answer}`
+          : `    模拟读者接话（勿代发）: ${f.answer}`);
       }
     }
   }

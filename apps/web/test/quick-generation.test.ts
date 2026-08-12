@@ -1,6 +1,19 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { approveOpportunitiesForBatch, autoApproveAndGenerate, GenerationStillRunningError, quickCandidateFields, quickCandidateToMarkdown, reviseCandidate } from '../src/lib/quick-generation.js';
+import { approveOpportunitiesForBatch, autoApproveAndGenerate, GenerationStillRunningError, isFreshCandidateBatch, quickCandidateFields, quickCandidateToMarkdown, reviseCandidate } from '../src/lib/quick-generation.js';
+
+// 候选数组换身份时的批次判定:改稿(保序替换一个候选)必须保持用户当前所在
+// 版本,只有「再来一批」(id 全新)才回到第一版——曾经无条件重置,在第 3 版上
+// 提交修改会被跳回第 1 版,看不到自己的修改结果。
+test('isFreshCandidateBatch 区分改稿与再来一批', () => {
+  // 改稿:替换了 c2,c1/c3 仍在 → 不是新批次
+  assert.equal(isFreshCandidateBatch(['c1', 'c2', 'c3'], ['c1', 'c2b', 'c3']), false);
+  // 再来一批:id 完全无交集 → 新批次
+  assert.equal(isFreshCandidateBatch(['c1', 'c2', 'c3'], ['d1', 'd2', 'd3']), true);
+  // 首次装载与清空都不算新批次:没有旧状态可保持,也不该触发重置副作用
+  assert.equal(isFreshCandidateBatch([], ['c1']), false);
+  assert.equal(isFreshCandidateBatch(['c1'], []), false);
+});
 
 const fullCandidate = {
   id: 'c1',

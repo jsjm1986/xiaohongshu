@@ -190,6 +190,36 @@ test('断供清队退还从未执行任务的扣款', async () => {
   }
 });
 
+test('回收判死的生成任务退还入队扣款', async () => {
+  const { projectId, workspaceId } = await seedProject('回收判死结算');
+  const database = app.get(DatabaseService);
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const staleHeartbeat = new Date(Date.now() - 86_400_000).toISOString();
+  // 已被打断 3 次(上限)且心跳停更的 running 任务:下一轮回收判 failed。
+  database.prepare(
+    `INSERT INTO generation_jobs
+       (id, project_id, status, config_json, seed, created_by, created_at, updated_at,
+        quota_consumed_count, claimed_by, heartbeat_at, resolution_snapshot_json)
+     VALUES (?, ?, 'running', '{}', '1', ?, ?, ?, 1, 'dead-instance', ?, ?)`,
+  ).run(id, projectId, adminId, now, now, staleHeartbeat, JSON.stringify({ restartInterruptions: 3 }));
+  setQuotaUsed(workspaceId, 5);
+
+  const generation = app.get(GenerationService) as unknown as { reclaimAndDrain(): void };
+  generation.reclaimAndDrain();
+
+  const row = database.prepare('SELECT status, quota_consumed_count, error FROM generation_jobs WHERE id=?')
+    .get(id) as { status: string; quota_consumed_count: number; error: string };
+  assert.equal(row.status, 'failed');
+  assert.equal(row.quota_consumed_count, 0);
+  assert.match(row.error, /反复打断/);
+  assert.equal(quotaUsed(workspaceId), 4, '回收判死 = 零产出,入队扣款退还');
+  const event = database.prepare(
+    "SELECT details_json FROM generation_events WHERE job_id=? AND event='failed' ORDER BY id DESC LIMIT 1",
+  ).get(id) as { details_json: string };
+  assert.equal(JSON.parse(event.details_json).refundedQuota, 1, 'failed 事件要如实记录退款额');
+});
+
 test('分析任务心跳失速由周期回收清理并退款，不再依赖重启', async () => {
   const { projectId, workspaceId } = await seedProject('分析回收');
   const database = app.get(DatabaseService);

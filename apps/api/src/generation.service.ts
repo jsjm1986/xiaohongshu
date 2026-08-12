@@ -1452,9 +1452,13 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
             this.options.instanceId,
           );
         if (completed.changes !== 1) throw new ClaimLostError('generation');
-        // 交付了产出留 1;确定性预览(没配模型)按零模型消耗全退。
+        // 交付了产出留 1,但留下的必须是「平台真的跑了模型」:确定性预览(没配
+        // 模型)零消耗全退;入队后切到 BYOK 的任务跑的是用户自己的 key,平台
+        // 扣款同样要退——判据是执行时刻的计费模式,不是有没有 key。
         const refundedQuota = this.settleGenerationQuota(
-          jobId, String(project.workspace_id), providerSettings.apiKey ? 1 : 0,
+          jobId,
+          String(project.workspace_id),
+          providerSettings.mode === 'platform' && providerSettings.apiKey ? 1 : 0,
         );
         this.event(jobId, 'completed', {
           candidateCount: result.packages.length,

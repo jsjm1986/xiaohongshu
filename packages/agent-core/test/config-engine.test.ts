@@ -406,6 +406,71 @@ describe("three-candidate content generation engine", () => {
     expect(result.packages.slice(1).every((item) => item.validation.valid === true)).toBe(true);
   });
 
+  /**
+   * 修复补丁的瞬时坏输出要在本轮内重试,而不是让整轮修复报废。
+   * 生产实测(2026-08)repair_parse_failed 命中 10/65 个包,全部是一次性的
+   * 坏 JSON/空响应;修复轮上限本就只有 1,一次抖动就把候选钉死在待修状态。
+   */
+  it("修复补丁第一次坏输出时在本轮内重试，不记 repair_parse_failed", async () => {
+    const calls: ModelGenerationRequest[] = [];
+    const repairAttemptsByCandidate = new Map<number, number>();
+    const evidenceId = "evidence_task_project";
+    const supportedFact = "资料中确认了产品要点";
+    const validBody = `${supportedFact}。适用边界已经写明；适合谁、如何比较、哪些未知目前仍未知，请补充个人条件并按来源核实。先记录条件，再比较选择。`.repeat(2);
+    const baseDraft = {
+      content: {
+        H: { hashtags: ["方案选择", "信息"] },
+        N: { imageBrief: "信息清单封面", title: "先核实信息", body: supportedFact },
+        Cref: { disclaimer: "评论区问答参考模板", threads: [] },
+      },
+      evidenceIds: [evidenceId],
+      reasoning: [{
+        statement: supportedFact,
+        location: "N.body",
+        occurrence: { field: "body" },
+        status: "fact",
+        evidenceIds: [evidenceId],
+        sourceSpans: [{ evidenceId, quote: supportedFact }],
+      }],
+      unknowns: [],
+    };
+    const provider: ModelProvider = {
+      async generate(request) {
+        calls.push(request);
+        if (request.metadata?.purpose === "repair") {
+          const candidateIndex = Number(request.metadata?.candidateIndex);
+          const attempt = (repairAttemptsByCandidate.get(candidateIndex) ?? 0) + 1;
+          repairAttemptsByCandidate.set(candidateIndex, attempt);
+          if (attempt === 1) return { text: "这不是 JSON{{{", raw: {} };
+          return { text: JSON.stringify({ N: { body: validBody } }), raw: {} };
+        }
+        return { text: JSON.stringify(baseDraft), raw: {} };
+      },
+    };
+    const value = config();
+    value.task.mustMention = ["适用边界"];
+    value.content.bodyMinChars = 40;
+    value.content.hashtagMin = 2;
+    value.content.commentThreadMin = 0;
+    value.content.commentThreadMax = 0;
+    value.generation.maxRepairAttempts = 1;
+    const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-08-13T00:00:00Z") })
+      .generate({ jobId: "repair-retry-job", config: value, formulaVersion: DEFAULT_FORMULA_VERSION, knowledge: [knowledge[0]!] });
+    // 每候选恰好两次补丁调用:初次坏输出 + 阶段级重试成功,序号可审计。
+    const repairCalls = calls.filter((item) => item.metadata?.purpose === "repair");
+    for (const index of [0, 1, 2]) {
+      const attempts = repairCalls
+        .filter((call) => call.metadata?.candidateIndex === index)
+        .map((call) => Number(call.metadata?.stageAttempt));
+      expect(attempts.sort()).toEqual([1, 2]);
+    }
+    // 重试成功 = 本轮修复生效:没有 repair_parse_failed,必含短语已补上。
+    expect(result.packages.every((item) =>
+      item.validation.issues.every((issue) => issue.code !== "repair_parse_failed"))).toBe(true);
+    expect(result.packages.every((item) => item.content.N.body.includes("适用边界"))).toBe(true);
+    expect(result.packages.map((item) => item.validation.repairAttempts)).toEqual([1, 1, 1]);
+  });
+
   it("fails closed when one initial model request fails instead of returning a publishable fallback", async () => {
     const provider: ModelProvider = {
       async generate(request) {
