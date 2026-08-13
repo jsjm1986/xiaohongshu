@@ -29,3 +29,19 @@ jobs:
       - run: npm run build
       - run: npm run typecheck
       - run: npm test
+
+  # 浏览器冒烟单列一个 job:装 Chromium 约 1 分钟,与 verify 并行不拖累主反馈;
+  # 它抓的是「测试全绿但页面白屏」——bundle 加载失败、路由崩溃、登录闭环断裂。
+  browser-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run smoke:browser
