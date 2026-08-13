@@ -37,6 +37,12 @@ export default defineConfig({
       ADMIN_USERNAME: 'admin',
       BOOTSTRAP_ADMIN_PASSWORD: 'Smoke-bootstrap-123!',
       MASTER_ENCRYPTION_KEY: 'browser-smoke-master-key-000000!',
+      // 显式钉死:webServer 继承外层 shell 环境,若 shell source 过生产 .env,
+      // CONTENT_AGENT_SECURE_COOKIES=true 会让 http://127.0.0.1 的 API 上下文
+      // 拒收会话 cookie(Secure 标志),seed 全部 401。同款教训见结算测试的
+      // platformApiKey。NODE_ENV 同理防 production 语义漂移。
+      CONTENT_AGENT_SECURE_COOKIES: 'false',
+      NODE_ENV: 'test',
     },
   },
 });
