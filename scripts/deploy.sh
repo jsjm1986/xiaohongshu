@@ -16,6 +16,11 @@ REPO_DIR="/Users/a1234/Desktop/开发项目/小红书创作/文案/content-agent
 PORT=8780
 HEALTH_URL="http://127.0.0.1:${PORT}/health"
 
+# 构建与测试需要 devDependencies:NODE_ENV=production 会让 npm ci 悄悄跳过
+# 它们(tsc/vitest/playwright 全消失,报 127)。shell 里 source 过生产 .env
+# 就会踩中。运行时的 NODE_ENV 由 launchd plist 提供,与本脚本无关。
+unset NODE_ENV
+
 cd "${REPO_DIR}"
 
 echo "==> [1/6] 拉取 main 最新代码"
