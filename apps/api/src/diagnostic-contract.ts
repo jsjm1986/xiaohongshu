@@ -5,6 +5,7 @@ import {
   FORMULA_EXECUTION_HANDLER_REGISTRY,
   candidateQualityStatus,
   normalizeContentValidationIssue,
+  resolveCandidateQualityStatus,
   type ContentDiagnostic,
   type DiagnosticProxyComponent,
   type DiagnosticProxyReport,
@@ -99,7 +100,11 @@ export function normalizeContentPackageForApi<T>(raw: T): T {
       || (isRecord(pkg.artifactRealization) && pkg.artifactRealization.deliverability === 'non_deliverable');
     const qualityStatus = preview
       ? 'blocked'
-      : candidateQualityStatus({ valid: pkg.validation.valid === true, issues });
+      : resolveCandidateQualityStatus({
+          valid: pkg.validation.valid === true,
+          qualityStatus: pkg.validation.qualityStatus,
+          issues,
+        });
     pkg.validation = {
       ...pkg.validation,
       issues,

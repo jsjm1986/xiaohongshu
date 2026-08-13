@@ -1,8 +1,12 @@
+import {
+  candidateQualityStatusLabel,
+  resolveCandidateQualityStatus,
+} from '@content-agent/agent-core/delivery-policy';
 import type { Candidate, CommentThread, GenerateInput, GenerationJob, Project, TopicOpportunity } from '../types';
 import { api } from './api';
 import { isRevisionInFlight } from './revision-progress';
 import { isOpportunityAvailableForCreation } from './quick-channel-state';
-import { DRAFT_EXPORT_WATERMARK, SIMULATED_COMMENT_COPY_NOTICE } from './simulation-notice';
+import { SIMULATED_COMMENT_COPY_NOTICE } from './simulation-notice';
 import { buildSimpleGenerateInput, resolveSimpleGenerationSettings } from './simple-generation';
 import type { SimpleSettingOverrides } from './simple-generation';
 import type { RetryPublishingContract } from './quick-recipe';
@@ -89,7 +93,7 @@ export function quickCandidateFields(candidate: Candidate): QuickCandidateView {
   return {
     id: candidate.id,
     label: candidate.label,
-    publishable: candidate.validation?.valid === true,
+    publishable: resolveCandidateQualityStatus(candidate.validation) === 'passed',
     title: candidate.title,
     body: candidate.body,
     tags: candidate.tags ?? [],
@@ -108,13 +112,11 @@ export function quickCandidateFields(candidate: Candidate): QuickCandidateView {
 }
 
 export function quickCandidateToMarkdown(view: QuickCandidateView): string {
-  const parts: string[] = [];
-  // 本地导出不经后端门禁,文档必须自我声明状态:未过校验的稿子带顶部水印,
-  // 谁拿到文件都能看出它只供核对。
-  if (!view.publishable) {
-    parts.push(`> ${DRAFT_EXPORT_WATERMARK}`);
-    parts.push('');
-  }
+  const qualityStatus = resolveCandidateQualityStatus(view.validation);
+  const parts: string[] = [
+    `> validation.qualityStatus：${candidateQualityStatusLabel(qualityStatus)}`,
+    '',
+  ];
   parts.push(`# ${view.title}`);
   parts.push('');
   parts.push(view.body);

@@ -42,8 +42,7 @@ export function BatchBoard({ project, activeBatchId, fail, onOpenJob, onReuseRec
    * - 批次接口不返回 candidates(轻量投影),所以先并发取详情拿候选 id。
    * - 下载必须串行 + 间隔:浏览器对连续多次 location/anchor 下载有节流,
    *   一口气触发 20 多个只会成功前几个。
-   * - 后端导出对未通过校验的候选一律 400(实测 165 个里 129 个过不了),
-   *   所以 planBatchExport 先筛,再如实报告跳过多少,而不是让用户收到一堆失败。
+   * - 所有格式共用交付硬门禁；Markdown 虽在本地拼装，也不能绕过硬阻断。
    */
   const exportBatch = async (batch: GenerationBatch, format: ExportFormat) => {
     setExporting(batch.id);
@@ -65,8 +64,8 @@ export function BatchBoard({ project, activeBatchId, fail, onOpenJob, onReuseRec
       const plan = planBatchExport(usable, format);
 
       if (plan.total === 0) {
-        const why = plan.skippedUnpublishable > 0
-          ? `${plan.skippedUnpublishable} 篇未通过可发布校验，无法导出为 ${format.toUpperCase()}；可改用 Markdown`
+        const why = plan.skippedBlocked > 0
+          ? `${plan.skippedBlocked} 篇命中交付硬门禁，须修复后重新生成；没有可批量导出的产出`
           : '这个批次还没有可导出的产出';
         toast.push(why, 'error');
         return;
@@ -95,8 +94,7 @@ export function BatchBoard({ project, activeBatchId, fail, onOpenJob, onReuseRec
       }
 
       const notes = [`已导出 ${plan.total} 篇`];
-      if (plan.skippedUnpublishable > 0) notes.push(`${plan.skippedUnpublishable} 篇未通过校验已跳过`);
-      if (plan.draftWatermarked > 0) notes.push(`${plan.draftWatermarked} 篇未过校验，已带「仅供核对」水印`);
+      if (plan.skippedBlocked > 0) notes.push(`${plan.skippedBlocked} 篇命中交付硬门禁已跳过`);
       if (plan.skippedUnfinished > 0) notes.push(`${plan.skippedUnfinished} 篇未完成已跳过`);
       toast.push(notes.join('，'));
     } catch (e) { fail(e, '批量导出失败'); } finally { setExporting(null); }

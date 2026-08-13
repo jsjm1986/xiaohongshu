@@ -148,13 +148,49 @@ test('quickCandidateToMarkdown 恒带模拟情景声明与角色标注', () => {
   assert.doesNotMatch(md, /仅供人工核对/);
 });
 
-test('quickCandidateToMarkdown 给未过校验的稿子加顶部水印', () => {
+test('quickCandidateToMarkdown 对 blocked 明确标记不可交付', () => {
   const md = quickCandidateToMarkdown(quickCandidateFields({
     ...fullCandidate,
-    validation: { valid: false, repairAttempts: 0, issues: [{ severity: 'error', message: 'x' }] },
+    validation: {
+      valid: false,
+      qualityStatus: 'blocked',
+      repairAttempts: 0,
+      issues: [{ code: 'title_required', severity: 'error', message: 'x' }],
+    },
   } as any));
-  assert.ok(md.startsWith('> ⚠ 本稿未通过可发布校验'), md.slice(0, 60));
-  assert.match(md, /不得直接发布/);
+  assert.match(md, /^> validation\.qualityStatus：硬阻断（不可交付）/u);
+  assert.match(md, /不可交付/u);
+});
+
+test('批量 Markdown 把 qualityStatus 人类可读状态写进文件，历史包才回退 valid', () => {
+  const review = quickCandidateToMarkdown(quickCandidateFields({
+    ...fullCandidate,
+    validation: {
+      valid: true,
+      qualityStatus: 'needs_review',
+      repairAttempts: 0,
+      issues: [],
+    },
+  } as any));
+  assert.match(review, /^> validation\.qualityStatus：建议复核（可复制导出）/u);
+  assert.doesNotMatch(review, /validation\.qualityStatus：校验通过|可直接发布|不得直接发布/u);
+
+  const passed = quickCandidateToMarkdown(quickCandidateFields({
+    ...fullCandidate,
+    validation: {
+      valid: false,
+      qualityStatus: 'passed',
+      repairAttempts: 0,
+      issues: [],
+    },
+  } as any));
+  assert.match(passed, /^> validation\.qualityStatus：校验通过/u);
+
+  const historical = quickCandidateToMarkdown(quickCandidateFields({
+    ...fullCandidate,
+    validation: { valid: false, repairAttempts: 0, issues: [] },
+  } as any));
+  assert.match(historical, /^> validation\.qualityStatus：建议复核（可复制导出）/u);
 });
 
 test('reader_exchange 的接话在 Markdown 里标为模拟读者,不冒充本账号答复', () => {

@@ -140,7 +140,8 @@ test('soft-deleting a workspace closes every access path and skips restart boots
   db.prepare(
     "INSERT INTO content_packages " +
       "(id, job_id, project_id, candidate_index, content_json, created_at, updated_at) " +
-      "VALUES (?, ?, ?, 0, '{\"title\":\"私有内容\"}', ?, ?)",
+      "VALUES (?, ?, ?, 0, " +
+      "'{\"title\":\"私有内容\",\"validation\":{\"valid\":true,\"qualityStatus\":\"passed\",\"issues\":[]}}', ?, ?)",
   ).run(packageId, jobId, projectId, now, now);
 
   const insertJob = db.prepare(

@@ -9,9 +9,14 @@
 ```powershell
 cd content-agent
 Copy-Item .env.example .env
+# 本地开发必须用编辑器把 .env 第一行改为 NODE_ENV=development
 npm install
 npm run dev
 ```
+
+`.env.example` 是生产部署模板，保持 `NODE_ENV=production` 时会拒绝空
+`MASTER_ENCRYPTION_KEY` 及示例 `BOOTSTRAP_ADMIN_PASSWORD`；本地开发需按上面
+改为 `NODE_ENV=development`，生产则必须填写独立强密钥与强初始密码。
 
 首次启动会根据 `.env` 创建管理员。打开 `http://127.0.0.1:5173`；生产构建由 API 在 `http://127.0.0.1:8780` 提供。
 
@@ -67,7 +72,10 @@ npm run import:legacy -- --source .. --username admin --password "新密码"
 
 ## 数据与备份
 
-所有运行数据位于 `CONTENT_AGENT_DATA_DIR`：SQLite 数据库、知识原文和导出文件都在同一目录。停止应用后复制该目录即可得到一致备份；恢复时将目录放回原位置再启动。
+知识原文、图片与导出文件位于 `CONTENT_AGENT_DATA_DIR`；SQLite 默认位于该目录的
+`app.db`，也可用 `CONTENT_AGENT_DB_PATH` 独立指定。两者的相对路径都以仓库根解析，
+绝对路径保持不变。生产备份必须同时保存数据库一致快照、dataDir 下的
+`knowledge/`、`images/` 与仓库 `.env`，具体操作见 [运营手册](docs/RUNBOOK.md)。
 
 知识库小于上下文安全预算时完整注入；超过预算时读取 `INDEX.md` 和与任务相关的章节。系统不创建向量，也不依赖 PostgreSQL、Redis 或对象存储服务。
 
@@ -93,8 +101,15 @@ npm run import:legacy -- --source .. --username admin --password "新密码"
 
 ```powershell
 Copy-Item .env.example .env
-# 修改初始管理员密码、SESSION_SECRET 与 MASTER_ENCRYPTION_KEY
+# 修改初始管理员密码与 MASTER_ENCRYPTION_KEY
 docker compose up -d --build
 ```
 
-对公网部署时，必须在本应用前配置 HTTPS 反向代理，并定期备份 `data/`。生产模式会返回 HSTS，并默认给会话与 CSRF Cookie 添加 `Secure`；反向代理应只向外提供 HTTPS。若仅在可信本机通过 HTTP 调试，可显式设置 `CONTENT_AGENT_SECURE_COOKIES=false`，但不要在公网部署中关闭。
+Compose 会强制容器使用 `/data`，避免宿主机 `.env` 中的
+`CONTENT_AGENT_DATA_DIR=./data` 绕过挂载卷。对公网部署时，必须在本应用前配置
+HTTPS 反向代理，并定期备份 `data/`。生产模式会返回 HSTS，并默认给会话与 CSRF
+Cookie 添加 `Secure`；反向代理应只向外提供 HTTPS。若仅在可信本机通过 HTTP
+调试，可显式设置 `CONTENT_AGENT_SECURE_COOKIES=false`，但不要在公网部署中关闭。
+
+当前单机生产使用 launchd；安装、部署、回滚、备份与恢复以
+[docs/RUNBOOK.md](docs/RUNBOOK.md) 为准。

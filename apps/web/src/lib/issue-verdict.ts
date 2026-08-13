@@ -1,4 +1,9 @@
+import {
+  candidateQualityStatusLabel,
+  resolveCandidateQualityStatus,
+} from '@content-agent/agent-core/delivery-policy';
 import { validationIssueLabel } from './validation-labels';
+import type { CandidateQualityStatus } from '../types';
 
 /**
  * 校验结论分级。
@@ -31,6 +36,7 @@ export interface IssueVerdict {
 
 export interface VerdictInput {
   valid?: boolean;
+  qualityStatus?: CandidateQualityStatus;
   issues?: Array<{ code?: string; severity?: string; message?: string }>;
 }
 
@@ -56,11 +62,22 @@ export function issueVerdict(validation?: VerdictInput): IssueVerdict {
   const issues = validation?.issues ?? [];
   const blocking = group(issues.filter((i) => i.severity === 'error'));
   const advisory = group(issues.filter((i) => i.severity !== 'error'));
-  // publishable 认后端的 valid,不自己按 error 数推断:后端可能因为别的原因判不通过。
-  const publishable = validation?.valid === true;
+  // UI、复制和导出共用 agent-core 的持久化状态解析：新 payload 认 qualityStatus，
+  // 只有历史 payload 缺字段时才回退 valid。
+  const qualityStatus = resolveCandidateQualityStatus(validation as never);
+  const publishable = qualityStatus === 'passed';
 
   let headline: string;
-  if (blocking.length > 0) {
+  if (validation?.qualityStatus === 'needs_review') {
+    const reviewCount = blocking.length + advisory.length;
+    headline = reviewCount > 0
+      ? `${candidateQualityStatusLabel('needs_review')}，${reviewCount} 项待核对`
+      : candidateQualityStatusLabel('needs_review');
+  } else if (qualityStatus === 'blocked') {
+    headline = blocking.length > 0
+      ? `${candidateQualityStatusLabel('blocked')}：${blocking[0]!.label}`
+      : candidateQualityStatusLabel('blocked');
+  } else if (blocking.length > 0) {
     headline = blocking[0]!.label;
   } else if (publishable) {
     headline = advisory.length > 0
@@ -74,13 +91,4 @@ export function issueVerdict(validation?: VerdictInput): IssueVerdict {
   }
 
   return { publishable, blocking, advisory, headline };
-}
-
-/** 导出/发布门槛的一句话理由;可发布时返回 null。 */
-export function exportBlockReason(verdict: IssueVerdict): string | null {
-  if (verdict.publishable) return null;
-  if (verdict.blocking.length > 0) {
-    return `有 ${verdict.blocking.length} 项必须核对的问题；完成人工交付确认后可复制与导出，自动校验结论仍保留`;
-  }
-  return '未通过可发布校验；完成人工交付确认后可复制与导出，自动校验结论仍保留';
 }

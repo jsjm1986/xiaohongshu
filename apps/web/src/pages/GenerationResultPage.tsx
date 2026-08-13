@@ -22,6 +22,7 @@ import {
   Target,
   TriangleAlert,
 } from "lucide-react";
+import { candidateQualityStatusLabel } from "@content-agent/agent-core/delivery-policy";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
@@ -30,6 +31,7 @@ import {
   EmptyState,
   useToast,
 } from "../components/Ui";
+import { CopyMiniButton } from "../components/CopyMiniButton";
 import { V2Hero } from "../components/V2";
 import { InlineProgress } from "../components/quick/InlineProgress";
 import { api, ApiError } from "../lib/api";
@@ -49,8 +51,10 @@ import {
   resolveValidationReadinessHeuristic,
   type DiagnosticProxyView,
 } from "../lib/diagnostic-proxy";
+import { candidateClipboardText } from "../lib/clipboard-truth";
 import { errorMessage } from "../lib/errors";
-import { candidateDeliverable, deliveryReadiness } from "../lib/delivery-readiness";
+import { candidateDeliverable } from "../lib/delivery-readiness";
+import { issueVerdict } from "../lib/issue-verdict";
 import {
   isRevisionInFlight,
   revisionBoxState,
@@ -143,9 +147,9 @@ export function GenerationResultPage() {
   // 交付判定只有两档:硬门禁 blocked 锁死,其余正式产物即可交付(deliveryReadiness
   // 的既定决策)。人工确认的发起入口是永不可达的死分支,已按该决策清理;
   // 历史确认记录仍随校验结论展示,不删审计痕迹。
-  const readiness = deliveryReadiness(selected?.validation, { generationMode: selected?.generationMode, deliverability: selected?.artifactRealization?.deliverability });
-  const publishable = readiness === "publishable";
   const deliverable = candidateDeliverable(selected?.validation, false, { generationMode: selected?.generationMode, deliverability: selected?.artifactRealization?.deliverability });
+  const selectedVerdict = issueVerdict(selected?.validation);
+  const publishable = deliverable && selectedVerdict.publishable;
   const candidateCount = job?.candidates?.length ?? 0;
   const partiallyGenerated = candidateCount > 0 && candidateCount < 3;
   const formalReviewIssues = (selected?.validation?.issues ?? []).filter((issue) =>
@@ -218,7 +222,7 @@ export function GenerationResultPage() {
   const copyContent = async () => {
     if (!selected) return;
     if (!deliverable) {
-      toast.push("该候选未通过自动校验，请先逐条核对并完成人工交付确认");
+      toast.push("该候选存在硬阻断，须修复后重新生成");
       return;
     }
     await navigator.clipboard.writeText(candidateToMarkdown(selected));
@@ -311,12 +315,17 @@ export function GenerationResultPage() {
         title={selected.title}
         actions={
           <>
-            {!publishable && (
+            {!deliverable && (
               <Badge tone="danger">
                 <TriangleAlert size={13} /> 存在硬阻断 · 必须修复
               </Badge>
             )}
-            {publishable && (
+            {deliverable && !publishable && (
+              <Badge tone="warning">
+                <TriangleAlert size={13} /> {candidateQualityStatusLabel("needs_review")}
+              </Badge>
+            )}
+            {deliverable && (
               <>
                 <Button
                   variant="secondary"
@@ -342,9 +351,9 @@ export function GenerationResultPage() {
         }
       />
 
-      {!publishable && formalReviewIssues.length > 0 && (
-        <section className="formal-delivery-review" role="status" aria-label="正式交付复核原因">
-          <header><TriangleAlert size={16} /><div><strong>当前是可查看草稿，不是可直接交付成品</strong><small>以下原因由服务端正式交付门槛判定；修复后重新生成，或逐项核对并完成人工确认。</small></div></header>
+      {deliverable && !publishable && formalReviewIssues.length > 0 && (
+        <section className="formal-delivery-review" role="status" aria-label="正式交付复核项">
+          <header><TriangleAlert size={16} /><div><strong>当前候选可复制导出，建议先复核</strong><small>以下属于复核项，不是硬阻断；请在正式使用前逐项核实。</small></div></header>
           <ul>{formalReviewIssues.map((issue, index) => <li key={`${issue.code}-${index}`}><b>{validationIssueLabel(issue.code) || issue.code}</b><span>{issue.message}</span></li>)}</ul>
         </section>
       )}
@@ -447,18 +456,14 @@ export function GenerationResultPage() {
               <Badge tone="blue">搜索入口</Badge>
             </div>
             <h2>{selected.title}</h2>
-            <button
-              type="button"
-              className="copy-mini"
-              onClick={() =>
+            <CopyMiniButton
+              deliverable={deliverable}
+              onCopy={() =>
                 navigator.clipboard
-                  .writeText(selected.title)
+                  .writeText(candidateClipboardText(selected.validation, selected.title))
                   .then(() => toast.push("标题已复制"))
               }
-            >
-              <Clipboard size={14} />
-              复制
-            </button>
+            />
           </div>
           <div className="package-section">
             <div className="package-section__label">

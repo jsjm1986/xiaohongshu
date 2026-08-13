@@ -6,8 +6,8 @@ interface Props {
   validation?: VerdictInput;
   /** 点「看详情」滚到下方工作区的校验全文 */
   onSeeDetail: () => void;
-  /** 自动校验未通过，但当前用户已确认当前候选可人工交付。 */
-  manuallyConfirmed?: boolean;
+  /** 统一交付门禁：false 仅表示命中不可覆盖的硬门禁。 */
+  deliverable: boolean;
 }
 
 /**
@@ -23,9 +23,19 @@ interface Props {
  * 三态而不是两态:能不能导出看 publishable,不看 warning 数。实测 229 个候选里 46 个
  * 是 valid=true 且带 warning——这些可以直接发,拿黄条写「N 项建议核对」会被读成没过校验。
  */
-export function NoteAlertBar({ validation, onSeeDetail, manuallyConfirmed = false }: Props) {
+export function NoteAlertBar({ validation, onSeeDetail, deliverable }: Props) {
+  // 交付硬门禁优先于序列化的 valid/qualityStatus；两者矛盾时必须失败关闭。
+  if (!deliverable) {
+    return (
+      <div className="xhs-alert xhs-alert--error">
+        <AlertTriangle size={13} />
+        <span>存在硬门禁 · 须修复后重新生成</span>
+        <button type="button" className="xhs-alert__link" onClick={onSeeDetail}>看详情</button>
+      </div>
+    );
+  }
+
   const verdict = issueVerdict(validation);
-  const blocking = verdict.blocking.length;
   const advisory = verdict.advisory.length;
 
   // 一态:干净通过。
@@ -49,25 +59,11 @@ export function NoteAlertBar({ validation, onSeeDetail, manuallyConfirmed = fals
     );
   }
 
-  // 三态:自动校验未通过。人工确认只改变交付权限，不改写自动结论。
-  if (manuallyConfirmed) {
-    return (
-      <div className="xhs-alert xhs-alert--warn">
-        <Info size={13} />
-        <span>自动校验未通过 · 已人工确认，可复制与导出</span>
-        <button type="button" className="xhs-alert__link" onClick={onSeeDetail}>看详情</button>
-      </div>
-    );
-  }
+  // 三态:自动校验有复核项，但未命中不可覆盖的硬门禁。
   return (
-    <div className={`xhs-alert xhs-alert--${blocking > 0 ? 'error' : 'warn'}`}>
-      {blocking > 0 ? <AlertTriangle size={13} /> : <Info size={13} />}
-      <span>
-        {blocking > 0
-          ? `${blocking} 项需核对才能导出`
-          : `未通过校验 · ${advisory} 项待核对`}
-        {blocking > 0 && advisory > 0 && `，另有 ${advisory} 项建议核对`}
-      </span>
+    <div className="xhs-alert xhs-alert--warn">
+      <Info size={13} />
+      <span>{verdict.headline}</span>
       <button type="button" className="xhs-alert__link" onClick={onSeeDetail}>看详情</button>
     </div>
   );

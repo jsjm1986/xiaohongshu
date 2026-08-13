@@ -8,21 +8,24 @@ import { issueVerdict, type VerdictInput } from '../../lib/issue-verdict';
  * 实测 129 个未通过候选里 110 个(85%)因此把 warning 当成了结论。用户照着改完,
  * 仍然不能导出。
  *
- * 这里把两类分开说:「须处理才能导出」与「可人工核对后使用」。
+ * 这里把两类分开说:「不可覆盖的硬门禁」与「不阻塞交付的复核项」。
  */
-export function ValidationVerdict({ validation, manuallyConfirmed = false }: { validation?: VerdictInput; manuallyConfirmed?: boolean }) {
+export function ValidationVerdict({ validation, deliverable }: { validation?: VerdictInput; deliverable?: boolean }) {
+  const deliveryBlocked = deliverable === false;
   const verdict = issueVerdict(validation);
+  const displayPublishable = !deliveryBlocked && verdict.publishable;
+  const headline = deliveryBlocked ? '存在硬门禁 · 须修复后重新生成' : verdict.headline;
 
   return (
-    <div className={`qc-verdict qc-verdict--${verdict.publishable ? 'ok' : 'blocked'}`}>
+    <div className={`qc-verdict qc-verdict--${deliveryBlocked ? 'blocked' : displayPublishable ? 'ok' : 'review'}`}>
       <p className="qc-verdict__head">
-        {verdict.publishable ? <ShieldCheck size={14} /> : <TriangleAlert size={14} />}
-        <strong>{verdict.headline}</strong>
+        {displayPublishable ? <ShieldCheck size={14} /> : <TriangleAlert size={14} />}
+        <strong>{headline}</strong>
       </p>
 
       {verdict.blocking.length > 0 && (
         <details className="qc-verdict__group qc-verdict__group--blocking">
-          <summary>{manuallyConfirmed ? '自动校验仍未通过' : '须核对后确认交付'} · {verdict.blocking.length} 项</summary>
+          <summary>{deliveryBlocked ? '硬门禁 · 须修复后重新生成' : '复核项（不阻塞复制与导出）'} · {verdict.blocking.length} 项</summary>
           <ul>
             {verdict.blocking.map((item) => (
               <li key={item.code ?? item.label}>
@@ -49,7 +52,7 @@ export function ValidationVerdict({ validation, manuallyConfirmed = false }: { v
         </details>
       )}
 
-      {verdict.publishable && verdict.advisory.length === 0 && (
+      {displayPublishable && verdict.advisory.length === 0 && (
         <small className="qc-hint">标题、正文、标签、证据引用与评论结构均已检查</small>
       )}
     </div>

@@ -19,11 +19,21 @@ import { AuditService } from './audit.service.js';
 import { DatabaseService } from './database.service.js';
 import { normalizeParameterValues } from './generation-parameters.js';
 import type { SessionPrincipal } from './models.js';
+import { resolveFrozenSnapshotStorageRef } from './reference-snapshot.js';
 import { assertJsonComplexity, nowIso, optionalString, parseJson, requireString, slugify } from './utils.js';
 
 type JsonObject = Record<string, unknown>;
 const MAX_RESEARCH_JSON_BYTES = 256 * 1024;
 const MAX_RELEASE_BINDINGS_PER_TYPE = 100;
+const REFERENCE_COPY_70_SNAPSHOT = {
+  datasetKey: 'reference-copy-70',
+  version: 1,
+  status: 'approved',
+  kind: 'internal_sample',
+  sha256: 'a65514d622ea6c7085b9bf96c4241f9857d53e71fa254ad591f20496c94035ad',
+  rowCount: 70,
+  storageRef: '../70篇对标内容_AI提炼版.jsonl',
+} as const;
 
 interface CatalogSource {
   id: string;
@@ -84,6 +94,7 @@ export class ResearchService implements OnModuleInit {
   bootstrapProject(projectId: string, userId: string): void {
     this.project(projectId);
     if (!this.currentCatalogImported(projectId)) this.importCatalog(projectId, userId);
+    this.ensureReferenceDataset(projectId, userId);
     this.ensureBaselineRelease(projectId, userId);
   }
 
@@ -665,7 +676,6 @@ export class ResearchService implements OnModuleInit {
           ).run(claimId, evidenceId, '仅在来源明确支持范围内作为背景；不能越过来源限制推导因果或参数权重。', userId, now);
         }
       }
-      this.importReferenceDataset(projectId, userId, now);
       this.record(projectId, userId, 'research.catalog.import', 'research_catalog', projectId, {
         catalogVersion: this.catalog.data.catalogVersion,
         catalogDigest: this.catalog.digest,
@@ -675,30 +685,71 @@ export class ResearchService implements OnModuleInit {
     });
   }
 
-  private importReferenceDataset(projectId: string, userId: string, now: string): void {
-    const existing = this.database.prepare(
-      "SELECT 1 FROM dataset_snapshots WHERE project_id=? AND dataset_key='reference-copy-70' LIMIT 1",
-    ).get(projectId);
-    if (existing) return;
+  private ensureReferenceDataset(projectId: string, userId: string): void {
+    // 每次启动都先验证可读原文件。只允许 ENOENT/EACCES/EPERM 回退固化元数据；
+    // 一旦能读到文件，哈希或 70 行合同漂移就立即失败，不能因 DB 已有记录跳过。
     const candidates = [
       resolve(process.cwd(), '../70篇对标内容_AI提炼版.jsonl'),
       resolve(process.cwd(), '../../../70篇对标内容_AI提炼版.jsonl'),
       resolve(dirname(this.catalog.path), '../../../70篇对标内容_AI提炼版.jsonl'),
     ];
-    const path = candidates.find(existsSync);
-    if (!path) return;
-    const buffer = readFileSync(path);
-    const rowCount = buffer.toString('utf8').split(/\r?\n/u).filter((line) => line.trim()).length;
-    this.database.prepare(
-      `INSERT INTO dataset_snapshots
-       (id,project_id,dataset_key,version,label,kind,sha256,row_count,storage_ref,provenance,limitations,schema_json,status,created_by,approved_by,created_at,approved_at)
-       VALUES (?,?, 'reference-copy-70',1,'70篇对标内容描述性快照','internal_sample',?,?,?,?,?,?,'approved',?,?,?,?)`,
-    ).run(
-      randomUUID(), projectId, createHash('sha256').update(buffer).digest('hex'), rowCount, path,
-      '内部收集的内容样本，仅用于描述体裁和信息位置。',
-      '不是随机样本，不能证明平台推荐、转化因果、最佳阈值或总体人群分布。',
-      JSON.stringify({ format: 'jsonl', frozen: true }), userId, userId, now, now,
-    );
+    const storageRef = resolveFrozenSnapshotStorageRef(candidates, REFERENCE_COPY_70_SNAPSHOT);
+
+    // 独立写事务把存量合同校验与缺失插入串在同一把 BEGIN IMMEDIATE 锁后，
+    // 多实例同时 bootstrap 只会写入一条；已有批准快照永不静默覆盖。
+    this.database.transaction(() => {
+      const existing = this.database.prepare(
+        `SELECT version, sha256, row_count, status, kind
+           FROM dataset_snapshots
+          WHERE project_id=? AND dataset_key=?`,
+      ).all(projectId, REFERENCE_COPY_70_SNAPSHOT.datasetKey) as Array<{
+        version: number;
+        sha256: string;
+        row_count: number | null;
+        status: string;
+        kind: string;
+      }>;
+      if (existing.length > 0) {
+        const mismatches: string[] = [];
+        if (existing.length !== 1) mismatches.push(`rows expected=1 actual=${existing.length}`);
+        const row = existing[0];
+        if (row) {
+          if (row.version !== REFERENCE_COPY_70_SNAPSHOT.version) {
+            mismatches.push(`version expected=${REFERENCE_COPY_70_SNAPSHOT.version} actual=${row.version}`);
+          }
+          if (row.sha256 !== REFERENCE_COPY_70_SNAPSHOT.sha256) {
+            mismatches.push(`sha256 expected=${REFERENCE_COPY_70_SNAPSHOT.sha256} actual=${row.sha256}`);
+          }
+          if (row.row_count !== REFERENCE_COPY_70_SNAPSHOT.rowCount) {
+            mismatches.push(`row_count expected=${REFERENCE_COPY_70_SNAPSHOT.rowCount} actual=${String(row.row_count)}`);
+          }
+          if (row.status !== REFERENCE_COPY_70_SNAPSHOT.status) {
+            mismatches.push(`status expected=${REFERENCE_COPY_70_SNAPSHOT.status} actual=${row.status}`);
+          }
+          if (row.kind !== REFERENCE_COPY_70_SNAPSHOT.kind) {
+            mismatches.push(`kind expected=${REFERENCE_COPY_70_SNAPSHOT.kind} actual=${row.kind}`);
+          }
+        }
+        if (mismatches.length) {
+          throw new Error(
+            `${REFERENCE_COPY_70_SNAPSHOT.datasetKey} 已有快照合同不一致：${mismatches.join('；')}；拒绝覆盖已批准快照`,
+          );
+        }
+        return;
+      }
+      const now = nowIso();
+      this.database.prepare(
+        `INSERT INTO dataset_snapshots
+         (id,project_id,dataset_key,version,label,kind,sha256,row_count,storage_ref,provenance,limitations,schema_json,status,created_by,approved_by,created_at,approved_at)
+         VALUES (?,?, 'reference-copy-70',1,'70篇对标内容描述性快照','internal_sample',?,?,?,?,?,?,'approved',?,?,?,?)`,
+      ).run(
+        randomUUID(), projectId, REFERENCE_COPY_70_SNAPSHOT.sha256, REFERENCE_COPY_70_SNAPSHOT.rowCount,
+        storageRef,
+        '内部收集的内容样本，仅用于描述体裁和信息位置。',
+        '不是随机样本，不能证明平台推荐、转化因果、最佳阈值或总体人群分布。',
+        JSON.stringify({ format: 'jsonl', frozen: true }), userId, userId, now, now,
+      );
+    });
   }
 
   private ensureBaselineRelease(projectId: string, userId: string): void {

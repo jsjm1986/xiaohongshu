@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.xhsai.health-watch</string>
+  <key>UserName</key>
+  <string>__USER__</string>
+  <key>GroupName</key>
+  <string>__GROUP__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__BIN_DIR__/health-watch.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CONTENT_AGENT_ROOT</key>
+    <string>__REPO__</string>
+    <key>CONTENT_AGENT_NODE_BIN</key>
+    <string>__NODE_BIN__</string>
+    <key>CONTENT_AGENT_SUPPORT_DIR</key>
+    <string>__SUPPORT_DIR__</string>
+    <key>CONTENT_AGENT_OPS_LOG_DIR</key>
+    <string>__LOG_DIR__</string>
+    <key>OPS_ENV_FILE</key>
+    <string>__OPS_ENV__</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/health-watch.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/health-watch.err.log</string>
+</dict>
+</plist>

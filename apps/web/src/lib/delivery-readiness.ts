@@ -1,6 +1,7 @@
 import {
   isNonOverridableContentIssueCode,
   NON_OVERRIDABLE_CONTENT_ISSUE_CODES,
+  resolveCandidateQualityStatus,
 } from '@content-agent/agent-core/delivery-policy';
 import type { CandidateValidation, CandidateValidationIssue } from '../types';
 
@@ -29,6 +30,7 @@ export function deliveryReadiness(
   if (!validation) return 'blocked';
   const issues = validation.issues ?? [];
   if (issues.some((issue) => issueOverridePolicy(issue) === 'non_overridable')) return 'blocked';
+  if (resolveCandidateQualityStatus(validation) === 'blocked') return 'blocked';
   // A formal model artifact is immediately deliverable. Review findings remain
   // visible but no longer require an acknowledgement click to unlock output.
   return 'publishable';

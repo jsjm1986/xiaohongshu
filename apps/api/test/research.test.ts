@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { after, before, test } from 'node:test';
@@ -94,10 +94,139 @@ test('catalog and sample data are imported with explicit non-causal boundaries',
   const sample = overview.body.datasets.find((item: any) => item.datasetKey === 'reference-copy-70');
   assert.ok(sample, 'the frozen reference-copy snapshot should be visible');
   assert.equal(sample.status, 'approved');
-  assert.equal(sample.sha256.length, 64);
-  assert.ok(sample.rowCount > 0);
+  assert.equal(sample.sha256, 'a65514d622ea6c7085b9bf96c4241f9857d53e71fa254ad591f20496c94035ad');
+  assert.equal(sample.rowCount, 70);
   assert.match(sample.limitations, /不是随机样本/u);
   assert.match(sample.limitations, /不能证明平台推荐/u);
+});
+
+test('bootstrap restores a deleted frozen reference snapshot without reimporting the current catalog', async () => {
+  const database = app.get(DatabaseService);
+  const research = app.get(ResearchService);
+  const before = await call(`/api/projects/${projectId}/research/overview`);
+  assert.equal(before.response.status, 200, JSON.stringify(before.body));
+  const owner = database.prepare('SELECT created_by FROM projects WHERE id=?').get(projectId) as { created_by: string };
+  const catalogDigest = String(before.body.catalog.digest);
+  const catalogClaims = (database.prepare(
+    "SELECT metadata_json FROM research_claims WHERE project_id=? AND logical_key LIKE 'formula:%'",
+  ).all(projectId) as Array<{ metadata_json: string }>).filter(
+    (row) => JSON.parse(row.metadata_json).catalogDigest === catalogDigest,
+  );
+  assert.ok(catalogClaims.length > 0, '删除快照前 catalog claim 必须仍是当前 digest');
+
+  const countsBefore = {
+    claims: Number((database.prepare('SELECT COUNT(*) AS value FROM research_claims WHERE project_id=?').get(projectId) as { value: number }).value),
+    sources: Number((database.prepare('SELECT COUNT(*) AS value FROM evidence_sources WHERE project_id=?').get(projectId) as { value: number }).value),
+  };
+  const deleted = database.prepare(
+    "DELETE FROM dataset_snapshots WHERE project_id=? AND dataset_key='reference-copy-70'",
+  ).run(projectId);
+  assert.equal(Number(deleted.changes), 1, '测试前置必须确实删除已固化快照');
+
+  const snapshots = () => (database.prepare(
+    `SELECT dataset_key, version, status, sha256, row_count
+       FROM dataset_snapshots
+      WHERE project_id=? AND dataset_key='reference-copy-70'
+      ORDER BY version`,
+  ).all(projectId) as Array<{
+    dataset_key: string;
+    version: number;
+    status: string;
+    sha256: string;
+    row_count: number;
+  }>).map((row) => ({ ...row }));
+  const counts = () => ({
+    claims: Number((database.prepare('SELECT COUNT(*) AS value FROM research_claims WHERE project_id=?').get(projectId) as { value: number }).value),
+    sources: Number((database.prepare('SELECT COUNT(*) AS value FROM evidence_sources WHERE project_id=?').get(projectId) as { value: number }).value),
+  });
+
+  research.bootstrapProject(projectId, owner.created_by);
+  assert.deepEqual(snapshots(), [{
+    dataset_key: 'reference-copy-70',
+    version: 1,
+    status: 'approved',
+    sha256: 'a65514d622ea6c7085b9bf96c4241f9857d53e71fa254ad591f20496c94035ad',
+    row_count: 70,
+  }]);
+  assert.deepEqual(counts(), countsBefore, '回填快照不得重复导入 formula claim 或 evidence source');
+
+  research.bootstrapProject(projectId, owner.created_by);
+  assert.equal(snapshots().length, 1, '重复 bootstrap 后仍只能有一条固化快照');
+  assert.deepEqual(counts(), countsBefore, '重复 bootstrap 也不得增加 formula claim 或 evidence source');
+});
+
+test('bootstrap validates a readable original before accepting an existing frozen snapshot', async () => {
+  const database = app.get(DatabaseService);
+  const research = app.get(ResearchService);
+  const owner = database.prepare('SELECT created_by FROM projects WHERE id=?').get(projectId) as { created_by: string };
+  const fixtureRoot = await mkdtemp(join(tmpdir(), 'content-agent-reference-drift-'));
+  const fixtureCwd = join(fixtureRoot, 'app');
+  const previousCwd = process.cwd();
+  await mkdir(fixtureCwd);
+  await writeFile(join(fixtureRoot, '70篇对标内容_AI提炼版.jsonl'), '{"drift":true}\n', 'utf8');
+  process.chdir(fixtureCwd);
+  try {
+    assert.throws(
+      () => research.bootstrapProject(projectId, owner.created_by),
+      /70篇对标内容快照与应用内固化的哈希或行数不一致/u,
+    );
+  } finally {
+    process.chdir(previousCwd);
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test('bootstrap fails closed on an existing reference snapshot with wrong version/hash/row_count/status/kind', () => {
+  const database = app.get(DatabaseService);
+  const research = app.get(ResearchService);
+  const owner = database.prepare('SELECT created_by FROM projects WHERE id=?').get(projectId) as { created_by: string };
+  const original = database.prepare(
+    `SELECT version, sha256, row_count, status, kind
+       FROM dataset_snapshots
+      WHERE project_id=? AND dataset_key='reference-copy-70'`,
+  ).get(projectId) as Record<string, string | number>;
+  const cases = [
+    ['version', 2],
+    ['sha256', '0'.repeat(64)],
+    ['row_count', 69],
+    ['status', 'draft'],
+    ['kind', 'external'],
+  ] as const;
+
+  for (const [column, badValue] of cases) {
+    database.prepare(
+      `UPDATE dataset_snapshots SET ${column}=? WHERE project_id=? AND dataset_key='reference-copy-70'`,
+    ).run(badValue, projectId);
+    try {
+      assert.throws(
+        () => research.bootstrapProject(projectId, owner.created_by),
+        new RegExp(`reference-copy-70.*${column}.*拒绝覆盖`, 'u'),
+      );
+      const preserved = database.prepare(
+        `SELECT ${column} AS value FROM dataset_snapshots
+          WHERE project_id=? AND dataset_key='reference-copy-70'`,
+      ).get(projectId) as { value: string | number };
+      assert.equal(preserved.value, badValue, `${column} 不一致时不得静默覆盖已批准快照`);
+    } finally {
+      database.prepare(
+        `UPDATE dataset_snapshots
+            SET version=?, sha256=?, row_count=?, status=?, kind=?
+          WHERE project_id=? AND dataset_key='reference-copy-70'`,
+      ).run(
+        original.version,
+        original.sha256,
+        original.row_count,
+        original.status,
+        original.kind,
+        projectId,
+      );
+    }
+  }
+
+  assert.doesNotThrow(
+    () => research.bootstrapProject(projectId, owner.created_by),
+    '合同完全一致时重复 bootstrap 必须幂等返回',
+  );
 });
 
 test('claims, evidence and experiments use reviewable versioned workflows', async () => {

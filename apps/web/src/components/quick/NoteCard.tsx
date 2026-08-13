@@ -1,6 +1,7 @@
 import { Bookmark, Copy, Heart, MessageCircle } from 'lucide-react';
 import { Button, useToast } from '../Ui';
 import { commentTotal, NoteComments } from './NoteComments';
+import { candidateClipboardText } from '../../lib/clipboard-truth';
 import { accountName, avatarTone, noteDate } from '../../lib/note-view';
 import type { NoteCommentsSource } from './NoteComments';
 import type { ReaderCandidate, ReaderJob } from '../../types';
@@ -12,7 +13,7 @@ import type { ReaderCandidate, ReaderJob } from '../../types';
  * 要看的是同一件事「这篇发出去长什么样」,所以本组件只声明自己真正读的字段,
  * 让两条数据源都能喂进来——否则创作区就得另写一套预览,那正是这次要消除的分裂。
  */
-export type NoteCardSource = Pick<ReaderCandidate, 'title' | 'body' | 'tags' | 'imageBrief'> &
+export type NoteCardSource = Pick<ReaderCandidate, 'title' | 'body' | 'tags' | 'imageBrief' | 'validation'> &
   NoteCommentsSource;
 
 interface Props {
@@ -45,7 +46,10 @@ export function NoteCard({ candidate, job, projectName, copyEnabled = true }: Pr
 
   const copy = async (text: string, label = '已复制') => {
     if (!copyEnabled) { toast.push('该候选未通过可发布校验，不能复制或导出', 'error'); return; }
-    try { await navigator.clipboard.writeText(text); toast.push(label); }
+    try {
+      await navigator.clipboard.writeText(candidateClipboardText(candidate.validation, text));
+      toast.push(label);
+    }
     catch { toast.push('复制失败，请手动选择文本', 'error'); }
   };
 

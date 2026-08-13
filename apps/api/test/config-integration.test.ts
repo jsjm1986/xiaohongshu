@@ -143,7 +143,10 @@ test('GenerationService passes configured retry attempts and delay to the real m
     assert.equal(requestTimes.length, 2);
     const retryDelay = requestTimes[1]! - requestTimes[0]!;
     assert.ok(retryDelay >= 80, `retry delay ${retryDelay}ms ignored configured base delay`);
-    assert.ok(retryDelay < 2_000, `retry delay ${retryDelay}ms used an unexpected default`);
+    // 全量 node:test 并发会让事件循环偶发延迟到 2-3 秒；3.5 秒仍严格低于
+    // 生产默认首轮 4 秒，既能识别「误用了默认值」又不把调度抖动当功能失败。
+    // 与 analysis-model-resilience 的同类延迟断言保持一致。
+    assert.ok(retryDelay < 3_500, `retry delay ${retryDelay}ms used an unexpected default`);
   } finally {
     await new Promise<void>((resolveClose, rejectClose) => {
       server.close((error) => error ? rejectClose(error) : resolveClose());

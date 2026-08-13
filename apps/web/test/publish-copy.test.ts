@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { publishBlocks, publishOrderText, readerCandidateToMarkdown } from "../src/lib/publish-copy.ts";
+import { candidateClipboardText } from "../src/lib/clipboard-truth.ts";
 import {
   ACCOUNTABLE_ANSWER_COPY_LABEL,
   SIMULATED_COMMENT_COPY_NOTICE,
@@ -10,7 +11,7 @@ import {
 } from "../src/lib/simulation-notice.ts";
 import type { ReaderCandidate } from "../src/types.ts";
 
-type Src = Parameters<typeof publishBlocks>[0];
+type Src = Parameters<typeof publishOrderText>[0];
 
 function candidate(patch: Partial<ReaderCandidate> = {}): Src {
   return {
@@ -18,6 +19,7 @@ function candidate(patch: Partial<ReaderCandidate> = {}): Src {
     body: "卫生间墙角这两天渗水。\n给客服打了电话。",
     tags: ["#杭州装修", "保修"],
     imageBrief: "手机随手拍墙角",
+    validation: { valid: true, qualityStatus: "passed", repairAttempts: 0, issues: [] },
     commentOwnedFirstComment: "补充一下保修范围：",
     comments: [
       { question: "谁来判定不合格", answer: "按合同由第三方验收", followUps: [] },
@@ -90,7 +92,7 @@ test("没有标签时正文末尾不留空行", () => {
 
 test("整份文本按发布顺序分段,评论段自带模拟情景声明", () => {
   const text = publishOrderText(candidate());
-  assert.ok(text.startsWith("—— 正文区（直接粘贴）——"));
+  assert.ok(text.startsWith("—— 正文区（可直接使用）——"));
   assert.ok(text.includes("—— 配图说明"));
   assert.ok(text.includes("—— 评论区话术参考（模拟情景 · 共 3 条）——"));
   assert.ok(text.includes(SIMULATED_COMMENT_COPY_NOTICE));
@@ -98,6 +100,47 @@ test("整份文本按发布顺序分段,评论段自带模拟情景声明", () =
   assert.ok(text.includes(`3. ${SIMULATED_QUESTION_COPY_LABEL}\n换班组要加钱吗`));
   assert.equal(text.includes("发帖后按顺序贴"), false, "不得再出现指示代发评论的措辞");
   assert.equal(text.endsWith("\n"), false, "末尾不该留空行");
+});
+
+test("needs_review 按发布顺序复制携带复核状态且不再声称直接粘贴", () => {
+  const text = publishOrderText(candidate({
+    validation: { valid: true, qualityStatus: "needs_review", repairAttempts: 0, issues: [] },
+  }));
+  assert.ok(text.startsWith("【validation.qualityStatus：建议复核（可复制导出）】"));
+  assert.ok(text.includes("—— 正文区（建议复核后使用）——"));
+  assert.equal(text.includes("直接粘贴"), false);
+});
+
+test("passed 按发布顺序复制保持直接可用且不增加复核状态头", () => {
+  const text = publishOrderText(candidate({
+    validation: { valid: false, qualityStatus: "passed", repairAttempts: 0, issues: [] },
+  }));
+  assert.ok(text.startsWith("—— 正文区（可直接使用）——"));
+  assert.equal(text.includes("建议复核（可复制导出）"), false);
+});
+
+test("needs_review 全文与逐字段的真实剪贴板载荷都携带同一状态头", () => {
+  const validation = { valid: true, qualityStatus: "needs_review", issues: [] };
+  for (const content of ["标题", "正文", "#话题", "配图说明", "完整全文"]) {
+    assert.equal(
+      candidateClipboardText(validation, content),
+      `【validation.qualityStatus：建议复核（可复制导出）】\n\n${content}`,
+    );
+  }
+  assert.equal(
+    candidateClipboardText({ valid: false, qualityStatus: "passed", issues: [] }, "标题"),
+    "标题",
+  );
+  const alreadyLabeled = "> validation.qualityStatus：建议复核（可复制导出）\n\n# 标题";
+  assert.equal(
+    candidateClipboardText(validation, alreadyLabeled),
+    alreadyLabeled,
+    "已经由 Markdown 构造器带状态的内容不得重复加头",
+  );
+  assert.throws(
+    () => candidateClipboardText({ valid: true, qualityStatus: "blocked", issues: [] }, "正文"),
+    /不可交付/u,
+  );
 });
 
 test("没有评论时不出现空的评论区标题与声明", () => {

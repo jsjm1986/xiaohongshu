@@ -379,8 +379,8 @@ export class AuthService implements OnModuleInit {
     if (typeof rawToken !== 'string' || !rawToken || typeof rawPassword !== 'string') {
       throw new BadRequestException('重置链接无效或已过期');
     }
-    if (rawPassword.length < 8 || rawPassword.length > 256) {
-      throw new BadRequestException('新密码长度需在 8-256 字符之间');
+    if (rawPassword.length < 12 || rawPassword.length > 256) {
+      throw new BadRequestException('新密码长度需在 12-256 字符之间');
     }
     const tokenHash = createHash('sha256').update(rawToken).digest('hex');
     const row = this.database

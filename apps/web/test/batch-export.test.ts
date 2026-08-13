@@ -1,43 +1,77 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { planBatchExport } from '../src/lib/batch-export.js';
 
-const cand = (id: string, publishable: boolean) => ({ id, publishable, title: `标题${id}` });
-const job = (id: string, status: string, cands: Array<{ id: string; publishable: boolean }>) => ({
+const board = readFileSync(new URL('../src/components/quick/BatchBoard.tsx', import.meta.url), 'utf8');
+
+const cand = (id: string, state: 'passed' | 'needs_review' | 'blocked') => ({
+  id,
+  title: `标题${id}`,
+  validation: {
+    valid: true,
+    qualityStatus: state === 'needs_review' ? 'needs_review' : 'passed',
+    repairAttempts: 0,
+    issues: [],
+  },
+  generationMode: 'model_generated',
+  artifactRealization: {
+    deliverability: state === 'blocked' ? 'non_deliverable' : 'eligible',
+  },
+});
+const job = (id: string, status: string, cands: ReturnType<typeof cand>[]) => ({
   id, status, topic: `选题${id}`, candidates: cands,
 }) as any;
 
-test('只导出可发布候选,未通过校验的计入 skipped', () => {
-  // 后端 export.service.ts:155 对未通过校验的候选一律 400,实测 165 个里 129 个
-  // 过不了。批量导出必须先筛,否则大半请求都是 400。
-  const plan = planBatchExport([
-    job('j1', 'completed', [cand('c1', true), cand('c2', false)]),
-  ], 'docx');
-  assert.equal(plan.items.length, 1);
-  assert.equal(plan.items[0].candidateId, 'c1');
-  assert.equal(plan.skippedUnpublishable, 1);
+test('任何格式都排除 deliverable=false 的硬阻断候选', () => {
+  for (const format of ['markdown', 'json', 'docx', 'pdf'] as const) {
+    const plan = planBatchExport([
+      job('j1', 'completed', [cand('c1', 'passed'), cand('c2', 'blocked')]),
+    ], format);
+    assert.deepEqual(plan.items.map((item) => item.candidateId), ['c1'], format);
+    assert.equal(plan.skippedBlocked, 1, format);
+  }
 });
 
-test('markdown 格式不筛但要计水印数:未过校验的稿子带「仅供核对」水印导出', () => {
+test('needs_review 候选仍可按任何格式批量导出', () => {
+  for (const format of ['markdown', 'json', 'docx', 'pdf'] as const) {
+    const plan = planBatchExport([
+      job('j1', 'completed', [cand('c1', 'needs_review')]),
+    ], format);
+    assert.deepEqual(plan.items.map((item) => item.candidateId), ['c1'], format);
+    assert.deepEqual(plan.items.map((item) => item.qualityStatusLabel), ['建议复核（可复制导出）'], format);
+    assert.equal(plan.skippedBlocked, 0, format);
+  }
+});
+
+test('批量导出清单携带人类可读 qualityStatus，历史候选才回退 valid', () => {
+  const passed = cand('passed', 'passed');
+  const review = cand('review', 'needs_review');
+  const historical = {
+    ...cand('historical', 'passed'),
+    validation: { valid: false, repairAttempts: 0, issues: [] },
+  };
   const plan = planBatchExport([
-    job('j1', 'completed', [cand('c1', true), cand('c2', false)]),
+    job('j1', 'completed', [passed, review, historical] as any),
   ], 'markdown');
-  assert.equal(plan.items.length, 2);
-  assert.equal(plan.skippedUnpublishable, 0);
-  // 调用方要据此在结果提示里如实说明;文档本身的水印由 quickCandidateToMarkdown 负责。
-  assert.equal(plan.draftWatermarked, 1);
+  assert.deepEqual(
+    plan.items.map((item) => [item.candidateId, item.qualityStatus, item.qualityStatusLabel]),
+    [
+      ['passed', 'passed', '校验通过'],
+      ['review', 'needs_review', '建议复核（可复制导出）'],
+      ['historical', 'needs_review', '建议复核（可复制导出）'],
+    ],
+  );
 });
 
-test('非 markdown 格式不产生水印计数', () => {
-  const plan = planBatchExport([
-    job('j1', 'completed', [cand('c1', true), cand('c2', false)]),
-  ], 'docx');
-  assert.equal(plan.draftWatermarked, 0);
+test('BatchBoard 如实说明硬门禁跳过，不再建议改用 Markdown 绕过', () => {
+  assert.match(board, /命中交付硬门禁/u);
+  assert.doesNotMatch(board, /可改用 Markdown|draftWatermarked|仅供核对.*水印/u);
 });
 
 test('未完成任务整个跳过,单独计数', () => {
   const plan = planBatchExport([
-    job('j1', 'completed', [cand('c1', true)]),
+    job('j1', 'completed', [cand('c1', 'passed')]),
     job('j2', 'failed', []),
     job('j3', 'running', []),
   ], 'docx');
@@ -47,7 +81,7 @@ test('未完成任务整个跳过,单独计数', () => {
 
 test('一个任务的多个候选都要导出,带上可区分的序号', () => {
   const plan = planBatchExport([
-    job('j1', 'completed', [cand('c1', true), cand('c2', true), cand('c3', true)]),
+    job('j1', 'completed', [cand('c1', 'passed'), cand('c2', 'passed'), cand('c3', 'passed')]),
   ], 'pdf');
   assert.equal(plan.items.length, 3);
   // 同一任务下多个候选,文件名必须能区分
@@ -57,7 +91,7 @@ test('一个任务的多个候选都要导出,带上可区分的序号', () => {
 
 test('文件名含选题与格式后缀,并清掉路径非法字符', () => {
   const plan = planBatchExport([
-    { id: 'j1', status: 'completed', topic: 'a/b:c*d?e"f<g>h|i', candidates: [cand('c1', true)] } as any,
+    { id: 'j1', status: 'completed', topic: 'a/b:c*d?e"f<g>h|i', candidates: [cand('c1', 'passed')] } as any,
   ], 'docx');
   const name = plan.items[0].filename;
   assert.match(name, /\.docx$/);
@@ -72,14 +106,14 @@ test('缺 candidates 的任务不崩,计为未完成', () => {
 test('空输入给空计划', () => {
   const plan = planBatchExport([], 'docx');
   assert.deepEqual(plan.items, []);
-  assert.equal(plan.skippedUnpublishable, 0);
+  assert.equal(plan.skippedBlocked, 0);
   assert.equal(plan.skippedUnfinished, 0);
 });
 
 test('total 反映实际要下载的文件数', () => {
   const plan = planBatchExport([
-    job('j1', 'completed', [cand('c1', true), cand('c2', false)]),
-    job('j2', 'completed', [cand('c3', true)]),
+    job('j1', 'completed', [cand('c1', 'passed'), cand('c2', 'blocked')]),
+    job('j2', 'completed', [cand('c3', 'needs_review')]),
   ], 'docx');
   assert.equal(plan.total, 2);
   assert.equal(plan.total, plan.items.length);

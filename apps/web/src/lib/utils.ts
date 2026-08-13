@@ -1,3 +1,7 @@
+import {
+  candidateQualityStatusLabel,
+  resolveCandidateQualityStatus,
+} from '@content-agent/agent-core/delivery-policy';
 import { resolveProductionArtifactView } from './image-production';
 import {
   auditAnswerAttribution,
@@ -44,9 +48,13 @@ export const candidateToMarkdown = (candidate: Candidate) => {
   // appendix layout (same policy as the API export); historical candidates
   // keep the legacy single-flow markdown byte-for-byte unless this candidate
   // was manually released after a failed automatic validation.
-  const markdown = isCrefV11Candidate(candidate)
+  const body = isCrefV11Candidate(candidate)
     ? candidateToV11TwoPartMarkdown(candidate)
     : legacyCandidateToMarkdown(candidate);
+  const qualityStatus = resolveCandidateQualityStatus(candidate.validation);
+  const markdown = `> validation.qualityStatus：${candidateQualityStatusLabel(qualityStatus)}
+
+${body}`;
   if (candidate.manualDeliveryConfirmation?.confirmed !== true) return markdown;
   return `${markdown.trimEnd()}
 

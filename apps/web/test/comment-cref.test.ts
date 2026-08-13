@@ -125,6 +125,37 @@ test("candidate markdown preserves failed validation truth after manual delivery
   assert.match(markdown, /已逐条核对事实、证据、身份与风险/u);
 });
 
+test("复制 Markdown 显式携带同源 qualityStatus 标签，历史包才回退 valid", () => {
+  const review = candidateToMarkdown({
+    ...baseCandidate,
+    validation: {
+      valid: true,
+      qualityStatus: "needs_review",
+      repairAttempts: 0,
+      issues: [],
+    },
+  });
+  assert.match(review, /^> validation\.qualityStatus：建议复核（可复制导出）/u);
+  assert.doesNotMatch(review, /validation\.qualityStatus：校验通过|可直接发布/u);
+
+  const passed = candidateToMarkdown({
+    ...baseCandidate,
+    validation: {
+      valid: false,
+      qualityStatus: "passed",
+      repairAttempts: 0,
+      issues: [],
+    },
+  });
+  assert.match(passed, /^> validation\.qualityStatus：校验通过/u);
+
+  const historical = candidateToMarkdown({
+    ...baseCandidate,
+    validation: { valid: false, repairAttempts: 0, issues: [] },
+  });
+  assert.match(historical, /^> validation\.qualityStatus：建议复核（可复制导出）/u);
+});
+
 test("candidate markdown renders v1.1 Cref and aC fields when present", () => {
   const candidate: Candidate = {
     ...baseCandidate,
