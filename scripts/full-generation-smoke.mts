@@ -32,41 +32,18 @@ const cloneDataDir = join(runDir, 'data');
 const testSourceDataDir = process.env.NODE_ENV === 'test' && process.env.SMOKE_TEST_SOURCE_DATA_DIR
   ? resolve(process.env.SMOKE_TEST_SOURCE_DATA_DIR)
   : undefined;
-const repositoryStorage = testSourceDataDir
-  ? undefined
-  : await resolveRepositoryStoragePaths(root);
-const sourceDataDir = testSourceDataDir ?? repositoryStorage!.dataDir;
-const sourceDatabasePath = process.env.NODE_ENV === 'test' && process.env.SMOKE_TEST_SOURCE_DATABASE_PATH
-  ? resolve(process.env.SMOKE_TEST_SOURCE_DATABASE_PATH)
-  : testSourceDataDir
-    ? join(testSourceDataDir, 'app.db')
-    : repositoryStorage!.databasePath;
 const persistToDevelopmentDatabase = process.env.SMOKE_PERSIST_DEVELOPMENT_DATA === 'true';
 const keepCloneData = process.env.SMOKE_KEEP_CLONE_DATA === 'true';
-const activeDataDir = persistToDevelopmentDatabase ? sourceDataDir : cloneDataDir;
-const activeDatabasePath = persistToDevelopmentDatabase
-  ? sourceDatabasePath
-  : join(cloneDataDir, 'app.db');
+let sourceDataDir = '';
+let sourceDatabasePath = '';
+let activeDataDir = cloneDataDir;
+let activeDatabasePath = join(cloneDataDir, 'app.db');
 const capture: JsonObject[] = [];
 const originalFetch = globalThis.fetch;
 const report: JsonObject = {
   runId: basename(runDir),
   runToken,
   startedAt,
-  storage: persistToDevelopmentDatabase
-    ? {
-        mode: 'development_database',
-        databaseModified: true,
-        dataDir: activeDataDir,
-        databasePath: activeDatabasePath,
-      }
-    : {
-        mode: 'isolated_clone',
-        databaseModified: false,
-        cloneDataDir,
-        sourceDataDir,
-        sourceDatabasePath,
-      },
 };
 
 let smokeApp: NestExpressApplication | undefined;
@@ -539,6 +516,34 @@ async function approvePlanningResources(
 
 async function main(): Promise<void> {
   validateRuntimeControls();
+  if (testSourceDataDir) {
+    sourceDataDir = testSourceDataDir;
+    sourceDatabasePath = process.env.SMOKE_TEST_SOURCE_DATABASE_PATH
+      ? resolve(process.env.SMOKE_TEST_SOURCE_DATABASE_PATH)
+      : join(testSourceDataDir, 'app.db');
+  } else {
+    const repositoryStorage = await resolveRepositoryStoragePaths(root);
+    sourceDataDir = repositoryStorage.dataDir;
+    sourceDatabasePath = repositoryStorage.databasePath;
+  }
+  if (persistToDevelopmentDatabase) {
+    activeDataDir = sourceDataDir;
+    activeDatabasePath = sourceDatabasePath;
+  }
+  report.storage = persistToDevelopmentDatabase
+    ? {
+        mode: 'development_database',
+        databaseModified: true,
+        dataDir: activeDataDir,
+        databasePath: activeDatabasePath,
+      }
+    : {
+        mode: 'isolated_clone',
+        databaseModified: false,
+        cloneDataDir,
+        sourceDataDir,
+        sourceDatabasePath,
+      };
   await ensureRunDirectory();
   throwIfStopping();
   report.staleCloneCleanup = await cleanupStaleClones();

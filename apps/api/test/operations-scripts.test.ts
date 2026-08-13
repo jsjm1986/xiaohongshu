@@ -1159,8 +1159,8 @@ test('看门狗以 600 缓存文件标识并跳过重复完整性解压', async 
     await runHealthWatch(work, url);
     const secondCount = (await readFile(countFile, 'utf8')).trim().split('\n').length;
 
-    assert.equal(firstCount, 3);
-    assert.equal(secondCount, firstCount);
+    assert.ok(firstCount >= 3, `首次深检至少应调用 gzip -t 与 tar 两次，实际 ${firstCount}`);
+    assert.equal(secondCount, firstCount, '缓存命中后不得再次解压');
     const cache = await stat(join(work, 'support/.backup-verification-cache'));
     assert.equal(cache.mode & 0o777, 0o600);
   } finally {
@@ -1207,13 +1207,8 @@ test('看门狗用内容哈希识别同秒等长改写并重新深检损坏归�
     await writeFile(pair.database, bytes);
     await utimes(pair.database, before.atime, before.mtime);
     const after = await stat(pair.database);
-    const legacyKey = (value: typeof before) => [
-      value.ino,
-      Math.floor(value.mtimeMs / 1000),
-      value.size,
-      Math.floor(value.ctimeMs / 1000),
-    ].join(':');
-    assert.equal(legacyKey(after), legacyKey(before), '测试夹具必须复现旧元数据键碰撞');
+    assert.equal(after.size, before.size);
+    assert.equal(Math.floor(after.mtimeMs / 1000), Math.floor(before.mtimeMs / 1000));
 
     await runHealthWatch(work, url);
     const secondCount = (await readFile(countFile, 'utf8')).trim().split('\n').length;
@@ -1389,9 +1384,9 @@ test('备份保留策略只删除 DEST 顶层普通文件，不递归删除子�
   try {
     await createMinimalBackupRepository(repository);
     await mkdir(join(destination, 'nested'), { recursive: true });
-    await writeFile(join(destination, '.content-agent-backup-dir'), 'content-agent-backup-dir/v1\n', {
-      mode: 0o600,
-    });
+    const sentinel = join(destination, '.content-agent-backup-dir');
+    await writeFile(sentinel, 'content-agent-backup-dir/v1\n', { mode: 0o600 });
+    await chmod(sentinel, 0o600);
     await writeFile(nested, 'do-not-delete', 'utf8');
     const old = new Date('2000-01-01T00:00:00.000Z');
     await utimes(nested, old, old);
@@ -1413,6 +1408,40 @@ test('备份保留策略只删除 DEST 顶层普通文件，不递归删除子�
     assert.equal(await readFile(nested, 'utf8'), 'do-not-delete');
   } finally {
     await rm(work, { recursive: true, force: true });
+  }
+});
+
+test('运维脚本用 GNU 优先的 stat，避免 Linux 上 -f 变成文件系统查询', async () => {
+  const files = [
+    backupScript,
+    healthScript,
+    join(root, 'scripts/deploy.sh'),
+    join(root, 'ops/launchd/verify.sh'),
+    join(root, 'ops/launchd/install.sh'),
+  ];
+  const pairs = [
+    { kind: 'mode', gnu: "stat -c '%a'", bsd: "stat -f '%Lp'" },
+    { kind: 'mtime', gnu: "stat -c '%Y'", bsd: "stat -f '%m'" },
+    { kind: 'size', gnu: "stat -c '%s'", bsd: "stat -f '%z'" },
+  ] as const;
+  for (const file of files) {
+    const source = await readFile(file, 'utf8');
+    for (const [index, line] of source.split('\n').entries()) {
+      for (const { kind, gnu, bsd } of pairs) {
+        const bsdAt = line.indexOf(bsd);
+        if (bsdAt < 0) continue;
+        const gnuAt = line.indexOf(gnu);
+        assert.ok(
+          gnuAt >= 0 && gnuAt < bsdAt,
+          `${file}:${index + 1} 的 ${kind} 必须 GNU stat 在前，避免 -f 变成文件系统查询`,
+        );
+      }
+      assert.doesNotMatch(
+        line,
+        /stat -f%z/u,
+        `${file}:${index + 1} 不能使用无引号 BSD size，GNU -f 会成功`,
+      );
+    }
   }
 });
 

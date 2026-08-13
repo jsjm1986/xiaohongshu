@@ -26,7 +26,8 @@ if [ -e "$OPS_ENV_FILE" ]; then
     echo "OPS_ENV_FILE 不是普通文件: $OPS_ENV_FILE" >&2
     exit 1
   fi
-  OPS_MODE="$(stat -f '%Lp' "$OPS_ENV_FILE" 2>/dev/null || stat -c '%a' "$OPS_ENV_FILE" 2>/dev/null || true)"
+  # GNU stat -c 必须在前：GNU -f 是 --file-system，会成功并倒出文件系统信息。
+  OPS_MODE="$(stat -c '%a' "$OPS_ENV_FILE" 2>/dev/null || stat -f '%Lp' "$OPS_ENV_FILE" 2>/dev/null || true)"
   if [ "$OPS_MODE" != "600" ] && [ "$OPS_MODE" != "400" ]; then
     echo "OPS_ENV_FILE 权限必须是 600 或 400，当前为 ${OPS_MODE:-未知}" >&2
     exit 1
@@ -129,7 +130,7 @@ DEST_SENTINEL="$DEST/.content-agent-backup-dir"
 validate_destination_sentinel() {
   local sentinel_mode sentinel_content
   [ -f "$DEST_SENTINEL" ] && [ ! -L "$DEST_SENTINEL" ] || return 1
-  sentinel_mode="$(stat -f '%Lp' "$DEST_SENTINEL" 2>/dev/null || stat -c '%a' "$DEST_SENTINEL" 2>/dev/null || true)"
+  sentinel_mode="$(stat -c '%a' "$DEST_SENTINEL" 2>/dev/null || stat -f '%Lp' "$DEST_SENTINEL" 2>/dev/null || true)"
   [ "$sentinel_mode" = "600" ] || return 1
   sentinel_content="$(command cat "$DEST_SENTINEL" 2>/dev/null || true)"
   [ "$sentinel_content" = "content-agent-backup-dir/v1" ]
@@ -196,7 +197,7 @@ if ! mkdir "$LOCK_DIR"; then
     echo "已有备份任务在运行（pid=${LOCK_PID}），本次拒绝并发执行" >&2
     exit 75
   fi
-  LOCK_MODIFIED="$(stat -f '%m' "$LOCK_DIR" 2>/dev/null || stat -c '%Y' "$LOCK_DIR" 2>/dev/null || true)"
+  LOCK_MODIFIED="$(stat -c '%Y' "$LOCK_DIR" 2>/dev/null || stat -f '%m' "$LOCK_DIR" 2>/dev/null || true)"
   case "$LOCK_MODIFIED" in
     ''|*[!0-9]*) echo "无法确认备份锁年龄，本次拒绝并发执行" >&2; exit 75 ;;
   esac

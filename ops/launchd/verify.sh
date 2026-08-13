@@ -51,7 +51,8 @@ PROCESS_USER="$(ps -o user= -p "$API_PID" | tr -d ' ')"
 [ "$PROCESS_USER" = "$TARGET_USER" ] || { echo "API 进程用户错误: $PROCESS_USER" >&2; exit 1; }
 
 [ -f "$OPS_ENV" ] || { echo "缺少仓库外运维环境接口" >&2; exit 1; }
-OPS_MODE="$(stat -f '%Lp' "$OPS_ENV" 2>/dev/null || stat -c '%a' "$OPS_ENV" 2>/dev/null || true)"
+# GNU stat -c 必须在前：GNU -f 是 --file-system，会成功并倒出文件系统信息。
+OPS_MODE="$(stat -c '%a' "$OPS_ENV" 2>/dev/null || stat -f '%Lp' "$OPS_ENV" 2>/dev/null || true)"
 [ "$OPS_MODE" = "600" ] || { echo "ops.env 权限不是 600: $OPS_MODE" >&2; exit 1; }
 cmp -s "$REPO/scripts/backup-production.sh" "$SUPPORT_DIR/bin/backup-production.sh"
 cmp -s "$REPO/scripts/health-watch.sh" "$SUPPORT_DIR/bin/health-watch.sh"
@@ -93,18 +94,18 @@ EOF
 gzip -t "$LATEST_BACKUP"
 tar -tzf "$FILES_BACKUP" >/dev/null
 tar -xOf "$FILES_BACKUP" .env >/dev/null
-BACKUP_MODE="$(stat -f '%Lp' "$LATEST_BACKUP" 2>/dev/null || stat -c '%a' "$LATEST_BACKUP")"
-FILES_MODE="$(stat -f '%Lp' "$FILES_BACKUP" 2>/dev/null || stat -c '%a' "$FILES_BACKUP")"
+BACKUP_MODE="$(stat -c '%a' "$LATEST_BACKUP" 2>/dev/null || stat -f '%Lp' "$LATEST_BACKUP")"
+FILES_MODE="$(stat -c '%a' "$FILES_BACKUP" 2>/dev/null || stat -f '%Lp' "$FILES_BACKUP")"
 [ "$BACKUP_MODE" = "600" ] || { echo "数据库备份权限不是 600: $BACKUP_MODE" >&2; exit 1; }
 [ "$FILES_MODE" = "600" ] || { echo "文件备份权限不是 600: $FILES_MODE" >&2; exit 1; }
 if [ "$BACKUP_POLICY" = "manifest" ]; then
-  MANIFEST_MODE="$(stat -f '%Lp' "$MANIFEST_BACKUP" 2>/dev/null || stat -c '%a' "$MANIFEST_BACKUP")"
+  MANIFEST_MODE="$(stat -c '%a' "$MANIFEST_BACKUP" 2>/dev/null || stat -f '%Lp' "$MANIFEST_BACKUP")"
   [ "$MANIFEST_MODE" = "600" ] || { echo "备份 manifest 权限不是 600: $MANIFEST_MODE" >&2; exit 1; }
 fi
 
 if [ "${SKIP_BACKUP_AGE:-0}" != "1" ]; then
   NOW="$(date +%s)"
-  MODIFIED="$(stat -f '%m' "$LATEST_BACKUP" 2>/dev/null || stat -c '%Y' "$LATEST_BACKUP")"
+  MODIFIED="$(stat -c '%Y' "$LATEST_BACKUP" 2>/dev/null || stat -f '%m' "$LATEST_BACKUP")"
   [ $((NOW - MODIFIED)) -le 172800 ] || { echo "最近自动备份超过 48 小时" >&2; exit 1; }
 fi
 

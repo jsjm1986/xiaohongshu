@@ -640,9 +640,9 @@ EOF
   gzip -t "$latest"
   tar -tzf "$files" >/dev/null
   tar -xOf "$files" .env >/dev/null
-  db_mode="$(stat -f '%Lp' "$latest" 2>/dev/null || stat -c '%a' "$latest")"
-  files_mode="$(stat -f '%Lp' "$files" 2>/dev/null || stat -c '%a' "$files")"
-  manifest_mode="$(stat -f '%Lp' "$manifest" 2>/dev/null || stat -c '%a' "$manifest")"
+  db_mode="$(stat -c '%a' "$latest" 2>/dev/null || stat -f '%Lp' "$latest")"
+  files_mode="$(stat -c '%a' "$files" 2>/dev/null || stat -f '%Lp' "$files")"
+  manifest_mode="$(stat -c '%a' "$manifest" 2>/dev/null || stat -f '%Lp' "$manifest")"
   [ "$db_mode" = "600" ] && [ "$files_mode" = "600" ] && [ "$manifest_mode" = "600" ]
 }
 

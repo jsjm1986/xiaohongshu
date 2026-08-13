@@ -37,7 +37,8 @@ esac
 
 OPS_ENV_FILE="${OPS_ENV_FILE:-$HOME/Library/Application Support/xhsai/ops.env}"
 if [ -e "$OPS_ENV_FILE" ]; then
-  OPS_MODE="$(stat -f '%Lp' "$OPS_ENV_FILE" 2>/dev/null || stat -c '%a' "$OPS_ENV_FILE" 2>/dev/null || true)"
+  # GNU stat -c 必须在前：GNU -f 是 --file-system，会成功并倒出文件系统信息。
+  OPS_MODE="$(stat -c '%a' "$OPS_ENV_FILE" 2>/dev/null || stat -f '%Lp' "$OPS_ENV_FILE" 2>/dev/null || true)"
   [ "$OPS_MODE" = "600" ] || { echo "拒绝部署：ops.env 权限必须是 600" >&2; exit 1; }
   set -a
   # shellcheck disable=SC1090

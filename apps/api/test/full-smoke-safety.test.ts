@@ -722,6 +722,22 @@ test('轮询子进程在测试回调失败时由 finally 终止并等待退出',
   assert.equal(processState.exited, true);
 });
 
+test('全量 smoke 在校验测试专用环境变量之前不得读取仓库 .env', () => {
+  const source = readFileSync(smokeScript, 'utf8');
+  assert.doesNotMatch(
+    source,
+    /^const repositoryStorage[\s\S]*?await resolveRepositoryStoragePaths/mu,
+    '模块顶层读取 .env 会让无仓库 .env 的 CI 在 NODE_ENV 校验前崩溃',
+  );
+  const mainStart = source.indexOf('async function main()');
+  assert.ok(mainStart >= 0, '缺少 main()');
+  const validateAt = source.indexOf('validateRuntimeControls();', mainStart);
+  const resolveAt = source.indexOf('await resolveRepositoryStoragePaths', mainStart);
+  assert.ok(validateAt >= 0, 'main 必须校验测试专用开关');
+  assert.ok(resolveAt >= 0, 'main 在校验通过后才解析仓库存储路径');
+  assert.ok(validateAt < resolveAt, 'NODE_ENV=test 校验必须发生在读取仓库 .env 之前');
+});
+
 test('非 test 环境拒绝测试 sourceDataDir 与暂停屏障配置', { timeout: 30_000 }, async (context) => {
   const sourceDataDir = await createSourceData();
   const barrierDir = await mkdtemp(join(tmpdir(), 'full-smoke-invalid-barrier-'));

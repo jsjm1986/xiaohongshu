@@ -34,7 +34,8 @@ if [ -e "$OPS_ENV_FILE" ]; then
     echo "OPS_ENV_FILE 不是普通文件: $OPS_ENV_FILE" >&2
     exit 1
   fi
-  OPS_MODE="$(stat -f '%Lp' "$OPS_ENV_FILE" 2>/dev/null || stat -c '%a' "$OPS_ENV_FILE" 2>/dev/null || true)"
+  # GNU stat -c 必须在前：GNU -f 是 --file-system，会成功并倒出文件系统信息。
+  OPS_MODE="$(stat -c '%a' "$OPS_ENV_FILE" 2>/dev/null || stat -f '%Lp' "$OPS_ENV_FILE" 2>/dev/null || true)"
   if [ "$OPS_MODE" != "600" ] && [ "$OPS_MODE" != "400" ]; then
     echo "OPS_ENV_FILE 权限必须是 600 或 400，当前为 ${OPS_MODE:-未知}" >&2
     exit 1
@@ -254,7 +255,7 @@ if [ "$BACKUP_RUNNING" = "0" ] && [ -f "$SUPPORT_DIR/backup.lock/owner" ]; then
 fi
 
 file_modified() {
-  stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null || true
+  stat -c '%Y' "$1" 2>/dev/null || stat -f '%m' "$1" 2>/dev/null || true
 }
 
 file_content_identity() {
@@ -407,7 +408,7 @@ fi
 #    API 服务(com.xhsai.api)的日志在 ~/Library/Logs/xhsai/——launchd 冷启动
 #    解析不了中文 StandardOutPath(exit 78),所以服务日志必须落纯 ASCII 路径。
 file_size() {
-  stat -f%z "$1" 2>/dev/null || stat -c%s "$1" 2>/dev/null || echo 0
+  stat -c '%s' "$1" 2>/dev/null || stat -f '%z' "$1" 2>/dev/null || echo 0
 }
 
 for FILE in "$HOME/Library/Logs/xhsai/api.out.log" "$HOME/Library/Logs/xhsai/api.err.log" \

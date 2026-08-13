@@ -767,6 +767,12 @@ test('部署脚本拒绝错误分支与脏树，并完整执行上线门禁', ()
   assert.match(deploy, /install_runtime_from_build/u, '门禁通过后才能换入活树运行时');
   assert.match(deploy, /ROLLBACK_DIR\/build/u);
   assert.match(deploy, /require_origin_ci_success/u, '部署前必须确认 origin/main 对应 SHA 的 CI 已成功');
+  assert.doesNotMatch(
+    deploy,
+    /stat -f ['"]%Lp['"][\s\S]{0,80}\|\|[\s\S]{0,80}stat -c ['"]%a['"]/u,
+    'GNU stat -f 是文件系统查询且会成功，ops.env 权限检查必须 GNU -c 优先',
+  );
+  assert.match(deploy, /stat -c '%a'.*\|\|.*stat -f '%Lp'/u);
   assert.match(deploy, /api\.github\.com\/repos/u);
   assert.match(deploy, /clear_legacy_gui_api/u, '部署必须清理残留 GUI API LaunchAgent');
   assert.match(read('ops/launchd/verify.sh'), /gui\/.*com\.xhsai\.api/u);
