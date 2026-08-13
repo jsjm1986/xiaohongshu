@@ -83,6 +83,19 @@ export class AuthController {
     return { ok: true };
   }
 
+  /**
+   * 凭一次性链接自设新密码(公开端点,链接本身就是凭证)。
+   * 防爆破:按来源 IP 限速,与登录同级;失败不区分令牌状态。
+   */
+  @Post('reset-password')
+  async resetPassword(@Body() rawBody: unknown, @Req() request: Request) {
+    const body = requireObject(rawBody);
+    const sourceKey = request.ip || request.socket.remoteAddress || 'unknown';
+    this.auth.consumeResetAttempt(sourceKey);
+    await this.auth.resetPasswordWithToken(body.token, body.newPassword);
+    return { ok: true };
+  }
+
   @Post('change-password')
   @UseGuards(SessionAuthGuard, CsrfGuard)
   async changePassword(@Req() rawRequest: Request, @Body() rawBody: unknown) {

@@ -305,6 +305,30 @@ export function TeamPage() {
                     <UserCog size={15} />
                     细分
                   </button>
+                  {isSystemAdmin && (
+                    <button
+                      type="button"
+                      title="生成一次性密码重置链接（24 小时有效，用一次即废）"
+                      onClick={async () => {
+                        try {
+                          const { resetPath } = await api.admin.createResetLink(member.userId);
+                          const url = `${window.location.origin}${resetPath}`;
+                          try {
+                            await navigator.clipboard.writeText(url);
+                            toast.push('重置链接已复制，请通过可信渠道发给用户（24 小时有效）');
+                          } catch {
+                            // 剪贴板不可用(非 https):用原生对话框兜底,链接必须能被拿走
+                            window.prompt('复制重置链接（24 小时有效）', url);
+                          }
+                        } catch (error) {
+                          toast.push(error instanceof Error ? error.message : '生成重置链接失败', 'error');
+                        }
+                      }}
+                    >
+                      <KeyRound size={15} />
+                      重置链接
+                    </button>
+                  )}
                   {member.role !== "Owner" && (
                     <button
                       type="button"

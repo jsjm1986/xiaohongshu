@@ -15,12 +15,14 @@
     "typecheck": "npm run typecheck -w @content-agent/agent-core && npm run typecheck -w @content-agent/agent-harness-core && npm run typecheck -w @content-agent/web && npm run typecheck -w @content-agent/api",
     "import:legacy": "tsx scripts/import-legacy.ts",
     "analyze:style": "tsx scripts/analyze-style-corpus.ts",
-    "smoke:full": "tsx --tsconfig apps/api/tsconfig.json scripts/full-generation-smoke.mts"
+    "smoke:full": "tsx --tsconfig apps/api/tsconfig.json scripts/full-generation-smoke.mts",
+    "smoke:browser": "playwright test"
   },
   "engines": {
     "node": ">=24.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "concurrently": "^9.2.1",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"

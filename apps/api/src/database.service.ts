@@ -13,7 +13,7 @@ export type SqlValue = string | number | bigint | Uint8Array | null;
  * 无关的测试变红——那不是回归信号,是维护噪声。测试断言这个常量,真正想验的
  * 「迁移到最新且表结构对得上」不变。
  */
-export const SCHEMA_VERSION = 30;
+export const SCHEMA_VERSION = 31;
 
 @Injectable()
 export class DatabaseService implements OnModuleDestroy {
@@ -1586,6 +1586,27 @@ export class DatabaseService implements OnModuleDestroy {
       this.db.exec('PRAGMA user_version = 30');
     });
     if (version < 30) version = 30;
+
+    if (version < 31) this.transaction(() => {
+      /*
+       * 忘记密码的自助通道:admin 生成一次性重置链接(不需要邮件/短信基础
+       * 设施),用户凭链接自设新密码。表里只存 token 的 sha256——链接明文
+       * 只在生成响应里出现一次,库泄露不等于链接泄露。
+       */
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+          token_hash TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          used_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS password_reset_tokens_user_idx ON password_reset_tokens(user_id);
+      `);
+      this.db.exec('PRAGMA user_version = 31');
+    });
+    if (version < 31) version = 31;
   }
 
   onModuleDestroy(): void {

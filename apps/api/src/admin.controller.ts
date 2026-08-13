@@ -76,6 +76,24 @@ export class AdminController {
     return result;
   }
 
+  /**
+   * 生成一次性密码重置链接(无邮件通道的忘记密码方案)。
+   * admin 把链接通过既有沟通渠道(微信/电话核身后)发给用户,24 小时有效、
+   * 用一次即废;同用户再生成会作废旧链接。明文 token 只在本响应出现一次。
+   */
+  @Post('users/:userId/reset-link')
+  createResetLink(@Req() request: Request, @Param('userId') userId: string) {
+    this.requireSystemAdmin(request);
+    const principal = (request as unknown as AuthenticatedRequest).principal as SessionPrincipal;
+    const { token, expiresAt } = this.auth.createPasswordResetToken(userId, principal.userId);
+    this.audit.record({
+      userId: principal.userId, action: 'user.reset-link', entityType: 'user', entityId: userId,
+      details: { expiresAt },
+    });
+    // 相对路径由前端拼 window.origin:服务端不知道外部访问域名。
+    return { resetPath: `/reset-password?token=${token}`, expiresAt };
+  }
+
   @Get('registrations')
   registrations(@Req() request: Request, @Query('status') status?: string) {
     this.requireSystemAdmin(request);

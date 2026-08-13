@@ -20,6 +20,7 @@ const QuickAccountPage = lazy(() => import('./pages/QuickAccountPage').then((mod
 const QuickChannelPage = lazy(() => import('./pages/QuickChannelPage').then((module) => ({ default: module.QuickChannelPage })));
 const QuickReaderPage = lazy(() => import('./pages/QuickReaderPage').then((module) => ({ default: module.QuickReaderPage })));
 const RegisterPage = lazy(() => import('./pages/RegisterPage').then((module) => ({ default: module.RegisterPage })));
+const ResetPasswordPage = lazy(() => import('./pages/ResetPasswordPage').then((module) => ({ default: module.ResetPasswordPage })));
 const ResearchPage = lazy(() => import('./pages/ResearchPage').then((module) => ({ default: module.ResearchPage })));
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((module) => ({ default: module.SettingsPage })));
 const TeamPage = lazy(() => import('./pages/TeamPage').then((module) => ({ default: module.TeamPage })));
@@ -42,6 +43,7 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/register" element={<RegisterPage />} />
+      <Route path="/reset-password" element={<ResetPasswordPage />} />
       {/*
         两棵独立的路由树。SaaS 用户的树里**根本没有专家页面**——不是渲染出来再
         弹走。改前是「先挂 AppShell,再由内部判断跳转」,实测结果是付费客户首次

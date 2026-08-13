@@ -5,6 +5,7 @@ import {
   ConflictException,
   Inject,
   Injectable,
+  NotFoundException,
   OnModuleInit,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -206,6 +207,15 @@ export class AuthService implements OnModuleInit {
     };
   }
 
+  /** 重置令牌尝试限速:64 字节随机数扛得住在线爆破,限速是纵深防御。 */
+  consumeResetAttempt(sourceKey: string): void {
+    this.rateLimits.consume('reset-token', sourceKey, {
+      maxAttempts: 10,
+      windowMs: 15 * 60_000,
+      message: '尝试过多，请稍后重试',
+    });
+  }
+
   consumeLoginAttempt(sourceKey: string, usernameKey: string): void {
     // Bound credential stuffing across many usernames without creating a
     // username-global bucket that an attacker could use to lock out a victim.
@@ -335,6 +345,58 @@ export class AuthService implements OnModuleInit {
       this.database
         .prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash <> ?')
         .run(principal.userId, principal.tokenHash);
+    });
+  }
+
+  /**
+   * 生成一次性密码重置令牌(admin 代发,无邮件通道的最小自助重置)。
+   * 明文只在本响应出现一次,库里只存 sha256;同用户旧的未用令牌一并作废,
+   * 保证任意时刻最多一个有效链接。有效期 24 小时。
+   */
+  createPasswordResetToken(userId: string, createdBy: string): { token: string; expiresAt: string } {
+    const user = this.database.prepare('SELECT id, disabled_at FROM users WHERE id = ?').get(userId) as { id: string; disabled_at: string | null } | undefined;
+    if (!user) throw new NotFoundException('用户不存在');
+    if (user.disabled_at) throw new BadRequestException('用户已停用，请先恢复账号');
+    const token = randomBytes(32).toString('base64url');
+    const tokenHash = createHash('sha256').update(token).digest('hex');
+    const now = nowIso();
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+    this.database.transaction(() => {
+      this.database.prepare('DELETE FROM password_reset_tokens WHERE user_id = ? AND used_at IS NULL').run(userId);
+      this.database
+        .prepare('INSERT INTO password_reset_tokens (token_hash, user_id, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?)')
+        .run(tokenHash, userId, createdBy, now, expiresAt);
+    });
+    return { token, expiresAt };
+  }
+
+  /**
+   * 凭一次性令牌自设新密码。成功即:令牌标记已用 + 该用户全部会话撤销
+   * (改密语义与 changePassword 一致,但持链接者不需要旧密码)。
+   * 失败一律同一句话,不区分「不存在/已用/过期」——错误差异会泄露令牌状态。
+   */
+  async resetPasswordWithToken(rawToken: unknown, rawPassword: unknown): Promise<void> {
+    if (typeof rawToken !== 'string' || !rawToken || typeof rawPassword !== 'string') {
+      throw new BadRequestException('重置链接无效或已过期');
+    }
+    if (rawPassword.length < 8 || rawPassword.length > 256) {
+      throw new BadRequestException('新密码长度需在 8-256 字符之间');
+    }
+    const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+    const row = this.database
+      .prepare('SELECT token_hash, user_id, expires_at, used_at FROM password_reset_tokens WHERE token_hash = ?')
+      .get(tokenHash) as { token_hash: string; user_id: string; expires_at: string; used_at: string | null } | undefined;
+    if (!row || row.used_at || row.expires_at <= nowIso()) {
+      throw new BadRequestException('重置链接无效或已过期');
+    }
+    const passwordHash = await this.hashPassword(rawPassword);
+    const now = nowIso();
+    this.database.transaction(() => {
+      this.database
+        .prepare('UPDATE users SET password_hash = ?, must_change_password = 0, updated_at = ? WHERE id = ?')
+        .run(passwordHash, now, row.user_id);
+      this.database.prepare('UPDATE password_reset_tokens SET used_at = ? WHERE token_hash = ?').run(now, row.token_hash);
+      this.database.prepare('DELETE FROM sessions WHERE user_id = ?').run(row.user_id);
     });
   }
 

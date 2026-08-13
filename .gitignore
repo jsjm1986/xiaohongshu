@@ -12,3 +12,7 @@ coverage/
 .tmp-*/
 tmp/
 .superpowers/
+
+# Playwright
+test-results/
+playwright-report/

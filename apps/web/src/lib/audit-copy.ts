@@ -34,6 +34,7 @@ export const AUDIT_ACTION_COPY: Record<string, AuditCopy> = {
   'workspace.create': { label: '创建工作区' },
   'workspace.update': { label: '修改工作区' },
   'workspace.delete': { label: '删除工作区' },
+  'user.reset-link': { label: '生成密码重置链接' },
   'workspace.export': { label: '导出工作区全量数据' },
   'workspace.purge': { label: '物理清除工作区' },
   'member.upsert': { label: '设置成员角色与权限' },

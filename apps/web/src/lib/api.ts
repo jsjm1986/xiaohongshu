@@ -810,6 +810,11 @@ export const api = {
       }
       return normalizeUser(result as unknown as JsonRecord);
     },
+    resetPassword: (token: string, newPassword: string) =>
+      request<{ ok: true }>("/api/auth/reset-password", {
+        method: "POST",
+        body: JSON.stringify({ token, newPassword }),
+      }),
     logout: async () => {
       const result = await request<void>("/api/auth/logout", {
         method: "POST",
@@ -878,6 +883,11 @@ export const api = {
         method: "POST",
         body: JSON.stringify(input),
       }),
+    createResetLink: (userId: string) =>
+      request<{ resetPath: string; expiresAt: string }>(
+        `/api/admin/users/${encodeURIComponent(userId)}/reset-link`,
+        { method: "POST", body: JSON.stringify({}) },
+      ),
     registrations: (status = "pending") =>
       request<RegistrationRequest[]>(
         `/api/admin/registrations?status=${encodeURIComponent(status)}`,

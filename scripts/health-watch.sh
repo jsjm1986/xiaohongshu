@@ -6,8 +6,19 @@
 # 数据库可写性/队列/磁盘),再从生产库聚合最近一小时失败率,异常时:
 #   1) 写 data/logs/alerts.log(留痕)
 #   2) macOS 桌面通知(单机生产,值班的人就在这台机器前)
-#   3) 可选 ALERT_WEBHOOK(POST JSON,接 IM 机器人)
+#   3) 可选 ALERT_WEBHOOK(接 IM 机器人,人不在电脑前也能收到)
 # 告警去重:同类告警 30 分钟内只发一次(state 文件)。
+#
+# ── 远程告警配置(打开 IM 通知只需两步)────────────────────────────────
+# 1. 建机器人拿 webhook 地址:
+#    飞书: 群设置 → 群机器人 → 添加「自定义机器人」→ 复制 webhook 地址
+#    钉钉: 群设置 → 智能群助手 → 添加「自定义」机器人(安全设置选「自定义
+#          关键词」,填「告警」)→ 复制 webhook 地址
+# 2. 写进 launchd 配置(~/Library/LaunchAgents/com.content-agent.health-watch.plist
+#    的 EnvironmentVariables 区块)后 launchctl 重载:
+#      ALERT_WEBHOOK      = 上面复制的地址
+#      ALERT_WEBHOOK_KIND = feishu | dingtalk | generic(默认,发裸 JSON)
+#    验证:ALERT_WEBHOOK=... ALERT_WEBHOOK_KIND=feishu bash scripts/health-watch.sh --test
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -17,6 +28,20 @@ URL="${HEALTH_URL:-http://127.0.0.1:8780/health}"
 DEDUP_SECONDS=1800
 mkdir -p "$ROOT/data/logs"
 
+# IM webhook 载荷:飞书/钉钉的自定义机器人各有必须的信封格式,发错格式静默
+# 丢弃(HTTP 200 但不弹消息),所以按 ALERT_WEBHOOK_KIND 显式选择。
+send_webhook() { # $1=文本
+  local text="$1" payload
+  [ -z "${ALERT_WEBHOOK:-}" ] && return 0
+  case "${ALERT_WEBHOOK_KIND:-generic}" in
+    feishu)   payload="{\"msg_type\":\"text\",\"content\":{\"text\":\"${text}\"}}" ;;
+    dingtalk) payload="{\"msgtype\":\"text\",\"text\":{\"content\":\"告警 ${text}\"}}" ;;
+    *)        payload="{\"message\":\"${text}\"}" ;;
+  esac
+  curl -s --max-time 5 -X POST -H 'Content-Type: application/json' \
+    -d "${payload}" "${ALERT_WEBHOOK}" > /dev/null || true
+}
+
 alert() { # $1=类别 $2=消息
   local kind="$1" message="$2" now last
   now="$(date +%s)"
@@ -25,11 +50,15 @@ alert() { # $1=类别 $2=消息
   echo "$kind $now" >> "$STATE"
   echo "[$(date '+%F %T')] [$kind] $message" >> "$LOG"
   osascript -e "display notification \"$message\" with title \"content-agent 告警\" sound name \"Basso\"" 2>/dev/null || true
-  if [ -n "${ALERT_WEBHOOK:-}" ]; then
-    curl -s --max-time 5 -X POST -H 'Content-Type: application/json' \
-      -d "{\"kind\":\"$kind\",\"message\":\"$message\"}" "$ALERT_WEBHOOK" > /dev/null || true
-  fi
+  send_webhook "[content-agent/${kind}] ${message}"
 }
+
+# --test:发一条测试消息验证 webhook 通路,不跑真实巡检。
+if [ "${1:-}" = "--test" ]; then
+  send_webhook "[content-agent/test] 告警通路测试消息,收到即配置成功 $(date '+%F %T')"
+  echo "已发送测试消息(ALERT_WEBHOOK=${ALERT_WEBHOOK:-未配置} KIND=${ALERT_WEBHOOK_KIND:-generic})"
+  exit 0
+fi
 
 # 1) 探活:非 200 或 status 非 ok 都要叫人。
 #    变量一律 ${VAR} 花括号:macOS 自带 bash 3.2 在变量紧邻全角字符时
