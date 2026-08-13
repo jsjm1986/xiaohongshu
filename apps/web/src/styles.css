@@ -3349,9 +3349,11 @@ div.qc-topic { cursor: default; }
   padding: 12px 14px; border-radius: var(--v2-radius); border: 1px solid var(--v2-line);
 }
 .qc-verdict--ok { border-color: color-mix(in srgb, var(--v2-ok) 35%, var(--v2-line)); background: var(--v2-ok-soft); }
+.qc-verdict--review { border-color: color-mix(in srgb, var(--v2-warn) 35%, var(--v2-line)); background: var(--v2-warn-soft); }
 .qc-verdict--blocked { border-color: color-mix(in srgb, var(--v2-error) 30%, var(--v2-line)); background: var(--v2-error-soft); }
 .qc-verdict__head { display: flex; align-items: center; gap: 7px; margin: 0; font-size: var(--v2-fs-sm); }
 .qc-verdict--ok .qc-verdict__head { color: var(--v2-ok); }
+.qc-verdict--review .qc-verdict__head { color: var(--v2-warn); }
 .qc-verdict--blocked .qc-verdict__head { color: var(--v2-error); }
 .qc-verdict__group h5, .qc-verdict__group > summary {
   margin: 0; font-size: var(--v2-fs-xs); color: var(--v2-ink-2); cursor: default;

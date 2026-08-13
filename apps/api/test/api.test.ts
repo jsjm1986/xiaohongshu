@@ -689,7 +689,15 @@ test('V1 内容包端点与交付硬门禁同线：blocked 候选不提供可见
      VALUES (?, ?, ?, 1, ?, ?, ?)`,
   ).run(reviewableId, jobId, projectId, JSON.stringify({
     ...basePackage,
-    validation: { valid: false, issues: [{ code: 'gap_resolution_not_realized', severity: 'error', message: '计划缺口未达成' }] },
+    validation: { valid: true, qualityStatus: 'needs_review', issues: [] },
+  }), now, now);
+  const explicitlyBlockedId = randomUUID();
+  database.prepare(
+    `INSERT INTO content_packages (id, job_id, project_id, candidate_index, content_json, created_at, updated_at)
+     VALUES (?, ?, ?, 2, ?, ?, ?)`,
+  ).run(explicitlyBlockedId, jobId, projectId, JSON.stringify({
+    ...basePackage,
+    validation: { valid: true, qualityStatus: 'blocked', issues: [] },
   }), now, now);
 
   // 硬门禁候选:Web 复制门控与后端导出都拒绝,只读 API 必须同线,
@@ -705,4 +713,13 @@ test('V1 内容包端点与交付硬门禁同线：blocked 候选不提供可见
   assert.equal(reviewable.response.status, 200, JSON.stringify(reviewable.body));
   assert.equal(reviewable.body.qualityStatus, 'needs_review');
   assert.equal(reviewable.body.content.content.N.body, '正文');
+
+  const explicitlyBlocked = await call(`/v1/content-packages/${explicitlyBlockedId}`, { headers: auth });
+  assert.equal(explicitlyBlocked.response.status, 403, JSON.stringify(explicitlyBlocked.body));
+  assert.equal(explicitlyBlocked.body.code, 'CONTENT_PACKAGE_DELIVERY_BLOCKED');
+  assert.equal(
+    JSON.stringify(explicitlyBlocked.body).includes('正文'),
+    false,
+    '显式 blocked 即使 valid=true 且没有 issue 也不得返回正文',
+  );
 });

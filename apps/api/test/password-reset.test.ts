@@ -110,3 +110,42 @@ test('非管理员不能生成重置链接；伪造令牌统一 400 不泄露状
   assert.equal(forged.response.status, 400);
   assert.match(String(forged.body.message), /无效或已过期/u);
 });
+
+test('重置密码与全站合同一致：拒绝 11 字符且令牌仍可用于 12 字符密码', async () => {
+  const preflight = await call('/api/auth/reset-password', {
+    method: 'POST',
+    body: JSON.stringify({ token: 'any-token', newPassword: '12345678901' }),
+  }, '', '');
+  assert.equal(preflight.response.status, 400);
+  assert.match(String(preflight.body.message), /12-256/u, '密码长度预检不得继续保留旧的 8 字符合同');
+
+  const created = await post('/api/admin/users', {
+    username: 'length-contract-user',
+    password: 'Length-contract-init!',
+    systemRole: 'user',
+  });
+  assert.equal(created.response.status, 201, JSON.stringify(created.body));
+
+  const link = await post(`/api/admin/users/${created.body.id}/reset-link`);
+  assert.equal(link.response.status, 201, JSON.stringify(link.body));
+  const token = String(link.body.resetPath).split('token=')[1]!;
+
+  const tooShort = await call('/api/auth/reset-password', {
+    method: 'POST',
+    body: JSON.stringify({ token, newPassword: '12345678901' }),
+  }, '', '');
+  assert.equal(tooShort.response.status, 400);
+  assert.match(String(tooShort.body.message), /12-256/u);
+
+  const accepted = await call('/api/auth/reset-password', {
+    method: 'POST',
+    body: JSON.stringify({ token, newPassword: '12345678901!' }),
+  }, '', '');
+  assert.equal(accepted.response.status, 201, JSON.stringify(accepted.body));
+
+  const login = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username: 'length-contract-user', password: '12345678901!' }),
+  }, '', '');
+  assert.equal(login.response.status, 201);
+});

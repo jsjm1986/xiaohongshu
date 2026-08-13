@@ -8,6 +8,7 @@ import { FactLedgerCard } from './FactLedgerCard';
 import { GapCoverageCard } from './GapCoverageCard';
 import { ValidationVerdict } from './ValidationVerdict';
 import { issueVerdict } from '../../lib/issue-verdict';
+import { candidateClipboardText } from '../../lib/clipboard-truth';
 import { clampCandidateIndex } from '../../lib/note-view';
 import { publishOrderText } from '../../lib/publish-copy';
 import type { ReaderCandidate, ReaderJob } from '../../types';
@@ -93,7 +94,10 @@ export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, ret
 
   const copyText = async (text: string) => {
     if (!deliverable) { toast.push('该候选未通过可发布校验，不能复制或导出', 'error'); return; }
-    try { await navigator.clipboard.writeText(text); toast.push('已复制'); }
+    try {
+      await navigator.clipboard.writeText(candidateClipboardText(current.validation, text));
+      toast.push('已复制');
+    }
     catch { toast.push('复制失败，请手动选择文本', 'error'); }
   };
 
@@ -109,7 +113,7 @@ export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, ret
       {/* 切版本在上面的预览区,这里只读差异 */}
       <CandidateDiffBar candidates={candidates} activeIndex={activeIndex} />
 
-      <ValidationVerdict validation={current.validation} manuallyConfirmed={!verdict.publishable && deliverable} />
+      <ValidationVerdict validation={current.validation} deliverable={deliverable} />
       <RealizationCard candidate={current} />
 
       {/* 第二段:判断依据。(原第一段「成品」已移交预览区 NoteCard,不是漏了;
@@ -149,21 +153,25 @@ export function ReaderDetail({ job, onExport, onRevise, revisingId, onRetry, ret
         <span className="qc-export-group">
           <span className="qc-export-group__label"><Download size={13} />导出</span>
           {EXPORT_FORMATS.map((fmt) => {
-            // 自动校验通过，或当前用户已对当前候选完成人工交付确认，才可导出。
+            // 交付权限只看统一硬门禁；普通复核项保持可见，但不锁复制与导出。
             const blocked = !deliverable;
             return (
               <Button
                 key={fmt}
                 variant="ghost"
                 disabled={blocked}
-                title={blocked ? '人工确认后可复制与导出' : undefined}
+                title={blocked ? '存在硬门禁，须修复后重新生成' : undefined}
                 onClick={() => onExport(current, fmt)}
               >
                 {fmt === 'markdown' ? 'Markdown' : fmt.toUpperCase()}
               </Button>
             );
           })}
-          {!verdict.publishable && <small className="qc-hint">{deliverable ? '已人工确认，可导出；自动校验结论仍保留' : '人工确认后可复制与导出'}</small>}
+          {!deliverable
+            ? <small className="qc-hint">存在硬门禁，须修复后重新生成</small>
+            : !verdict.publishable
+              ? <small className="qc-hint">可复制与导出 · 自动校验结论仍保留</small>
+              : null}
         </span>
         {onRetry && (
           <Button variant="ghost" icon={<RotateCcw size={13} />} loading={retrying} disabled={retrying} onClick={onRetry}>

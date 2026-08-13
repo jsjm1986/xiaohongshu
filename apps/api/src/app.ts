@@ -9,7 +9,14 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module.js';
 import { resolveOptions, type ApiOptionsInput } from './config.js';
 
-export async function createApplication(options: ApiOptionsInput = {}): Promise<NestExpressApplication> {
+export interface ApplicationLifecycleOptions {
+  enableShutdownHooks?: boolean;
+}
+
+export async function createApplication(
+  options: ApiOptionsInput = {},
+  lifecycle: ApplicationLifecycleOptions = {},
+): Promise<NestExpressApplication> {
   const resolvedOptions = resolveOptions(options);
   const app = await NestFactory.create<NestExpressApplication>(AppModule.register(resolvedOptions), {
     logger: resolvedOptions.logger ? ['error', 'warn', 'log'] : false,
@@ -36,7 +43,7 @@ export async function createApplication(options: ApiOptionsInput = {}): Promise<
     }
     next();
   });
-  app.enableShutdownHooks();
+  if (lifecycle.enableShutdownHooks !== false) app.enableShutdownHooks();
   const webDist = resolve(dirname(fileURLToPath(import.meta.url)), '../../web/dist');
   const webIndex = resolve(webDist, 'index.html');
   if (existsSync(webIndex)) {

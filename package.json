@@ -16,7 +16,8 @@
     "import:legacy": "tsx scripts/import-legacy.ts",
     "analyze:style": "tsx scripts/analyze-style-corpus.ts",
     "smoke:full": "tsx --tsconfig apps/api/tsconfig.json scripts/full-generation-smoke.mts",
-    "smoke:browser": "playwright test"
+    "smoke:browser": "playwright test",
+    "smoke:production": "bash scripts/production-blackbox-smoke.sh"
   },
   "engines": {
     "node": ">=24.0"

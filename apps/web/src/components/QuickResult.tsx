@@ -1,6 +1,7 @@
 import { Copy } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Button, useToast } from './Ui';
+import { candidateClipboardText } from '../lib/clipboard-truth';
 import { deliveryReadiness } from '../lib/delivery-readiness';
 import { clampCandidateIndex } from '../lib/note-view';
 import { isFreshCandidateBatch, quickCandidateToMarkdown, type QuickCandidateView } from '../lib/quick-generation';
@@ -79,7 +80,7 @@ export function QuickResult({ candidates, projectName, onRegenerate, onPickAnoth
 
       {/* 结论块与产出区共用 ValidationVerdict:原来这里按数组顺序取首条可识别 code
           当结论,实测 129 个未通过候选里 110 个因此把 warning 当成了结论。 */}
-      <ValidationVerdict validation={view.validation} />
+      <ValidationVerdict validation={view.validation} deliverable={deliverable} />
 
       {/* 生成完先给「发出去长什么样」,与阅读页同一个 NoteCard——原来这里是
           标题/正文/标签/图片简报各一张字段卡,同一份内容在 SaaS 里长两个样,
@@ -121,7 +122,10 @@ export function QuickResult({ candidates, projectName, onRegenerate, onPickAnoth
             icon={<Copy size={15} />}
             disabled={!deliverable}
             title={deliverable ? undefined : '该版本未通过可发布校验，不能复制或导出'}
-            onClick={() => void copyText(quickCandidateToMarkdown(view), toast)}
+            onClick={() => void copyText(
+              candidateClipboardText(view.validation, quickCandidateToMarkdown(view)),
+              toast,
+            )}
           >
             复制全部
           </Button>

@@ -18,11 +18,24 @@ test("全部候选未通过时仍展示草稿，交付判定两档：blocked 锁
   assert.match(page, /selected\.body[\s\S]*?split\("\\n"\)/u);
   assert.match(page, /selected\.comments\.map/u);
   assert.match(page, /const deliverable = candidateDeliverable\(/u);
+  assert.match(page, /const selectedVerdict = issueVerdict\(selected\?\.validation\)/u);
+  assert.match(page, /const publishable = deliverable && selectedVerdict\.publishable/u);
+  assert.doesNotMatch(page, /qualityStatus === "passed"/u, "历史 payload 缺 qualityStatus 时必须走统一 fallback");
   assert.match(page, /存在硬阻断 · 必须修复/u);
+  assert.match(page, /\{deliverable && \(/u, "复核项候选必须仍显示复制/导出入口");
+  assert.doesNotMatch(page, /\{publishable && \([\s\S]{0,300}<Button/u);
+  assert.match(page, /candidateQualityStatusLabel\("needs_review"\)/u);
   // 人工确认的发起入口是永不可达的死分支,已按交付政策清理,不得回潮
   assert.doesNotMatch(page, /reviewable && \(/u);
   assert.doesNotMatch(page, /我已核对事实、证据、身份与风险/u);
   assert.doesNotMatch(page, /manualConfirmChecked/u);
+  assert.doesNotMatch(page, /人工交付确认|人工确认后可/u);
+  assert.match(page, /存在硬阻断，须修复后重新生成/u);
+  assert.match(
+    page,
+    /<CopyMiniButton[\s\S]{0,200}deliverable=\{deliverable\}/u,
+    "标题复制按钮必须消费与导出相同的硬门禁",
+  );
 });
 
 test("结果页把校验和运行版本压缩为按需展开信息", () => {
@@ -45,12 +58,15 @@ test("部分候选成功时按实际数量展示，不把降级交付误报成�
 });
 
 
-test("正式交付降级原因在首屏单独展示，而不是埋在一般 warning 中", () => {
+test("普通复核原因在首屏明确标为可交付，且不冒充硬门禁", () => {
   assert.match(page, /formalReviewIssues/u);
   assert.match(page, /issue\.disposition === "review"/u);
   assert.match(page, /model_not_invoked/u);
   assert.match(page, /gap_evidence_binding_degraded/u);
   assert.match(page, /required_information_not_realized/u);
-  assert.match(page, /当前是可查看草稿，不是可直接交付成品/u);
+  assert.match(page, /当前候选可复制导出，建议先复核/u);
+  assert.match(page, /以下属于复核项，不是硬阻断/u);
+  assert.match(page, /deliverable && !publishable && formalReviewIssues\.length > 0/u);
+  assert.doesNotMatch(page, /逐项核对并完成人工确认/u);
   assert.match(css, /\.formal-delivery-review/u);
 });

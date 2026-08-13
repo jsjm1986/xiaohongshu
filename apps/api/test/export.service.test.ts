@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { inflateRawSync } from 'node:zlib';
 import {
   DEFAULT_FORMULA_VERSION,
   buildParameterDiagnostics,
@@ -11,6 +12,45 @@ import {
 } from '@content-agent/agent-core';
 import { BadRequestException } from '@nestjs/common';
 import { ExportService } from '../src/export.service.js';
+
+function zipEntryText(archive: Buffer, targetName: string): string {
+  const endSignature = 0x06054b50;
+  let endOffset = -1;
+  for (let offset = archive.length - 22; offset >= Math.max(0, archive.length - 65_557); offset -= 1) {
+    if (archive.readUInt32LE(offset) === endSignature) {
+      endOffset = offset;
+      break;
+    }
+  }
+  assert.notEqual(endOffset, -1, 'DOCX 缺少 ZIP 中央目录');
+  const entryCount = archive.readUInt16LE(endOffset + 10);
+  let centralOffset = archive.readUInt32LE(endOffset + 16);
+  for (let index = 0; index < entryCount; index += 1) {
+    assert.equal(archive.readUInt32LE(centralOffset), 0x02014b50);
+    const method = archive.readUInt16LE(centralOffset + 10);
+    const compressedSize = archive.readUInt32LE(centralOffset + 20);
+    const nameLength = archive.readUInt16LE(centralOffset + 28);
+    const extraLength = archive.readUInt16LE(centralOffset + 30);
+    const commentLength = archive.readUInt16LE(centralOffset + 32);
+    const localOffset = archive.readUInt32LE(centralOffset + 42);
+    const name = archive.subarray(
+      centralOffset + 46,
+      centralOffset + 46 + nameLength,
+    ).toString('utf8');
+    if (name === targetName) {
+      assert.equal(archive.readUInt32LE(localOffset), 0x04034b50);
+      const localNameLength = archive.readUInt16LE(localOffset + 26);
+      const localExtraLength = archive.readUInt16LE(localOffset + 28);
+      const dataOffset = localOffset + 30 + localNameLength + localExtraLength;
+      const compressed = archive.subarray(dataOffset, dataOffset + compressedSize);
+      if (method === 0) return compressed.toString('utf8');
+      assert.equal(method, 8, `不支持的 DOCX ZIP 压缩方法：${method}`);
+      return inflateRawSync(compressed).toString('utf8');
+    }
+    centralOffset += 46 + nameLength + extraLength + commentLength;
+  }
+  assert.fail(`DOCX 缺少 ${targetName}`);
+}
 
 const contentPackage = {
   schemaVersion: '1.0',
@@ -571,6 +611,69 @@ test('rejects malformed packages and unsupported formats', async () => {
     service.exportPackage(contentPackage, 'xml' as never),
     BadRequestException,
   );
+});
+
+test('Markdown、DOCX、PDF 显式携带同源的人类可读 qualityStatus，历史包才回退 valid', async () => {
+  const service = new ExportService();
+  const reviewable = structuredClone(contentPackage) as any;
+  reviewable.validation = {
+    valid: true,
+    qualityStatus: 'needs_review',
+    repairAttempts: 0,
+    issues: [],
+  };
+
+  const reviewMarkdown = (await service.exportPackage(reviewable, 'markdown')).toString('utf8');
+  assert.match(reviewMarkdown, /validation\.qualityStatus：建议复核（可复制导出）/u);
+  assert.doesNotMatch(reviewMarkdown, /validation\.qualityStatus：校验通过|是否通过：是|可直接发布/u);
+
+  const docx = await service.exportPackage(reviewable, 'docx');
+  const pdf = await service.exportPackage(reviewable, 'pdf');
+  assert.equal(docx.subarray(0, 2).toString('ascii'), 'PK');
+  const documentXml = zipEntryText(docx, 'word/document.xml');
+  assert.match(
+    documentXml,
+    /validation\.qualityStatus：建议复核（可复制导出）/u,
+    '必须验证离开生成器后的真实 DOCX 文档内容',
+  );
+  assert.equal(pdf.subarray(0, 5).toString('ascii'), '%PDF-');
+  const { PDFParse } = await import('pdf-parse');
+  const parser = new PDFParse({ data: pdf });
+  try {
+    const extracted = await parser.getText();
+    assert.match(
+      extracted.text,
+      /validation\.qualityStatus[\s\S]*needs_review/u,
+      '必须从最终 PDF Buffer 提取并验证用户可见状态',
+    );
+  } finally {
+    await parser.destroy();
+  }
+
+  const passed = structuredClone(contentPackage) as any;
+  passed.validation = { valid: false, qualityStatus: 'passed', repairAttempts: 0, issues: [] };
+  const passedMarkdown = (await new ExportService().exportPackage(passed, 'markdown')).toString('utf8');
+  assert.match(passedMarkdown, /validation\.qualityStatus：校验通过/u);
+
+  const historicalPassed = structuredClone(contentPackage) as any;
+  historicalPassed.validation = { valid: true, repairAttempts: 0, issues: [] };
+  const historicalPassedMarkdown = (await new ExportService().exportPackage(historicalPassed, 'markdown')).toString('utf8');
+  assert.match(historicalPassedMarkdown, /validation\.qualityStatus：校验通过/u);
+
+  const historicalReview = structuredClone(contentPackage) as any;
+  historicalReview.validation = { valid: false, repairAttempts: 0, issues: [] };
+  const historicalReviewMarkdown = (await new ExportService().exportPackage(historicalReview, 'markdown')).toString('utf8');
+  assert.match(historicalReviewMarkdown, /validation\.qualityStatus：建议复核（可复制导出）/u);
+
+  const blocked = structuredClone(contentPackage) as any;
+  blocked.validation = { valid: true, qualityStatus: 'blocked', repairAttempts: 0, issues: [] };
+  for (const format of ['markdown', 'docx', 'pdf'] as const) {
+    await assert.rejects(
+      () => new ExportService().exportPackage(blocked, format),
+      /硬阻断（不可交付）/u,
+      format,
+    );
+  }
 });
 
 test('formal review findings export immediately while mechanical hard gates remain blocked', async () => {

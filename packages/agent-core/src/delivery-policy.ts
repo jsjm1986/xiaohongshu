@@ -1,4 +1,11 @@
-import type { ContentValidationIssue } from "./types.js";
+import type { CandidateQualityStatus, ContentValidationIssue } from "./types.js";
+export type { CandidateQualityStatus } from "./types.js";
+
+export const CANDIDATE_QUALITY_STATUS_LABELS: Readonly<Record<CandidateQualityStatus, string>> = Object.freeze({
+  passed: "校验通过",
+  needs_review: "建议复核（可复制导出）",
+  blocked: "硬阻断（不可交付）",
+});
 
 /**
  * 交付硬门禁政策 —— 全系统唯一权威来源。
@@ -86,10 +93,44 @@ export function candidateQualityStatus(
     valid?: boolean;
     issues: readonly Pick<ContentValidationIssue, "code" | "severity" | "disposition">[];
   },
-): "passed" | "needs_review" | "blocked" {
+): CandidateQualityStatus {
   if (validation.issues.some((issue) => isNonOverridableContentIssueCode(issue.code))) return "blocked";
   if (validation.issues.some((issue) => issueDisposition(issue) === "review") || validation.valid === false) return "needs_review";
   return "passed";
+}
+
+/**
+ * 读取已落盘候选的交付真值。新记录显式携带的 qualityStatus 优先；只有历史记录
+ * 缺该字段时才回退 valid。当前硬门禁白名单始终拥有最高优先级，避免陈旧的
+ * `passed` 序列化值放行机械不可交付内容。
+ */
+export function resolveCandidateQualityStatus(
+  validation?: {
+    valid?: boolean;
+    qualityStatus?: unknown;
+    issues?: readonly { code?: string }[];
+  },
+): CandidateQualityStatus {
+  if (!validation) return "blocked";
+  const issues = validation.issues ?? [];
+  if (issues.some((issue) => (
+    typeof issue.code === "string" && isNonOverridableContentIssueCode(issue.code)
+  ))) return "blocked";
+  if (
+    validation.qualityStatus === "passed"
+    || validation.qualityStatus === "needs_review"
+    || validation.qualityStatus === "blocked"
+  ) {
+    return validation.qualityStatus;
+  }
+  if (validation.qualityStatus !== undefined) {
+    return "blocked";
+  }
+  return validation.valid === true ? "passed" : "needs_review";
+}
+
+export function candidateQualityStatusLabel(status: CandidateQualityStatus): string {
+  return CANDIDATE_QUALITY_STATUS_LABELS[status];
 }
 
 /** Recompute action metadata from the hard-gate allowlist. Stale serialized

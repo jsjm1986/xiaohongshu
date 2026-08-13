@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Copy, Info } from 'lucide-react';
 import { Button, useToast } from '../Ui';
+import { candidateClipboardText } from '../../lib/clipboard-truth';
 import { commentSectionView, gapNameMap } from '../../lib/comment-view';
 import { avatarTone } from '../../lib/note-view';
 import { labeledCommentCopy, type CommentCopyNode } from '../../lib/simulation-notice';
@@ -18,7 +19,8 @@ export type NoteCommentsSource = {
   comments: Array<Omit<ReaderComment, 'followUps'> & { followUps?: ReaderComment['followUps'] }>;
   commentDisclaimer?: string;
   commentOwnedFirstComment?: string;
-} & Partial<Pick<ReaderCandidate, 'gapCards' | 'gapLedger'>>;
+} & Pick<ReaderCandidate, 'validation'>
+  & Partial<Pick<ReaderCandidate, 'gapCards' | 'gapLedger'>>;
 
 /** @deprecated 保留旧名以免外部引用断裂;新代码用 NoteCommentsSource。 */
 type Source = NoteCommentsSource;
@@ -121,7 +123,10 @@ export function NoteComments({ candidate, accountLabel, copyEnabled = true }: No
   const copyOne = async (text: string, threadKind?: string, node?: CommentCopyNode) => {
     if (!copyEnabled) { toast.push('该候选未通过可发布校验，不能复制或导出', 'error'); return; }
     const payload = node ? labeledCommentCopy(threadKind, node, text) : text;
-    try { await navigator.clipboard.writeText(payload); toast.push('已复制'); }
+    try {
+      await navigator.clipboard.writeText(candidateClipboardText(candidate.validation, payload));
+      toast.push('已复制');
+    }
     catch { toast.push('复制失败，请手动选择文本', 'error'); }
   };
 

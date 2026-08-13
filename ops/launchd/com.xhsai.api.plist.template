@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.xhsai.api</string>
+  <key>UserName</key>
+  <string>__USER__</string>
+  <key>GroupName</key>
+  <string>__GROUP__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE_BIN__</string>
+    <string>--env-file=__REPO__/.env</string>
+    <string>__REPO__/apps/api/dist/main.js</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__REPO__/apps/api</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NODE_ENV</key>
+    <string>production</string>
+    <key>PATH</key>
+    <string>__NODE_DIR__:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/api.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/api.err.log</string>
+</dict>
+</plist>

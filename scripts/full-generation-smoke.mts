@@ -1,25 +1,338 @@
 #!/usr/bin/env node
 import '../apps/api/node_modules/reflect-metadata/Reflect.js';
+import { randomUUID } from 'node:crypto';
 import { backup, DatabaseSync } from 'node:sqlite';
-import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { createApplication } from '../apps/api/src/app.js';
 import { DatabaseService } from '../apps/api/src/database.service.js';
 import { GenerationService } from '../apps/api/src/generation.service.js';
 import { IntelligenceService } from '../apps/api/src/intelligence.service.js';
 import type { SessionPrincipal } from '../apps/api/src/models.js';
+import {
+  classifyProcessOwner,
+  processStartIdentity,
+  type KnownProcessStartIdentity,
+  type ProcessOwnerState,
+} from './process-start-identity.mjs';
+import { resolveRepositoryStoragePaths } from './storage-paths.mjs';
 
 type JsonObject = Record<string, any>;
+type SmokeSignal = 'SIGINT' | 'SIGTERM' | 'SIGHUP';
+type TestBarrierAction = 'continue' | 'return' | 'throw';
 
 const root = resolve(import.meta.dirname, '..');
+const smokeRoot = resolve(root, '.tmp-test');
+const startedAt = new Date().toISOString();
+const runToken = process.env.SMOKE_TEST_RUN_TOKEN || randomUUID();
 const stamp = new Date().toISOString().replace(/[:.]/gu, '-');
-const runDir = resolve(root, '.tmp-test', `full-generation-smoke-${stamp}`);
+const runDir = resolve(smokeRoot, `full-generation-smoke-${stamp}-${process.pid}`);
 const cloneDataDir = join(runDir, 'data');
-const sourceDataDir = resolve(root, 'data');
+const testSourceDataDir = process.env.NODE_ENV === 'test' && process.env.SMOKE_TEST_SOURCE_DATA_DIR
+  ? resolve(process.env.SMOKE_TEST_SOURCE_DATA_DIR)
+  : undefined;
+const repositoryStorage = testSourceDataDir
+  ? undefined
+  : await resolveRepositoryStoragePaths(root);
+const sourceDataDir = testSourceDataDir ?? repositoryStorage!.dataDir;
+const sourceDatabasePath = process.env.NODE_ENV === 'test' && process.env.SMOKE_TEST_SOURCE_DATABASE_PATH
+  ? resolve(process.env.SMOKE_TEST_SOURCE_DATABASE_PATH)
+  : testSourceDataDir
+    ? join(testSourceDataDir, 'app.db')
+    : repositoryStorage!.databasePath;
 const persistToDevelopmentDatabase = process.env.SMOKE_PERSIST_DEVELOPMENT_DATA === 'true';
+const keepCloneData = process.env.SMOKE_KEEP_CLONE_DATA === 'true';
 const activeDataDir = persistToDevelopmentDatabase ? sourceDataDir : cloneDataDir;
+const activeDatabasePath = persistToDevelopmentDatabase
+  ? sourceDatabasePath
+  : join(cloneDataDir, 'app.db');
 const capture: JsonObject[] = [];
 const originalFetch = globalThis.fetch;
+const report: JsonObject = {
+  runId: basename(runDir),
+  runToken,
+  startedAt,
+  storage: persistToDevelopmentDatabase
+    ? {
+        mode: 'development_database',
+        databaseModified: true,
+        dataDir: activeDataDir,
+        databasePath: activeDatabasePath,
+      }
+    : {
+        mode: 'isolated_clone',
+        databaseModified: false,
+        cloneDataDir,
+        sourceDataDir,
+        sourceDatabasePath,
+      },
+};
+
+let smokeApp: NestExpressApplication | undefined;
+let appCreationPromise: Promise<NestExpressApplication> | undefined;
+let cloneOperationPromise: Promise<void> | undefined;
+let runDirectoryPromise: Promise<void> | undefined;
+let cleanupPromise: Promise<void> | undefined;
+let cleanupStarted = false;
+let runFailure: unknown;
+let receivedSignal: SmokeSignal | undefined;
+let signalExitPromise: Promise<void> | undefined;
+
+const signalHandlers = new Map<SmokeSignal, () => void>();
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+  // The tsx CLI also installs signal listeners and translates a signal into
+  // process.exit(128 + signal). This standalone harness must own the lifecycle
+  // so cleanup finishes before the original signal is re-raised.
+  process.removeAllListeners(signal);
+  const handler = () => handleSignal(signal);
+  signalHandlers.set(signal, handler);
+  process.on(signal, handler);
+}
+
+function handleSignal(signal: SmokeSignal): void {
+  if (!receivedSignal) {
+    receivedSignal = signal;
+    report.interruption = { signal, receivedAt: new Date().toISOString() };
+  }
+  signalExitPromise ??= (async () => {
+    await cleanup();
+    for (const [registeredSignal, handler] of signalHandlers) {
+      process.off(registeredSignal, handler);
+      process.removeAllListeners(registeredSignal);
+    }
+    try {
+      process.kill(process.pid, receivedSignal!);
+    } catch (error) {
+      console.error(`Failed to re-raise ${receivedSignal}: ${error instanceof Error ? error.message : String(error)}`);
+      process.exitCode = 1;
+    }
+  })();
+}
+
+const testOnlyEnvironmentNames = [
+  'SMOKE_TEST_SOURCE_DATA_DIR',
+  'SMOKE_TEST_SOURCE_DATABASE_PATH',
+  'SMOKE_TEST_BARRIER_DIR',
+  'SMOKE_TEST_PAUSE_AT',
+  'SMOKE_TEST_RUN_TOKEN',
+] as const;
+
+function validateRuntimeControls(): void {
+  const configuredTestControls = testOnlyEnvironmentNames.filter((name) => process.env[name] !== undefined);
+  if (configuredTestControls.length > 0 && process.env.NODE_ENV !== 'test') {
+    throw new Error(`${configuredTestControls.join(', ')} are only allowed when NODE_ENV=test.`);
+  }
+  if (process.env.NODE_ENV === 'test' && process.env.SMOKE_TEST_PAUSE_AT && !process.env.SMOKE_TEST_BARRIER_DIR) {
+    throw new Error('SMOKE_TEST_BARRIER_DIR is required when SMOKE_TEST_PAUSE_AT is set.');
+  }
+  if (
+    process.env.NODE_ENV === 'test'
+    && process.env.SMOKE_TEST_RUN_TOKEN !== undefined
+    && !/^[A-Za-z0-9_-]{16,128}$/u.test(process.env.SMOKE_TEST_RUN_TOKEN)
+  ) {
+    throw new Error('SMOKE_TEST_RUN_TOKEN must be 16-128 URL-safe characters.');
+  }
+}
+
+function staleCloneGraceMs(): number {
+  const raw = process.env.SMOKE_STALE_CLONE_GRACE_MS ?? String(24 * 60 * 60_000);
+  if (!/^\d+$/u.test(raw)) {
+    throw new Error('SMOKE_STALE_CLONE_GRACE_MS must be an integer of at least 60000.');
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 60_000) {
+    throw new Error('SMOKE_STALE_CLONE_GRACE_MS must be an integer of at least 60000.');
+  }
+  return value;
+}
+
+function processExists(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+async function writePrivateJson(path: string, value: unknown): Promise<void> {
+  await writeFile(path, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600 });
+  await chmod(path, 0o600);
+}
+
+async function ensureRunDirectory(): Promise<void> {
+  runDirectoryPromise ??= (async () => {
+    await mkdir(runDir, { recursive: true });
+    await chmod(runDir, 0o700);
+    const ownerProcessStartIdentity = await processStartIdentity(process.pid);
+    if (ownerProcessStartIdentity.kind !== 'known') {
+      throw new Error(`Unable to determine process start identity for pid ${process.pid}.`);
+    }
+    await writePrivateJson(join(runDir, 'smoke-owner.json'), {
+      pid: process.pid,
+      runToken,
+      processStartIdentity: ownerProcessStartIdentity,
+      startedAt,
+      keep: keepCloneData,
+    });
+  })();
+  await runDirectoryPromise;
+}
+
+async function readJsonIfPresent(path: string): Promise<JsonObject | undefined> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(path, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as JsonObject
+      : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT' || error instanceof SyntaxError) return undefined;
+    throw error;
+  }
+}
+
+function processStartIdentityFromMarker(marker: JsonObject): KnownProcessStartIdentity | undefined {
+  const identity = marker.processStartIdentity;
+  if (
+    identity?.kind === 'known'
+    && ['linux-proc-boot-id', 'linux-proc-btime', 'ps-lstart'].includes(identity.backend)
+    && typeof identity.value === 'string'
+    && identity.value
+  ) {
+    return identity as KnownProcessStartIdentity;
+  }
+  const legacy = marker.processStartId;
+  if (typeof legacy !== 'string') return undefined;
+  if (legacy.startsWith('ps-lstart-utc-c:')) {
+    return { kind: 'known', backend: 'ps-lstart', value: legacy.slice('ps-lstart-utc-c:'.length) };
+  }
+  if (legacy.startsWith('linux-proc:btime-')) {
+    return { kind: 'known', backend: 'linux-proc-btime', value: legacy.slice('linux-proc:btime-'.length) };
+  }
+  if (legacy.startsWith('linux-proc:') && !legacy.startsWith('linux-proc:unknown-boot:')) {
+    return { kind: 'known', backend: 'linux-proc-boot-id', value: legacy.slice('linux-proc:'.length) };
+  }
+  return undefined;
+}
+
+async function processOwnerState(marker: JsonObject): Promise<ProcessOwnerState> {
+  const pid = marker.pid;
+  if (!Number.isSafeInteger(pid) || pid <= 0) return 'dead';
+  const expectedIdentity = processStartIdentityFromMarker(marker);
+  if (!expectedIdentity) return processExists(pid) ? 'unknown' : 'dead';
+  return classifyProcessOwner(pid, expectedIdentity);
+}
+
+async function staleStartedAtMs(directory: string, owner: JsonObject | undefined, legacyReport: JsonObject | undefined): Promise<number> {
+  for (const candidate of [owner?.startedAt, legacyReport?.startedAt]) {
+    if (typeof candidate !== 'string') continue;
+    const parsed = Date.parse(candidate);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return (await stat(directory)).mtimeMs;
+}
+
+function isCompletedLegacyReport(reportValue: JsonObject | undefined): boolean {
+  if (!reportValue || reportValue.cleanup?.keptByRequest !== false) return false;
+  return [reportValue.completedAt, reportValue.failedAt].some((value) =>
+    typeof value === 'string' && Number.isFinite(Date.parse(value)));
+}
+
+async function cleanupStaleClones(): Promise<JsonObject[]> {
+  let entries;
+  try {
+    entries = await readdir(smokeRoot, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+  const graceMs = staleCloneGraceMs();
+  const now = Date.now();
+  const outcomes: JsonObject[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith('full-generation-smoke-')) continue;
+    const directory = join(smokeRoot, entry.name);
+    if (directory === runDir) continue;
+    try {
+      const owner = await readJsonIfPresent(join(directory, 'smoke-owner.json'));
+      const legacyReport = await readJsonIfPresent(join(directory, 'smoke-result.json'));
+      const ageMs = now - await staleStartedAtMs(directory, owner, legacyReport);
+      if (ageMs <= graceMs) {
+        outcomes.push({ runId: entry.name, action: 'kept_fresh', ageMs });
+        continue;
+      }
+      if (owner?.keep === true || legacyReport?.cleanup?.keptByRequest === true) {
+        outcomes.push({ runId: entry.name, action: 'kept_by_request', ageMs });
+        continue;
+      }
+      if (owner) {
+        const ownerState = await processOwnerState(owner);
+        if (ownerState === 'same' || ownerState === 'unknown') {
+          outcomes.push({
+            runId: entry.name,
+            action: ownerState === 'same' ? 'kept_live_owner' : 'kept_unknown_owner',
+            ageMs,
+          });
+          continue;
+        }
+      }
+      if (!owner && !isCompletedLegacyReport(legacyReport)) {
+        outcomes.push({ runId: entry.name, action: 'kept_unknown_legacy', ageMs });
+        continue;
+      }
+      await rm(join(directory, 'data'), { recursive: true, force: true });
+      outcomes.push({
+        runId: entry.name,
+        action: owner ? 'removed_stale_clone' : 'removed_legacy_stale_clone',
+        ageMs,
+      });
+    } catch (error) {
+      outcomes.push({
+        runId: entry.name,
+        action: 'cleanup_failed',
+        error: error instanceof Error ? error.message : String(error),
+      });
+      process.exitCode = 1;
+    }
+  }
+  return outcomes;
+}
+
+async function testBarrier(phase: string): Promise<TestBarrierAction> {
+  if (process.env.NODE_ENV !== 'test' || process.env.SMOKE_TEST_PAUSE_AT !== phase) return 'continue';
+  const barrierDir = resolve(process.env.SMOKE_TEST_BARRIER_DIR!);
+  await mkdir(barrierDir, { recursive: true });
+  await writePrivateJson(join(barrierDir, `${phase}.ready.json`), {
+    phase,
+    runDir,
+    cloneDataDir,
+    runToken,
+  });
+  const releasePath = join(barrierDir, `${phase}.release.json`);
+  for (;;) {
+    const release = await readJsonIfPresent(releasePath);
+    if (release) {
+      if (!['continue', 'return', 'throw'].includes(String(release.action))) {
+        throw new Error(`Unsupported smoke test barrier action: ${String(release.action)}`);
+      }
+      return release.action as TestBarrierAction;
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+  }
+}
+
+function handleTestBarrierAction(action: TestBarrierAction): boolean {
+  if (action === 'throw') throw new Error('Smoke test barrier requested failure.');
+  return action === 'return';
+}
+
+function throwIfStopping(): void {
+  if (cleanupStarted || receivedSignal) {
+    throw new Error(`Smoke interrupted by ${receivedSignal ?? 'cleanup'}.`);
+  }
+}
 
 function requestText(body: JsonObject): string {
   const content = body.messages?.[0]?.content ?? body.input?.[0]?.content ?? '';
@@ -66,8 +379,9 @@ function coalesceChatCompletionSse(raw: string): JsonObject {
 
 async function cloneProductionData(): Promise<void> {
   await mkdir(cloneDataDir, { recursive: true });
-  const source = new DatabaseSync(join(sourceDataDir, 'app.db'), { readOnly: true });
+  const source = new DatabaseSync(sourceDatabasePath, { readOnly: true });
   try { await backup(source, join(cloneDataDir, 'app.db')); } finally { source.close(); }
+  if (handleTestBarrierAction(await testBarrier('clone-files-pending'))) return;
   for (const directory of ['knowledge', 'images']) {
     await cp(join(sourceDataDir, directory), join(cloneDataDir, directory), { recursive: true, force: true });
   }
@@ -113,7 +427,10 @@ function allNumbersKnown(value: JsonObject, keys: string[]): boolean {
 async function waitForJob(
   generation: GenerationService,
   id: string,
-  timeoutMs = Number.parseInt(process.env.SMOKE_JOB_TIMEOUT_MS ?? String(12 * 60_000), 10),
+  // 真实模型实测(2026-08-13):simple 9m37s,advanced 23m47s。旧默认 12 分钟
+  // 会把健康的高级模式误报为超时；45 分钟给到约 1.9x 实测余量，又不会
+  // 让真正卡死的任务无限挂住。仍可用 SMOKE_JOB_TIMEOUT_MS 覆盖。
+  timeoutMs = Number.parseInt(process.env.SMOKE_JOB_TIMEOUT_MS ?? String(45 * 60_000), 10),
 ): Promise<JsonObject> {
   if (!Number.isFinite(timeoutMs) || timeoutMs < 60_000) {
     throw new Error('SMOKE_JOB_TIMEOUT_MS must be a finite integer of at least 60000.');
@@ -221,8 +538,18 @@ async function approvePlanningResources(
 }
 
 async function main(): Promise<void> {
-  await mkdir(runDir, { recursive: true });
-  if (!persistToDevelopmentDatabase) await cloneProductionData();
+  validateRuntimeControls();
+  await ensureRunDirectory();
+  throwIfStopping();
+  report.staleCloneCleanup = await cleanupStaleClones();
+  if (handleTestBarrierAction(await testBarrier('stale-cleanup-complete'))) return;
+  throwIfStopping();
+  if (!persistToDevelopmentDatabase) {
+    cloneOperationPromise = cloneProductionData();
+    await cloneOperationPromise;
+  }
+  if (handleTestBarrierAction(await testBarrier('clone-complete'))) return;
+  throwIfStopping();
   const modelDisabled = process.env.SMOKE_DISABLE_MODEL === 'true';
   if (modelDisabled) disableClonedModelCredentials();
   globalThis.fetch = async (input, init) => {
@@ -274,22 +601,31 @@ async function main(): Promise<void> {
     }
   };
 
-  const app = await createApplication({
+  appCreationPromise = createApplication({
     dataDir: activeDataDir,
-    databasePath: join(activeDataDir, 'app.db'),
+    databasePath: activeDatabasePath,
     ...(process.env.SMOKE_DISABLE_MODEL === 'true'
       ? { platformApiKey: '' }
       : process.env.SMOKE_PLATFORM_API_KEY
         ? { platformApiKey: process.env.SMOKE_PLATFORM_API_KEY }
         : {}),
     logger: false,
+  }, {
+    enableShutdownHooks: false,
   });
+  smokeApp = await appCreationPromise;
+  throwIfStopping();
+  if (handleTestBarrierAction(await testBarrier('application-ready'))) return;
+  throwIfStopping();
+  const app = smokeApp;
   const database = app.get(DatabaseService);
   const intelligence = app.get(IntelligenceService);
   const generation = app.get(GenerationService);
   const principal = principalFrom(database);
-  const requestedProjectId = process.env.SMOKE_PROJECT_ID?.trim();
-  const requestedProjectName = process.env.SMOKE_PROJECT_NAME?.trim();
+
+  try {
+    const requestedProjectId = process.env.SMOKE_PROJECT_ID?.trim();
+    const requestedProjectName = process.env.SMOKE_PROJECT_NAME?.trim();
   if (requestedProjectId && requestedProjectName) {
     throw new Error('Set only one of SMOKE_PROJECT_ID or SMOKE_PROJECT_NAME.');
   }
@@ -325,17 +661,9 @@ async function main(): Promise<void> {
       WHERE workspace_id=?`)
       .run(providerOverride ?? null, modelOverride ?? null, baseUrlOverride ?? null, new Date().toISOString(), project.workspace_id);
   }
-  const report: JsonObject = {
-    runId: basename(runDir),
-    startedAt: new Date().toISOString(),
-    storage: persistToDevelopmentDatabase
-      ? { mode: 'development_database', databaseModified: true, dataDir: activeDataDir }
-      : { mode: 'isolated_clone', databaseModified: false, cloneDataDir },
-    project: { id: project.id, name: project.name },
-    model: database.prepare("SELECT provider_mode,provider,model,base_url,transport FROM workspace_settings WHERE workspace_id=?").get(project.workspace_id),
-  };
+  report.project = { id: project.id, name: project.name };
+  report.model = database.prepare("SELECT provider_mode,provider,model,base_url,transport FROM workspace_settings WHERE workspace_id=?").get(project.workspace_id);
 
-  try {
     const analysisStarted = Date.now();
     let analysis: JsonObject = { informationGaps: [], expressionStrategies: [], topicOpportunities: [] };
     const reusable = existingApprovedPlanning(intelligence, project.id);
@@ -538,50 +866,179 @@ async function main(): Promise<void> {
     report.error = error instanceof Error ? { message: error.message, stack: error.stack } : String(error);
     throw error;
   } finally {
-    const generatedJobIds = Array.isArray(report.generations)
-      ? report.generations.map((item: JsonObject) => item?.job?.id).filter((id: unknown): id is string => typeof id === 'string')
-      : [];
-    const modelUsageEvents = generatedJobIds.length
-      ? database.prepare(
-        `SELECT job_id,details_json,created_at FROM generation_events
-         WHERE event='model_usage' AND job_id IN (${generatedJobIds.map(() => '?').join(',')})
-         ORDER BY id`,
-      ).all(...generatedJobIds).map((row: JsonObject) => {
-        let details: JsonObject = {};
-        try { details = JSON.parse(String(row.details_json ?? '{}')); } catch { /* keep empty */ }
-        return {
-          jobId: row.job_id,
-          createdAt: row.created_at,
-          purpose: details.purpose,
-          candidateIndex: details.candidateIndex,
-          outcome: details.outcome,
-          elapsedMs: details.elapsedMs,
-          inputTokens: details.inputTokens,
-          outputTokens: details.outputTokens,
-          status: details.status,
-          failureKind: details.failureKind,
-          responseDiagnostics: details.responseDiagnostics,
-        };
-      })
-      : [];
-    // Some BYOK transports use a pinned dispatcher and do not pass through the
-    // global fetch hook. Database model_usage events are the authoritative call
-    // audit; captured transport payloads remain available only for harness debug.
-    report.modelCalls = modelUsageEvents;
+    try {
+      const generatedJobIds = Array.isArray(report.generations)
+        ? report.generations.map((item: JsonObject) => item?.job?.id).filter((id: unknown): id is string => typeof id === 'string')
+        : [];
+      const modelUsageEvents = generatedJobIds.length
+        ? database.prepare(
+          `SELECT job_id,details_json,created_at FROM generation_events
+           WHERE event='model_usage' AND job_id IN (${generatedJobIds.map(() => '?').join(',')})
+           ORDER BY id`,
+        ).all(...generatedJobIds).map((row: JsonObject) => {
+          let details: JsonObject = {};
+          try { details = JSON.parse(String(row.details_json ?? '{}')); } catch { /* keep empty */ }
+          return {
+            jobId: row.job_id,
+            createdAt: row.created_at,
+            purpose: details.purpose,
+            candidateIndex: details.candidateIndex,
+            outcome: details.outcome,
+            elapsedMs: details.elapsedMs,
+            inputTokens: details.inputTokens,
+            outputTokens: details.outputTokens,
+            status: details.status,
+            failureKind: details.failureKind,
+            responseDiagnostics: details.responseDiagnostics,
+          };
+        })
+        : [];
+      // Some BYOK transports use a pinned dispatcher and do not pass through the
+      // global fetch hook. Database model_usage events are the authoritative call
+      // audit; captured transport payloads remain available only for harness debug.
+      report.modelCalls = modelUsageEvents;
+    } catch (error) {
+      report.modelCallAuditError = error instanceof Error ? error.message : String(error);
+    }
     report.capturedTransportCalls = capture;
-    await writeFile(join(runDir, 'smoke-result.json'), JSON.stringify(report, null, 2), 'utf8');
-    await writeFile(join(runDir, 'captured-prompts.json'), JSON.stringify(capture, null, 2), 'utf8');
-    await app.close();
+  }
+}
+
+function errorDetails(error: unknown): JsonObject | string {
+  return error instanceof Error ? { message: error.message, stack: error.stack } : String(error);
+}
+
+async function performCleanup(): Promise<void> {
+  const stepErrors: JsonObject[] = [];
+
+  if (cloneOperationPromise) {
+    try {
+      await cloneOperationPromise;
+    } catch (error) {
+      stepErrors.push({ step: 'wait_for_clone', error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  let appToClose = smokeApp;
+  if (appCreationPromise) {
+    try {
+      appToClose = await appCreationPromise;
+    } catch (error) {
+      stepErrors.push({ step: 'wait_for_application', error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  if (appToClose) {
+    try {
+      await appToClose.close();
+    } catch (error) {
+      stepErrors.push({ step: 'close_application', error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  try {
     globalThis.fetch = originalFetch;
+  } catch (error) {
+    stepErrors.push({ step: 'restore_fetch', error: error instanceof Error ? error.message : String(error) });
+  }
+
+  const cleanupReport: JsonObject = {
+    cloneDataRemoved: false,
+    keptByRequest: keepCloneData,
+  };
+  if (!persistToDevelopmentDatabase && !keepCloneData) {
+    try {
+      await rm(cloneDataDir, { recursive: true, force: true });
+      cleanupReport.cloneDataRemoved = true;
+      cleanupReport.note = 'Disposable production clone removed after clone operations settled and services closed.';
+    } catch (error) {
+      cleanupReport.error = error instanceof Error ? error.message : String(error);
+      stepErrors.push({ step: 'remove_clone_data', error: cleanupReport.error });
+      process.exitCode = 1;
+    }
+  } else {
+    cleanupReport.note = persistToDevelopmentDatabase
+      ? 'No clone was created because development database persistence was explicitly enabled.'
+      : 'Clone retained only because SMOKE_KEEP_CLONE_DATA=true.';
+  }
+  if (stepErrors.length > 0) {
+    cleanupReport.stepErrors = stepErrors;
+    process.exitCode = 1;
+  }
+  report.cleanup = cleanupReport;
+
+  if (receivedSignal) {
+    report.interruptedAt = new Date().toISOString();
+  } else if (runFailure) {
+    report.failedAt ??= new Date().toISOString();
+    report.error ??= errorDetails(runFailure);
+  } else {
+    report.completedAt ??= new Date().toISOString();
+  }
+
+  let runDirectoryReady = false;
+  try {
+    await ensureRunDirectory();
+    runDirectoryReady = true;
+  } catch (error) {
+    console.error(`Failed to prepare smoke report directory: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  }
+  if (runDirectoryReady) {
+    try {
+      await writePrivateJson(join(runDir, 'smoke-result.json'), report);
+    } catch (error) {
+      console.error(`Failed to persist smoke result: ${error instanceof Error ? error.message : String(error)}`);
+      process.exitCode = 1;
+    }
+    try {
+      await writePrivateJson(join(runDir, 'captured-prompts.json'), capture);
+    } catch (error) {
+      console.error(`Failed to persist captured prompts: ${error instanceof Error ? error.message : String(error)}`);
+      process.exitCode = 1;
+    }
+  }
+}
+
+async function cleanup(): Promise<void> {
+  if (!cleanupPromise) {
+    cleanupStarted = true;
+    cleanupPromise = performCleanup().catch((error) => {
+      globalThis.fetch = originalFetch;
+      console.error(`Unexpected smoke cleanup failure: ${error instanceof Error ? error.message : String(error)}`);
+      process.exitCode = 1;
+    });
+  }
+  await cleanupPromise;
+}
+
+async function run(): Promise<void> {
+  try {
+    await main();
+  } catch (error) {
+    if (!receivedSignal) {
+      runFailure = error;
+      report.failedAt ??= new Date().toISOString();
+      report.error ??= errorDetails(error);
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exitCode = 1;
+    }
+  } finally {
+    await cleanup();
+  }
+  if (!receivedSignal) {
+    const modelUsageEvents = Array.isArray(report.modelCalls) ? report.modelCalls : [];
     console.log(JSON.stringify({
       runDir,
       report: join(runDir, 'smoke-result.json'),
-      calls: modelUsageEvents.map(({ purpose, candidateIndex, outcome, elapsedMs }) => ({ purpose, candidateIndex, outcome, elapsedMs })),
+      cleanup: report.cleanup,
+      calls: modelUsageEvents.map(({ purpose, candidateIndex, outcome, elapsedMs }: JsonObject) => ({
+        purpose,
+        candidateIndex,
+        outcome,
+        elapsedMs,
+      })),
     }, null, 2));
   }
 }
 
-void main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+void run();

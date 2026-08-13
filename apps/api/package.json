@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node --env-file-if-exists=../../.env --import tsx --watch --watch-path=src --watch-path=../../packages/agent-core/dist src/main.ts",
-    "start": "node --env-file-if-exists=../../.env dist/main.js",
+    "start": "node --env-file=../../.env dist/main.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test test/*.test.ts"
@@ -33,6 +33,7 @@
     "@types/node": "^24.0.0",
     "@types/pdfkit": "^0.17.3",
     "fast-check": "3.23.2",
+    "pdf-parse": "^2.4.5",
     "tsx": "^4.20.3",
     "typescript": "^5.8.3"
   },

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { exportBlockReason, issueVerdict } from "../src/lib/issue-verdict.ts";
+import { issueVerdict } from "../src/lib/issue-verdict.ts";
+
+const source = readFileSync(new URL("../src/lib/issue-verdict.ts", import.meta.url), "utf8");
 
 /**
  * 这些用例锁住的是一个实测缺陷:129 个未通过候选里 110 个(85%)旧实现把 warning
@@ -81,6 +84,44 @@ test("干净通过时不编造提醒数", () => {
   assert.equal(verdict.headline, "已通过可发布校验");
 });
 
+test("needs_review 即使 valid=true 且没有 issue 也只能建议复核", () => {
+  const verdict = issueVerdict({
+    valid: true,
+    qualityStatus: "needs_review",
+    issues: [],
+  });
+  assert.equal(verdict.publishable, false);
+  assert.equal(verdict.headline, "建议复核（可复制导出）");
+});
+
+test("needs_review 带 review warning 时保持可复制导出但不冒充直接发布", () => {
+  const verdict = issueVerdict({
+    valid: true,
+    qualityStatus: "needs_review",
+    issues: [{ code: "plan_to_copy_alignment", severity: "warning" }],
+  });
+  assert.equal(verdict.publishable, false);
+  assert.equal(verdict.headline, "建议复核（可复制导出），1 项待核对");
+  assert.equal(verdict.advisory.length, 1);
+  assert.doesNotMatch(verdict.headline, /可直接发布|已通过可发布校验/u);
+});
+
+test("passed 带 advisory warning 仍是可直接发布态", () => {
+  const verdict = issueVerdict({
+    valid: true,
+    qualityStatus: "passed",
+    issues: [{ code: "plan_to_copy_alignment", severity: "warning" }],
+  });
+  assert.equal(verdict.publishable, true);
+  assert.equal(verdict.headline, "已通过可发布校验，另有 1 项建议人工核对");
+});
+
+test("历史 payload 缺 qualityStatus 时继续回退 valid 旧逻辑", () => {
+  const verdict = issueVerdict({ valid: true, issues: [] });
+  assert.equal(verdict.publishable, true);
+  assert.equal(verdict.headline, "已通过可发布校验");
+});
+
 test("未通过但没有 error:如实说明,不假装是某条 warning 导致的", () => {
   const verdict = issueVerdict({
     valid: false,
@@ -133,12 +174,6 @@ test("可发布且带建议项是主路径:advisory 不能算进 blocking", () =
   assert.equal(verdict.blocking.length, 0);
 });
 
-test("导出门槛理由:可发布返回 null,不可发布指向人工确认且保留自动结论", () => {
-  assert.equal(exportBlockReason(issueVerdict({ valid: true, issues: [] })), null);
-  const reason = exportBlockReason(
-    issueVerdict({ valid: false, issues: [{ code: "ungrounded_fact", severity: "error" }] }),
-  );
-  assert.match(reason ?? "", /1 项必须核对/);
-  assert.match(reason ?? "", /完成人工交付确认后可复制与导出/);
-  assert.match(reason ?? "", /自动校验结论仍保留/);
+test("issue 归纳不再内置已删除的人工确认交付策略", () => {
+  assert.doesNotMatch(source, /exportBlockReason|人工交付确认后/u);
 });

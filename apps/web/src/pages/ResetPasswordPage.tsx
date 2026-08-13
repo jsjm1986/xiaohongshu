@@ -23,8 +23,12 @@ export function ResetPasswordPage() {
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
     setError('');
-    if (password.length < 8) {
-      setError('新密码至少 8 个字符');
+    if (password.length < 12) {
+      setError('新密码至少 12 个字符');
+      return;
+    }
+    if (password.length > 256) {
+      setError('新密码不能超过 256 个字符');
       return;
     }
     if (password !== confirm) {
@@ -63,7 +67,8 @@ export function ResetPasswordPage() {
                   value={password}
                   autoComplete="new-password"
                   onChange={(event) => setPassword(event.target.value)}
-                  placeholder="至少 8 个字符"
+                  placeholder="至少 12 个字符"
+                  maxLength={256}
                   required
                 />
               </label>
@@ -74,6 +79,7 @@ export function ResetPasswordPage() {
                   value={confirm}
                   autoComplete="new-password"
                   onChange={(event) => setConfirm(event.target.value)}
+                  maxLength={256}
                   required
                 />
               </label>

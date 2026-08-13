@@ -1,4 +1,5 @@
 import type { ReaderCandidate } from '../types';
+import { candidateClipboardText, clipboardPostSectionLabel } from './clipboard-truth';
 import {
   ACCOUNTABLE_ANSWER_COPY_LABEL,
   SIMULATED_COMMENT_COPY_NOTICE,
@@ -10,7 +11,8 @@ import {
 /**
  * 按发布顺序复制。
  *
- * 正文区（标题+正文+标签）是真正可直接粘贴发布的内容；评论区不是——
+ * 正文区（标题+正文+标签）是发布内容；needs_review 的剪贴板载荷会先带复核状态，
+ * passed 才标记为可直接使用。评论区不是发布正文——
  * 它是「模拟情景话术参考」：模拟提问与读者接话没有任何真人为其负责，
  * 由任何账号代发都是伪造真实用户发言。所以评论条目必须逐条携带角色标注，
  * 段落自带用途声明；只有自备首评与可追责答复标明「本账号」用途。
@@ -118,10 +120,12 @@ export function readerCandidateToMarkdown(
   return parts.join('\n');
 }
 
-/** 整份按发布顺序的纯文本:正文区（可直接粘贴） + 评论区话术参考（模拟情景）。 */
-export function publishOrderText(candidate: Source): string {
+/** 整份按发布顺序的纯文本:正文区 + 评论区话术参考（模拟情景）。 */
+export function publishOrderText(
+  candidate: Source & Pick<ReaderCandidate, 'validation'>,
+): string {
   const blocks = publishBlocks(candidate);
-  const parts = ['—— 正文区（直接粘贴）——', '', blocks.post];
+  const parts = [`—— ${clipboardPostSectionLabel(candidate.validation)}——`, '', blocks.post];
   if (blocks.imageBrief) {
     parts.push('', '—— 配图说明（拍图/选图用，不要贴进正文）——', '', blocks.imageBrief);
   }
@@ -139,5 +143,5 @@ export function publishOrderText(candidate: Source): string {
     // 末尾多出的空行去掉
     if (parts.at(-1) === '') parts.pop();
   }
-  return parts.join('\n');
+  return candidateClipboardText(candidate.validation, parts.join('\n'));
 }

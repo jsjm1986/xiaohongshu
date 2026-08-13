@@ -297,7 +297,7 @@ export function QuickReaderPage() {
 
             <NoteAlertBar
               validation={current.validation}
-              manuallyConfirmed={current.manualDeliveryConfirmation?.confirmed === true}
+              deliverable={deliverable}
               onSeeDetail={() => workbenchRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
             />
 

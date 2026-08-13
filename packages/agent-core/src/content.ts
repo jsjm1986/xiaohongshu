@@ -1977,12 +1977,15 @@ export function isHashtagOnlyLine(statement: string): boolean {
  * 使用的绑定在顶部 import。
  */
 export {
+  CANDIDATE_QUALITY_STATUS_LABELS,
   NON_OVERRIDABLE_CONTENT_ISSUE_CODES,
   candidateQualityStatus,
+  candidateQualityStatusLabel,
   isNonOverridableContentIssueCode,
   issueDisposition,
   issueOverridePolicy,
   normalizeContentValidationIssue,
+  resolveCandidateQualityStatus,
 } from "./delivery-policy.js";
 
 export function validateGenerationDraft(input: DraftValidationInput): ContentValidationIssue[] {

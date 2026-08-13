@@ -213,7 +213,7 @@ export function resolveOptions(input: ApiOptionsInput = {}): ApiOptions {
       ? process.env.NODE_ENV !== 'test'
       : validateBoolean(input.logger, '配置项 logger'),
     masterEncryptionKey:
-      input.masterEncryptionKey ?? process.env.MASTER_ENCRYPTION_KEY ?? process.env.SESSION_SECRET ?? '',
+      input.masterEncryptionKey ?? process.env.MASTER_ENCRYPTION_KEY ?? '',
     // 轮换期的旧钥(逗号分隔):只用于解密回退,加密永远用当前钥。
     // 跑完 scripts/rotate-byok-keys.mts 重加密存量后应清空此变量。
     previousMasterEncryptionKeys:
@@ -270,10 +270,9 @@ export function resolveOptions(input: ApiOptionsInput = {}): ApiOptions {
 /**
  * 生产模式的启动安全校验（fail-fast）。
  *
- * 启动器用 `node --env-file-if-exists=…` 加载环境:.env 丢失/路径错时它**静默
- * 跳过**,进程会带着回落默认值"看起来正常"地跑起来——管理员密码回落到公开的
- * 占位值、master key 回落为空(BYOK 密钥形同弱钥加密)。这两种状态在生产里
- * 没有任何合法场景,拒绝启动是唯一诚实的行为;错误信息直接指向最常见根因。
+ * 生产启动器必须用 `node --env-file=…` 严格加载环境；这里仍做第二道防线，
+ * 防止其他启动方式漏传环境后带着公开占位管理员密码或空 master key 运行。
+ * 这两种状态在生产里没有任何合法场景，拒绝启动是唯一诚实的行为。
  * 非生产(开发/测试)保持宽松:测试夹具依赖默认引导密码。
  */
 function assertProductionSafeOptions(options: ApiOptions): void {
@@ -282,13 +281,13 @@ function assertProductionSafeOptions(options: ApiOptions): void {
   if (!isUsableMasterEncryptionKey(options.masterEncryptionKey)) {
     problems.push('MASTER_ENCRYPTION_KEY 缺失或过弱（不足 16 字符或为示例占位值），BYOK 密钥将以弱钥加密');
   }
-  if (options.adminPassword === 'change-me-now-123!') {
+  if (['change-me-now-123!', 'replace-with-a-strong-password'].includes(options.adminPassword)) {
     problems.push('管理员密码仍是默认占位值');
   }
   if (problems.length) {
     throw new Error(
       `生产模式拒绝启动：${problems.join('；')}。`
-      + '最常见根因是环境文件未被加载——node --env-file-if-exists 在 .env 缺失或路径错误时会静默跳过；'
+      + '最常见根因是生产环境变量或 .env 未被加载；'
       + '请确认 .env 存在并包含 MASTER_ENCRYPTION_KEY 与 BOOTSTRAP_ADMIN_PASSWORD。',
     );
   }

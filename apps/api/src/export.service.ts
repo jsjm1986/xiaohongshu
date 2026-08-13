@@ -4,7 +4,11 @@ import { resolve } from 'node:path';
 import { BadRequestException, Injectable } from '@nestjs/common';
 import type { ISectionOptions } from 'docx';
 import PDFDocument from 'pdfkit';
-import { isNonOverridableContentIssueCode } from '@content-agent/agent-core';
+import {
+  candidateQualityStatusLabel,
+  isNonOverridableContentIssueCode,
+  resolveCandidateQualityStatus,
+} from '@content-agent/agent-core';
 import {
   normalizeContentPackageForApi,
   normalizeDiagnosticForApi,
@@ -182,14 +186,22 @@ export class ExportService {
       throw new BadRequestException('确定性预览不是正式成品，禁止导出；请重新生成');
     }
     const validation = asObject(pkg.validation);
+    if (!Object.keys(validation).length) {
+      throw new BadRequestException('候选缺少 validation，按硬阻断（不可交付）处理');
+    }
     const issues = Array.isArray(validation.issues) ? validation.issues.filter((issue): issue is JsonObject => Boolean(issue) && typeof issue === 'object' && !Array.isArray(issue)) : [];
     const nonOverridable = issues.filter((issue) =>
       typeof issue.code === 'string' && isNonOverridableContentIssueCode(issue.code));
     if (nonOverridable.length) {
       throw new BadRequestException('候选包含来源真实性、保密、身份或必要结构硬门禁，禁止导出；请修复或重新生成');
     }
-    if (validation.valid !== true) {
-      throw new BadRequestException('候选没有可交付的正式模型成品；请重新生成');
+    const qualityStatus = resolveCandidateQualityStatus({
+      valid: validation.valid === true,
+      qualityStatus: validation.qualityStatus,
+      issues: issues as never[],
+    });
+    if (qualityStatus === 'blocked') {
+      throw new BadRequestException('候选 validation.qualityStatus 为硬阻断（不可交付），禁止导出；请修复或重新生成');
     }
     const deliverable = options.manualDeliveryConfirmation?.confirmed === true
       ? { ...pkg, manualDeliveryConfirmation: options.manualDeliveryConfirmation }
@@ -551,6 +563,11 @@ function appendAuditTrail(lines: string[], pkg: JsonObject): void {
   appendOpportunityRankAudit(lines, pkg);
 
   const validation = asObject(pkg.validation);
+  const qualityStatus = resolveCandidateQualityStatus({
+    valid: validation.valid === true,
+    qualityStatus: validation.qualityStatus,
+    issues: objectArray(validation.issues) as never[],
+  });
   const manualDeliveryConfirmation = asObject(pkg.manualDeliveryConfirmation);
   if (manualDeliveryConfirmation.confirmed === true) {
     lines.push(
@@ -567,7 +584,7 @@ function appendAuditTrail(lines: string[], pkg: JsonObject): void {
   lines.push(
     '## 校验结果',
     '',
-    `- 是否通过：${validation.valid === true ? '是' : '否'}`,
+    `- validation.qualityStatus：${candidateQualityStatusLabel(qualityStatus)} [${qualityStatus}]`,
     `- 修复次数：${typeof validation.repairAttempts === 'number' ? validation.repairAttempts : 0}`,
   );
   for (const issue of objectArray(validation.issues)) {

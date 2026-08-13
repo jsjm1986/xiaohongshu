@@ -27,3 +27,14 @@ test('formal review findings are immediately deliverable and only mechanical gat
   assert.equal(deliveryReadiness(passed, { generationMode: 'deterministic_preview' }), 'blocked');
   assert.equal(candidateDeliverable(passed, true, { deliverability: 'non_deliverable' }), false);
 });
+
+test('persisted blocked is non-deliverable even when stale valid/issues look clean', () => {
+  const stale = {
+    valid: true,
+    qualityStatus: 'blocked' as const,
+    repairAttempts: 0,
+    issues: [],
+  };
+  assert.equal(deliveryReadiness(stale), 'blocked');
+  assert.equal(candidateDeliverable(stale, false), false);
+});

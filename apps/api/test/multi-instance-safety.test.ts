@@ -496,12 +496,13 @@ test('版本取号在跨进程写锁后执行:公式、研究资源与项目智�
   }
 });
 
-test('两个进程首次初始化研究目录与基线发布时只写入一份', async () => {
+test('两个进程初始化研究目录并回填缺失快照时都只写入一份', async () => {
   const projectId = 'p-parallel-bootstrap';
   seedProject(projectId);
   seedFormula(projectId, `${projectId}-formula`, 1, 'active');
   const workerA = await startVersionWorker();
   const workerB = await startVersionWorker();
+  let catalogCountsBeforeRepair = { claims: 0, sources: 0 };
   let committed = false;
   instanceA.db.exec('BEGIN IMMEDIATE');
   try {
@@ -516,6 +517,37 @@ test('两个进程首次初始化研究目录与基线发布时只写入一份',
     const [resultA, resultB] = await Promise.all([readWorkerResult(workerA), readWorkerResult(workerB)]);
     assert.deepEqual(resultA, { id: 'bootstrap-a', ok: true });
     assert.deepEqual(resultB, { id: 'bootstrap-b', ok: true });
+
+    catalogCountsBeforeRepair = {
+      claims: Number((instanceA.prepare(
+        'SELECT COUNT(*) AS value FROM research_claims WHERE project_id=?',
+      ).get(projectId) as { value: number }).value),
+      sources: Number((instanceA.prepare(
+        'SELECT COUNT(*) AS value FROM evidence_sources WHERE project_id=?',
+      ).get(projectId) as { value: number }).value),
+    };
+    const deleted = instanceA.prepare(
+      "DELETE FROM dataset_snapshots WHERE project_id=? AND dataset_key='reference-copy-70'",
+    ).run(projectId);
+    assert.equal(Number(deleted.changes), 1, '并发回填前必须确实删除首次 bootstrap 的固化快照');
+
+    let repairCommitted = false;
+    instanceA.db.exec('BEGIN IMMEDIATE');
+    try {
+      workerA.child.stdin.write(`${JSON.stringify({ id: 'repair-a', operation: 'bootstrap', projectId })}\n`);
+      workerB.child.stdin.write(`${JSON.stringify({ id: 'repair-b', operation: 'bootstrap', projectId })}\n`);
+      const [repairStartedA, repairStartedB] = await Promise.all([workerA.lines.next(), workerB.lines.next()]);
+      assert.equal(repairStartedA.value, 'START repair-a', workerA.stderr());
+      assert.equal(repairStartedB.value, 'START repair-b', workerB.stderr());
+      await delay(50);
+      instanceA.db.exec('COMMIT');
+      repairCommitted = true;
+      const [repairA, repairB] = await Promise.all([readWorkerResult(workerA), readWorkerResult(workerB)]);
+      assert.deepEqual(repairA, { id: 'repair-a', ok: true });
+      assert.deepEqual(repairB, { id: 'repair-b', ok: true });
+    } finally {
+      if (!repairCommitted) instanceA.db.exec('ROLLBACK');
+    }
   } finally {
     if (!committed) instanceA.db.exec('ROLLBACK');
     await Promise.all([stopVersionWorker(workerA), stopVersionWorker(workerB)]);
@@ -534,6 +566,27 @@ test('两个进程首次初始化研究目录与基线发布时只写入一份',
   ).all(projectId) as Array<{ source_key: string; count: number; max_version: number }>;
   assert.ok(sourceGroups.length > 0);
   assert.ok(sourceGroups.every((row) => Number(row.count) === 1 && Number(row.max_version) === 1));
+
+  const snapshots = (instanceA.prepare(
+    `SELECT version, status, sha256, row_count
+       FROM dataset_snapshots
+      WHERE project_id=? AND dataset_key='reference-copy-70'`,
+  ).all(projectId) as Array<{ version: number; status: string; sha256: string; row_count: number }>)
+    .map((row) => ({ ...row }));
+  assert.deepEqual(snapshots, [{
+    version: 1,
+    status: 'approved',
+    sha256: 'a65514d622ea6c7085b9bf96c4241f9857d53e71fa254ad591f20496c94035ad',
+    row_count: 70,
+  }]);
+  assert.deepEqual({
+    claims: Number((instanceA.prepare(
+      'SELECT COUNT(*) AS value FROM research_claims WHERE project_id=?',
+    ).get(projectId) as { value: number }).value),
+    sources: Number((instanceA.prepare(
+      'SELECT COUNT(*) AS value FROM evidence_sources WHERE project_id=?',
+    ).get(projectId) as { value: number }).value),
+  }, catalogCountsBeforeRepair, '并发回填不得重复导入 formula claim 或 evidence source');
 
   const releases = instanceA.prepare(
     'SELECT status, COUNT(*) AS count FROM release_manifests WHERE project_id=? GROUP BY status',

@@ -852,14 +852,13 @@ test('formula registry, settings and deterministic generation form one working f
 
   const deliveryCandidateId = String(deliveryContent.candidateId);
   const deliveryExportPath = `/api/generations/${jobId}/candidates/${encodeURIComponent(deliveryCandidateId)}/export`;
-  const semanticExport = await request(`${deliveryExportPath}?format=json`);
-  assert.equal(semanticExport.response.status, 200, JSON.stringify(semanticExport.body));
-  assert.equal(semanticExport.body.validation.valid, true);
-  assert.equal(semanticExport.body.validation.qualityStatus, 'needs_review');
-  assert.ok(semanticExport.body.validation.issues.some((issue: any) =>
-    issue.code === 'future_semantic_rule'
-      && issue.severity === 'warning'
-      && issue.disposition === 'review'));
+  const explicitlyBlockedExport = await request(`${deliveryExportPath}?format=json`);
+  assert.equal(
+    explicitlyBlockedExport.response.status,
+    400,
+    JSON.stringify(explicitlyBlockedExport.body),
+  );
+  assert.match(String(explicitlyBlockedExport.body.message), /硬阻断|禁止导出/u);
 
   deliveryContent.validation = {
     valid: true,

@@ -17,6 +17,8 @@ const MANAGED_ENV = [
   'CONTENT_AGENT_BYOK_ALLOW_HTTP',
   'CONTENT_AGENT_BYOK_ALLOW_PRIVATE_NETWORK',
   'CONTENT_AGENT_BYOK_ALLOW_PROXY_FAKE_IP',
+  'MASTER_ENCRYPTION_KEY',
+  'SESSION_SECRET',
 ] as const;
 
 const originalEnv = new Map(MANAGED_ENV.map((name) => [name, process.env[name]]));
@@ -135,6 +137,18 @@ test('proxy fake-IP compatibility is explicit and defaults off', () => {
   });
 });
 
+test('SESSION_SECRET 不再回退成 BYOK 加密主密钥', () => {
+  withEnv('SESSION_SECRET', 'legacy-session-secret-must-not-encrypt-byok', () => {
+    assert.equal(options({ masterEncryptionKey: undefined }).masterEncryptionKey, '');
+  });
+  withEnv('MASTER_ENCRYPTION_KEY', 'explicit-master-key-32-characters!', () => {
+    assert.equal(
+      options({ masterEncryptionKey: undefined }).masterEncryptionKey,
+      'explicit-master-key-32-characters!',
+    );
+  });
+});
+
 test('production defaults to secure cookies but permits an explicit trusted HTTP override', () => {
   assert.equal(options({ production: true }).secureCookies, true);
   assert.equal(options({ production: true, secureCookies: false }).secureCookies, false);
@@ -147,9 +161,8 @@ test('production defaults to secure cookies but permits an explicit trusted HTTP
   });
 });
 
-// 生产 fail-fast:启动器的 --env-file-if-exists 在 .env 缺失时静默跳过,进程会
-// 带着回落默认值"看起来正常"地跑——管理员密码回落公开占位值、master key 回落
-// 空串(BYOK 形同弱钥加密)。这两种状态在生产里没有合法场景,必须拒绝启动。
+// 生产 fail-fast:即使启动器被绕开或环境漏传，也不能带公开占位管理员密码或
+// 空 master key "看起来正常"地运行。
 test('生产模式拒绝空 master key 与占位管理员密码启动', () => {
   assert.throws(
     () => options({ production: true, masterEncryptionKey: '' }),
@@ -164,10 +177,14 @@ test('生产模式拒绝空 master key 与占位管理员密码启动', () => {
     () => options({ production: true, adminPassword: 'change-me-now-123!' }),
     /管理员密码/u,
   );
+  assert.throws(
+    () => options({ production: true, adminPassword: 'replace-with-a-strong-password' }),
+    /管理员密码/u,
+  );
   // 错误信息必须指向最常见根因,值班的人半夜看得懂
   assert.throws(
     () => options({ production: true, masterEncryptionKey: '' }),
-    /env-file-if-exists/u,
+    /环境变量或 \.env 未被加载/u,
   );
   // 非生产保持宽松:测试与本地开发依赖默认引导值
   assert.equal(options({ production: false, masterEncryptionKey: '' }).masterEncryptionKey, '');
