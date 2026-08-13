@@ -18,8 +18,10 @@ import {
   planTopicOrchestrations,
   PROMPT_CONTRACT_VERSION,
   selectKnowledgeContext,
+  STAGED_COMMENT_GROWTH_JSON_SCHEMA,
   STAGED_COMMENT_READERS_JSON_SCHEMA,
   STAGED_COMMENTS_JSON_SCHEMA,
+  STAGED_HOST_ANSWERS_JSON_SCHEMA,
   STAGED_ORG_ANSWERS_JSON_SCHEMA,
 } from "../src/index.js";
 import type { CommentSurfaceRoleCard, DialogueThreadPlan, InformationGap, ModelGenerationRequest, ModelProvider, TopicOpportunity } from "../src/index.js";
@@ -433,7 +435,10 @@ describe("Cref contract v1.1 prompt contract", () => {
     // 2.8.0: org answers carry a same-call per-sentence evidence self-review
     // (2A-O/2B-O schema), growth parses as followUps-only patches, and the
     // network editor may no longer rewrite accountable answers.
-    expect(PROMPT_CONTRACT_VERSION).toBe("2.8.0");
+    // 2.9.0: host answers get their own review-free schema, growth emits
+    // followUps-only patches (schema + prompt), and the digest covers every
+    // schema plus canonical renderings of all stage prompt texts.
+    expect(PROMPT_CONTRACT_VERSION).toBe("2.9.0");
     const properties = STAGED_COMMENTS_JSON_SCHEMA.properties as Record<string, any>;
     expect(STAGED_COMMENTS_JSON_SCHEMA.required).toEqual(["disclaimer", "threads"]);
     expect(properties.ownedFirstComment).toEqual({ type: "string" });
@@ -467,6 +472,16 @@ describe("Cref contract v1.1 prompt contract", () => {
     expect(orgProperties.answers.items.properties.boundary).toEqual({ type: "string" });
     expect(orgProperties.answers.items.properties.review.required).toEqual(["status", "claims", "reasons"]);
     expect(orgProperties.ownedFirstCommentReview.required).toEqual(["status", "claims", "reasons"]);
+    // 2.9.0: 楼主答复 schema 独立——楼主没有口径与证据原文,不承担 review;
+    // strict json_schema 下复用机构 schema 会在语法层强迫楼主编造自检。
+    const hostProperties = STAGED_HOST_ANSWERS_JSON_SCHEMA.properties as Record<string, any>;
+    expect(STAGED_HOST_ANSWERS_JSON_SCHEMA.required).toEqual(["answers"]);
+    expect(hostProperties.answers.items.required).toEqual(["id", "answer"]);
+    expect(hostProperties.answers.items.properties.review).toBeUndefined();
+    // 2.9.0: 2B 生长输出补丁 schema——线程只要求 id+followUps,不再重发根文案。
+    const growthProperties = STAGED_COMMENT_GROWTH_JSON_SCHEMA.properties as Record<string, any>;
+    expect(STAGED_COMMENT_GROWTH_JSON_SCHEMA.required).toEqual(["threads"]);
+    expect(growthProperties.threads.items.required).toEqual(["id", "followUps"]);
   });
 
   it("places the large stable knowledge prefix before candidate-specific orchestration", () => {
@@ -718,7 +733,8 @@ describe("Cref contract v1.1 staged prompt text", () => {
       disclaimer: "以下为完整评论区创作参考，不代表已经发生的真实互动或观测口碑。",
       threads: plan.dialogueThreads.map((thread) => ({ id: thread.id, question: "根评论", answer: "根回复", followUps: [] })),
     });
-    const phase = String(prompt.messages[4]?.content);
+    // 2.9.0: 根评论只在 phase 内嵌一份,不再有 assistant 回放,phase 是第 4 条消息。
+    const phase = String(prompt.messages[3]?.content);
     expect(phase).toContain("followUpIntent");
     // 计划多轮的线程投出接龙方向；单交换线程不投。
     for (const thread of growing) expect(phase).toContain(thread.followUpIntent);
@@ -731,7 +747,8 @@ describe("Cref contract v1.1 staged prompt text", () => {
       N: { imageBrief: "", title: "先核实信息", body: "正文。" },
       Cref: { disclaimer: "参考模板", threads: [] },
     });
-    const phase = String(prompt.messages[5]?.content);
+    // 2.9.0: 完整公开内容只在 phase 内嵌一份,不再有 assistant 回放,phase 是第 3 条消息。
+    const phase = String(prompt.messages[2]?.content);
     expect(phase).toContain("必须记为 fact");
     expect(phase).toContain("usableEvidenceReferences 中对应小节的逐字原文");
     expect(phase).toContain("按 hypothesis 记，不得伪装成 fact");

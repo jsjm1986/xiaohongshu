@@ -936,14 +936,17 @@ describe("按侧+按角色隔离的引擎合并", () => {
   }
 
   function completeNetworkEditorResponse(request: ModelGenerationRequest, drift = false) {
-    const current = [...request.messages].reverse().flatMap((message) =>
-      typeof message.content === "string" ? [message.content] : [])
-      .map((text) => {
-        try { return JSON.parse(text) as { disclaimer?: string; threads?: Array<{ id: string; question: string; answer: string; followUps?: unknown[] }> }; }
-        catch { return undefined; }
-      })
-      .find((value) => value?.disclaimer === STAGED_COMMENT_DISCLAIMER && Array.isArray(value.threads));
-    if (!current?.threads) throw new Error("终编测试夹具没有读到完整评论网络。");
+    // 2.9.0: 终编不再用 assistant 回放重复注入当前评论区,唯一副本内嵌在 phase
+    // 的“当前完整评论区”小节里;夹具改为从该小节解析。
+    const embedded = requestText(request).match(/当前完整评论区：\n([\s\S]*?)\n\n服务器诊断：/u)?.[1];
+    const current = (() => {
+      if (!embedded) return undefined;
+      try { return JSON.parse(embedded) as { disclaimer?: string; threads?: Array<{ id: string; question: string; answer: string; followUps?: unknown[] }> }; }
+      catch { return undefined; }
+    })();
+    if (current?.disclaimer !== STAGED_COMMENT_DISCLAIMER || !Array.isArray(current.threads)) {
+      throw new Error("终编测试夹具没有读到完整评论网络。");
+    }
     const unknownVariants = [
       "这一项当前无法确认，先不下结论。",
       "这一项目前无法核实，先保留未知。",
