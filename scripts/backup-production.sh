@@ -34,6 +34,11 @@ if [ "$CHECK" != "ok" ]; then
   rm -f "$DB_OUT"
   exit 1
 fi
+# 校验通过后 gzip 落盘:content_json 大 JSON 压缩率高(实测 ~200MB → ~30MB),
+# 14 天保留从 ~3GB 降到 ~0.5GB——这台机器磁盘打过 100%,备份不能是下一个引信。
+# 恢复:gunzip 后即普通 SQLite 文件。
+gzip -f "$DB_OUT"
+DB_OUT="$DB_OUT.gz"
 
 # 2) 盘上文件:知识库原文(knowledge_files.storage_path 指向的目录)与 .env。
 #    只备份 app.db 的话客户知识库不完整,恢复出来的系统解不开也读不到原文。
@@ -50,7 +55,9 @@ echo "[$(date '+%F %T')] 完成: app-$STAMP.db ($DB_SIZE), files-$STAMP.tar.gz (
 
 # 3) 保留策略:自动备份目录只保留最近 KEEP_DAYS 天。
 #    (data/backups/ 根下的手工命名快照不受影响。)
+#    app-*.db 同时匹配旧的未压缩备份,让存量自然过期。
 find "$DEST" -name 'app-*.db' -mtime +"$KEEP_DAYS" -delete
+find "$DEST" -name 'app-*.db.gz' -mtime +"$KEEP_DAYS" -delete
 find "$DEST" -name 'files-*.tar.gz' -mtime +"$KEEP_DAYS" -delete
 
 # 4) 异地副本:同盘备份防误删不防盘毁/机器丢失。
