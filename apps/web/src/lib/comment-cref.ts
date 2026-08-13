@@ -19,14 +19,19 @@ export const commentNodeKindLabel = (value?: string): string => {
 };
 
 /**
- * 线程级互动形态(读者互动层)归一化:缺省或不可识别的值一律按
- * org_answer(T1 机构问答)处理——历史包没有 threadKind 字段,界面与
- * 复制markdown 都按 T1 渲染,不出错。
+ * 线程级互动形态(读者互动层)归一化,两种兜底方向刻意不同:
+ * - **缺失**(历史包没有 threadKind 字段)→ org_answer:T1 时代只有机构问答,
+ *   这是历史事实,按 T1 渲染不出错;
+ * - **存在但不认识**(未来新增的形态,典型场景是升级窗口内旧前端 bundle
+ *   处理新后端产物)→ reader_exchange:按模拟读者处理。方向必须 fail-closed:
+ *   把不认识的互动形态标成机构担责身份,等于把不明内容挂到自有账号名下
+ *   (《ROLE 04》反向踩线);标成模拟读者最多是过度谦虚,不会冒充担责。
  */
-export const commentThreadKindOf = (thread: { threadKind?: string }): "org_answer" | "host_reply" | "reader_exchange" | "organic_reaction" =>
-  thread.threadKind === "host_reply" || thread.threadKind === "reader_exchange" || thread.threadKind === "organic_reaction"
-    ? thread.threadKind
-    : "org_answer";
+export const commentThreadKindOf = (thread: { threadKind?: string }): "org_answer" | "host_reply" | "reader_exchange" | "organic_reaction" => {
+  const kind = thread.threadKind;
+  if (kind === "org_answer" || kind === "host_reply" || kind === "reader_exchange" || kind === "organic_reaction") return kind;
+  return kind ? "reader_exchange" : "org_answer";
+};
 
 /** 线程级互动形态 → 中文徽标;未知值原样透传。 */
 export const commentThreadKindLabel = (value?: string): string => {

@@ -96,6 +96,12 @@ curl http://127.0.0.1:8780/health
 
 RPO = 上次备份时间（每日一次；关键操作前手工跑一次备份脚本可缩短）。
 
+> 恢复流程于 2026-08-13 用当日备份完整演练过一次:临时实例六表计数与
+> 生产一致、知识原文按库内路径可读、/health ok。注意 files 包解出的是
+> `data/knowledge/`(相对仓库根),恢复目标必须让知识目录落在
+> `<dataDir>/knowledge/`——生产 dataDir 就是 `data/`,按上述命令 `-C .`
+> 解到仓库根即正确;往别的 dataDir 恢复时需要相应挪位。
+
 ## 7. 安全：master key 轮换（BYOK 加密钥）
 
 1. `.env`：新钥写 `MASTER_ENCRYPTION_KEY`，旧钥挪到

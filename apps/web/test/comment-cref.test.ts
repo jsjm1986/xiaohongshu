@@ -344,8 +344,10 @@ test("candidate markdown flips to the two-part layout on any single Cref v1.1 fi
 });
 
 test("thread kind helpers default to org_answer and label the three interaction forms", () => {
+  // 缺失=历史包(T1 时代只有机构问答)→ org_answer;
+  // 存在但不认识=未来新形态 → fail-closed 按模拟读者,不冒充机构担责身份。
   assert.equal(commentThreadKindOf({}), "org_answer");
-  assert.equal(commentThreadKindOf({ threadKind: "未知形态" }), "org_answer");
+  assert.equal(commentThreadKindOf({ threadKind: "未知形态" }), "reader_exchange");
   assert.equal(commentThreadKindOf({ threadKind: "org_answer" }), "org_answer");
   assert.equal(commentThreadKindOf({ threadKind: "reader_exchange" }), "reader_exchange");
   assert.equal(commentThreadKindOf({ threadKind: "organic_reaction" }), "organic_reaction");
