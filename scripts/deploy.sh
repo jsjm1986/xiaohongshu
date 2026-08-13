@@ -56,6 +56,12 @@ else
   echo "    端口 ${PORT} 无进程(可能已停),等 launchd 拉起"
 fi
 
+echo "==> [5.5/6] 刷新 launchd 脚本拷贝(TCC 拒绝执行桌面下的脚本,见 RUNBOOK)"
+LAUNCHD_BIN="$HOME/Library/Application Support/xhsai/bin"
+mkdir -p "${LAUNCHD_BIN}"
+cp "${REPO_DIR}/scripts/health-watch.sh" "${REPO_DIR}/scripts/backup-production.sh" "${LAUNCHD_BIN}/"
+chmod 755 "${LAUNCHD_BIN}"/*.sh
+
 echo "==> [6/6] 探活(最多等 60 秒)"
 for i in $(seq 1 30); do
   sleep 2

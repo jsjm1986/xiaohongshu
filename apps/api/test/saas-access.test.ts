@@ -76,6 +76,8 @@ const cases: Array<[string, string, boolean]> = [
   // 额度只读:仅这一条精确路径放行。裸 /api/settings 仍拒——它的 publicSettings
   // 会连带吐出 apiBaseUrl / model / generationDefaults,租户不该看到基础设施细节。
   ['GET', '/api/settings/quota', true],
+  ['GET', '/api/settings/quota/ledger', true],
+  ['POST', '/api/settings/quota/ledger', false],
   ['POST', '/api/settings/quota', false],
   ['PATCH', '/api/settings/quota', false],
   ['DELETE', '/api/settings/quota', false],

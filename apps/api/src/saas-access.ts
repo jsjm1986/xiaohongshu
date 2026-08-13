@@ -65,6 +65,8 @@ export function isSaasApiAllowed(method: string, path: string): boolean {
 
     // 裸 /api/settings 会暴露供应商与生成配置，SaaS 只读额度快照。
     { methods: ['GET'], route: /^\/api\/settings\/quota$/u },
+    // 用量流水(只读):客户对自己的账单有知情权,权限与看余量一致。
+    { methods: ['GET'], route: /^\/api\/settings\/quota\/ledger$/u },
   ];
 
   return allowed.some(({ methods, route }) => methods.includes(verb) && route.test(pathname));

@@ -5,6 +5,7 @@ import { useAuth } from '../components/AuthContext';
 import { Button, Field, useToast } from '../components/Ui';
 import { api } from '../lib/api';
 import { quotaAbsenceNote, quotaCell, type QuotaSnapshot } from '../lib/quota-view';
+import { ledgerItemView, preLedgerNote, type QuotaLedgerResponse } from '../lib/quota-ledger-view';
 import { QUICK_HOME_PATH } from '../lib/quick-routes';
 
 /**
@@ -26,18 +27,24 @@ export function QuickAccountPage() {
   const [password, setPassword] = useState({ current: '', next: '', confirm: '' });
   const [saving, setSaving] = useState(false);
   const [quota, setQuota] = useState<QuotaSnapshot | null>(null);
+  const [ledger, setLedger] = useState<QuotaLedgerResponse | null>(null);
 
   // 额度:工作区 id 从 /api/workspaces 取,而不是依赖「当前选中项目」——
-  // 账户页可能在还没选项目时打开。两个接口都在 SaaS 白名单里。
+  // 账户页可能在还没选项目时打开。接口都在 SaaS 白名单里。
   useEffect(() => {
     let cancelled = false;
     api.workspaces.list()
       .then((list) => {
         const workspaceId = list[0]?.id;
         if (!workspaceId || cancelled) return;
-        return api.settings.quota(workspaceId).then((snapshot) => {
-          if (!cancelled) setQuota(snapshot);
-        });
+        return Promise.all([
+          api.settings.quota(workspaceId).then((snapshot) => {
+            if (!cancelled) setQuota(snapshot);
+          }),
+          api.settings.quotaLedger(workspaceId).then((response) => {
+            if (!cancelled) setLedger(response);
+          }),
+        ]);
       })
       .catch(() => { /* 静默回落:额度读不到就不显示这一格,不打扰用户 */ });
     return () => { cancelled = true; };
@@ -128,6 +135,33 @@ export function QuickAccountPage() {
             ) : (
               <p className="qc-hint">{absenceNote}</p>
             )}
+          </section>
+        )}
+
+        {/* 用量流水:客户对自己的账单有知情权。空流水且余额为 0 时整节不显示;
+            流水上线(2026-08-13)前的历史用量无逐笔明细,差额如实说明。 */}
+        {ledger && (ledger.items.length > 0 || (quota?.quotaUsed ?? 0) > 0) && (
+          <section className="qc-account__card">
+            <h2>用量明细</h2>
+            <p className="qc-hint">共扣 {ledger.consumed} 次、退回 {ledger.refunded} 次；生成、按意见修改、知识库分析各计 1 次，失败与中断自动退回。</p>
+            {quota && preLedgerNote(quota.quotaUsed ?? 0, ledger.net) && (
+              <p className="qc-hint">{preLedgerNote(quota.quotaUsed ?? 0, ledger.net)}</p>
+            )}
+            {ledger.items.length > 0 && (
+              <ul className="qc-ledger">
+                {ledger.items.slice(0, 20).map((item) => {
+                  const view = ledgerItemView(item);
+                  return (
+                    <li key={item.id}>
+                      <span className="qc-ledger__label">{view.label}</span>
+                      <span className="qc-ledger__date">{view.date}</span>
+                      <b className={view.isRefund ? 'qc-ledger__amount qc-ledger__amount--refund' : 'qc-ledger__amount'}>{view.amount}</b>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+            {ledger.items.length > 20 && <p className="qc-hint">仅显示最近 20 条。</p>}
           </section>
         )}
 

@@ -13,7 +13,9 @@
 # 或挂载的外置盘路径),未设置时脚本会在日志里提醒——同盘备份防误删不防盘毁。
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# launchd 拷贝运行时由 CONTENT_AGENT_ROOT 指定仓库(TCC 拒绝执行桌面下的
+# 脚本文件,见 health-watch.sh 同款注释);仓库内手工执行自动推导。
+ROOT="${CONTENT_AGENT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 DB="$ROOT/data/app.db"
 DEST="$ROOT/data/backups/auto"
 STAMP="$(date +%Y%m%d-%H%M%S)"

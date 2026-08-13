@@ -3275,6 +3275,15 @@ div.qc-topic { cursor: default; }
 
 /* ---- 极简创作账户页:SaaS 用户不再被送进专家版 /settings ---- */
 .qc-account .qc-panel { display: flex; flex-direction: column; gap: 16px; }
+/* 用量流水列表:label + 时间 + 金额三列,退回用绿色区分扣款 */
+.qc-ledger { margin: 8px 0 0; padding: 0; list-style: none; display: grid; gap: 2px; }
+.qc-ledger li { display: flex; align-items: baseline; gap: 10px; padding: 5px 0; border-bottom: 1px dashed var(--line); font-size: var(--v2-fs-xs); }
+.qc-ledger li:last-child { border-bottom: 0; }
+.qc-ledger__label { color: var(--v2-ink); }
+.qc-ledger__date { margin-left: auto; color: var(--v2-muted); font-variant-numeric: tabular-nums; }
+.qc-ledger__amount { min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
+.qc-ledger__amount--refund { color: var(--v2-ok); }
+
 .qc-account__card {
   border: 1px solid var(--v2-line); border-radius: var(--v2-radius);
   background: var(--v2-surface); padding: 18px 20px;

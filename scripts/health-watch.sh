@@ -21,7 +21,11 @@
 #    验证:ALERT_WEBHOOK=... ALERT_WEBHOOK_KIND=feishu bash scripts/health-watch.sh --test
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# launchd 从 ~/Library/Application Support/xhsai/bin/ 运行本脚本的拷贝
+# (macOS TCC 会拒绝 launchd 执行位于"桌面"下的脚本文件,exit 126;
+# 部署方式见 RUNBOOK):此时仓库位置由 CONTENT_AGENT_ROOT 提供。
+# 在仓库内直接手工执行时仍按脚本位置自动推导。
+ROOT="${CONTENT_AGENT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 LOG="$ROOT/data/logs/alerts.log"
 STATE="$ROOT/data/logs/.alert-state"
 URL="${HEALTH_URL:-http://127.0.0.1:8780/health}"

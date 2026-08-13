@@ -1528,6 +1528,16 @@ export const api = {
       request<QuotaSnapshot>(
         `/api/settings/quota${workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : ""}`,
       ),
+    /** 用量流水(只读):月度汇总+逐笔明细,权限与看余量一致。 */
+    quotaLedger: (workspaceId?: string, month?: string) => {
+      const params = new URLSearchParams();
+      if (workspaceId) params.set("workspaceId", workspaceId);
+      if (month) params.set("month", month);
+      const query = params.toString();
+      return request<import("./quota-ledger-view").QuotaLedgerResponse>(
+        `/api/settings/quota/ledger${query ? `?${query}` : ""}`,
+      );
+    },
     update: (
       input: Partial<AppSettings> & { apiKey?: string; workspaceId?: string; clearApiKey?: boolean },
     ) =>

@@ -13,6 +13,7 @@
 | 数据 | `data/app.db`（SQLite）+ `data/knowledge/`（知识原文）+ `.env` |
 | 每日备份 | launchd `com.content-agent.backup` → `data/backups/auto/`（gzip，保留 14 天） |
 | 看门狗 | launchd `com.content-agent.health-watch`，每 5 分钟探活 + 失败率聚合 |
+| launchd 脚本位置 | `~/Library/Application Support/xhsai/bin/`（**不是**仓库 scripts/：macOS TCC 会拒绝 launchd 执行"桌面"路径下的脚本，exit 126。`deploy.sh` 每次部署自动刷新拷贝；仓库位置经 plist 的 `CONTENT_AGENT_ROOT` 传入） |
 | 健康检查 | `curl http://127.0.0.1:8780/health` |
 
 ---
