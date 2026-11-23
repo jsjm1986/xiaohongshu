@@ -1433,6 +1433,11 @@ test('planning CRUD, explicit approvals, image safety and generation snapshots w
   assert.equal(imageJob.imageContextKind, 'approved_source_observations');
   assert.equal(imageJob.sourceImageAssets[0].assetKind, 'source_material');
   assert.equal(imageJob.sourceImageAssets[0].isFinalAsset, false);
+  const articleImages = [{ assetId: uploaded.body.id, filename: uploaded.body.filename, width: uploaded.body.width, height: uploaded.body.height }];
+  assert.deepEqual(imageJob.candidates[0].articleImages, articleImages);
+  const imageReader = await request(`/api/generations/${imageJob.id}/reader`);
+  assert.equal(imageReader.response.status, 200);
+  assert.deepEqual(imageReader.body.candidates[0].articleImages, articleImages);
   assert.deepEqual(imageJob.planningContext.imageAnalyses[0].observedFacts, ['红色横幅']);
   assert.ok(imageJob.candidates.every((candidate: any) => candidate.imagePlan));
   assert.ok(imageJob.candidates.every((candidate: any) => candidate.productionArtifacts?.schemaVersion === '1.0'));

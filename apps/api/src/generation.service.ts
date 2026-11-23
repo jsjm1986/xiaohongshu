@@ -40,7 +40,7 @@ import {
   normalizeImpactReportForApi,
 } from './diagnostic-contract.js';
 import { FormulaService } from './formula.service.js';
-import { readerView } from './generation-reader-view.js';
+import { articleImagesForCandidate, readerView, type ArticleImage } from './generation-reader-view.js';
 import {
   claimNext,
   claimNextJob,
@@ -909,6 +909,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
    */
   readerView(jobId: string, deliveryConfirmationUserId?: string): Record<string, unknown> {
     const row = this.jobRow(jobId);
+    const sourceImages = row.status === 'completed' ? this.articleSourceImages(row) : [];
     return {
       id: row.id,
       projectId: row.project_id,
@@ -930,10 +931,35 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
             const confirmation = deliveryConfirmationUserId
               ? this.manualDeliveryConfirmation(content.id, deliveryConfirmationUserId) ?? undefined
               : undefined;
-            return readerView(content, confirmation);
+            return readerView(content, confirmation, sourceImages);
           })
         : [],
     };
+  }
+
+  private articleSourceImages(row: JobRow): ArticleImage[] {
+    const selected = parseJson<unknown>(row.image_context_json, []);
+    if (!Array.isArray(selected)) return [];
+    const descriptions = new Map<string, string | undefined>();
+    for (const image of selected) {
+      if (!isRecord(image)) continue;
+      const assetId = image.sourceAssetId ?? image.assetId;
+      if (typeof assetId !== 'string' || !assetId || descriptions.has(assetId)) continue;
+      descriptions.set(assetId, typeof image.altText === 'string' ? image.altText.trim().slice(0, 240) || undefined : undefined);
+    }
+    const ids = [...descriptions.keys()];
+    if (!ids.length) return [];
+    // The asset endpoint applies the same project boundary. Exclude deleted
+    // sources so historical articles keep working after a library cleanup.
+    const assets = this.database.prepare(
+      `SELECT id AS assetId, filename, width, height FROM image_assets
+       WHERE project_id=? AND deleted_at IS NULL AND id IN (${ids.map(() => '?').join(',')})`,
+    ).all(row.project_id, ...ids) as unknown as ArticleImage[];
+    const byId = new Map(assets.map((asset) => [asset.assetId, asset]));
+    return ids.flatMap((id) => {
+      const asset = byId.get(id);
+      return asset ? [{ ...asset, altText: descriptions.get(id) }] : [];
+    });
   }
 
   /** 受理修改请求并立即返回;执行由 RevisionService 的队列负责。 */
@@ -2069,6 +2095,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     const warnings = Array.isArray(resolutionSnapshot.warnings) ? resolutionSnapshot.warnings : [];
     const conflicts = Array.isArray(resolutionSnapshot.conflicts) ? resolutionSnapshot.conflicts : [];
     const sourceImageContext = parseJson<Array<Record<string, unknown>>>(row.image_context_json, []);
+    const sourceImages = includeCandidates && row.status === 'completed' ? this.articleSourceImages(row) : [];
     const opportunitySnapshot = parseJson<Record<string, unknown>>(row.opportunity_snapshot_json, {});
     const opportunitySelectionAudit = isRecord(opportunitySnapshot.opportunitySelectionAudit)
       ? opportunitySnapshot.opportunitySelectionAudit
@@ -2084,7 +2111,12 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       qualityStatus: this.projectedJobQualityStatus(row),
       progress: row.progress,
       ...this.queueView(row.id),
-      candidates: includeCandidates && row.status === 'completed' ? this.packageRows(row.id).map((item) => this.mapCandidate(normalizeContentPackageForApi(parseJson<ContentPackage>(item.content_json, {} as ContentPackage)), deliveryConfirmationUserId)) : undefined,
+      candidates: includeCandidates && row.status === 'completed'
+        ? this.packageRows(row.id).map((item) => {
+            const content = normalizeContentPackageForApi(parseJson<ContentPackage>(item.content_json, {} as ContentPackage));
+            return this.mapCandidate(content, deliveryConfirmationUserId, sourceImages);
+          })
+        : undefined,
       seed: row.seed,
       formulaVersion: config?.formula.versionId,
       presetId: row.preset_id,
@@ -2133,7 +2165,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  private mapCandidate(content: ContentPackage, deliveryConfirmationUserId?: string): Record<string, unknown> {
+  private mapCandidate(content: ContentPackage, deliveryConfirmationUserId: string | undefined, sourceImages: ArticleImage[]): Record<string, unknown> {
     const errors = content.validation.issues.filter((item) => item.severity === 'error').length;
     const warnings = content.validation.issues.filter((item) => item.severity === 'warning').length;
     const score = Math.max(0, Math.round(100 - errors * 25 - warnings * 5));
@@ -2149,6 +2181,7 @@ export class GenerationService implements OnModuleInit, OnModuleDestroy {
       label: '随机候选',
       title: content.content.N.title,
       body: content.content.N.body,
+      articleImages: articleImagesForCandidate(sourceImages, content.imagePlan ?? content.orchestrationSnapshot?.imagePlan),
       tags: content.content.H.hashtags.map((tag) => tag.startsWith('#') ? tag : `#${tag}`),
       comments: content.content.Cref.threads.map((thread, index) => {
         const planned = content.dialogueThreads?.find((item) => item.id === thread.id) ?? content.dialogueThreads?.[index];

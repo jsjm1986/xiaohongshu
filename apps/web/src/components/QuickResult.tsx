@@ -19,8 +19,9 @@ async function copyText(text: string, toast: ReturnType<typeof useToast>) {
   }
 }
 
-export function QuickResult({ candidates, projectName, onRegenerate, onPickAnotherTopic, onRevise, revisingId }: {
+export function QuickResult({ candidates, projectId, projectName, onRegenerate, onPickAnotherTopic, onRevise, revisingId }: {
   candidates: QuickCandidateView[];
+  projectId?: string;
   /** 发布账号名,用于仿真笔记与机构答复的署名 */
   projectName?: string;
   onRegenerate?: () => void;
@@ -85,7 +86,7 @@ export function QuickResult({ candidates, projectName, onRegenerate, onPickAnoth
       {/* 生成完先给「发出去长什么样」,与阅读页同一个 NoteCard——原来这里是
           标题/正文/标签/图片简报各一张字段卡,同一份内容在 SaaS 里长两个样,
           而用户先看到的偏偏是字段清单那套。字段级复制没丢:NoteCard 自带逐字段复制。 */}
-      <NoteCard candidate={view} job={{}} projectName={projectName} copyEnabled={deliverable} />
+      <NoteCard candidate={view} job={{ projectId }} projectName={projectName} copyEnabled={deliverable} />
 
       {/* 评论核对:边界要求/下一步核验这些编排字段原来平铺在「问答话术」卡里,
           换成仿真预览后预览区不再展示它们(它们是写给生成器的内部指令,不是发布文案)。
