@@ -1002,7 +1002,7 @@ export function buildStagedCorePrompt(input: GenerationPromptInput): PromptBundl
       ? `发布主体硬合同：机构官方账号。
 - 标题和正文必须是明确的机构说明、条件式建议、常见问题整理或待核实表达；不得扮演消费者、体验者或“正在比较的人”。
 - 禁止消费者第一人称，也禁止省略“我”后写成“昨天去了、约了家、体验下来、没被推销”这类隐含消费者亲历；“我们/我方”只能陈述有证据的机构事实。
-- personaScenePlan只提供议题结构，不授权任何消费者生活事件。`
+- personaScenePlan只提供议题结构，不授权任何消费者生活事件。举例用“如果”之类的条件表达；没有真实记录时，不声称店里实际见过、接到过或经常发生。`
       : `发布主体硬合同：已确认的真实个人作者。
 人工确认事实：${safeJson(authorFacts)}
 - 作者身份、状态、打算、限制、时间、地点、动作、关系、情绪、接触、交易、恢复和结果，只能逐项来自上述事实。
@@ -1017,6 +1017,7 @@ ${topologyContract}
 - orchestrationPlan.focusContract 是本候选的最终聚焦合同：只写 effectiveAngle 与 allowedGapIds 覆盖的任务。mode=focused 时不得引入任何未被这些 gap 明确要求的相邻主题，也不得为了“人味”补经历。
 - 正文必须落在硬范围 ${input.config.content.bodyMinChars}-${input.config.content.bodyMaxChars} 字内；personaScenePlan.surfaceTargets 与硬范围冲突时以硬范围为准，其余情况优先落在其长度区间。标签 ${input.config.content.hashtagMin}-${input.config.content.hashtagMax} 个，不追无关热点。
 - 只完成一次最小推进，不同时回答所有信息缺口，不写“首先/其次/核实清单/适用边界/资料显示”等后台总结句。
+- 正文完成 contentIntent.bodyMustEstablish 的职责。bodyMustNotExpand 中交给评论的问题留给评论回答；选题明确要给读者可复制的示例或话术，就给出一句可直接使用的例子。
 - 项目知识只能在证据范围内自然进入；creative_scenario 可创作消费者亲历载体但不能把项目知识伪装成亲历证据，其他视角不得把项目资料变成作者本人经历。
 - 标题优先短、具体，不把主题、风险、方案、结果和成本一次列全。
 - N.imageBrief服从imagePlan：真实素材只陈述可见事实；creative_scenario可落实已审核的创作画面，但不得把它标成真实用户现场，也不得虚构被禁止的项目历史、他人对话或结果画面。
@@ -1290,7 +1291,13 @@ export function buildStagedCommentReadersPrompt(
 ): PromptBundle {
   const context = readerSideCommentContext(input);
   const specs = readerThreadSpecs(input);
-  const hasHostReply = (input.orchestrationPlan?.dialogueThreads ?? []).some((thread) => thread.threadKind === "host_reply");
+  const plannedThreads = input.orchestrationPlan?.dialogueThreads ?? [];
+  const hasHostReply = plannedThreads.some((thread) => thread.threadKind === "host_reply");
+  const hasSocialSeats = plannedThreads.some((thread) =>
+    thread.threadKind === "reader_exchange" || thread.threadKind === "organic_reaction");
+  const varietyRule = hasSocialSeats
+    ? "- 在已分配的社会位置里变化语气和切入点。局部共鸣或反例也要承接本线程的同一件事。"
+    : "- 只写已分配的问题，不额外凑社交场景、读者共鸣或反例。";
   const hostReplyRule = hasHostReply
     ? `\n- threadKind=host_reply：question只问已发布正文或“作者可确认事实”中的当前状态、打算、限制与明确细节；严禁询问价格、地址、预约、档期、效果、恢复、风险、适用性、资质、身份或因果结论；answer留空给作者隔离阶段填写。`
     : "";
@@ -1305,13 +1312,14 @@ ${writerSafeJson(input, specs)}
 - id严格沿用规格ID。question字段表示开口人物的一条可见评论，不要求每条都是问句：可以是提问、同款担心、正在做的准备、不同意见或几个字的反应。长度优先服从所分配人物的targetChars。
 - 每条线程规格里带“禁止代替的证据”——那是这条线程分配到的人物必须守的一条硬边界，逐条照它执行。开口人物可以说自己的处境和做过的功课，但不写成效果证词（不给效果数字、不背书）。“开口人物重复需换说法”=true的线程，同一人物类型也要换一种说法和切入点，不和前一位撞腔。
 ${hostReplyRule}
+- threadKind=org_answer：只问职责内的一件事，让对方能直接回答。正文已经说明的内容，可以顺着问一个同题的实际执行条件。配图的装饰和未说明的数字不作为服务条件来提问。
 - threadKind=reader_exchange：answer是同帖下读者B的自然接话——B只说自己的处境、感受、疑问或轻反应，范围限其permittedContribution；B同样遵守读者须知，不回答项目事实类问题。
 - 其余threadKind：answer一律输出空字符串""，留给能回答的一方后续补；其中threadKind=organic_reaction 的 question 是一条4-20字轻反应——用该人物自己的话表达共鸣、围观、收藏或想跟进，不提问、不答题，也不套用平台口头禅模板。
 - 本轮只写 id、question、answer 三个字段。function、kind、boundary、followUps、身份和证据结构全部由程序按冻结计划装配，不得输出。
 - 评论总可见行数优先落在篇幅目标visibleCommentLines，典型单行长度落在typicalCommentChars附近，但允许少量长经验和极短反应，长短必须不齐。
-- 至少包含三种不同社会位置；至少一条人物/地点/行动路由；至少一条经验差异或谨慎反例；允许一条纯共鸣或未完全闭合的评论。
+${varietyRule}
 - 先按人物说话，再考虑网感。允许短问、半句话、迟疑、轻微反对和不完整反应；禁止全员同款称呼、堆emoji、堆热词，以及为躲审核故意造错字。一人最多一处明显语域标记。
-- 整体执行评论网络形态要求里的multiTurnTarget和antiScriptRules。允许局部同意、反驳、看图才发现、同城插话或轻微岔开；禁止所有线程同向夸赞，禁止排成整齐的行动漏斗。
+- 多轮留给后续阶段。遵守antiScriptRules，禁止所有线程同向夸赞或排成整齐的行动漏斗。
 - 信息要相对正文新增，但单个角色只说自己位置能知道的部分。消费者亲历与效果感受可以作为明确标注的创作参考出现，但不能算作真实口碑、项目证据或项目方承诺。
 - 同一知识按人物换说法：先像真人聊天，再检查事实，不要出现审计或说明书口吻；相关边界在最需要的一条评论中自然出现一次即可。
 - 根question必须落实该线程冻结的“提问时刻”：至少自然露出当前动作、现实限制或为什么现在来问中的一项；人物标签不能只存在于隐藏字段里。
@@ -1342,6 +1350,7 @@ export function buildStagedCommentEditorPrompt(
   input: GenerationPromptInput,
   core: Pick<ContentPackageContent, "H" | "N">,
   current: { threads: Array<{ id: string; question: string; answer: string }> },
+  reasons: string[] = [],
 ): PromptBundle {
   const context = readerSideCommentContext(input);
   const specs = readerThreadSpecs(input);
@@ -1353,8 +1362,12 @@ ${writerSafeJson(input, specs)}
 当前读者评论：
 ${safeJson(current)}
 
+服务器发现的复核线索：
+${writerSafeJson(input, reasons)}
+
 编辑职责：
 - 逐条保留 id、数量和顺序，只改 question；仅 reader_exchange 可改非空 answer，其他线程 answer 必须为空。
+- 按线程核对线索。问题和接话用不同措辞也能承接同一件事；只修实际偏题、越权和重复，不为了命中关键词改动自然且同题的原文。
 - 每条发言必须从分配人物的“提问时刻”自然开口，让当前动作、现实限制或现在来问的原因至少露出一项，并在其问题职责内提供具体顾虑、条件、观察、行动打算或轻反应。
 - 必须改掉采访/审核腔：“公开渠道能查到的有哪些”“具体要看什么条件”“需要核实哪些信息”“由哪个身份确认”等句式不能作为最终question；不要用空泛赞同、主持人口吻、说明书口吻或同义改写凑数。
 - 整组评论要有真实差异：人物知道的范围、句长、语气和互动动作可以不同；不要求整齐，不要求每条都是问句，不为覆盖指标硬塞话。
@@ -1790,11 +1803,14 @@ function orgThreadList(
   }));
 }
 
-/**
- * 阶段2A-O（机构答复，publisher/staff 各 1 次，该角色无线程则引擎跳过）：
- * 产出本角色线程的 answer（+可选 answerKind/boundary）；publisher 调用可产
- * ownedFirstComment。core(H/N) 仅作对话背景。
- */
+const ORG_ANSWER_SELF_REVIEW_RULES = `- 尽量用一到两句独立短句，优先用中文句号。服务器按 。！？!?；; 及换行分段，保留每段末尾的标点，忽略首尾空白。
+- review.claims 按原顺序逐段填写。一段对应一项，statement 必须逐字复制该段及末尾标点。分号后另起一项，逗号不分段。
+- factual_assertion 和 organization_commitment 分别用于事实陈述和服务处理、收费或承诺。每段的全部事实须有本线程证据支持，supported=true，evidenceId 属于本线程，quote 是该来源的逐字连续原文。无法支持时先删掉答复中的无依据断言；仍无法作答则用 review.status=reject。
+- hedge_or_unknown 和 question_or_nonclaim 只用于确实保留未知、提出问题或不作声明的段。此时 supported、evidenceId、quote 三项都填 null。有事实或承诺的段不能用这两类替代。`;
+
+const ORG_ANSWER_SELF_REVIEW_EXAMPLE = `{"status":"accept","claims":[{"statement":"有依据的答复。","classification":"factual_assertion","supported":true,"evidenceId":"本线程证据ID","quote":"逐字原文"},{"statement":"个别情况还需确认。","classification":"hedge_or_unknown","supported":null,"evidenceId":null,"quote":null}],"reasons":[]}`;
+
+/** 机构根答复按角色分别生成，发布账号还可提供已自检的首评。 */
 export function buildStagedOrgAnswersPrompt(
   input: GenerationPromptInput,
   core: Pick<ContentPackageContent, "H" | "N">,
@@ -1806,10 +1822,10 @@ export function buildStagedOrgAnswersPrompt(
   const ownedFirstCommentRule = identity === "publisher"
     ? "\n- 首评（可选）：ownedFirstComment是发布账号可单独发布的首评，不是模拟读者评论。只在有已核验口径时，先回应一个最影响判断的顾虑，再自然补充1—2个有用信息点；只保留会改变判断的必要边界。默认不催促行动，不重复私信、预约、到店或留联系方式；确有必要时只给一个最低压力的下一步。不得写成FAQ清单、客服串词、用户证言或伪造互动；信息不足时省略整个字段。"
     : "";
-  const reviewSample = `"review":{"status":"accept|reject","claims":[{"statement":"answer中的完整句子","classification":"factual_assertion|organization_commitment|hedge_or_unknown|question_or_nonclaim","supported":true,"evidenceId":"该线程证据ID","quote":"该证据中的逐字原文"}],"reasons":[]}`;
+  const answerExample = `{"id":"清单ID","answer":"有依据的答复。个别情况还需确认。","answerKind":"answer","review":${ORG_ANSWER_SELF_REVIEW_EXAMPLE}}`;
   const sample = identity === "publisher"
-    ? `{"answers":[{"id":"清单ID","answer":"自然答复","answerKind":"answer",${reviewSample}}],"ownedFirstComment":"可选首评","ownedFirstCommentReview":{"status":"accept|reject","claims":[{"statement":"首评中的完整句子","classification":"factual_assertion|organization_commitment|hedge_or_unknown|question_or_nonclaim","supported":true,"evidenceId":"该线程证据ID","quote":"该证据中的逐字原文"}],"reasons":[]}}`
-    : `{"answers":[{"id":"清单ID","answer":"自然答复","answerKind":"answer",${reviewSample}}]}`;
+    ? `{"answers":[${answerExample}],"ownedFirstComment":"有依据的答复。个别情况还需确认。","ownedFirstCommentReview":${ORG_ANSWER_SELF_REVIEW_EXAMPLE}}`
+    : `{"answers":[${answerExample}]}`;
   const phase = `阶段2A-O：图文与读者评论已经完成。现在以你的身份逐条答复下方列出的线程，不改图文，也不答复未列出的线程。
 
 本角色线程清单（每条附“你手里的口径”：答复要点＋钉到该gap的证据原文；没有证据的按硬约束明确保留未知，不承诺未来服务动作）：
@@ -1817,14 +1833,12 @@ ${writerSafeJson(input, threadList)}
 
 每条线程必须：
 - id严格沿用清单ID，覆盖清单中的每一条；answer紧接读者提问，通常一小句或两小句。
+- 只给当前问题需要的口径。已有一般建议、个别安排待定时，先给能确认的建议，再保留具体安排；不重复整段正文，也不引入相邻套餐或流程。
 - answerKind常规为answer；该线程有明确边界时写出boundary，没有就省略该字段。${ownedFirstCommentRule}
-- 写完answer后立即逐句自检：review.claims必须按answer句子原顺序逐句覆盖，不得遗漏、拆改或合并句子。
-- 事实陈述归 factual_assertion；机构现在或未来会做什么、收费/保障/处理方式归 organization_commitment；明确保留未知或限定范围归 hedge_or_unknown；纯提问或非声明归 question_or_nonclaim。不要用 hedge_or_unknown 掩盖承诺或事实。
-- factual_assertion 与 organization_commitment 只有在本线程“证据原文”语义支持时才可 supported=true：evidenceId 必须属于本线程，quote 必须是该证据中的逐字连续原文；没有支持就 review.status=reject，不得用常识或推断放行。
-- hedge_or_unknown与question_or_nonclaim不要求证据，supported/evidenceId/quote填null。只有每句都合规时status=accept；reasons简述拒绝原因，不改写证据。
+${ORG_ANSWER_SELF_REVIEW_RULES}
 - ownedFirstComment存在时必须同时给ownedFirstCommentReview并按同一规则自检；缺少可支持口径时省略首评及其review。
 
-只返回：${sample}`;
+按这个格式只返回 JSON。示例文字和证据占位符不可复制到成稿：${sample}`;
   const messages: PromptMessage[] = [
     { role: "system", content: STAGED_ISOLATED_SYSTEM_PROMPT },
     { role: "user", content: context },
@@ -1930,9 +1944,9 @@ ${writerSafeJson(input, followUpList)}
 每条必须：
 - id严格沿用清单ID，覆盖清单中的每一条；answer紧接追问，一小句或两小句。
 - answerKind常规为clarification；有明确边界时写出boundary，没有就省略该字段。
-- review.claims按answer句子原顺序逐句覆盖。事实断言和机构承诺只有在本线程证据原文语义支持时才能status=accept，并附本线程evidenceId与逐字quote；限定、保留未知或非声明节点填null。缺少支持必须status=reject。
+${ORG_ANSWER_SELF_REVIEW_RULES}
 
-只返回：{"answers":[{"id":"清单ID","answer":"自然补答","answerKind":"clarification","review":{"status":"accept|reject","claims":[{"statement":"answer中的完整句子","classification":"factual_assertion|organization_commitment|hedge_or_unknown|question_or_nonclaim","supported":true,"evidenceId":"证据ID","quote":"逐字原文"}],"reasons":[]}}]}`;
+按这个格式只返回 JSON。示例文字和证据占位符不可复制到成稿：{"answers":[{"id":"清单ID","answer":"有依据的答复。个别情况还需确认。","answerKind":"clarification","review":${ORG_ANSWER_SELF_REVIEW_EXAMPLE}}]}`;
   const messages: PromptMessage[] = [
     { role: "system", content: STAGED_ISOLATED_SYSTEM_PROMPT },
     { role: "user", content: context },
@@ -1959,7 +1973,7 @@ export function buildStagedLedgerPrompt(
 - fact只能使用usableEvidenceReferences中的证据。每个sourceSpans.quote必须是对应证据quote中的逐字连续原文；不得用常识或相似意思代替原文。
 - 每条fact必须同时返回evidenceIds和至少一条非空sourceSpans（evidenceId + quote）。只报证据ID、只说“来自知识库”或省略引用原文都不算完成，服务器会拒绝。
 - inference、hypothesis、sample和unknown不能伪装成fact，sourceSpans留空；公开文字把未知写成确定事实时，不得靠台账洗白。
-- personaScenePlan 中的模拟人物和模拟评论统一按 hypothesis 或 sample 记账；真实个人作者的已确认事实由系统在模型输出后绑定为 human_confirmed_author_fact，模型不得伪造 authorFactId 或 confirmationId。只有知识库直接支持的项目声明才可能是 fact。
+- 模拟读者的提问和互聊可按 hypothesis 或 sample 记账。org_answer 线程的 answer 由指定可追责身份提供，按可见陈述逐句分类；事实只引用该线程主问题在 gapPlanningCards 中列出的证据。真实个人作者的已确认事实由系统绑定为 human_confirmed_author_fact，模型不得伪造 authorFactId 或 confirmationId。
 - 命中知识口径的项目事实声明（价格区间、人员姓名、恢复周期、地址、技术路径、保障说法等）必须记为 fact，并在 sourceSpans 挂载 usableEvidenceReferences 中对应小节的逐字原文；词组要记账，句子级声明同样要记账，不得因定位麻烦而降级为 inference 或干脆不记。
 - 只有创作情景与模拟读者言行按 hypothesis 或 sample 记账；拿不准一条声明的身份时按 hypothesis 记，不得伪装成 fact。
 - 根evidenceIds必须等于全部reasoning.sourceSpans使用的证据ID去重集合。
@@ -2018,6 +2032,7 @@ export const CLAIM_JUDGE_JSON_SCHEMA: Record<string, unknown> = {
 export function buildClaimJudgePrompt(input: {
   statements: string[];
   evidenceSources: Array<{ evidenceId: string; quote: string }>;
+  allowedEvidenceIdsByStatement?: Array<readonly string[] | undefined>;
 }): PromptBundle {
   const user = `声明裁决：下列句子是公开文案中被词表圈出的敏感声明（价格、数字、承诺或受控词命中）。你掌握机构完整知识上下文，对每句先分类，再只对事实断言判断证据支持。
 
@@ -2031,12 +2046,16 @@ export function buildClaimJudgePrompt(input: {
 - supported=true 仅当给出的证据源中存在对该句的语义支撑：允许换说法、不要求原文一致；但数字、单位、范围、限定语口径必须一致，口径不同（数值不同、来源只是可能/推测、范围不符）一律 supported=false。
 - 找不到语义支撑就 supported=false，不要勉强。
 - supported=true 时 evidenceId 与 quote 都必填：evidenceId 必须是下方证据源 ID，quote 必须是该证据源中的逐字连续片段（不得改写、缩写、扩写、拼接或调整标点）。系统会机械校验来源角色、ID、逐字片段和支持度；任一不通过即 supported=false。拿不准就填 supported=false、evidenceId=null、quote=null。
+- 有标注可用证据 ID 的句子只在列出的来源内判断；列表为空表示该句没有可引用来源。
 - service_offer / hedge / question 的 supported、evidenceId 与 quote 一律填 null。
 
 不评价句子真假之外的任何事，不修改句子，不新增证据。
 
 待裁决句子（statementIndex从0开始）：
-${input.statements.map((statement, index) => `${index}. ${statement}`).join("\n")}
+${input.statements.map((statement, index) => {
+    const allowed = input.allowedEvidenceIdsByStatement?.[index];
+    return `${index}. ${statement}${allowed ? `（可用证据 ID ${safeJson(allowed)}）` : ""}`;
+  }).join("\n")}
 
 证据源（判断支持的唯一依据）：
 ${safeJson(input.evidenceSources)}

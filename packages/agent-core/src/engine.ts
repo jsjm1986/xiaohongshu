@@ -64,6 +64,7 @@ import {
   attachKnowledgeAnchors,
   attachKnowledgeAnchorSelections,
   collectUnanchoredSensitiveClaims,
+  commentEvidenceForOccurrence,
   knowledgeAnchorEvidencePool,
   parseClaimJudgeVerdicts,
   resolveClaimJudgments,
@@ -81,6 +82,7 @@ import {
   assignCommentDisplayName,
   diagnoseAccountableIdentities,
   guardedReplyIdentitiesForQuestion,
+  organizationQuestionAsksForOtherRole,
   planTopicOrchestrations,
   realizeDeploymentPlan,
   questionMatchesPlannedGap,
@@ -306,6 +308,10 @@ export async function judgeSensitiveClaimsWithModel(
   const prompt = buildClaimJudgePrompt({
     statements: claims.map((claim) => claim.statement),
     evidenceSources: evidencePool,
+    allowedEvidenceIdsByStatement: claims.map((claim) => {
+      const scopedIds = commentEvidenceForOccurrence(context, claim.occurrence);
+      return scopedIds ? [...scopedIds] : undefined;
+    }),
   });
   try {
     // 判官失败的代价不对称:缺席时校验回退词面命中,合规邀约/限定句照样落
@@ -333,7 +339,7 @@ export async function judgeSensitiveClaimsWithModel(
         ? [{ statementIndex: verdict.statementIndex, evidenceId: verdict.evidenceId, quote: verdict.quote }]
         : []),
     );
-    return { ...anchored, claimJudgments: resolveClaimJudgments(claims, verdicts, evidencePool) };
+    return { ...anchored, claimJudgments: resolveClaimJudgments(claims, verdicts, evidencePool, context) };
   } catch (error) {
     request.onFailure?.(error);
     return clear();
@@ -592,6 +598,17 @@ interface ResolvedGenerationPlanning {
   plans: [OrchestrationPlan, OrchestrationPlan, OrchestrationPlan];
 }
 
+/** Match a complete quoted sentence in an already-cited table cell. Neighboring
+ * columns (for example a reader question) must not change its modality. */
+function matchesCitedTableSentence(statement: string, source: string): boolean {
+  const quote = statement.trim();
+  return source.split(/\r?\n/u).some((line) => {
+    const row = line.trim();
+    return row.startsWith("|") && row.endsWith("|")
+      && row.split("|").some((cell) => splitSensitiveStatements(cell).includes(quote));
+  });
+}
+
 function bindGapEvidence(
   gap: InformationGap,
   input: GenerationInput,
@@ -599,9 +616,10 @@ function bindGapEvidence(
 ): InformationGap {
   const references = generationEvidenceReferences(input.config, input.knowledge, context, input.planningContext);
   const sources = generationEvidenceSources(input.config, input.knowledge, context, input.planningContext);
+  const factualIds = new Set(references.filter(evidenceReferenceCanSupportFact).map((reference) => reference.id));
   const approvedIds = [...new Set(gap.evidenceIds
     .map((id) => resolveCanonicalEvidenceId(id, references))
-    .filter((id): id is string => Boolean(id)))];
+    .filter((id): id is string => id !== undefined && factualIds.has(id)))];
   const evidenceFor = (statement: string | undefined, field: HumanApprovedField): string[] => {
     if (!statement?.trim()) return [];
     // Preserve an approved citation when the same current, immutable source
@@ -610,9 +628,11 @@ function bindGapEvidence(
     // detached merely because a later retrieval order changed.
     const mapped = approvedIds.filter((id) => {
       const source = sources[id];
-      return source ? combinedEvidenceSupport(statement, [source]) : false;
+      return source
+        ? combinedEvidenceSupport(statement, [source]) || matchesCitedTableSentence(statement, source)
+        : false;
     });
-    mapped.push(...findSupportingSectionEvidenceIds([statement], context));
+    mapped.push(...findSupportingSectionEvidenceIds([statement], context).filter((id) => factualIds.has(id)));
     if (taskEvidenceSupports(input.config, [statement])) mapped.push(TASK_PROJECT_EVIDENCE_ID);
     const humanEvidenceId = humanApprovedEvidenceId(input.config.project.id, gap, field, statement.trim());
     if (humanEvidenceId) mapped.push(humanEvidenceId);
@@ -624,15 +644,17 @@ function bindGapEvidence(
     // Fail soft at sentence/semicolon boundaries. Each retained sentence must
     // independently pass the same evidence gate; unsupported siblings remain
     // visible in the audit issue instead of erasing supported facts.
-    const sentences = value
-      .split(/(?<=[。！？!?；;])|\n+/u)
-      .map((item) => item.trim())
-      .filter(Boolean);
+    const sentences = splitSensitiveStatements(value);
     const retained = sentences.map((sentence) => ({ sentence, ids: evidenceFor(sentence, field) }))
       .filter((item) => item.ids.length > 0);
+    const partial = retained.length !== sentences.length;
     return retained.length
-      ? { text: retained.map((item) => item.sentence).join(""), evidenceIds: [...new Set(retained.flatMap((item) => item.ids))], partial: true }
-      : { evidenceIds: [], partial: false };
+      ? {
+          text: partial ? retained.map((item) => item.sentence).join("\n") : value,
+          evidenceIds: [...new Set(retained.flatMap((item) => item.ids))],
+          partial,
+        }
+      : { evidenceIds: [], partial: true };
   };
   // Governance-only clauses are not factual answer atoms. Bind the public
   // remainder first; otherwise a compound value such as “public address + name
@@ -1654,10 +1676,21 @@ function factualEvidenceForThread(
   references: EvidenceReference[],
 ): EvidenceReference[] {
   const card = plan.gapPlanningCards?.find((item) => item.gapId === planned.primaryGapId);
-  const pinned = new Set(card?.evidenceIds ?? []);
+  const pinned = new Set(card?.evidenceIds.map((id) => resolveCanonicalEvidenceId(id, references)) ?? []);
   return references.filter((reference) => pinned.has(reference.id)
     && evidenceReferenceCanSupportFact(reference)
     && Boolean(reference.quote?.trim()));
+}
+
+function commentAnswerEvidenceScope(plan: OrchestrationPlan | undefined, references: EvidenceReference[]) {
+  const scoped = new Map<string, ReadonlySet<string>>();
+  if (!plan?.gapPlanningCards) return scoped;
+  for (const thread of plan.dialogueThreads) {
+    if ((thread.threadKind ?? "org_answer") !== "org_answer"
+      || !plan.gapPlanningCards.some((card) => card.gapId === thread.primaryGapId)) continue;
+    scoped.set(thread.id, new Set(factualEvidenceForThread(thread, plan, references).map((reference) => reference.id)));
+  }
+  return scoped;
 }
 
 function bindDialogueProvenance(
@@ -1857,7 +1890,8 @@ function bindDialogueProvenance(
       },
     },
   };
-  const reconciled = reconcileReasoningEvidence(bound, allowedEvidenceIds, evidenceSources, evidenceReferences);
+  const commentAnswerEvidenceIds = evidenceReferences ? commentAnswerEvidenceScope(plan, evidenceReferences) : undefined;
+  const reconciled = reconcileReasoningEvidence(bound, allowedEvidenceIds, evidenceSources, evidenceReferences, commentAnswerEvidenceIds);
   return {
     ...reconciled,
     content: {
@@ -1995,6 +2029,7 @@ function reconcileReasoningEvidence(
   allowedEvidenceIds: string[],
   evidenceSources: Record<string, string>,
   evidenceReferences?: EvidenceReference[],
+  commentAnswerEvidenceIds?: KnowledgeAnchorContext["commentAnswerEvidenceIds"],
 ): GenerationDraft {
   const referenceById = new Map((evidenceReferences ?? []).map((reference) => [reference.id, reference]));
   const allowed = new Set(allowedEvidenceIds.filter((id) => {
@@ -2011,11 +2046,12 @@ function reconcileReasoningEvidence(
       reasoning.push({ ...item, evidenceIds: [], sourceSpans: [] });
       continue;
     }
+    const scopedIds = commentEvidenceForOccurrence({ commentAnswerEvidenceIds }, item.occurrence);
     const preferred = [...new Set([
       ...(item.sourceSpans ?? []).map((span) => span.evidenceId),
       ...item.evidenceIds,
       ...factualAllowedIds,
-    ])].filter((id) => allowed.has(id));
+    ])].filter((id) => allowed.has(id) && (!scopedIds || scopedIds.has(id)));
     const sourceSpans = sourceSpansForClaim(item.statement, preferred, evidenceSources);
     if (!sourceSpans.length) continue;
     reasoning.push({
@@ -2030,7 +2066,9 @@ function reconcileReasoningEvidence(
       && item.occurrence?.followUpIndex === segment.occurrence.followUpIndex
       && conservativeEvidenceSupport(segment.statement, item.statement)
       && combinedEvidenceSupport(item.statement, (item.sourceSpans ?? []).map((span) => span.quote)))) continue;
-    const sourceSpans = sourceSpansForClaim(segment.statement, factualAllowedIds, evidenceSources);
+    const scopedIds = commentEvidenceForOccurrence({ commentAnswerEvidenceIds }, segment.occurrence);
+    const candidates = scopedIds ? factualAllowedIds.filter((id) => scopedIds.has(id)) : factualAllowedIds;
+    const sourceSpans = sourceSpansForClaim(segment.statement, candidates, evidenceSources);
     if (!sourceSpans.length) continue;
     reasoning.push({
       statement: segment.statement,
@@ -2501,8 +2539,9 @@ function readerStageEditorialReasons(
     if (kind === "org_answer") {
       const card = cards.get(planned.primaryGapId);
       if (!card || !questionMatchesPlannedGap(thread.question, card)) reasons.push(`线程 ${thread.id} 偏离冻结主缺口 ${planned.primaryGapId}`);
-      const guarded = guardedReplyIdentitiesForQuestion(thread.question, claimRules);
-      if ([...guarded].some((identity) => identity !== planned.postingIdentity)) reasons.push(`线程 ${thread.id} 改变了冻结答复身份`);
+      if (organizationQuestionAsksForOtherRole(thread.question, card, planned.postingIdentity, claimRules)) {
+        reasons.push(`线程 ${thread.id} 另问了超出主问题职责的受控事项`);
+      }
     }
     if (kind === "host_reply") {
       const guarded = guardedReplyIdentitiesForQuestion(thread.question, claimRules);
@@ -2581,9 +2620,8 @@ export function commentNetworkEditorialReasons(
       if (card && !questionMatchesPlannedGap(thread.question, card)) {
         reasons.push(`线程 ${thread.id} 的问题偏离冻结主缺口 ${card.gapId}`);
       }
-      const guarded = guardedReplyIdentitiesForQuestion(thread.question, claimRules);
-      if ([...guarded].some((identity) => identity !== planned.postingIdentity)) {
-        reasons.push(`线程 ${thread.id} 的问题改变了冻结答复身份`);
+      if (organizationQuestionAsksForOtherRole(thread.question, card, planned.postingIdentity, claimRules)) {
+        reasons.push(`线程 ${thread.id} 另问了超出主问题职责的受控事项`);
       }
     }
     if (kind === "host_reply" && guardedReplyIdentitiesForQuestion(thread.question, claimRules).size) {
@@ -3167,7 +3205,7 @@ export class ContentGenerationAgent implements GenerationEngine {
       if (!initialReaderReasons.length) editorialAssessments.push({ stage: "comment_openers", status: "skipped", reasons: [], summary: "读者开口未触发编辑。", accepted: true, attempt: 0 });
       if (initialReaderReasons.length) {
         try {
-          const editorPrompt = buildStagedCommentEditorPrompt(promptInput, core, readerSide);
+          const editorPrompt = buildStagedCommentEditorPrompt(promptInput, core, readerSide, initialReaderReasons);
           const editorResponse = await this.provider.generate({
             messages: editorPrompt.messages,
             responseSchema: editorPrompt.responseSchema,
@@ -3732,11 +3770,31 @@ export class ContentGenerationAgent implements GenerationEngine {
           }),
         },
       };
+      // A later ledger pass may miss a supported organization reply or treat it
+      // as simulated reader speech. Carry forward exact, independently grounded
+      // review citations for the unchanged visible reply.
+      const checkedReplyFacts = stagedContent.Cref.threads.flatMap((thread): GenerationDraft["reasoning"] => {
+        const accepted = orgAnswersById.get(thread.id);
+        if (!accepted?.review || accepted.answer !== thread.answer) return [];
+        return accepted.review.claims.flatMap((claim): GenerationDraft["reasoning"] => {
+          if (claim.supported !== true || !claim.evidenceId || !claim.quote
+            || !combinedEvidenceSupport(claim.statement, [claim.quote])) return [];
+          return [{
+            statement: claim.statement,
+            location: "Cref.thread",
+            occurrence: { field: "answer", threadId: thread.id },
+            status: "fact",
+            evidenceIds: [claim.evidenceId],
+            sourceSpans: [{ evidenceId: claim.evidenceId, quote: claim.quote }],
+          }];
+        });
+      });
       // The ledger sees the exact accepted agent copy. Length defects are routed
       // to the core editor/final validator; deterministic code never trims prose.
       draft = {
         ...deterministicBase,
         content: stagedContent,
+        reasoning: [...deterministicBase.reasoning, ...checkedReplyFacts],
         ...(commentEditorialAssessment ? { commentEditorialAssessment } : {}),
         editorialAssessments,
       };
@@ -3765,7 +3823,12 @@ export class ContentGenerationAgent implements GenerationEngine {
         draft = {
           ...draft,
           evidenceIds: parsed.evidenceIds,
-          reasoning: parsed.reasoning,
+          reasoning: [
+            ...checkedReplyFacts,
+            ...parsed.reasoning.filter((item) => !checkedReplyFacts.some((checked) =>
+              item.location === checked.location && item.occurrence?.field === checked.occurrence?.field
+              && item.occurrence?.threadId === checked.occurrence?.threadId && item.statement === checked.statement)),
+          ],
           unknowns: parsed.unknowns,
         };
         editorialAssessments.push({ stage: "ledger", status: "pass", reasons: [], summary: ledgerAttempt > 1 ? `事实台账已生成并解析（第 ${ledgerAttempt} 次尝试）。` : "事实台账已生成并解析。", accepted: true, attempt: ledgerAttempt });
@@ -3805,7 +3868,11 @@ export class ContentGenerationAgent implements GenerationEngine {
       draft = keepCriticalBoundariesInBody(draft, orchestrationPlan, input.config);
     }
     draft = bindDialogueProvenance(draft, orchestrationPlan, allowedEvidenceIds, evidenceSources, availableEvidence);
-    const anchorContext: KnowledgeAnchorContext = { allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence, projectBlueprint: input.planningContext?.projectBlueprint };
+    const anchorContext: KnowledgeAnchorContext = {
+      allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence,
+      projectBlueprint: input.planningContext?.projectBlueprint,
+      commentAnswerEvidenceIds: commentAnswerEvidenceScope(orchestrationPlan, availableEvidence),
+    };
     // 证据自动锚定:bind 完成后、校验前,为敏感面上可精确锚定的受控声明补
     // fact 台账;锚不到的声明不挂,仍由校验层 error 拦截。
     draft = attachKnowledgeAnchors(draft, anchorContext);
@@ -4230,6 +4297,7 @@ export class ContentGenerationAgent implements GenerationEngine {
       const anchorContext: KnowledgeAnchorContext = {
         allowedEvidenceIds, evidenceSources, evidenceReferences: availableEvidence,
         projectBlueprint: input.planningContext?.projectBlueprint,
+        commentAnswerEvidenceIds: commentAnswerEvidenceScope(input.package.orchestrationSnapshot, availableEvidence),
       };
       revised = attachKnowledgeAnchors(revised, anchorContext);
       if (this.provider) {

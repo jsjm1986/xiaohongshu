@@ -28,7 +28,7 @@ import {
 } from "./delivery-policy.js";
 import { combinedEvidenceSupport, conservativeEvidenceSupport, evidenceClaimAtoms, evidenceReferenceCanSupportFact } from "./knowledge.js";
 import { assertModelJsonComplexity } from "./model.js";
-import { guardedReplyIdentitiesForQuestion, questionMatchesPlannedGap } from "./planning.js";
+import { organizationQuestionAsksForOtherRole, questionMatchesPlannedGap } from "./planning.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -2281,8 +2281,14 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
       // 当成受控声明。标签的合规性由 H 通道自己的检查负责。
       if (isHashtagOnlyLine(statement)) continue;
       const matchedRules = controlledRules.filter((rule) => rule.terms.some((term) => term && statement.includes(term)));
-      if ((!genericMeasuredClaim.test(statement) && !experientialGeneralizationClaim.test(statement) && matchedRules.length === 0) || /[？?]$/u.test(statement)) continue;
       const judgment = claimJudgmentByStatement.get(statement);
+      const judgedUnsupported = judgment?.classification === "factual_assertion" && judgment.supported === false;
+      // The judge also receives marketing promises without numbers or project terms.
+      // Honor its explicit verdict for organization replies without making keywords a hard gate.
+      const rejectedOrganizationPromise = surface.location !== "N.body"
+        && judgedUnsupported && marketingPromiseClaim.test(statement);
+      if ((!genericMeasuredClaim.test(statement) && !experientialGeneralizationClaim.test(statement)
+        && matchedRules.length === 0 && !rejectedOrganizationPromise) || /[？?]$/u.test(statement)) continue;
       // 判官裁决:邀约/限定/疑问不需要证据,直接放行;事实断言 supported 放行、
       // unsupported 落到同一 error。无裁决时维持词面旧逻辑(fact 台账锚定判定)。
       // The judge may classify an offer/hedge/question, but a factual verdict
@@ -2294,7 +2300,7 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
       if (!grounded) {
         const labels = matchedRules.map((rule) => rule.label || rule.claimType).join(", ") || "measured claim";
         const channel = surface.location === "Cref.thread" || surface.location === "Cref.followUp" ? "Cref" : surface.location;
-        if (judgment?.classification === "factual_assertion" && judgment.supported === false) {
+        if (judgedUnsupported) {
           issues.push({
             code: "sensitive_claim_without_evidence", severity: "error", channel,
             message: `AI evidence judge found no support for a controlled project claim (${labels}): ${statement}`,
@@ -2464,14 +2470,12 @@ export function validateGenerationDraft(input: DraftValidationInput): ContentVal
     }
     const plannedGap = input.orchestrationPlan?.gapPlanningCards?.find((card) => card.gapId === plannedThread?.primaryGapId);
     if (plannedThread && plannedGap && threadKind === "org_answer") {
-      const guardedIdentities = guardedReplyIdentitiesForQuestion(
-        thread.question,
+      const introducesConflictingResponsibility = organizationQuestionAsksForOtherRole(
+        thread.question, plannedGap, plannedThread.postingIdentity,
         input.projectBlueprint?.claimPolicy.rules ?? [],
       );
-      const introducesConflictingResponsibility = [...guardedIdentities]
-        .some((identity) => identity !== plannedThread.postingIdentity);
       if (!questionMatchesPlannedGap(thread.question, plannedGap) || introducesConflictingResponsibility) {
-        add("reply_question_plan_drift", "error", "Cref", `Thread ${thread.id} changed the frozen primary question responsibility for gap “${plannedGap.label}”; rewrite the question within the planned gap instead of changing the responder.`);
+        add("reply_question_plan_drift", "error", "Cref", `Thread ${thread.id} asks outside the planned question responsibility for gap “${plannedGap.label}”; keep the question on that gap.`);
       }
     }
     // 追问层级(方法论《问题—答复—追问的最小结构》L0—L3):只做**结构**判断,

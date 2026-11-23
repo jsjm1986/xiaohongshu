@@ -4,7 +4,9 @@ import {
   ContentGenerationAgent,
   createDefaultGenerationConfig,
   DEFAULT_FORMULA_VERSION,
+  evidenceIdForSection,
   indexKnowledgeSource,
+  splitKnowledgeDocument,
 } from "../src/index.js";
 import type { InformationGap, KnowledgeDocument } from "../src/index.js";
 
@@ -57,12 +59,12 @@ function gap(overrides: Partial<InformationGap> = {}): InformationGap {
 
 const confirmation = { confirmedBy: "owner-1", confirmedAt: "2026-08-01T10:00:00.000Z" };
 
-async function generatedGap(input: InformationGap) {
+async function generatedGap(input: InformationGap, documents = knowledge) {
   const result = await new ContentGenerationAgent().generate({
     jobId: "human-evidence-job",
     config: config(),
     formulaVersion: DEFAULT_FORMULA_VERSION,
-    knowledge,
+    knowledge: documents,
     planningContext: { informationGaps: [input] },
   });
   const packageResult = result.packages[0];
@@ -113,6 +115,53 @@ describe("人工确认的缺口答案", () => {
     expect((card?.evidenceIds ?? []).some((id) => id.startsWith("evidence_human_"))).toBe(false);
   });
 
+  it("keeps all supported answer segments across separate sections without marking the answer partial", async () => {
+    const answer = "可携带熟悉的小玩具。\n迟到后能否按原档拍摄由门店确认。";
+    const document = indexKnowledgeSource({
+      projectId: "p1",
+      path: "booking.md",
+      content: "# 拍前准备\n\n可携带熟悉的小玩具。\n\n# 拍摄时间\n\n迟到后能否按原档拍摄由门店确认。",
+    });
+    const result = await new ContentGenerationAgent().generate({
+      jobId: "two-source-approved-gap",
+      config: config(),
+      formulaVersion: DEFAULT_FORMULA_VERSION,
+      knowledge: [document],
+      planningContext: { informationGaps: [gap({ answer, sourceStatus: "supplied_fact" })] },
+    });
+    const card = result.packages[0]?.orchestrationSnapshot?.gapPlanningCards?.find((item) => item.gapId === "g1");
+    expect(card?.answer).toBe(answer);
+    expect(card?.evidenceIds).toHaveLength(2);
+    expect(card?.evidenceBindingStatus).toBe("supported");
+  });
+
+  it("checks an exact cited FAQ answer on its own and keeps the question from changing its uncertainty", async () => {
+    const advice = "先告诉摄影师孩子容易放松的时间、喜欢的活动和熟悉的安抚方式。";
+    const uncertain = "具体安排能否满足需确认。";
+    const doc = indexKnowledgeSource({
+      projectId: "p1",
+      path: "faq.md",
+      content: `# 拍前问答\n\n| 问题 | 答疑 | 适用条件 |\n| --- | --- | --- |\n| 我家孩子慢热，开拍会不会一直僵住 | ${advice}${uncertain} | 拍摄安排按现场确认 |`,
+    });
+    const evidenceId = evidenceIdForSection(splitKnowledgeDocument(doc)[0]!);
+    const { card } = await generatedGap(gap({
+      answer: `${advice}\n具体安排一定能满足。`, evidenceIds: [evidenceId], sourceStatus: "supplied_fact",
+    }), [doc]);
+    expect(card?.answer).toBe(advice);
+    expect(card?.evidenceIds).toEqual([evidenceId]);
+    expect(card?.evidenceBindingStatus).toBe("partial");
+  });
+
+  it("reports a removed ungrounded framework without discarding the supported answer", async () => {
+    const { card } = await generatedGap(gap({
+      answer: "资料里确认过的一句话。",
+      framework: "不用预约就可以直接拍摄。",
+      sourceStatus: "supplied_fact",
+    }));
+    expect(card?.answer).toBe("资料里确认过的一句话。");
+    expect(card?.framework).toBeUndefined();
+    expect(card?.evidenceBindingStatus).toBe("partial");
+  });
 
   it("keeps a reviewed SOFT pain answer bound across harmless frequency paraphrases", async () => {
     const softKnowledge = [indexKnowledgeSource({

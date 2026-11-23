@@ -494,6 +494,8 @@ describe("评论参数分侧注入(滑杆真正参与生成)", () => {
     expect(text).toContain("答复侧写作行为参数");
     expect(text).toContain("单条回复只承担一个主要增量");
     expect(text).not.toContain("每个问题优先带入一至两个已披露且会改变答案的现实约束");
+    expect(text).toContain("分号后另起一项，逗号不分段");
+    expect(text).toContain('"classification":"hedge_or_unknown","supported":null,"evidenceId":null,"quote":null');
   });
 
   it("只注入 trace 级指令:preset/style 散文不下放,不把另一侧角色概念漏进单一身份调用", () => {
@@ -1036,6 +1038,7 @@ describe("按侧+按角色隔离的引擎合并", () => {
 
   it("采访腔由读者编辑Agent纠正，原子验收后才进入答复阶段", async () => {
     let openerEditorCalls = 0;
+    const editorDiagnostics: string[] = [];
     const provider: ModelProvider = {
       async generate(request) {
         const purpose = String(request.metadata?.purpose);
@@ -1054,6 +1057,7 @@ describe("按侧+按角色隔离的引擎合并", () => {
         }
         if (purpose === "edit_comment_openers") {
           openerEditorCalls += 1;
+          editorDiagnostics.push(requestText(request));
           return {
             text: JSON.stringify({
               threads: frozenReaderThreads(request, true),
@@ -1073,6 +1077,7 @@ describe("按侧+按角色隔离的引擎合并", () => {
       .generate({ jobId: "reader-editor-success", config: engineConfig(), formulaVersion: DEFAULT_FORMULA_VERSION, knowledge, planningContext });
 
     expect(openerEditorCalls).toBe(3);
+    expect(editorDiagnostics.every((text) => /服务器发现的复核线索[\s\S]+线程 [^"\n]+ 使用采访或审核清单腔/u.test(text))).toBe(true);
     for (const pkg of result.packages) {
       expect(pkg.commentEditorialAssessment).toMatchObject({ status: "pass", summary: "已按人物处境改写。" });
       for (const [index, thread] of pkg.content.Cref.threads.entries()) {
@@ -1336,7 +1341,7 @@ describe("按侧+按角色隔离的引擎合并", () => {
     return result.packages.map((pkg) => pkg.validation.issues.filter((issue) => issue.code === "accountable_identity_incomplete"));
   }
 
-  it("机构模型自检判 reject 时在公开合并前整条拒收", async () => {
+  it.each(["reject", "accept"] as const)("机构承诺无有效引文时在公开合并前拒收（模型自检 %s）", async (status) => {
     const confirmation = { confirmedBy: "owner-1", confirmedAt: "2026-08-05T00:00:00.000Z" };
     const groundedGaps: InformationGap[] = isolationGaps.map((gap) => ({
       ...gap,
@@ -1361,13 +1366,16 @@ describe("按侧+按角色隔离的引擎合并", () => {
           }), raw: {} };
         }
         if (purpose === "generate_org_answers") {
+          const answer = "保证明天免费补拍。";
           return { text: JSON.stringify({ answers: stagedThreadIds(request).map((id) => ({
             id,
-            answer: "声明甲。",
+            answer,
             review: {
-              status: "reject",
-              claims: [{ statement: "声明甲。", classification: "factual_assertion", supported: false, evidenceId: null, quote: null }],
-              reasons: ["当前线程证据不支持该声明"],
+              status,
+              claims: [{ statement: answer, classification: "organization_commitment",
+                supported: status === "accept", evidenceId: status === "accept" ? "invented_source" : null,
+                quote: status === "accept" ? answer : null }],
+              reasons: status === "reject" ? ["当前线程证据不支持该声明"] : [],
             },
           })) }), raw: {} };
         }
@@ -1377,7 +1385,7 @@ describe("按侧+按角色隔离的引擎合并", () => {
     };
     const result = await new ContentGenerationAgent({ modelProvider: provider, now: () => new Date("2026-08-05T00:00:00Z") })
       .generate({
-        jobId: "org-answer-premerge-rejection",
+      jobId: `org-answer-premerge-${status}`,
         config: engineConfig(),
         formulaVersion: DEFAULT_FORMULA_VERSION,
         knowledge,
@@ -1393,8 +1401,9 @@ describe("按侧+按角色隔离的引擎合并", () => {
         channel: "Cref",
         disposition: "review",
         origin: "agent",
+        message: expect.stringContaining(status === "accept" ? "self_review_evidence_invalid:0" : "当前线程证据不支持该声明"),
       }));
-      expect(pkg.content.Cref.threads.some((thread) => thread.answer.includes("声明甲"))).toBe(false);
+      expect(pkg.content.Cref.threads.some((thread) => thread.answer.includes("免费补拍"))).toBe(false);
     }
   });
 
