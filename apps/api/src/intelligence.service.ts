@@ -1169,6 +1169,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
           v.id AS latest_analysis_id,
           v.version AS latest_analysis_version,
           v.status AS analysis_status,
+          v.approval_scope AS latest_analysis_approval_scope,
           v.source_fingerprint AS latest_source_fingerprint,
           v.observation_json AS latest_observation_json,
           v.created_by AS latest_analysis_created_by,
@@ -1195,6 +1196,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
               project_id: row.project_id,
               version: row.latest_analysis_version,
               status: row.analysis_status,
+              approval_scope: row.latest_analysis_approval_scope,
               source_fingerprint: row.latest_source_fingerprint,
               observation_json: row.latest_observation_json,
               created_by: row.latest_analysis_created_by,
@@ -1281,18 +1283,30 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       const row = this.row('image_analysis_versions', projectId, analysisId);
       if (String(row.image_asset_id) !== assetId) throw new BadRequestException('The analysis does not belong to this image asset.');
       const requested = body.status ?? (body.approved === false ? 'rejected' : 'approved');
+      const approvalScope = body.approvalScope ?? row.approval_scope;
+      if (approvalScope !== 'project' && approvalScope !== 'generation') {
+        throw new BadRequestException('Image approval scope must be project or generation.');
+      }
+      // A selected generation can use confirmed visual observations without
+      // adding them to the evidence used to build the project blueprint.
+      const replacesProjectObservation = this.database.prepare(
+        `SELECT 1 FROM image_analysis_versions
+         WHERE project_id=? AND image_asset_id=? AND status='approved' AND approval_scope='project'
+           AND deleted_at IS NULL AND (?='approved' OR id=?) LIMIT 1`,
+      ).get(projectId, assetId, String(requested), analysisId);
       if (requested === 'approved') {
         assertResourceMetricsReady('image_analysis_versions', row);
         this.database.prepare(
           `UPDATE image_analysis_versions SET status='stale', updated_at=?
            WHERE image_asset_id=? AND id<>? AND status='approved' AND deleted_at IS NULL`,
         ).run(nowIso(), assetId, analysisId);
+        this.database.prepare('UPDATE image_analysis_versions SET approval_scope=? WHERE id=?').run(approvalScope, analysisId);
       }
       const result = this.approveResource(
         'image_analysis_versions', projectId, analysisId, body, principal,
         this.mapImageAnalysis.bind(this), 'image-analysis',
       );
-      this.markProjectStale(projectId);
+      if (replacesProjectObservation || (requested === 'approved' && approvalScope === 'project')) this.markProjectStale(projectId);
       return result;
     });
   }
@@ -1320,7 +1334,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       ).run(JSON.stringify(nextObservation), nowIso(), analysisId, projectId, assetId);
       if (Number(updated.changes) !== 1) throw new NotFoundException('Project resource not found.');
       this.record(project, principal, 'image-analysis.update', 'image_analysis_version', analysisId, { projectId, assetId });
-      this.markProjectStale(projectId);
+      if (row.status === 'approved' && row.approval_scope === 'project') this.markProjectStale(projectId);
       return this.mapImageAnalysis(this.row('image_analysis_versions', projectId, analysisId));
     });
   }
@@ -2202,7 +2216,8 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
     const imageJoin = `FROM image_assets a
        JOIN image_analysis_versions v ON v.id = (
          SELECT selected.id FROM image_analysis_versions selected
-         WHERE selected.image_asset_id=a.id AND selected.status='approved' AND selected.deleted_at IS NULL
+         WHERE selected.image_asset_id=a.id AND selected.status='approved' AND selected.approval_scope='project'
+           AND selected.deleted_at IS NULL
          ORDER BY selected.version DESC LIMIT 1
        )
        WHERE a.project_id=? AND a.deleted_at IS NULL`;
@@ -2501,7 +2516,8 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
          FROM image_assets a
          JOIN image_analysis_versions v ON v.id=(
            SELECT selected.id FROM image_analysis_versions selected
-            WHERE selected.image_asset_id=a.id AND selected.status='approved' AND selected.deleted_at IS NULL
+            WHERE selected.image_asset_id=a.id AND selected.status='approved' AND selected.approval_scope='project'
+              AND selected.deleted_at IS NULL
             ORDER BY selected.version DESC, selected.created_at DESC, selected.id DESC LIMIT 1
          )
         WHERE a.project_id=? AND a.deleted_at IS NULL
@@ -3885,6 +3901,7 @@ export class IntelligenceService implements OnModuleInit, OnModuleDestroy {
       version: Number(row.version),
       status: row.status,
       approvalStatus: row.status,
+      approvalScope: row.approval_scope,
       observationStatus: row.status === 'approved' ? 'approved' : 'unapproved',
       evidenceStatus: row.status === 'approved' ? 'approved_observation' : 'unapproved_observation',
       sourceFingerprint: row.source_fingerprint,
