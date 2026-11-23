@@ -1,8 +1,8 @@
-import { expect, request as apiRequest, test } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 
 /**
  * 浏览器冒烟:防「测试全绿但页面白屏」。
- * 覆盖:登录页渲染 → 登录闭环(强制改密)→ 专家壳可达 → 重置密码页渲染。
+ * 覆盖登录、强制改密、重置密码页和 SaaS 客户首登建项目。
  * 不做业务断言,只验证 bundle 能加载、路由能渲染、认证闭环能走通。
  */
 
@@ -16,21 +16,26 @@ test('登录页渲染且无运行时错误', async ({ page }) => {
   expect(pageErrors, `页面运行时错误: ${pageErrors.join('; ')}`).toEqual([]);
 });
 
-test('登录闭环：admin 首登强制改密后进入专家壳', async ({ page }) => {
+test('管理员首登及刷新时可以改密，且不加载项目数据', async ({ page }) => {
   const pageErrors: string[] = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
+  const workspaceRequests: string[] = [];
+  page.on('request', (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path.startsWith('/api/') && !path.startsWith('/api/auth/')) workspaceRequests.push(path);
+  });
 
   await page.goto('/login');
   await page.locator('input[autocomplete="username"]').fill('admin');
   await page.locator('input[autocomplete="current-password"]').fill('Smoke-bootstrap-123!');
   await page.getByRole('button', { name: /登录/ }).click();
 
-  // 首次登录会被要求改密(mustChangePassword),页面路径依用户树而定;
-  // 冒烟只断言「离开了登录页且渲染出了内容」,不锁死具体跳转策略。
-  await page.waitForURL((url) => !url.pathname.startsWith('/login'), { timeout: 10_000 });
-  await expect(page.locator('#root > *').first()).toBeVisible();
-  const text = await page.locator('body').innerText();
-  expect(text.trim().length, '页面渲染不能是白屏').toBeGreaterThan(20);
+  await expect(page).toHaveURL('/settings');
+  await expect(page.getByRole('heading', { name: '修改初始密码' })).toBeVisible();
+  await expect(page.getByLabel('当前密码')).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('button', { name: '更新密码' })).toBeEnabled();
+  expect(workspaceRequests).toEqual([]);
   expect(pageErrors, `页面运行时错误: ${pageErrors.join('; ')}`).toEqual([]);
 });
 
@@ -48,9 +53,8 @@ test('重置密码页凭 token 参数渲染表单，缺 token 给出明确提示
  * 无从下手,而这条链路(QuickHome 空态 + deriveNextAction)只有源码断言,
  * 此前没有真浏览器走过。
  */
-test('新 SaaS 客户首登：空工作区引导建项目，项目页主按钮指向上传资料', async ({ page, request }) => {
-  // 服务端 seed:admin 建 saas 账号+工作区+成员+额度,并替客户完成首次改密,
-  // 浏览器只走客户视角(改密流程属于账号页职责,不在这条冒烟射程内)。
+test('新 SaaS 客户首登：改密后创建第一个项目', async ({ page, request }) => {
+  // 服务端创建 SaaS 账号、工作区和成员关系，浏览器走客户的首次登录流程。
   const adminLogin = await request.post('/api/auth/login', {
     data: { username: 'admin', password: 'Smoke-bootstrap-123!' },
   });
@@ -82,26 +86,18 @@ test('新 SaaS 客户首登：空工作区引导建项目，项目页主按钮�
   });
   expect(memberResponse.ok(), await memberResponse.text()).toBe(true);
 
-  const clientContext = await apiRequest.newContext({ baseURL: 'http://127.0.0.1:8791' });
-  const clientLogin = await clientContext.post('/api/auth/login', {
-    data: { username, password: 'Client-init-12345!' },
-  });
-  expect(clientLogin.ok(), await clientLogin.text()).toBe(true);
-  const clientAuth = await clientLogin.json();
-  const changed = await clientContext.post('/api/auth/change-password', {
-    headers: { 'x-csrf-token': clientAuth.csrfToken },
-    data: { currentPassword: 'Client-init-12345!', newPassword: 'Client-fresh-6789!' },
-  });
-  expect(changed.ok(), await changed.text()).toBe(true);
-  await clientContext.dispose();
-
-  // 客户视角:登录 → 空工作区引导 → 建项目 → 主按钮指向第一个缺口
   await page.goto('/login');
   await page.locator('input[autocomplete="username"]').fill(username);
-  await page.locator('input[autocomplete="current-password"]').fill('Client-fresh-6789!');
+  await page.locator('input[autocomplete="current-password"]').fill('Client-init-12345!');
   await page.getByRole('button', { name: /登录/ }).click();
 
-  await page.waitForURL((url) => url.pathname.startsWith('/quick'), { timeout: 10_000 });
+  await expect(page).toHaveURL('/quick/account');
+  await page.getByLabel('当前密码').fill('Client-init-12345!');
+  await page.getByLabel(/^新密码/).fill('Client-fresh-6789!');
+  await page.getByLabel('再次输入新密码').fill('Client-fresh-6789!');
+  await page.getByRole('button', { name: '更新密码' }).click();
+
+  await expect(page).toHaveURL('/quick');
   await expect(page.getByText(/创建第一个项目/)).toBeVisible();
 
   await page.getByLabel('项目名称').fill('冒烟测试项目');

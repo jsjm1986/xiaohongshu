@@ -4,7 +4,6 @@ import {
   Eye,
   EyeOff,
   KeyRound,
-  LockKeyhole,
   RefreshCcw,
   Save,
   Server,
@@ -12,8 +11,9 @@ import {
   TriangleAlert,
   UserRound,
 } from "lucide-react";
-import { type FormEvent, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useAuth } from "../components/AuthContext";
+import { ChangePasswordForm } from "../components/ChangePasswordForm";
 import { useProjects } from "../components/ProjectContext";
 import {
   Badge,
@@ -43,21 +43,12 @@ export function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
-  const [password, setPassword] = useState({
-    current: "",
-    next: "",
-    confirm: "",
-  });
-  const { user, setUser } = useAuth();
+  const { user } = useAuth();
   const { currentProject } = useProjects();
   const toast = useToast();
   // 这个页面现在只服务专家用户:SaaS 用户的账户页是 /quick/account,渲染在极简
   // 创作壳里。原来这里有一堆 saas 分支(遮侧栏、只给 accountSections、跳过
   // /api/settings),既让页面难改,也留着"以后加东西忘了判 saas"的漏点。
-
-  useEffect(() => {
-    if (user?.mustChangePassword) setTab("account");
-  }, [user?.mustChangePassword]);
 
   const loadSettings = async () => {
     setLoading(true);
@@ -117,34 +108,6 @@ export function SettingsPage() {
     }
   };
 
-  const changePassword = async (event: FormEvent) => {
-    event.preventDefault();
-    if (password.next.length < 12) {
-      toast.push("新密码至少需要 12 个字符", "error");
-      return;
-    }
-    if (password.next !== password.confirm) {
-      toast.push("两次输入的新密码不一致", "error");
-      return;
-    }
-    setSaving(true);
-    try {
-      await api.auth.changePassword(password.current, password.next);
-      if (user) setUser({ ...user, mustChangePassword: false });
-      setPassword({ current: "", next: "", confirm: "" });
-      toast.push("密码已更新");
-    } catch (error) {
-      toast.push(
-        error instanceof Error ? error.message : "密码更新失败",
-        "error",
-      );
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  // 「账户安全」区:改密码表单 + 账户信息卡,所需信息全部来自 useAuth,不调 API。
-  // SaaS 用户直接渲染这一块;科研用户仍在 tab === "account" 时渲染同一份。
   const accountSections = (
     <>
       <section className="settings-section">
@@ -171,71 +134,8 @@ export function SettingsPage() {
             <h2>更改密码</h2>
             <p>修改后系统会保留当前会话，其他设备需重新登录。</p>
           </div>
-          {user?.mustChangePassword && (
-            <Badge tone="warning">首次登录需修改</Badge>
-          )}
         </header>
-        <form
-          className="form-stack password-form"
-          onSubmit={changePassword}
-        >
-          <Field label="当前密码">
-            <input
-              type="password"
-              value={password.current}
-              onChange={(event) =>
-                setPassword({
-                  ...password,
-                  current: event.target.value,
-                })
-              }
-              required
-            />
-          </Field>
-          <div className="field-grid field-grid--two">
-            <Field label="新密码" hint="至少 12 个字符">
-              <input
-                type="password"
-                value={password.next}
-                onChange={(event) =>
-                  setPassword({ ...password, next: event.target.value })
-                }
-                minLength={12}
-                required
-              />
-            </Field>
-            <Field label="再次输入新密码">
-              <input
-                type="password"
-                value={password.confirm}
-                onChange={(event) =>
-                  setPassword({
-                    ...password,
-                    confirm: event.target.value,
-                  })
-                }
-                minLength={12}
-                required
-              />
-            </Field>
-          </div>
-          <div className="security-note">
-            <LockKeyhole size={17} />
-            <p>
-              密码会使用 Argon2id
-              单向处理，服务器不保存可读取的明文密码。
-            </p>
-          </div>
-          <div className="settings-save">
-            <Button
-              type="submit"
-              loading={saving}
-              icon={<Save size={16} />}
-            >
-              更新密码
-            </Button>
-          </div>
-        </form>
+        <ChangePasswordForm />
       </section>
     </>
   );
