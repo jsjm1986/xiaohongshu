@@ -33,6 +33,7 @@ import {
 } from "../components/Ui";
 import { CopyMiniButton } from "../components/CopyMiniButton";
 import { V2Hero } from "../components/V2";
+import { ArticleWithImages } from "../components/ArticleWithImages";
 import { InlineProgress } from "../components/quick/InlineProgress";
 import { api, ApiError } from "../lib/api";
 import {
@@ -472,15 +473,13 @@ export function GenerationResultPage() {
               <Badge tone="neutral">{selected.body.length} 字</Badge>
             </div>
             <div className="article-body">
-              {selected.body
-                .split("\n")
-                .map((paragraph, index) =>
-                  paragraph ? (
-                    <p key={index}>{paragraph}</p>
-                  ) : (
-                    <br key={index} />
-                  ),
-                )}
+              <ArticleWithImages projectId={job.projectId} images={selected.articleImages}>
+                <div>
+                  {selected.body.split("\n").map((paragraph, index) =>
+                    paragraph ? <p key={index}>{paragraph}</p> : <br key={index} />,
+                  )}
+                </div>
+              </ArticleWithImages>
             </div>
           </div>
           <div className="package-section">

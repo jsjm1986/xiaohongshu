@@ -70,6 +70,25 @@ export interface ReaderStrategy {
   voice?: string;
 }
 
+export interface ArticleImage {
+  assetId: string;
+  filename: string;
+  width: number;
+  height: number;
+  altText?: string;
+}
+
+/** Use the candidate's chosen cover first and preserve the order of the other selected assets. */
+export function articleImagesForCandidate(
+  images: ArticleImage[],
+  plan?: ContentPackage['imagePlan'],
+): ArticleImage[] | undefined {
+  if (!images.length) return undefined;
+  const coverId = plan?.sourceAssetId ?? plan?.primaryAssetId;
+  const cover = images.find((image) => image.assetId === coverId);
+  return cover ? [cover, ...images.filter((image) => image.assetId !== coverId)] : images;
+}
+
 export interface ReaderCandidate {
   id: string;
   manualDeliveryConfirmation?: { confirmed: true; confirmedAt: string; confirmedBy: string; contentDigest: string; issueDigest: string; issueCodes: string[] };
@@ -80,6 +99,7 @@ export interface ReaderCandidate {
   body: string;
   tags: string[];
   imageBrief?: string;
+  articleImages?: ArticleImage[];
   commentDisclaimer?: string;
   commentOwnedFirstComment?: string;
   commentUncoveredGaps?: string[];
@@ -216,6 +236,7 @@ function readerGapLedger(pkg: ContentPackage): ReaderCandidate['gapLedger'] {
 export function readerView(
   pkg: ContentPackage,
   manualDeliveryConfirmation?: ReaderCandidate['manualDeliveryConfirmation'],
+  sourceImages: ArticleImage[] = [],
 ): ReaderCandidate {
   const strategy = pkg.orchestrationSnapshot?.strategy;
   return compact<ReaderCandidate>({
@@ -228,6 +249,7 @@ export function readerView(
     body: pkg.content?.N?.body ?? '',
     tags: (pkg.content?.H?.hashtags ?? []).map((tag) => (tag.startsWith('#') ? tag : `#${tag}`)),
     imageBrief: pkg.content?.N?.imageBrief,
+    articleImages: articleImagesForCandidate(sourceImages, pkg.imagePlan ?? pkg.orchestrationSnapshot?.imagePlan),
     commentDisclaimer: pkg.content?.Cref?.disclaimer,
     commentOwnedFirstComment: pkg.content?.Cref?.ownedFirstComment,
     commentUncoveredGaps: pkg.content?.Cref?.uncoveredGaps,

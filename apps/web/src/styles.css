@@ -687,6 +687,11 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .article-body { color: #2b3832; font-size: 13px; line-height: 2; }
 .article-body p { margin-bottom: 15px; }
 .article-body p:last-child { margin-bottom: 0; }
+.article-with-images { display: grid; gap: 14px; margin-block: 10px; }
+.article-photo-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 148px), 1fr)); gap: 10px; align-items: start; }
+.article-photo { display: block; min-width: 0; line-height: 0; }
+.article-photo img { display: block; width: auto; height: auto; max-width: 100%; max-height: 620px; margin-inline: auto; border-radius: 8px; }
+.article-photo-grid img { max-height: 320px; }
 .tag-list { display: flex; flex-wrap: wrap; gap: 7px; }
 .tag-list span { padding: 6px 9px; border-radius: 7px; background: var(--blue-soft); color: var(--blue); font-size: 10px; }
 .tag-reach-boundary { margin-top: 10px; padding: 8px 9px; display: flex; align-items: flex-start; gap: 7px; border-radius: 7px; background: #fff8e8; color: var(--amber); font-size: 8px; line-height: 1.55; }
@@ -4210,7 +4215,8 @@ details.sidebar-fold.orchestration-insight > summary h3 { margin: 0; display: in
   outline: 1px dashed var(--v2-line-dark); outline-offset: -12px;
 }
 .quick-shell .xhs-note__cover p { font-size: var(--v2-fs-xs); color: var(--v2-muted); line-height: 1.65; margin: 0; }
-.quick-shell .xhs-note__cover small { font-size: var(--v2-fs-micro); color: var(--v2-muted-2); }
+.quick-shell .xhs-note__cover summary { cursor: pointer; color: var(--v2-muted); font-size: var(--v2-fs-xs); }
+.quick-shell .xhs-note__cover:not([open]) { min-height: 0; padding: 12px 16px; outline: none; }
 /* 配图位里的 unit 不做悬停显形:虚线框里只有这一个按钮,藏起来等于没有。
    选择器比下面的 .xhs-note__unit .button 多一个类(0,3,0 vs 0,2,0),所以能赢,
    与书写顺序无关——但别把它改成两类选择器,那样就要靠顺序了。 */

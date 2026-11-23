@@ -139,6 +139,17 @@ test('字段集与白名单完全相等,不多不少', () => {
   assert.deepEqual(Object.keys(view).sort(), [...CANDIDATE_KEYS].sort());
 });
 
+test('正文配图按候选首图和任务选图顺序投影，文本任务不返回图片字段', () => {
+  const scene = { assetId: 'scene-1', filename: '室内场景.jpg', width: 800, height: 1200 };
+  const cover = { assetId: 'cover-1', filename: '主题海报.png', width: 900, height: 1200, altText: '主题海报' };
+  const planned = pkg({ imagePlan: {
+    sourceAssetId: cover.assetId, role: 'cover', frames: [], composition: '', altText: '', evidenceIds: [], boundaries: [],
+  } });
+  assert.deepEqual(readerView(planned, undefined, [scene, cover]).articleImages, [cover, scene]);
+  assert.deepEqual(readerView(planned, undefined, [scene]).articleImages, [scene]);
+  assert.equal('articleImages' in readerView(planned), false);
+});
+
 test('当前用户的人工交付确认可进入轻量投影且不改写校验结论', () => {
   const confirmation = { confirmed: true as const, confirmedAt: '2026-08-05T00:00:00.000Z', confirmedBy: 'user-1', contentDigest: 'content', issueDigest: 'issues', issueCodes: ['ungrounded_fact'] };
   const view = readerView(pkg(), confirmation);

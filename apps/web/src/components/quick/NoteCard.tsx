@@ -1,4 +1,5 @@
 import { Bookmark, Copy, Heart, MessageCircle } from 'lucide-react';
+import { ArticleWithImages } from '../ArticleWithImages';
 import { Button, useToast } from '../Ui';
 import { commentTotal, NoteComments } from './NoteComments';
 import { candidateClipboardText } from '../../lib/clipboard-truth';
@@ -13,12 +14,12 @@ import type { ReaderCandidate, ReaderJob } from '../../types';
  * 要看的是同一件事「这篇发出去长什么样」,所以本组件只声明自己真正读的字段,
  * 让两条数据源都能喂进来——否则创作区就得另写一套预览,那正是这次要消除的分裂。
  */
-export type NoteCardSource = Pick<ReaderCandidate, 'title' | 'body' | 'tags' | 'imageBrief' | 'validation'> &
+export type NoteCardSource = Pick<ReaderCandidate, 'title' | 'body' | 'tags' | 'imageBrief' | 'articleImages' | 'validation'> &
   NoteCommentsSource;
 
 interface Props {
   candidate: NoteCardSource;
-  job: Pick<ReaderJob, 'completedAt' | 'createdAt'>;
+  job: Pick<ReaderJob, 'completedAt' | 'createdAt'> & Partial<Pick<ReaderJob, 'projectId'>>;
   projectName?: string;
   /** 自动校验未通过时，需人工确认后才开放任何复制入口。 */
   copyEnabled?: boolean;
@@ -34,8 +35,7 @@ interface Props {
  * - 点赞/收藏只有图标,不带数字。系统没有平台数据,编一个「129 赞」一旦出现在界面
  *   上,用户截图给老板时它就成了业绩证据,与「研究数据不是平台表现数据」这条红线
  *   直接冲突。图标不构成断言,数字构成。
- * - 配图位是虚线框 + 配图说明文字。系统只产出拍摄要求,没有真图;放一张占位图会让
- *   人以为配图已经有了。
+ * - 正文可显示随任务选择的项目原图；没有源素材时显示文字配图说明。
  */
 export function NoteCard({ candidate, job, projectName, copyEnabled = true }: Props) {
   const toast = useToast();
@@ -43,6 +43,7 @@ export function NoteCard({ candidate, job, projectName, copyEnabled = true }: Pr
   const tone = avatarTone(account);
   const date = noteDate(job);
   const comments = commentTotal(candidate);
+  const hasPhotos = Boolean(job.projectId && candidate.articleImages?.length);
 
   const copy = async (text: string, label = '已复制') => {
     if (!copyEnabled) { toast.push('该候选未通过可发布校验，不能复制或导出', 'error'); return; }
@@ -73,15 +74,15 @@ export function NoteCard({ candidate, job, projectName, copyEnabled = true }: Pr
       </header>
 
       {candidate.imageBrief && (
-        <div className="xhs-note__cover">
+        <details className="xhs-note__cover" open={!hasPhotos}>
+          <summary>配图说明</summary>
           {/* 配图说明是要被复制走交给摄影/选图的,所以它需要自己的复制入口:
               「复制全文」按设计不含它。按钮与说明标签同一行,不挤压虚线框里的正文。 */}
           <div className="xhs-note__unit">
             <p>{candidate.imageBrief}</p>
             <Button variant="ghost" icon={<Copy size={12} />} disabled={!copyEnabled} onClick={() => void copy(candidate.imageBrief!, '已复制配图说明')} aria-label="复制配图说明" />
           </div>
-          <small>配图说明 · 按此拍摄或选图</small>
-        </div>
+        </details>
       )}
 
       <div className="xhs-note__body">
@@ -91,14 +92,14 @@ export function NoteCard({ candidate, job, projectName, copyEnabled = true }: Pr
             <Button variant="ghost" icon={<Copy size={12} />} disabled={!copyEnabled} onClick={() => void copy(candidate.title, '已复制标题')} aria-label="复制标题" />
           </div>
         )}
-        {candidate.body?.trim()
-          ? (
+        <ArticleWithImages projectId={job.projectId} images={candidate.articleImages}>
+          {candidate.body?.trim() ? (
             <div className="xhs-note__unit">
               <p className="xhs-note__text">{candidate.body}</p>
               <Button variant="ghost" icon={<Copy size={12} />} disabled={!copyEnabled} onClick={() => void copy(candidate.body, '已复制正文')} aria-label="复制正文" />
             </div>
-          )
-          : <p className="xhs-note__text xhs-note__text--empty">本次未产出正文</p>}
+          ) : <p className="xhs-note__text xhs-note__text--empty">本次未产出正文</p>}
+        </ArticleWithImages>
 
         {candidate.tags.length > 0 && (
           <div className="xhs-note__unit">

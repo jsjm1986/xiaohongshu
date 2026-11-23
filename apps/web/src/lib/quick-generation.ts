@@ -43,6 +43,7 @@ export interface QuickCandidateView {
   body: string;
   tags: string[];
   imageBrief?: string;
+  articleImages?: Candidate['articleImages'];
   commentDisclaimer?: string;
   commentOwnedFirstComment?: string;
   commentUncoveredGaps?: string[];
@@ -98,6 +99,7 @@ export function quickCandidateFields(candidate: Candidate): QuickCandidateView {
     body: candidate.body,
     tags: candidate.tags ?? [],
     imageBrief: candidate.imageBrief,
+    articleImages: candidate.articleImages,
     commentDisclaimer: candidate.commentDisclaimer,
     commentOwnedFirstComment: candidate.commentOwnedFirstComment,
     commentUncoveredGaps: candidate.commentUncoveredGaps,

@@ -781,6 +781,14 @@ export interface ImagePlan {
   missingShots?: string[];
 }
 
+export interface ArticleImage {
+  assetId: string;
+  filename: string;
+  width: number;
+  height: number;
+  altText?: string;
+}
+
 export type ProductionAlignmentStatus = "pass" | "warn" | "fail" | "not_evaluated";
 
 export interface ProductionAlignmentCheck {
@@ -1135,6 +1143,7 @@ export interface ReaderCandidate {
   body: string;
   tags: string[];
   imageBrief?: string;
+  articleImages?: ArticleImage[];
   commentDisclaimer?: string;
   commentOwnedFirstComment?: string;
   commentUncoveredGaps?: string[];
@@ -1206,6 +1215,7 @@ export interface Candidate {
   artifactRealization?: ArtifactRealization;
   generationMode?: "model_generated" | "deterministic_preview";
   imageBrief?: string;
+  articleImages?: ArticleImage[];
   /** Legacy compatibility value; display only when bound to validationHeuristic. */
   score?: number;
   validationHeuristic?: ValidationReadinessHeuristic;
