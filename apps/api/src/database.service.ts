@@ -1609,11 +1609,15 @@ export class DatabaseService implements OnModuleDestroy {
     if (version < 31) version = 31;
 
     if (version < 32) this.transaction(() => {
-      this.db.exec(`
-        ALTER TABLE image_analysis_versions ADD COLUMN approval_scope TEXT NOT NULL
-          DEFAULT 'project' CHECK(approval_scope IN ('project', 'generation'));
-        PRAGMA user_version = 32;
-      `);
+      const columns = this.prepare("SELECT name FROM pragma_table_info('image_analysis_versions')").all();
+      // Historical snapshots can omit the table or already include this column.
+      if (columns.length > 0 && !columns.some((column) => column.name === 'approval_scope')) {
+        this.db.exec(`
+          ALTER TABLE image_analysis_versions ADD COLUMN approval_scope TEXT NOT NULL
+            DEFAULT 'project' CHECK(approval_scope IN ('project', 'generation'));
+        `);
+      }
+      this.db.exec('PRAGMA user_version = 32');
     });
   }
 

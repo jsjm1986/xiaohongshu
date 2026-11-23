@@ -163,6 +163,11 @@ test('migrates a v3 database to the current schema with source-image boundaries'
     const assetKind = imageAssetColumns.find((column) => column.name === 'asset_kind');
     assert.equal(assetKind?.notnull, 1);
     assert.equal(assetKind?.dflt_value, "'source_material'");
+    const approvalScope = migrated.prepare(
+      `SELECT "notnull" AS required, dflt_value FROM pragma_table_info('image_analysis_versions') WHERE name='approval_scope'`,
+    ).get();
+    assert.equal(approvalScope?.required, 1);
+    assert.equal(approvalScope?.dflt_value, "'project'");
     const legacyJob = migrated.prepare(
       'SELECT opportunity_snapshot_json, planning_context_json, image_context_json FROM generation_jobs WHERE id=?',
     ).get('legacy-job') as Record<string, unknown>;
