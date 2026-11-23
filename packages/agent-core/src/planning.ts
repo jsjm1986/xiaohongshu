@@ -1355,11 +1355,22 @@ function makeGapPlanningCards(
   const residual = relevant.filter((gap) => !critical.some((item) => item.id === gap.id));
   const bodyEligible = (gap: InformationGap & { disclosureScope?: "organization_only" | "shared" }) =>
     publishingTopology === "institution_owned" || gap.disclosureScope !== "organization_only";
-  const bodyIds = new Set(critical.filter(bodyEligible).map((gap) => gap.id));
-  const bodyResidual = (commentsEnabled ? residual.slice(0, 1) : residual).filter(bodyEligible);
-  const commentResidual = commentsEnabled ? residual.slice(1) : [];
+  const honorsChannelPreferences = commentsEnabled && publishingTopology === "institution_owned";
+  const prefersBodyOnly = (gap: InformationGap) => honorsChannelPreferences
+    && gap.preferredChannels?.includes("N.body") && !gap.preferredChannels.includes("Cref");
+  const prefersBody = (gap: InformationGap) => bodyEligible(gap)
+    && !(honorsChannelPreferences && gap.preferredChannels?.includes("Cref") && !gap.preferredChannels.includes("N.body"));
+  const bodyIds = new Set(critical.filter(prefersBody).map((gap) => gap.id));
+  const bodyResidual = honorsChannelPreferences
+    ? residual.filter(prefersBody).slice(0, 1)
+    : (commentsEnabled ? residual.slice(0, 1) : residual).filter(bodyEligible);
+  const commentResidual = !commentsEnabled
+    ? []
+    : honorsChannelPreferences
+      ? residual.filter((gap) => !bodyResidual.includes(gap) && !prefersBodyOnly(gap))
+      : residual.slice(1);
   bodyResidual.forEach((gap) => bodyIds.add(gap.id));
-  const firstBodyEligible = relevant.find(bodyEligible);
+  const firstBodyEligible = relevant.find(prefersBody) ?? relevant.find(bodyEligible);
   if (firstBodyEligible) bodyIds.add(firstBodyEligible.id);
   if (!commentsEnabled) relevant.filter(bodyEligible).forEach((gap) => bodyIds.add(gap.id));
   const commentIds = new Set(commentsEnabled ? commentResidual.map((gap) => gap.id) : []);
@@ -1370,7 +1381,7 @@ function makeGapPlanningCards(
     for (const gap of relevant) {
       if (gap.preferredChannels?.includes("N.body") && bodyEligible(gap)) bodyIds.add(gap.id);
       if (gap.preferredChannels?.includes("Cref")) commentIds.add(gap.id);
-      if (gap.disclosureScope === "organization_only") commentIds.add(gap.id);
+      if (gap.disclosureScope === "organization_only" && !prefersBodyOnly(gap)) commentIds.add(gap.id);
     }
     // A focused unresolved responsibility has one visible completion owner.
     // Putting it in both body and comments made the writer repeat the same
@@ -1687,7 +1698,7 @@ export function routeReplyPostingIdentity(
 /** 三身份生态的答复身份(项目发布账号/机构助理/机构 IP)。 */
 export type ReplyPostingIdentity = ReturnType<typeof routeReplyPostingIdentity>;
 
-/** 可见问题命中的硬职责集合；用于发现问题换题，而不是重新分配答复人。 */
+/** Conservative boundary check for questions directed at an individual author. */
 export function guardedReplyIdentitiesForQuestion(
   question: string,
   claimRules: ProjectClaimRule[] = [],
@@ -1703,6 +1714,35 @@ export function guardedReplyIdentitiesForQuestion(
   }
   if (isExpertGuardedGap(probe, claimRules)) identities.add("expert");
   return identities;
+}
+
+/** Check whether a question introduces a controlled ask outside its frozen scope. */
+export function organizationQuestionAsksForOtherRole(
+  question: string,
+  gap: ReplyRoutingGap | undefined,
+  postingIdentity: DialogueThreadPlan["postingIdentity"],
+  claimRules: ReplyClaimRule[] = [],
+): boolean {
+  const normalize = (text: string) => text.normalize("NFKC").toLowerCase().replace(/\s+/gu, "");
+  const approvedQuestion = normalize(gap ? `${gap.label}\n${gap.question}` : "");
+  // Check the actual asks. An introductory clause may name a place, price or
+  // other condition without asking the responder to establish that fact.
+  const asks = question.split(/[。！？!?；;\n]+/u).flatMap((sentence) => {
+    const clauses = sentence.split(/[，,：:]+/u).map((clause) => clause.trim()).filter(Boolean);
+    return clauses.filter((clause, index) => index === clauses.length - 1
+      || /(?:吗|呢|能否|是否|可否|多少|多久|怎么|如何|要不要|有没有)/u.test(clause));
+  });
+  return asks.some((ask) => {
+    if (asks.length === 1 && gap && questionMatchesPlannedGap(ask, gap)) return false;
+    const text = normalize(ask);
+    const matches = (types: ReadonlySet<ProjectClaimRule["claimType"]>) =>
+      claimRules.some((rule) => types.has(rule.claimType) && rule.terms.some((term) => {
+        const exact = normalize(term);
+        return exact.length > 0 && text.includes(exact) && !approvedQuestion.includes(exact);
+      }));
+    if (matches(STAFF_GUARD_CLAIM_TYPES)) return postingIdentity !== "staff";
+    return postingIdentity !== "expert" && matches(EXPERT_FALLBACK_CLAIM_TYPES);
+  });
 }
 
 /**
@@ -2595,6 +2635,13 @@ function effectiveEditorialAngle(
   return opportunity.angle || opportunity.topic;
 }
 
+function usesCompactOfficialComments(config: ResolvedGenerationConfig): boolean {
+  return config.task.publishingTopology === "institution_owned"
+    && config.expressionWindow.channels.includes("comments")
+    && config.content.commentThreadMax > 0
+    && config.content.commentThreadMax <= 2;
+}
+
 function editorialFocusContract(
   input: PlanTopicOrchestrationsInput,
   gaps: InformationGap[],
@@ -2614,14 +2661,16 @@ function editorialFocusContract(
   // persona/event in that case would re-import the very price/recovery/outcome
   // topic that strategy compatibility just rejected.
   const neutralFallback = selection.mode === "neutral_fallback";
-  const focused = narrow && (allOrganizationOnly || explicitlyConstrained || neutralFallback);
+  const compactOfficial = usesCompactOfficialComments(input.config);
+  const focused = compactOfficial || (narrow && (allOrganizationOnly || explicitlyConstrained || neutralFallback));
+  const focusReason = neutralFallback
+    ? "当前选题没有兼容的已审批表达策略；改用当前缺口专属的中立人物、事件与评论职责，不继承相邻营销主题。"
+    : `本候选只有 ${gaps.length} 个信息职责；取消额外社交席位、跨缺口分支和多轮扩写，围绕现有问题答疑。`;
   return {
     mode: focused ? "focused" : "standard",
-    reason: focused
-      ? neutralFallback
-        ? `当前选题没有兼容的已审批表达策略；改用当前缺口专属的中立人物、事件与评论职责，不继承相邻营销主题。`
-        : `本候选只有 ${gaps.length} 个受控信息职责；取消额外社交席位、跨缺口分支和多轮扩写，避免为热闹引入无关主题。`
-      : `本候选不属于受控窄题，保留最终参数编译出的标准评论能力。`,
+    reason: compactOfficial
+      ? "官方账号的精简评论目标保留独立答疑席位，不为补充氛围追加互动。"
+      : focused ? focusReason : "本候选不属于受控窄题，保留最终参数编译出的标准评论能力。",
     allowedGapIds: gaps.map((gap) => gap.id),
     effectiveAngle: effectiveEditorialAngle(input.opportunity, gaps, input.config.task.publishingTopology),
     originalAngle: input.opportunity.angle,
@@ -2765,9 +2814,13 @@ export function planTopicOrchestrations(input: PlanTopicOrchestrationsInput): [O
     }
     const imagePlan = buildImagePlan(strategy, effectiveOpportunity, input.imageAnalyses ?? [], personaScenePlan);
     const contentIntent = compileContentIntentCard(effectiveOpportunity, gapPlanningCards, strategy, imagePlan);
-    const primaryGapIds = gapPlanningCards
-      .filter((card) => card.plannedPlacements.includes("Cref"))
-      .map((card) => card.gapId);
+    const commentCards = gapPlanningCards.filter((card) => card.plannedPlacements.includes("Cref"));
+    if (usesCompactOfficialComments(input.config)) {
+      const opportunityOrder = new Map(input.opportunity.gapIds.map((id, index) => [id, index]));
+      commentCards.sort((left, right) =>
+        (opportunityOrder.get(left.gapId) ?? opportunityOrder.size) - (opportunityOrder.get(right.gapId) ?? opportunityOrder.size));
+    }
+    const primaryGapIds = commentCards.map((card) => card.gapId);
     const commentExpansion = input.config.parameters?.commentExpansion ?? 70;
     const individualAuthor = input.config.task.publishingTopology === "confirmed_individual_author";
     if (individualAuthor && (input.config.task.authorContext.status !== "confirmed" || input.config.task.authorContext.facts.length === 0)) {

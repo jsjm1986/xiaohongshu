@@ -177,12 +177,12 @@ const reviewContext = anchorContext({
   evidenceReferences: [evidenceReference(EV_REVIEW, "observed")],
 });
 
-function makeDraft(body: string): GenerationDraft {
+function makeDraft(body: string, threads: unknown[] = []): GenerationDraft {
   return parseGenerationDraft(JSON.stringify({
     content: {
       H: { hashtags: ["信息", "选择"] },
       N: { imageBrief: "清单式封面", title: "先核实，再决定", body },
-      Cref: { disclaimer: "以下为模拟情景问答参考模板，不代表真实评论。", threads: [] },
+      Cref: { disclaimer: "以下为模拟情景问答参考模板，不代表真实评论。", threads },
     },
     evidenceIds: [],
     reasoning: [],
@@ -273,6 +273,28 @@ describe("judgeSensitiveClaimsWithModel 四类句子裁决", () => {
     }));
     const judged = await judgeSensitiveClaimsWithModel(provider, draft, reviewContext, {});
     expect(sensitiveClaimIssues(judged)).toEqual([]);
+  });
+
+  it("承接机构答复中不带数字的无据承诺裁决，保留条件说明", async () => {
+    const givenAnswer = (answer: string) => makeDraft("先核实安排，再决定。", [{
+      id: "t1", threadKind: "org_answer", postingIdentity: "publisher",
+      question: "临时有事怎么办？", answer, followUps: [], sourceClusterIds: [], evidenceIds: [],
+    }]);
+    const promise = givenAnswer("保证明天免费补拍。");
+    expect(sensitiveClaimIssues(promise)).toEqual([]);
+    const unsupported = spyProvider(JSON.stringify({
+      judgments: [{ statementIndex: 0, classification: "factual_assertion", supported: false, evidenceId: null, quote: null }],
+    }));
+    const judgedPromise = await judgeSensitiveClaimsWithModel(unsupported, promise, reviewContext, {});
+    expect(sensitiveClaimIssues(judgedPromise)).toContainEqual(expect.objectContaining({
+      code: "sensitive_claim_without_evidence", channel: "Cref", origin: "agent", disposition: "review",
+    }));
+
+    const hedge = spyProvider(JSON.stringify({
+      judgments: [{ statementIndex: 0, classification: "hedge", supported: null, evidenceId: null, quote: null }],
+    }));
+    const judgedHedge = await judgeSensitiveClaimsWithModel(hedge, givenAnswer("是否免费补拍需按订单核实。"), reviewContext, {});
+    expect(sensitiveClaimIssues(judgedHedge)).toEqual([]);
   });
 
   it("事实断言且知识支持(换说法+真实引文)→ 放行", async () => {

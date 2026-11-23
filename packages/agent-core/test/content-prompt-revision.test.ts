@@ -106,6 +106,22 @@ describe("structured output parsing and validation", () => {
     }, evidence)).toEqual({ accepted: false, reason: "审核不通过" });
   });
 
+  it("要求机构承诺引用当前线程的已授权原文", () => {
+    const answer = "改期不另收费。";
+    const source = { id: "reschedule", quote: "新档期需提前 2 天预约，改期不另收费。" };
+    const review = {
+      status: "accept" as const,
+      claims: [{
+        statement: answer, classification: "organization_commitment" as const,
+        supported: true, evidenceId: source.id, quote: "改期不另收费",
+      }],
+      reasons: [],
+    };
+    expect(verifyOrgAnswerSelfReview(answer, review, [source])).toEqual({ accepted: true });
+    expect(verifyOrgAnswerSelfReview(answer, review, [{ id: "age", quote: "周岁照建议在 10–13 个月拍摄。" }]))
+      .toEqual({ accepted: false, reason: "self_review_evidence_invalid:0" });
+  });
+
   it("declares growth level and stopReason in the strict response schema", () => {
     const threadItems = ((STAGED_COMMENTS_JSON_SCHEMA.properties as any).threads.items.properties.followUps.items);
     expect(threadItems.properties.level.enum).toEqual(["L1", "L2", "L3"]);

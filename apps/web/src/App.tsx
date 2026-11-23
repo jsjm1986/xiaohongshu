@@ -9,6 +9,7 @@ const QuickShell = lazy(() => import('./components/quick/QuickShell').then((modu
 const AuditPage = lazy(() => import('./pages/AuditPage').then((module) => ({ default: module.AuditPage })));
 const AgentHarnessPage = lazy(() => import('./pages/AgentHarnessPage').then((module) => ({ default: module.AgentHarnessPage })));
 const DashboardPage = lazy(() => import('./pages/DashboardPage').then((module) => ({ default: module.DashboardPage })));
+const FirstLoginPasswordPage = lazy(() => import('./pages/FirstLoginPasswordPage').then((module) => ({ default: module.FirstLoginPasswordPage })));
 const FormulasPage = lazy(() => import('./pages/FormulasPage').then((module) => ({ default: module.FormulasPage })));
 const GenerationResultPage = lazy(() => import('./pages/GenerationResultPage').then((module) => ({ default: module.GenerationResultPage })));
 const GeneratorPage = lazy(() => import('./pages/GeneratorPage').then((module) => ({ default: module.GeneratorPage })));
@@ -50,7 +51,7 @@ export default function App() {
         登录稳定停在专家壳里,整条 9 个入口的侧边栏可见可点。
         expertOnly 让 SaaS 用户在 AppShell 挂载之前就被弹回 /quick。
       */}
-      <Route element={<ProtectedRoute expertOnly><AppShell /></ProtectedRoute>}>
+      <Route element={<ProtectedRoute expertOnly passwordChange={<FirstLoginPasswordPage />}><AppShell /></ProtectedRoute>}>
         <Route index element={<DashboardPage />} />
         <Route path="generate" element={<GeneratorPage />} />
         <Route path="agent-harness" element={<AgentHarnessPage />} />
@@ -65,7 +66,7 @@ export default function App() {
         <Route path="team" element={<TeamPage />} />
         <Route path="audit" element={<AuditPage />} />
       </Route>
-      <Route element={<ProtectedRoute><QuickShell /></ProtectedRoute>}>
+      <Route element={<ProtectedRoute passwordChange={<FirstLoginPasswordPage />}><QuickShell /></ProtectedRoute>}>
         <Route path="quick" element={<QuickChannelPage />} />
         {/*
           固定段必须写在 :projectId 之前才读得顺(React Router 的 rank 规则本身

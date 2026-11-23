@@ -76,17 +76,20 @@ export function useAuth() {
  * 弹回 /quick —— 改前是先渲染 AppShell 再由内部判断,实测付费客户首次登录稳定
  * 停在专家壳里,整条 9 个入口的侧边栏可见可点。
  */
-export function ProtectedRoute({ children, expertOnly }: { children: ReactNode; expertOnly?: boolean }) {
+export function ProtectedRoute({ children, expertOnly, passwordChange }: {
+  children: ReactNode;
+  expertOnly?: boolean;
+  passwordChange: ReactNode;
+}) {
   const { user, loading, error, retry } = useAuth();
   const location = useLocation();
   if (loading) return <div className="app-loading"><span className="spinner" /><p>正在读取工作区…</p></div>;
   if (error) return <AuthLoadError message={error} onRetry={retry} />;
   if (!user) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
-  // 强制改密的落点按用户类型分叉:SaaS → /quick/account,专家 → /settings。
-  // 改前这里硬编码 /settings,是「SaaS 用户必然落进专家壳」的直接原因。
-  const changePath = passwordChangePath(user);
-  if (user.mustChangePassword && location.pathname !== changePath) {
-    return <Navigate to={changePath} replace />;
+  if (user.mustChangePassword) {
+    const changePath = passwordChangePath(user);
+    // 业务接口要求先改密，因此在挂载工作台之前显示表单。
+    return location.pathname === changePath ? passwordChange : <Navigate to={changePath} replace />;
   }
   if (expertOnly && isSaasUser(user)) return <Navigate to={SAAS_HOME_PATH} replace />;
   // SaaS 用户只允许 /quick 及子路径,其余一律弹回 /quick

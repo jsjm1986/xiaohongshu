@@ -163,6 +163,11 @@ test('migrates a v3 database to the current schema with source-image boundaries'
     const assetKind = imageAssetColumns.find((column) => column.name === 'asset_kind');
     assert.equal(assetKind?.notnull, 1);
     assert.equal(assetKind?.dflt_value, "'source_material'");
+    const approvalScope = migrated.prepare(
+      `SELECT "notnull" AS required, dflt_value FROM pragma_table_info('image_analysis_versions') WHERE name='approval_scope'`,
+    ).get();
+    assert.equal(approvalScope?.required, 1);
+    assert.equal(approvalScope?.dflt_value, "'project'");
     const legacyJob = migrated.prepare(
       'SELECT opportunity_snapshot_json, planning_context_json, image_context_json FROM generation_jobs WHERE id=?',
     ).get('legacy-job') as Record<string, unknown>;
@@ -174,6 +179,65 @@ test('migrates a v3 database to the current schema with source-image boundaries'
   } finally {
     migrated.onModuleDestroy();
   }
+});
+
+test('generation-only image approval preserves approved project analysis and makes the image selectable', async () => {
+  const { app, request, user } = await startApp();
+  const project = await request('/api/projects', { method: 'POST', body: JSON.stringify({ name: '图文素材测试' }) });
+  assert.equal(project.response.status, 201, JSON.stringify(project.body));
+  const projectId = project.body.id as string;
+  const database = app.get(DatabaseService);
+  const intelligence = app.get(IntelligenceService);
+  const intelligenceId = seedApprovedProjectBlueprint(app, projectId);
+  const before = await intelligence.preflightGenerationSource(projectId);
+  const sourceBefore = await intelligence['projectAnalysisSource']({ id: projectId });
+
+  const png = await sharp({ create: { width: 40, height: 40, channels: 3, background: '#f2eed9' } }).png().toBuffer();
+  const form = new FormData();
+  form.set('file', new Blob([new Uint8Array(png)], { type: 'image/png' }), 'cover.png');
+  const asset = await request(`/api/projects/${projectId}/image-assets`, { method: 'POST', body: form });
+  assert.equal(asset.response.status, 201, JSON.stringify(asset.body));
+  const analysisId = randomUUID();
+  const now = new Date().toISOString();
+  database.prepare(
+    `INSERT INTO image_analysis_versions
+      (id, image_asset_id, project_id, version, status, source_fingerprint, observation_json, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, 1, 'draft', ?, ?, ?, ?, ?)`,
+  ).run(analysisId, asset.body.id, projectId, asset.body.sha256, JSON.stringify({
+    observedFacts: ['浅色背景'], inferredSignals: [], unknowns: [], visibleText: [], roles: ['cover'],
+    quality: { clarity: 0.8, relevance: 0.8, textLegibility: 0.1 }, evidenceIds: [], source: 'uploaded',
+  }), user.id, now, now);
+  const analysisPath = `/api/projects/${projectId}/image-assets/${asset.body.id}/analyses/${analysisId}`;
+  const scoped = await request(`${analysisPath}/approve`, {
+    method: 'POST', body: JSON.stringify({ approvalScope: 'generation' }),
+  });
+  assert.equal(scoped.response.status, 201, JSON.stringify(scoped.body));
+  assert.equal(scoped.body.approvalScope, 'generation');
+  assert.equal(scoped.body.status, 'approved');
+  assert.equal(intelligence.getIntelligence(projectId, intelligenceId).status, 'approved');
+  assert.equal((await intelligence.preflightGenerationSource(projectId)).revision, before.revision);
+  assert.equal((await intelligence['projectAnalysisSource']({ id: projectId })).fingerprint, sourceBefore.fingerprint);
+  const listed = await request(`/api/projects/${projectId}/image-assets?observationStatus=approved`);
+  assert.equal(listed.body.items[0]?.latestAnalysis?.approvalScope, 'generation');
+
+  const prepared = intelligence.prepareGeneration(projectId, { topic: '图文素材测试', imageAssetIds: [asset.body.id] });
+  const hydrated = await intelligence.hydratePlanningContext(projectId, prepared.planningContext);
+  const image = hydrated?.imageAnalyses?.[0];
+  assert.equal(image?.assetId, asset.body.id);
+  assert.match(image?.imageUrl ?? '', /^data:image\/png;base64,/u);
+
+  const edit = await request(analysisPath, { method: 'PATCH', body: JSON.stringify({ quality: { relevance: 0.9 } }) });
+  assert.equal(edit.response.status, 200, JSON.stringify(edit.body));
+  assert.equal((await intelligence.preflightGenerationSource(projectId)).revision, before.revision);
+  assert.throws(() => intelligence.prepareGeneration(projectId, { topic: '图文素材测试', imageAssetIds: [asset.body.id] }), /approved analysis/u);
+  const reapplied = await request(`${analysisPath}/approve`, { method: 'POST' });
+  assert.equal(reapplied.body.approvalScope, 'generation');
+  assert.equal(intelligence.getIntelligence(projectId, intelligenceId).status, 'approved');
+
+  const promoted = await request(`${analysisPath}/approve`, { method: 'POST', body: JSON.stringify({ approvalScope: 'project' }) });
+  assert.equal(promoted.body.approvalScope, 'project');
+  assert.equal(intelligence.getIntelligence(projectId, intelligenceId).status, 'stale');
+  assert.notEqual((await intelligence['projectAnalysisSource']({ id: projectId })).fingerprint, sourceBefore.fingerprint);
 });
 
 test('generation coverage rejects inconsistent references and remains idempotent', async () => {

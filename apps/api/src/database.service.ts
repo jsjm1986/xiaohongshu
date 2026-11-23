@@ -13,7 +13,7 @@ export type SqlValue = string | number | bigint | Uint8Array | null;
  * 无关的测试变红——那不是回归信号,是维护噪声。测试断言这个常量,真正想验的
  * 「迁移到最新且表结构对得上」不变。
  */
-export const SCHEMA_VERSION = 31;
+export const SCHEMA_VERSION = 32;
 
 @Injectable()
 export class DatabaseService implements OnModuleDestroy {
@@ -1607,6 +1607,18 @@ export class DatabaseService implements OnModuleDestroy {
       this.db.exec('PRAGMA user_version = 31');
     });
     if (version < 31) version = 31;
+
+    if (version < 32) this.transaction(() => {
+      const columns = this.prepare("SELECT name FROM pragma_table_info('image_analysis_versions')").all();
+      // Historical snapshots can omit the table or already include this column.
+      if (columns.length > 0 && !columns.some((column) => column.name === 'approval_scope')) {
+        this.db.exec(`
+          ALTER TABLE image_analysis_versions ADD COLUMN approval_scope TEXT NOT NULL
+            DEFAULT 'project' CHECK(approval_scope IN ('project', 'generation'));
+        `);
+      }
+      this.db.exec('PRAGMA user_version = 32');
+    });
   }
 
   onModuleDestroy(): void {

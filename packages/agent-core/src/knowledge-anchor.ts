@@ -27,6 +27,16 @@ export interface KnowledgeAnchorContext {
   evidenceReferences?: EvidenceReference[];
   /** Controlled claim policy supplies the requiresEvidence rule terms. */
   projectBlueprint?: ProjectCreativeBlueprint;
+  /** Current plan's factual sources for each organization's reply. */
+  commentAnswerEvidenceIds?: ReadonlyMap<string, ReadonlySet<string>>;
+}
+
+export function commentEvidenceForOccurrence(
+  context: Pick<KnowledgeAnchorContext, "commentAnswerEvidenceIds">,
+  occurrence: ReasoningEntry["occurrence"],
+): ReadonlySet<string> | undefined {
+  if (!occurrence?.threadId || occurrence.field !== "answer") return undefined;
+  return context.commentAnswerEvidenceIds?.get(occurrence.threadId);
 }
 
 /** 敏感面上命中受控声明、需要证据锚定的一句(机械与 AI 复核共用同一份扫描)。 */
@@ -201,7 +211,9 @@ export function attachKnowledgeAnchors(draft: GenerationDraft, context: Knowledg
   for (const claim of controlledClaimSurfaces(draft, controlledRules)) {
     if (groundedFact(reasoning, claim.statement, claim.location, claim.occurrence)
       || recordedFact(reasoning, claim.statement, claim.location, claim.occurrence)) continue;
+    const scopedIds = commentEvidenceForOccurrence(context, claim.occurrence);
     for (const source of pool) {
+      if (scopedIds && !scopedIds.has(source.evidenceId)) continue;
       const quotes = anchorQuotesInSource(claim.statement, source.quote);
       if (!quotes.length) continue;
       reasoning.push({
@@ -233,7 +245,9 @@ export function collectUnanchoredSensitiveClaims(
   return controlledClaimSurfaces(draft, controlledRules).filter((claim) => {
     if (groundedFact(draft.reasoning, claim.statement, claim.location, claim.occurrence)
       || recordedFact(draft.reasoning, claim.statement, claim.location, claim.occurrence)) return false;
-    return !pool.some((source) => anchorQuotesInSource(claim.statement, source.quote).length > 0);
+    const scopedIds = commentEvidenceForOccurrence(context, claim.occurrence);
+    return !pool.some((source) => (!scopedIds || scopedIds.has(source.evidenceId))
+      && anchorQuotesInSource(claim.statement, source.quote).length > 0);
   });
 }
 
@@ -257,6 +271,8 @@ export function attachKnowledgeAnchorSelections(
   for (const selection of selections) {
     const claim = claims[selection.statementIndex];
     if (!claim) continue;
+    const scopedIds = commentEvidenceForOccurrence(context, claim.occurrence);
+    if (scopedIds && (!selection.evidenceId || !scopedIds.has(selection.evidenceId))) continue;
     const source = selection.evidenceId ? poolById.get(selection.evidenceId) : undefined;
     const quote = selection.quote?.trim();
     if (!source || !quote || !source.includes(quote)) continue;
@@ -338,6 +354,7 @@ export function resolveClaimJudgments(
   claims: SensitiveClaimSurface[],
   verdicts: ClaimJudgeVerdict[],
   evidencePool: Array<{ evidenceId: string; quote: string }>,
+  context: Pick<KnowledgeAnchorContext, "commentAnswerEvidenceIds"> = {},
 ): ClaimJudgment[] {
   const judgments: ClaimJudgment[] = [];
   for (const verdict of verdicts) {
@@ -347,7 +364,8 @@ export function resolveClaimJudgments(
       judgments.push({ statement: claim.statement, classification: verdict.classification });
       continue;
     }
-    const source = verdict.evidenceId
+    const scopedIds = commentEvidenceForOccurrence(context, claim.occurrence);
+    const source = verdict.evidenceId && (!scopedIds || scopedIds.has(verdict.evidenceId))
       ? evidencePool.find((candidate) => candidate.evidenceId === verdict.evidenceId)
       : undefined;
     const supported = verdict.supported === true

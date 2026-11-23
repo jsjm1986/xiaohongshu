@@ -3,11 +3,13 @@ import { describe, expect, it } from "vitest";
 import {
   buildKnowledgeLedger,
   channelsForIssues,
+  commentNetworkEditorialReasons,
   ContentGenerationAgent,
   createDefaultGenerationConfig,
   DEFAULT_FORMULA_VERSION,
   indexKnowledgeSource,
   mergeCrefPatchById,
+  normalizeProjectCreativeBlueprint,
   parseGenerationDraft,
   parseGenerationPatch,
   validateGenerationDraft,
@@ -198,15 +200,16 @@ describe("P4 comment identity and host-state validators", () => {
       postingIdentity: "staff",
       surfaceRoleCard: frozenRole,
     })])));
-    expect(codes(validate(clean, validationConfig(), { orchestrationPlan: plan })))
-      .not.toEqual(expect.arrayContaining(["reply_identity_plan_drift", "reply_display_role_plan_drift"]));
+    const identityCodes = ["reply_identity_plan_drift", "reply_display_role_plan_drift", "comment_answer_identity_mismatch"];
+    expect(codes(validate(clean, validationConfig(), { orchestrationPlan: plan }))
+      .filter((code) => identityCodes.includes(code))).toEqual([]);
 
     const identityDrift = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({
       postingIdentity: "expert",
       surfaceRoleCard: frozenRole,
     })])));
     expect(validate(identityDrift, validationConfig(), { orchestrationPlan: plan })).toContainEqual(expect.objectContaining({
-      code: "reply_identity_plan_drift", severity: "error", channel: "Cref",
+      code: "reply_identity_plan_drift", severity: "error", channel: "Cref", disposition: "block", overridePolicy: "non_overridable",
     }));
 
     const roleDrift = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({
@@ -214,11 +217,57 @@ describe("P4 comment identity and host-state validators", () => {
       surfaceRoleCard: { ...frozenRole, replyDisplayRole: "机构 IP" },
     })])));
     expect(validate(roleDrift, validationConfig(), { orchestrationPlan: plan })).toContainEqual(expect.objectContaining({
-      code: "reply_display_role_plan_drift", severity: "error", channel: "Cref",
+      code: "reply_display_role_plan_drift", severity: "error", channel: "Cref", disposition: "block", overridePolicy: "non_overridable",
+    }));
+
+    const answerDrift = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({
+      postingIdentity: "staff", answerIdentity: "expert", surfaceRoleCard: frozenRole,
+    })])));
+    expect(validate(answerDrift, validationConfig(), { orchestrationPlan: plan })).toContainEqual(expect.objectContaining({
+      code: "comment_answer_identity_mismatch", severity: "error", channel: "Cref", disposition: "block", overridePolicy: "non_overridable",
     }));
   });
 
-  it("硬拦最终问题偏离规划期主 gap，即使身份和展示角色字段没有漂移", () => {
+  it("措辞重叠不触发职责复核，独立提出另一项受控问题仍提示复核", () => {
+    const blueprint = normalizeProjectCreativeBlueprint({
+      projectId: "p1", sourceFingerprint: "question-scope", moduleRevisions: {},
+      modules: { claim_policy: { rules: [
+        { claimType: "identity", terms: ["孩子优先"] },
+        { claimType: "outcome", terms: ["当天另约选片", "报告结果保证"] },
+        { claimType: "credential", terms: ["摄影师的资历"] },
+        { claimType: "schedule", terms: ["提前预约"] },
+      ] } },
+    });
+    const cases = [
+      { label: "家长陪同与适应时间", approved: "孩子慢热，开拍前家长可以先陪着互动、熟悉一下吗？",
+        question: "还没定，先问清楚：孩子慢热，开拍前家长能先陪着熟悉一会儿吗？", role: "staff" },
+      { label: "拍摄当天改期", approved: "孩子当天状态不好需要改期，新档期怎么约、要另收费吗？",
+        question: "我也担心这个，娃当天状态不对的话，能改天再拍吗？", role: "staff" },
+      { label: "周岁照拍摄月龄", approved: "周岁照什么时候拍比较合适？",
+        question: "想提前预约，孩子慢一点，周岁照什么时候拍合适？", role: "expert" },
+      { label: "报告取件时间", approved: "报告什么时候可以取？",
+        question: "我白天没空，报告什么时候能取？", role: "staff" },
+      { label: "拍摄当天改期", approved: "孩子当天状态不好需要改期，新档期怎么约？",
+        question: "孩子当天能改期吗？孩子摄影师的资历怎么核对？", role: "staff", shouldReview: true },
+    ];
+    for (const { label, approved, question, role, shouldReview } of cases) {
+      const frozenRole = { ...surfaceRole("咨询中的读者"), replyDisplayRole: role === "expert" ? "机构 IP" : "项目助理" };
+      const plan = commentNetworkPlan(1, [0, 0]);
+      plan.gapPlanningCards = [{ gapId: "gap", label, question: approved }];
+      plan.dialogueThreads = [{ id: "t1", primaryGapId: "gap", postingIdentity: role, surfaceRoleCard: frozenRole }];
+      const parsed = parseGenerationDraft(JSON.stringify(draftJson(plainBody, [thread({
+        question, postingIdentity: role, answerIdentity: role, surfaceRoleCard: frozenRole,
+      })])));
+      const reasons = commentNetworkEditorialReasons(parsed.content.Cref, plan, blueprint.claimPolicy.rules);
+      expect(reasons.some((reason) => reason.includes("超出主问题职责")), question).toBe(Boolean(shouldReview));
+      const issues = validate(parsed, validationConfig(), { orchestrationPlan: plan, projectBlueprint: blueprint });
+      expect(issues.some((issue) => issue.code === "reply_question_plan_drift" && issue.disposition === "review"), question)
+        .toBe(Boolean(shouldReview));
+      expect(issues.some((issue) => issue.code.includes("identity_plan_drift")), question).toBe(false);
+    }
+  });
+
+  it("最终问题偏离规划期主 gap 时仍提示复核，即使身份和展示角色字段没有漂移", () => {
     const plannedSurface = { ...surfaceRole("到院信息核实者"), replyDisplayRole: "项目助理" };
     const plan = {
       ...commentNetworkPlan(1, [0, 0]),

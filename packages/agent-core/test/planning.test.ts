@@ -526,6 +526,43 @@ describe("non-vector orchestration planning", () => {
     }
   });
 
+  it("allocates a compact official preview to distinct Q&A without pulling a comment-only gap into the body", () => {
+    const compact = config();
+    compact.task.publishingTopology = "institution_owned";
+    compact.content.commentThreadMin = 1;
+    compact.content.commentThreadMax = 2;
+    compact.content.commentMultiTurnGrowthEnabled = true;
+    const primary: InformationGap = {
+      ...gaps[0]!, label: "拍前准备", question: "预约拍照前需要准备什么？",
+      answer: "可以带上熟悉的玩具。", preferredChannels: ["N.body"],
+    };
+    const accompaniment: InformationGap = {
+      ...gaps[0]!, id: "accompany", label: "家长陪同", question: "能问下家长陪同吗？",
+      answer: "家长陪同请在预约时沟通。", preferredChannels: ["Cref"],
+    };
+    const scheduling: InformationGap = {
+      ...gaps[0]!, id: "rebook", label: "改期", question: "当天需要改期怎么办？", category: "schedule",
+      answer: "新档期需要提前两天预约。", preferredChannels: ["Cref"], decisionLeverage: 0.99,
+    };
+    const choice = {
+      ...opportunity("compact-official", "拍前准备"),
+      gapIds: [primary.id, accompaniment.id, scheduling.id],
+      boundaries: [],
+    };
+    const plans = planTopicOrchestrations({
+      opportunity: choice, gaps: [scheduling, primary, accompaniment], config: compact, seeds: [21, 22, 23],
+    });
+    for (const plan of plans) {
+      expect(plan.contentIntent?.bodyOwnedGapIds).toEqual([primary.id]);
+      expect(new Set(plan.contentIntent?.bodyMustNotExpand)).toEqual(new Set([accompaniment.id, scheduling.id]));
+      expect(plan.dialogueThreads.map((thread) => [thread.primaryGapId, thread.threadKind])).toEqual([
+        [accompaniment.id, "org_answer"],
+        [scheduling.id, "org_answer"],
+      ]);
+      expect(plan.dialogueThreads.every((thread) => thread.conversationPlan?.targetFollowUps === 0)).toBe(true);
+    }
+  });
+
   it("caps one post to a focused gap set and records every actually selected gap", () => {
     const constrained = config();
     constrained.content.commentThreadMin = 1;

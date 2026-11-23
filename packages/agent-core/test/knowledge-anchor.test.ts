@@ -9,6 +9,7 @@ import {
   DEFAULT_FORMULA_VERSION,
   normalizeProjectCreativeBlueprint,
   parseGenerationDraft,
+  resolveClaimJudgments,
   validateGenerationDraft,
   type EvidenceReference,
   type GenerationDraft,
@@ -524,6 +525,22 @@ describe("collectUnanchoredSensitiveClaims + 联合判官机械挂账", () => {
       { statementIndex: 0, evidenceId: EV_INFERRED, quote: "消肿一般7天左右" },
     ]);
     expect(anchored).toBe(draft);
+  });
+
+  it("keeps organization replies within the planned evidence while allowing the same fact in the body", () => {
+    const context = anchorContext({ commentAnswerEvidenceIds: new Map([["t1", new Set([EV_FOLLOWUP])]]) });
+    const draft = makeDraft("到店有赠送护理包。", [thread({ answer: "到店有赠送护理包。" })]);
+    const anchored = attachKnowledgeAnchors(draft, context);
+    expect(anchored.reasoning.filter((entry) => entry.status === "fact")).toHaveLength(1);
+    expect(anchored.reasoning[0]).toMatchObject({ location: "N.body", evidenceIds: [EV_GIFT] });
+    expect(anchored.content.Cref.threads[0]?.evidenceIds).toEqual([]);
+    const missing = collectUnanchoredSensitiveClaims(anchored, context);
+    expect(missing.map((claim) => claim.location)).toEqual(["Cref.thread"]);
+    const selection = { statementIndex: 0, evidenceId: EV_GIFT, quote: "到店有赠送护理包" };
+    expect(attachKnowledgeAnchorSelections(anchored, context, missing, [selection])).toBe(anchored);
+    expect(resolveClaimJudgments(missing, [{ ...selection, classification: "factual_assertion", supported: true }], [
+      { evidenceId: EV_GIFT, quote: evidenceSources[EV_GIFT]! },
+    ], context)[0]?.supported).toBe(false);
   });
 
   it("AI 选 none → 不挂且 error 照旧", () => {
